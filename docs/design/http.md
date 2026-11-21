@@ -569,7 +569,20 @@ lock found a row (`Key::absent`, set by `answered`; every path asks
 `replay` under the lock it then keeps the key in, and a key whose look
 found none is written over by no one before `keep`); and the expiry's
 text is written only to make or move the collection, a `format!` a
-write before. Against train-d, the mean of each build's 8 identities:
+write before. A look under an expiry the write then moves is not
+believed: a server started again with a longer `--idempotency-ttl`
+brings back, as its first keyed write moves the expiry (`ensure`, `alter
+field at @ttl`), the rows past the old one the sweeper has not reached
+-- its first pass comes a minute after the start -- which that write's
+look, made before the move, did not see; with the `del` skipped, a key
+brought back so was two live rows, the older answering its retries with
+its own answer, or a 422 for the write that landed (the review of the
+fixes' second and third rounds). `ensure` says whether it moved the
+expiry, and the `del` runs on that write. `tests/idempotency.rs`'s
+`a_key_a_longer_ttl_brings_back_is_written_over` opens the file again
+two minutes on (the database's clock) under an hour's keys: one row for
+the key, the retry handed the new answer; with the `del` skipped, 422.
+Against train-d, the mean of each build's 8 identities:
 
 | instructions a request | train-d | 32 hex digits | 16 bytes | and no `del` |
 |---|---|---|---|---|

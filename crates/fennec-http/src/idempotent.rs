@@ -51,7 +51,8 @@ pub struct Key {
     request: i64,
     /// Whether the last look for the key ([`answered`]) found no row: read
     /// by [`keep`] under the write lock that looked, every path asking
-    /// [`replay`] under the lock it then keeps the key in.
+    /// [`replay`] under the lock it then keeps the key in, and believed
+    /// only where the expiry it looked under is the one kept ([`ensure`]).
     absent: std::cell::Cell<bool>,
 }
 
@@ -177,8 +178,11 @@ const PUT: usize = 2;
 /// expiry (`alter field at @ttl`), and a collection from before the expiry
 /// -- `at int @sorted`, whose keys a purge let go of -- or from before a
 /// key was bytes ([`key`]) -- `key text`, whose keys no request names now
-/// -- is made again, the keys it held a day's retries at most.
-fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
+/// -- is made again, the keys it held a day's retries at most. True where
+/// it moved the expiry of the collection there: a longer one brings back
+/// rows past the old one the sweeper has not reached, which a look made
+/// before the move did not see ([`keep`]).
+fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<bool> {
     let at = db.collection(KEYS).ok().map(|c| {
         let bytes = c
             .schema
@@ -191,16 +195,17 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
     });
     if let Some(Some((true, Some(t)))) = at {
         if t == ttl_ms.max(1) as u64 {
-            return Ok(());
+            return Ok(false);
         }
     }
     // Written only where the collection is made or moved: written at each
     // keyed write, it was a `format!` a write.
     let ttl = fennec_core::schema::ttl_text(ttl_ms.max(1) as u64);
-    let sql = match at {
-        Some(Some((true, Some(_)))) => {
-            format!("alter collection {KEYS} alter field at @ttl({ttl})")
-        }
+    let (sql, moved) = match at {
+        Some(Some((true, Some(_)))) => (
+            format!("alter collection {KEYS} alter field at @ttl({ttl})"),
+            true,
+        ),
         made => {
             if made.is_some() {
                 db.execute(&Statement::DropCollection {
@@ -208,14 +213,15 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
                     if_exists: true,
                 })?;
             }
-            format!(
+            let create = format!(
                 "create collection {KEYS} (key bytes @hash, request int, status int, \
                  body text, at timestamp @ttl({ttl}))"
-            )
+            );
+            (create, false)
         }
     };
     db.execute(&fennec_ql::parse_one(&sql)?)?;
-    Ok(())
+    Ok(moved)
 }
 
 /// A key's kept answer, as a request sent with the key again is handed it
@@ -353,7 +359,7 @@ pub fn keep(
     ttl_ms: i64,
 ) -> fennec_core::error::Result<()> {
     let fresh = db.collection(KEYS).is_err();
-    ensure(db, ttl_ms)?;
+    let moved = ensure(db, ttl_ms)?;
     let body = match resp.body.len() <= KEPT_BODY {
         true => String::from_utf8_lossy(&resp.body).into_owned(),
         false => format!(
@@ -373,8 +379,13 @@ pub fn keep(
     // expiry is the sweeper's. One the look under this lock found no row
     // for has none to write over: its `del`, run at every keyed write,
     // was a lookup and a statement a write for nothing -- the work that
-    // pays for a caller's 16 bytes in the key ([`key`]).
-    if !fresh && !key.absent.get() {
+    // pays for a caller's 16 bytes in the key ([`key`]). Unless the
+    // expiry moved since that look: a server started again with a longer
+    // `--idempotency-ttl` brings back, at its first keyed write, the rows
+    // past the old one the sweeper has not reached, and without the `del`
+    // a key brought back so was two live rows, the older answering the
+    // retries -- its answer, or a 422 for the write that landed.
+    if !fresh && (moved || !key.absent.get()) {
         db.execute_with(stmt(DEL), &row[..1])?;
     }
     db.execute_with(stmt(PUT), &row)?;

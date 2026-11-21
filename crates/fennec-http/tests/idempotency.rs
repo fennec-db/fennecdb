@@ -23,8 +23,6 @@ fn start(ttl: Duration) -> Node {
 }
 
 fn start_over(ttl: Duration, setup: &[&str]) -> Node {
-    let access =
-        Arc::new(Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n").unwrap());
     let mut db = Database::new();
     for sql in [
         "create collection notes (owner text, t text)",
@@ -35,6 +33,13 @@ fn start_over(ttl: Duration, setup: &[&str]) -> Node {
     {
         db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
     }
+    serve_over(Arc::new(RwLock::new(db)), ttl)
+}
+
+/// A server over `db`, keeping keys for `ttl`.
+fn serve_over(db: Arc<RwLock<Database>>, ttl: Duration) -> Node {
+    let access =
+        Arc::new(Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n").unwrap());
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -42,7 +47,6 @@ fn start_over(ttl: Duration, setup: &[&str]) -> Node {
         idempotency_ttl: ttl,
         ..Config::default()
     };
-    let db = Arc::new(RwLock::new(db));
     let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -396,6 +400,77 @@ fn the_keys_collection_follows_the_ttl_it_is_started_with() {
     assert!(kept.replayed, "a key kept is kept across the move");
     moved.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
     assert_eq!(ttl(&moved), (DataType::Timestamp, Some(3_600_000)));
+}
+
+/// A server started again with a longer `--idempotency-ttl` brings back,
+/// at its first keyed write, the keys past the old expiry the sweeper has
+/// not reached -- and the look that write made, before the expiry moved,
+/// found none of them. Its key brought back so, the write writes over the
+/// row: one row for the key, its retry handed the new answer. Where the
+/// look's finding no row was the end of it, the key was two live rows,
+/// the older answering its retries: its own answer, or a 422 for the write
+/// that landed.
+#[test]
+fn a_key_a_longer_ttl_brings_back_is_written_over() {
+    let dir = std::env::temp_dir().join(format!("fennec-http-idempotency-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("longer.fennec");
+    let _ = std::fs::remove_file(&path);
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    db.execute(&fennec_ql::parse_one("create collection logs (t text)").unwrap())
+        .unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let minute = serve_over(Arc::clone(&db), Duration::from_secs(60));
+    let first = minute.query(ROOT, Some("k"), "put logs {t: \"a\"}");
+    assert_eq!(
+        (first.status, first.replayed),
+        (200, false),
+        "{}",
+        first.body
+    );
+
+    // The file opened again two minutes on, and served keeping keys for an
+    // hour: the key is past the minute it was kept for, and not swept.
+    {
+        let mut g = db.write().unwrap();
+        drop(std::mem::replace(&mut *g, Database::new()));
+        *g = fennec_core::fs::open(&path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        g.set_clock(Some(now + 120_000));
+    }
+    let hour = serve_over(Arc::clone(&db), Duration::from_secs(3600));
+    let again = hour.query(ROOT, Some("k"), "put logs {t: \"b\"}");
+    assert_eq!(
+        (again.status, again.replayed),
+        (200, false),
+        "a key past its time is a new request: {}",
+        again.body
+    );
+    let retried = hour.query(ROOT, Some("k"), "put logs {t: \"b\"}");
+    assert_eq!(
+        (retried.status, retried.replayed, retried.body.as_str()),
+        (200, true, again.body.as_str()),
+        "the retry was not handed the write's answer"
+    );
+    let keys = db
+        .read()
+        .unwrap()
+        .query(
+            &fennec_ql::parse_one("get _idempotency count").unwrap(),
+            &[],
+        )
+        .unwrap()
+        .rows()
+        .unwrap()
+        .rows[0]
+        .values[0]
+        .clone();
+    assert_eq!(keys, Value::Int(1), "the key is more than one live row");
+    assert_eq!(hour.count("logs"), "[{\"count\":2}]");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Keys kept as text -- the owner, `U+001F` and the key, from before a

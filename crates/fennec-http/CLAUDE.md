@@ -109,7 +109,8 @@ once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
 token (`Scope::authority`) and the key with another request 422; a failed
 write or a `compact` keeps none. Every path asks `idempotent::replay` under
 the write lock it then keeps the key in: `keep` deletes no row where that
-look found none (`Key::absent`). A replay answers only once the first try's record is as durable and
+look found none (`Key::absent`) under the expiry it keeps (`ensure` moving
+none). A replay answers only once the first try's record is as durable and
 sent as its answer was to be: under `--sync always` every path that finds
 a key runs `Database::durability` after its lock (`idempotent::replay`),
 and a failed fsync is its answer, never the kept success; after a storage
