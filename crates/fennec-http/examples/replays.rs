@@ -10,6 +10,11 @@
 //!     lock).
 //!   * `keyed`: the same, each with a key of its own: the key's lookup,
 //!     the block and the `_idempotency` row.
+//!   * `scoped`, `scoped-keyed`: `put` and `keyed` by a JSON Web Token
+//!     (HS256, `t read,write`), verified once and found in the server's
+//!     table after: what a key costs a scoped caller -- its key kept under
+//!     its caller (`Scope::authority`), where the server's token keeps it
+//!     under none.
 //!   * `batch`: N writes of 100 documents each (`put t [{id: 1, n: $1},
 //!     ...]`, the same 100 ids written over), no key: a record of 100
 //!     frames, where `put` writes one of one.
@@ -35,6 +40,11 @@ use std::time::Instant;
 const ROUNDS: usize = 9;
 
 fn request(sql: &str, params: &str, key: Option<&str>) -> Request {
+    scoped(sql, params, key, None)
+}
+
+/// [`request`], carrying `bearer` where it is given.
+fn scoped(sql: &str, params: &str, key: Option<&str>, bearer: Option<&str>) -> Request {
     Request {
         method: Method::Post,
         target: "/query".into(),
@@ -43,6 +53,7 @@ fn request(sql: &str, params: &str, key: Option<&str>) -> Request {
         headers: key
             .map(|k| ("Idempotency-Key".to_string(), k.to_string()))
             .into_iter()
+            .chain(bearer.map(|b| ("Authorization".to_string(), format!("Bearer {b}"))))
             .collect(),
         body: format!(r#"{{"query":"{sql}","params":[{params}]}}"#).into_bytes(),
         keep_alive: true,
@@ -69,11 +80,27 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.fennec");
     let db = Arc::new(RwLock::new(fennec_core::fs::open(&path).unwrap()));
+    let access = mode.starts_with("scoped").then(|| {
+        let secret = b"a secret of more than thirty-two bytes, as HS256 wants";
+        Arc::new(fennec_http::access::Access::new(secret, "t read,write\n").unwrap())
+    });
+    let jwt = access
+        .as_ref()
+        .map(|a| a.mint(r#"{"sub":"bench"}"#).unwrap());
     let cfg = Config {
         sync_on_write: mode == "replay",
+        // The collection is made by the server's own token, the writes by
+        // the JWT.
+        token: access.as_ref().map(|_| "bench-token".to_string()),
+        access,
         ..Config::default()
     };
-    send(&db, &cfg, &request("create collection t (n int)", "", None));
+    let root = cfg.token.as_deref();
+    send(
+        &db,
+        &cfg,
+        &scoped("create collection t (n int)", "", None, root),
+    );
     let put = "put t {id: $1, n: $2}";
     let replayed = request(put, "1, 1", Some("replayed"));
     let batch = format!(
@@ -103,7 +130,18 @@ fn main() {
                 }
                 "replay" => send(&db, &cfg, &replayed),
                 "batch" => send(&db, &cfg, &request(&batch, &i.to_string(), None)),
-                other => panic!("no mode {other}: put, keyed, batch or replay"),
+                "scoped" => send(&db, &cfg, &scoped(put, &params(), None, jwt.as_deref())),
+                "scoped-keyed" => {
+                    let key = format!("k-{i}");
+                    send(
+                        &db,
+                        &cfg,
+                        &scoped(put, &params(), Some(&key), jwt.as_deref()),
+                    )
+                }
+                other => {
+                    panic!("no mode {other}: put, keyed, batch, replay, scoped or scoped-keyed")
+                }
             }
         }
         rounds.push(t.elapsed().as_nanos() as f64 / per as f64);
