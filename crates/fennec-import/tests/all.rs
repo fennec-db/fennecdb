@@ -5,5 +5,11 @@
 //! without the indexes.
 
 mod follow;
+mod held;
 mod pg;
 mod sqlite;
+
+/// Each thread's bytes counted (`held`): the SQLite reader's tests hold its
+/// memory to a bound by what it allocates.
+#[global_allocator]
+static COUNTING: held::Counting = held::Counting;

@@ -90,9 +90,12 @@ test('a page on another origin reads the router\'s own answers and a node\'s thr
     assert.equal(unknown.refused, true, JSON.stringify(unknown));
     assert.equal(unknown.status, 404);
     assert.match(unknown.message, /no tenant `nosuch`/);
-    const raw404 = await seen(p, `${router.url}/t/nosuch/query`);
-    assert.equal(raw404.status, 404);
-    assert.match(raw404.requestId ?? '', /\S/);
+    // Sent with no token: the stand-in asks every credential before it
+    // says whether a tenant exists, so a caller the router cannot vouch
+    // for is told 401, never which names are taken.
+    const raw = await seen(p, `${router.url}/t/nosuch/query`);
+    assert.equal(raw.status, 401);
+    assert.match(raw.requestId ?? '', /\S/);
 
     const early = await outcome(p, `${standby.url}/t/acme`, 'get notes');
     assert.equal(early.refused, true, JSON.stringify(early));

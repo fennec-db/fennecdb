@@ -325,11 +325,13 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
       { cf: { continent: 'EU', country: 'DE', colo: 'FRA' } },
     );
     // An isolate that keeps no home of its own: every request one the
-    // colo's cache answers, or a relay.
+    // colo's cache answers, or a relay. It names its client, as a router
+    // names a home only to an entry that does.
     shared = await serve('entry', join(state, 'shared'), {
       REGIONS: JSON.stringify(regions),
       DEFAULT_REGION: 'eu',
       HOMES: '0',
+      ENTRY_TOKEN: SECRET,
     });
     // One whose default region is down: eu's router is a port nothing
     // listens on.

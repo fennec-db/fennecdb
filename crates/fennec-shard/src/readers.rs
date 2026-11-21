@@ -367,7 +367,15 @@ impl Router {
             return None;
         }
         let n = dir.node(&r.node)?;
-        Some((r.node.clone(), n.addr.clone(), self.mark(&n.token)))
+        let marked = self.marked(n);
+        // A copy on a node not known to ask a token -- one that said it
+        // asks none, or not asked yet -- this router listening past
+        // loopback: its reads go home, which is asked as any forward is
+        // (`Router::open_node`).
+        if self.guards_open_nodes() && self.open_copy(&n.addr, &marked) {
+            return None;
+        }
+        Some((r.node.clone(), n.addr.clone(), self.mark_of(&marked)))
     }
 
     /// Whether `tenant`'s marked reads pass its read replica on `node` by
@@ -2833,6 +2841,12 @@ mod tests {
             ..Config::default()
         };
         let router = Router::new(Directory::in_memory(), cfg);
+        // As it serves on loopback alone: one taken for a router past it
+        // passes a copy on a node it has not asked.
+        router.listens.fetch_or(
+            crate::LISTENS_LOOPBACK,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         {
             let mut dir = router.write_dir();
             for (name, region) in [("eu1", "eu"), ("us1", "us")] {

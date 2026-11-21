@@ -261,7 +261,9 @@ function origin(url, what) {
  *   the colo's other isolates through the Cache API.
  * - `DOWN_MS`: {@link DOWN_MS}.
  * - `ENTRY_TOKEN` (a secret): the key of the client's mark ({@link CLIENT});
- *   without it no client is named.
+ *   without it no client is named, and a router with `--token` names the
+ *   entry no tenant's home ({@link HOME}), which it names only to a caller
+ *   it can vouch for.
  * - `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET` (secrets): a Cloudflare
  *   Access service token, sent to every router as `CF-Access-Client-Id` and
  *   `CF-Access-Client-Secret`. A router's tunnel hostname is public; with an

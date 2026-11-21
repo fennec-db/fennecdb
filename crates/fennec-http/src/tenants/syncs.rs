@@ -46,6 +46,8 @@ pub(crate) struct Syncs {
 struct Inner {
     queue: Mutex<Queue>,
     ready: Condvar,
+    /// Told as the last sync under way ends, for [`Syncs::close`].
+    idle: Condvar,
     /// The one shutdown, which a sync's panic asks for: the node never
     /// serves on with a tenant whose writes nothing syncs. Unset where no
     /// clock runs (a test's own calls), where the panic is logged alone.
@@ -59,7 +61,8 @@ struct Queue {
     waiting: VecDeque<Arc<Tenant>>,
     threads: usize,
     busy: usize,
-    /// The registry is gone: each thread ends once nothing waits.
+    /// The registry is gone or shutting down ([`Syncs::close`]): nothing
+    /// more is handed over, and each thread ends once nothing waits.
     closed: bool,
 }
 
@@ -78,10 +81,16 @@ impl Syncs {
     /// Queues `t`'s sync for a free thread, making one where every thread
     /// is taken and fewer than [`THREADS`] run. Where none can be made and
     /// none runs, the sync runs here, as the pass ran it.
-    fn hand(&self, t: Arc<Tenant>) {
+    pub(super) fn hand(&self, t: Arc<Tenant>) {
         let mut q = lock(&self.inner.queue);
+        // The shutdown's own sync takes it in, under the lock it keeps.
+        if q.closed {
+            return;
+        }
         q.waiting.push_back(t);
-        let free = q.threads - q.busy;
+        // A sync run here, where no thread could be made, counts as busy
+        // with no thread of its own: `busy` may pass `threads`.
+        let free = q.threads.saturating_sub(q.busy);
         if q.waiting.len() <= free || q.threads >= THREADS {
             drop(q);
             self.inner.ready.notify_one();
@@ -101,14 +110,49 @@ impl Syncs {
             }
             let mut q = lock(&self.inner.queue);
             q.threads -= 1;
-            if q.threads > 0 {
+            if q.threads > 0 || q.closed {
                 return;
             }
             let here: Vec<_> = q.waiting.drain(..).collect();
+            q.busy += 1;
             drop(q);
+            let _busy = Busy(&self.inner);
             for t in here {
                 run(&t);
             }
+        }
+    }
+
+    /// Ends the node's syncs for its shutdown, before it keeps a tenant's
+    /// lock ([`Tenants::shutdown_with`]): nothing more is handed over, what
+    /// waits is let go -- the shutdown's own sync takes it in -- and every
+    /// sync under way is waited for. One left running reached for a lock
+    /// the shutdown keeps to the exit, or for the write lock again to note
+    /// a failed fsync (`Database::fail`), and waited for good, holding its
+    /// tenant.
+    pub(crate) fn close(&self) {
+        let mut q = lock(&self.inner.queue);
+        q.closed = true;
+        let left = std::mem::take(&mut q.waiting);
+        while q.busy > 0 {
+            q = self.inner.idle.wait(q).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(q);
+        self.inner.ready.notify_all();
+        drop(left);
+    }
+}
+
+/// A sync under way, counted until it ends -- a panic's unwinding too, or
+/// [`Syncs::close`] would wait for it for good.
+struct Busy<'a>(&'a Inner);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let mut q = lock(&self.0.queue);
+        q.busy -= 1;
+        if q.busy == 0 {
+            self.0.idle.notify_all();
         }
     }
 }
@@ -132,8 +176,11 @@ impl Inner {
                     q = self.ready.wait(q).unwrap_or_else(|e| e.into_inner());
                 }
             };
+            let busy = Busy(&self);
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&t)));
-            lock(&self.queue).busy -= 1;
+            // Counted busy until the panic has asked for the stop: let go
+            // before, a shutdown waiting in `close` went on and could exit
+            // with code 0 before `stop` stored the failure.
             if let Err(p) = ran {
                 let words = crate::schedule::panic_words(p.as_ref());
                 match self.stop.get() {
@@ -147,6 +194,7 @@ impl Inner {
                     None => crate::log!("tenant `{}`'s sync panicked ({words})", t.name),
                 }
             }
+            drop(busy);
         }
     }
 }

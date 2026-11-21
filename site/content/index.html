@@ -322,7 +322,7 @@ set accounts {balance: balance - $3}
 
     <ul class="points rise">
       <li>Copied with <code>COPY</code>, then streamed: no <code>psql</code>, no <code>pg_dump</code>.</li>
-      <li>Over TLS, checked as libpq's <code>sslmode</code> says.</li>
+      <li>Over TLS, checked as libpq's <code>sslmode</code> says, <code>verify-full</code> by default across a network; signed in by SCRAM bound to the session.</li>
       <li>The mirror is read-only to clients; writes stay in PostgreSQL.</li>
       <li>Stopped, the same command resumes where it left off.</li>
     </ul>
