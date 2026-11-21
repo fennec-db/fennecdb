@@ -301,7 +301,7 @@ impl Client {
         }
         Ok(TlsStream {
             conn: Conn::Client(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -334,7 +334,7 @@ impl Client {
         )?;
         Ok(TlsStream {
             conn: Conn::Client(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -540,7 +540,7 @@ impl Server {
         }
         Ok(TlsStream {
             conn: Conn::Server(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -558,7 +558,7 @@ impl Server {
         handshake_by(&mut conn, &mut sock, deadline, within, &peer, "client")?;
         Ok(TlsStream {
             conn: Conn::Server(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 }
@@ -683,11 +683,13 @@ macro_rules! with_stream {
     ($self:ident, $s:ident => $e:expr) => {
         match &mut $self.conn {
             Conn::Client(c) => {
-                let mut $s = rustls::Stream::new(c, &mut $self.sock);
+                let mut sock: &TcpStream = &$self.sock;
+                let mut $s = rustls::Stream::new(c, &mut sock);
                 $e
             }
             Conn::Server(c) => {
-                let mut $s = rustls::Stream::new(c, &mut $self.sock);
+                let mut sock: &TcpStream = &$self.sock;
+                let mut $s = rustls::Stream::new(c, &mut sock);
                 $e
             }
         }
@@ -710,9 +712,17 @@ pub enum By {
 }
 
 /// A connection whose handshake is done: plaintext in, plaintext out.
+///
+/// Its socket is one handle, shared ([`Self::socket`]) rather than
+/// duplicated: an option a caller sets beside the session -- a timeout,
+/// blocking or not -- is set on the handle the session reads and writes
+/// through. On Windows a `try_clone` is `WSADuplicateSocketW` and a new
+/// `SOCKET`, and the timeouts that bound a blocking `recv` and `send`
+/// are the handle's own: one set through the clone left the session's
+/// reads with none (docs/design/http.md#slow-clients).
 pub struct TlsStream {
     conn: Conn,
-    sock: TcpStream,
+    sock: Arc<TcpStream>,
 }
 
 impl fmt::Debug for TlsStream {
@@ -729,6 +739,16 @@ impl TlsStream {
     /// writing it directly would break the stream.
     pub fn get_ref(&self) -> &TcpStream {
         &self.sock
+    }
+
+    /// The socket beneath as a handle to keep beside the session, for its
+    /// options, its address, a `poll` or a shutdown while the session is
+    /// borrowed elsewhere: the session's own handle, never a `dup`, so
+    /// what is set through it bounds the session's reads and writes on
+    /// every platform. Closed once the session and every such handle are
+    /// gone. Reading or writing it directly would break the stream.
+    pub fn socket(&self) -> Arc<TcpStream> {
+        Arc::clone(&self.sock)
     }
 
     /// The protocol ALPN settled on, if any.
@@ -786,8 +806,8 @@ impl TlsStream {
                     .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
             )?;
             let got = match &mut self.conn {
-                Conn::Client(c) => c.read_tls(&mut self.sock),
-                Conn::Server(c) => c.read_tls(&mut self.sock),
+                Conn::Client(c) => c.read_tls(&mut &*self.sock),
+                Conn::Server(c) => c.read_tls(&mut &*self.sock),
             };
             // What the read took in is read whatever the peer did since.
             unless_gone(self.sock.set_read_timeout(before))?;
@@ -896,8 +916,8 @@ impl TlsStream {
                 }
             }
             let read = match &mut self.conn {
-                Conn::Client(c) => c.read_tls(&mut self.sock),
-                Conn::Server(c) => c.read_tls(&mut self.sock),
+                Conn::Client(c) => c.read_tls(&mut &*self.sock),
+                Conn::Server(c) => c.read_tls(&mut &*self.sock),
             };
             match read {
                 // The end: told as `read` tells it, `close_notify` or not.
@@ -924,12 +944,12 @@ impl TlsStream {
         match &mut self.conn {
             Conn::Client(c) => {
                 while c.wants_write() {
-                    c.write_tls(&mut self.sock)?;
+                    c.write_tls(&mut &*self.sock)?;
                 }
             }
             Conn::Server(c) => {
                 while c.wants_write() {
-                    c.write_tls(&mut self.sock)?;
+                    c.write_tls(&mut &*self.sock)?;
                 }
             }
         }
@@ -972,8 +992,8 @@ impl TlsStream {
         }
         self.sock.set_nonblocking(true)?;
         let got = match &mut self.conn {
-            Conn::Client(c) => c.read_tls(&mut self.sock),
-            Conn::Server(c) => c.read_tls(&mut self.sock),
+            Conn::Client(c) => c.read_tls(&mut &*self.sock),
+            Conn::Server(c) => c.read_tls(&mut &*self.sock),
         };
         self.sock.set_nonblocking(false)?;
         let ended = match got {
@@ -1039,8 +1059,9 @@ impl TlsStream {
 
     /// The socket beneath, the TLS session let go of: once [`Self::close`]
     /// has sent its end, what is left is to read off what the peer still
-    /// sends before closing it.
-    pub fn into_socket(self) -> TcpStream {
+    /// sends before closing it. Shared with the handles [`Self::socket`]
+    /// gave out, open while any of them is.
+    pub fn into_socket(self) -> Arc<TcpStream> {
         self.sock
     }
 }
@@ -1351,6 +1372,46 @@ mod tests {
         served.join().unwrap();
         let e = s.readable(Duration::from_secs(10)).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    /// A timeout and a mode set through [`TlsStream::socket`] bound a read
+    /// through the session: the session's own handle, where a `dup`'s are
+    /// its own on Windows and a read through the session waited with none.
+    /// The peer sends nothing, and ends only once told or at 20 s, so a
+    /// read the timeout did not bound reads that end, not a timeout.
+    #[test]
+    fn what_is_set_through_the_socket_bounds_the_session() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (done, wait) = mpsc::channel::<()>();
+        let served = thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let _s = server.accept(sock).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(20));
+        });
+        let mut s = dial(&trusting(&ca), port, "localhost").unwrap();
+        let within = Duration::from_millis(300);
+        let sock = s.socket();
+        sock.set_read_timeout(Some(within)).unwrap();
+        let started = Instant::now();
+        let e = s.read(&mut [0u8; 16]).unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+            "{e} after {took:?}"
+        );
+        // A timeout's wait, Windows' clock ticks of 15.6 ms aside: not a
+        // non-blocking read's at once.
+        assert!(took >= within - Duration::from_millis(50), "{took:?}");
+        sock.set_read_timeout(None).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let e = s.read(&mut [0u8; 16]).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::WouldBlock, "{e}");
+        assert_eq!(s.get_ref().read_timeout().unwrap(), None);
+        done.send(()).unwrap();
+        served.join().unwrap();
     }
 
     /// A handshake trickled a byte at a time, each well inside the bound,

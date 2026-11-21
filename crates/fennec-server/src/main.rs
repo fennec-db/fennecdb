@@ -1673,9 +1673,11 @@ fn main() {
 }
 
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
-/// thread the syncer a single file gets from [`durability::run_syncer`] --
-/// periodic sync, idle close, and on the shutdown signal a final sync and
-/// checkpoint of every open tenant.
+/// thread what a single file's [`durability::run_syncer`] does but its
+/// periodic sync -- idle close, and on the shutdown signal a final sync and
+/// checkpoint of every open tenant. Under `--sync <ms>` each tenant is
+/// synced on a thread of its own (`Tenants::sync_every`), so that its
+/// window is a file's, whatever the others' syncs take.
 #[allow(clippy::too_many_arguments)]
 fn serve_dir(
     dir: &str,
@@ -1785,6 +1787,14 @@ fn serve_dir(
         // started with the node's as the scheduler's is.
         #[cfg(feature = "test-clock")]
         fennec_http::test_clock::follow(&tenants)?;
+        // `--sync <ms>`: each tenant synced on a thread of its own, every
+        // interval. Synced in turn on this thread, a tenant's sync waited
+        // for every one before it and the next for the slowest: two
+        // tenants on the power-cut rig handed a write over 772 ms after its
+        // answer, past the 650 ms a file's window holds (run 43696612848).
+        if matches!(sync, SyncPolicy::Interval(_)) {
+            tenants.sync_every(sync.tick(), durability::stop_failed)?;
+        }
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();
         std::thread::Builder::new()
@@ -1835,9 +1845,6 @@ fn serve_dir(
             let open = tenants.shutdown_with(durability::checkpoints());
             fennec_http::log!("\nshutting down: {open} open tenant(s) synced");
             exit::now(durability::exit_code());
-        }
-        if matches!(sync, SyncPolicy::Interval(_)) {
-            tenants.sync_dirty();
         }
         tenants.rebind_hooks();
         if !idle_close.is_zero() {

@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
@@ -686,6 +686,24 @@ node-archive-bench:
 	$(CARGO) build --release -p fennec-server -p fennec-cli
 	$(CARGO) run --release -p fennec-http --example node_archive -- $(or $(ARGS),1000 10 20 always)
 	$(CARGO) run --release -p fennec-http --example node_archive_passes -- $(or $(PASSES),node 20 32)
+
+## A --dir node's window under --sync 250, as the power-cut rig reads it: a
+## node of each of TENANTS (2,8,32,64) tenants, every one written RATE (100)
+## times a second, its pages' gaps and its writes' handover read from
+## /_changes; HEAVY=spill,batch the first tenant slow to sync beside the
+## rest, FILE=1 a file's server too, SECONDS (20) a run. This tree's release
+## build against BASE_BIN (another build's fennec-server, copied aside) in
+## turns, ROUNDS (2) of each, each run once the 1-minute load is under QUIET
+## (4): one line a run to OUT (target/node-syncs/results.jsonl), the medians
+## to its .log (crates/fennec-http/examples/node_syncs.py;
+## docs/design/durability.md#a-nodes-syncs)
+node_sync_tenants := 2,8,32,64
+node-sync-bench:
+	$(CARGO) build --release -p fennec-server
+	python3 crates/fennec-http/examples/node_syncs.py $(if $(BASE_BIN),--base '$(BASE_BIN)') \
+	  --tenants '$(or $(TENANTS),$(node_sync_tenants))' --rate $(or $(RATE),100) --seconds $(or $(SECONDS),20) \
+	  --heavy '$(or $(HEAVY),none)' --rounds $(or $(ROUNDS),2) --quiet $(or $(QUIET),4) \
+	  $(if $(FILE),--file) $(if $(OUT),--out '$(OUT)')
 
 ## Writers and readers at once, fennecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
@@ -1444,6 +1462,30 @@ packaging-test:
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
+
+## Two releases' processes beside each other: this tree's fennec-server,
+## fennec and fennec-shard against the last published release's, OLD (a tag;
+## `latest`, the default, is the published release highest in version order
+## up to this tree's, asked of GitHub with gh), through
+## tools/compat-matrix.sh: replication both ways, archives and backups plain
+## and sealed, the values 0.2.0 wrote that this tree does not read whole, a
+## router over nodes of the other release, and a rolling upgrade of a router
+## and a node pair under durable writes, each write classed and read back
+## (docs/design/compatibility.md#the-compatibility-matrix). The harness's
+## own tests run first. The release's fennec-server and fennec come from its
+## tarball, checked against its SHA256SUMS by site/install.sh
+## (OLD_ASSETS_DIR, a directory holding the two files, in place of `gh
+## release download`); its fennec-shard, which no release ships, is built
+## from the tag's sources into target/compat-shard (SHARD_TARGET_DIR), kept
+## (tools/release-bins.sh). compat.yml runs it weekly, on release tags and
+## by dispatch: minutes. Needs curl, jq, openssl and python3, and gh unless
+## OLD_ASSETS_DIR holds the release's files and this clone its tag.
+compat-check:
+	bash tools/compat-matrix.sh --self-test
+	bash tools/test_release_bins.sh
+	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
+	CARGO=$(CARGO) bash tools/release-bins.sh $(or $(OLD),latest) $(CURDIR)/target/compat-old
+	bash tools/compat-matrix.sh $(CURDIR)/target/compat-old $(CURDIR)/target/debug
 
 ## Publishes to Cloudflare Workers (fennecdb.com). Needs `wrangler login`
 ## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.

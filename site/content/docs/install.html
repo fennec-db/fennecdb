@@ -311,6 +311,59 @@ shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-m
 (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Select-String -SimpleMatch $zip SHA256SUMS</pre>
 
+<p>A sum says the file is the one listed beside it, fetched from the same
+place. Who built it is said by its attestation: releases after 0.2.0 carry
+one for every file and for the image, signed by the GitHub Actions run that
+built it, which the <a href="https://cli.github.com/">GitHub CLI</a>
+checks. Name the workflow and the tag it must come from, and refuse a
+self-hosted runner's: <code>-R</code> alone takes an attestation by any
+workflow of the repository at any branch.</p>
+
+<pre data-lang="bash">gh attestation verify fennec-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz -R fennec-db/fennecdb \
+  --signer-workflow fennec-db/fennecdb/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+gh attestation verify oci://ghcr.io/fennec-db/fennec-server:X.Y.Z -R fennec-db/fennecdb \
+  --signer-workflow fennec-db/fennecdb/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners</pre>
+
+<p>Each prints the workflow and the run that built it, and fails on a file
+that workflow did not build at that tag. The image's list is attested, and
+so is each architecture's image: <code>:X.Y.Z-amd64</code> and
+<code>:X.Y.Z-arm64</code> verify the same way. Two kinds of file come from
+another workflow. The app's downloads (<code>fennec-studio-*</code>) are
+built by <code>desktop.yml</code> from <code>main</code>:
+<code>--signer-workflow fennec-db/fennecdb/.github/workflows/desktop.yml
+--source-ref refs/heads/main</code>. The XCFramework's files
+(<code>FennecFFI*</code>) are built before the tag by
+<code>swift-binary.yml</code>: <code>--signer-workflow
+fennec-db/fennecdb/.github/workflows/swift-binary.yml --source-ref
+refs/heads/main</code> for an X.Y.0 and its release candidates, and
+<code>--source-ref refs/heads/release/X.Y</code> for a patch (X.Y.Z with Z
+above 0), each the one ref its version is built on.</p>
+
+<p>An attestation names a file's bytes, not its name, so what ties a file
+to its name in a release is <code>SHA256SUMS</code>, attested by the tag's
+own run too. The app's lines are added at its end once the app's downloads
+are attached; the lines before them are the attested file:</p>
+
+<pre data-lang="bash">n=$(grep -vc ' fennec-studio-' SHA256SUMS)
+head -n "$n" SHA256SUMS > SHA256SUMS.release
+gh attestation verify SHA256SUMS.release -R fennec-db/fennecdb \
+  --signer-workflow fennec-db/fennecdb/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners</pre>
+
+<p>Then a sum read from it says the file is the one that release built
+under that name. RELEASING.md's <code>tools/release-verify.sh</code> makes
+every one of these checks for a whole release.</p>
+
+<p>The npm packages carry npm's SLSA provenance and PyPI's files PEP 740
+attestations, both from <code>packages.yml</code>.
+<code>npm view @fennecdb/web@X.Y.Z dist.attestations</code> shows the
+provenance, and <code>npm audit signatures</code> in a project that
+installed the packages checks the registry's signatures and the
+attestations they have. It does not fail a package that has none: look for
+the provenance first.</p>
+
 <h2 id="next">Next</h2>
 
 <ul>

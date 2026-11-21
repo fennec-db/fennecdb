@@ -63,6 +63,11 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
+# Every job reads: none writes to the repository, its packages or a
+# registry, and a job that will has to say so for itself.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -78,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: |
@@ -92,7 +97,7 @@ jobs:
       # kept by its version, so a run asks unicode.org only on a miss, and
       # held to the checksum gen.py pins either way.
       - id: unicode-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/unicode/17.0.0
           key: unicode-17.0.0-UnicodeData
@@ -193,6 +198,35 @@ jobs:
       - name: tools/api_compat.py finds every break and passes every addition
         run: python3 tools/test_api_compat.py
 
+      # docs/design/integrations.md#workflows: every action pinned by its
+      # commit, every workflow's permissions said, a job that writes running
+      # only what the check lists, every secret read under an environment,
+      # no value chosen outside the workflow spliced into a script; and the
+      # checker held to a failing workflow of each kind.
+      - name: Every workflow's actions pinned, its jobs' writes kept from its builds and its secrets in environments
+        run: |
+          python3 tools/workflow_check.py
+          python3 tools/test_workflow_check.py
+
+      # The move of the image's `latest` both release workflows run, against
+      # stand-ins for gh and docker: never to a draft, a pre-release or back,
+      # failing where the list it copies is not there yet.
+      - name: tools/image-latest.sh moves latest to the newest published release alone
+        run: python3 tools/test_image_latest.py
+
+      # packages.yml's hold of GitHub's Latest and its npm dist-tag, against
+      # a stand-in for gh: a patch to an older minor moves neither back, and
+      # a release candidate takes neither.
+      - name: tools/release-latest.sh keeps GitHub's Latest and npm's latest on the newest release
+        run: python3 tools/test_release_latest.py
+
+      # RELEASING.md's step 6, against stand-ins for gh, npm and curl: every
+      # asset there and no other, each attested by the workflow and at the
+      # ref that built it, the image by its digest, npm's and PyPI's
+      # provenance; and its list of assets held to the workflows.
+      - name: tools/release-verify.sh fails a release whose files or provenance are not the workflows'
+        run: python3 tools/test_release_verify.py
+
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
       # reading is judged against another's -- word by word, a panic failing
@@ -221,9 +255,21 @@ jobs:
       - name: tools/coverage_report.py's tables, and its boundary list's paths
         run: python3 tools/test_coverage_report.py
 
+      # docs/design/compatibility.md#the-compatibility-matrix: the harness
+      # compat.yml runs weekly and on a release's tag, held here on every
+      # change with no binary -- a case dying after its first part, one
+      # printing a part too few, each failing the run; every record kind,
+      # type tag and op of the tree named in its history or said to need
+      # none, so the next one cannot be forgotten; and a release's tarball
+      # with a byte flipped refused by release-bins.sh, nothing installed.
+      - name: The compatibility matrix fails a case dying part way, names every kind, tag and op of the tree, and refuses a tampered tarball
+        run: |
+          bash tools/compat-matrix.sh --self-test
+          bash tools/test_release_bins.sh
+
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/unicode/17.0.0
           key: ${{ steps.unicode-cache.outputs.cache-primary-key }}
@@ -233,7 +279,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # rust-toolchain.toml names an exact release: a new one, and the lints
       # it brings, comes in a pull request of its own, and shows here first.
@@ -243,7 +289,7 @@ jobs:
           rustup component add clippy
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -323,7 +369,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -343,7 +389,7 @@ jobs:
         # their NEON, CRC and atomics paths run only on an arm host.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The installer's --app path, which only a Mac runs: a stand-in DMG
       # served from localhost as a release's, installed into the Applications
@@ -359,12 +405,12 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -565,7 +611,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -662,13 +708,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -695,7 +741,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -727,7 +773,7 @@ jobs:
           rustup target add x86_64-apple-darwin
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -754,7 +800,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -778,13 +824,13 @@ jobs:
         os: [windows-latest, windows-11-arm]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -858,7 +904,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -882,13 +928,13 @@ jobs:
         os: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -927,7 +973,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -947,13 +993,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1005,7 +1051,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1039,7 +1085,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Before the build, so a script that does not read fails in seconds:
       # install.ps1 under Windows PowerShell 5.1, which `irm | iex` runs on
@@ -1072,7 +1118,7 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1104,7 +1150,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1142,7 +1188,7 @@ jobs:
           command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1171,7 +1217,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1194,7 +1240,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
 
@@ -1474,17 +1520,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1576,7 +1622,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1596,17 +1642,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1628,7 +1674,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1647,17 +1693,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1681,7 +1727,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1700,17 +1746,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1734,7 +1780,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1753,17 +1799,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1787,7 +1833,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1808,17 +1854,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1840,7 +1886,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1860,17 +1906,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1894,7 +1940,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1914,17 +1960,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1948,7 +1994,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1972,29 +2018,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # setup-node's and setup-go's `cache` save in their post step from any
       # ref, and have no read-only switch, so the two caches are the
       # actions' own paths, restored here and saved by main alone below.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/grafana/go.mod
           cache: false
 
       - id: npm-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
           key: v2-npm-${{ runner.os }}-${{ hashFiles('integrations/grafana/package-lock.json') }}
           restore-keys: v2-npm-${{ runner.os }}-
 
       - id: go-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2020,6 +2066,12 @@ jobs:
       - name: The data dashboards end to end
         run: make grafana-check
 
+      # release.yml's check of each image before it is pushed, on the image
+      # the compose above built from the same Dockerfile: a tag meets no
+      # step there that CI has not run.
+      - name: The image as a release holds it before pushing it
+        run: tools/image-check.sh fennecdb "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+
       # The image's fennec-server is a static binary: the runner runs it.
       - name: The plugin's backend tests
         working-directory: integrations/grafana
@@ -2038,14 +2090,14 @@ jobs:
 
       - name: Save the npm cache (main only)
         if: github.ref == 'refs/heads/main' && steps.npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
           key: ${{ steps.npm-cache.outputs.cache-primary-key }}
 
       - name: Save the Go cache (main only)
         if: github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2062,7 +2114,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: The units and the alert rules
         run: make deploy-check
@@ -2080,10 +2132,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh tools/release-latest.sh tools/release-verify.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
@@ -2155,7 +2207,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # musl-tools is the C compiler ring's C and assembly are built with
       # for musl, as release.yml's Linux builds take it.
@@ -2170,7 +2222,7 @@ jobs:
       # the workspace's are compiled every run, their sources newer than
       # any cache.
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2225,7 +2277,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2287,7 +2339,7 @@ jobs:
     # the runner's six.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain and the Android targets
         run: |
@@ -2295,7 +2347,7 @@ jobs:
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2305,12 +2357,12 @@ jobs:
           key: v2-ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: v2-ubuntu-latest-mobile-
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: wrapper
 
@@ -2369,15 +2421,25 @@ jobs:
       # package:flutter/material.dart, which `flutter analyze` fails on in the
       # examples (#590). Raised by hand, once the examples take what a new
       # release asks: 3.50.0 after they moved to package:material_ui (#591).
-      # No cache: the action's own saves from any ref and has no read-only
-      # switch, the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB (Linux) and
-      # restoring it saved 28 s and 16 s of a download (docs/design/conventions.md).
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: false
-          pub-cache: false
+      #
+      # Installed from Flutter's own archive by tools/install-flutter.sh,
+      # which holds it to the sum Flutter's list of its releases gives it
+      # and to the one written here (a raise is the version and its sum),
+      # and not by subosito/flutter-action: a composite action whose own
+      # steps run actions/cache@v5 by its tag, which no pin here reaches and
+      # which GitHub's sha_pinning_required refuses under a pinned commit
+      # too. No cache: the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB
+      # (Linux) and restoring it saved 28 s and 16 s of a download
+      # (docs/design/conventions.md).
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          SHA256: 6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       # The Dart package under Flutter's own Dart -- its sync tests against
       # a server run-tests.sh builds -- then the plugin's test.
@@ -2405,7 +2467,7 @@ jobs:
       # from a release): it is for a person to fetch. An upload that fails
       # on GitHub's side (#590/#591 lost a merge-queue run to one) must not
       # fail a job whose tests all passed. A test is never retried.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         continue-on-error: true
         with:
           name: fennecdb-android
@@ -2418,7 +2480,7 @@ jobs:
       # left of "1 failed" when it was not uploaded.
       - name: Test reports of a failing run
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-reports-android
           path: |
@@ -2448,7 +2510,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2469,7 +2531,7 @@ jobs:
     # hours; the steps that run tests are bounded on their own as well.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain and the Apple targets
         run: |
@@ -2477,7 +2539,7 @@ jobs:
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-darwin
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2538,7 +2600,7 @@ jobs:
 
       # Nothing downloads this either (see the Android upload): a failed
       # upload on GitHub's side does not fail a job whose tests passed.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         continue-on-error: true
         with:
           name: fennecdb-xcframework
@@ -2553,7 +2615,7 @@ jobs:
       # each test's output and the crash logs.
       - name: Test results of a failing run
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-apple
           path: integrations/swift/build/ios-tests.xcresult
@@ -2567,7 +2629,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2608,14 +2670,17 @@ jobs:
           name: fennecdb-android
           path: assets
 
-      # Flutter 3.50.0, as the Android job pins it, and as there with no
-      # cache: the action's own saves from any ref (see the Android job).
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
-        with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: false
-          pub-cache: false
+      # Flutter 3.50.0 as the Android job installs it, with no cache, from
+      # the archive for macOS on Apple silicon.
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json
+          SHA256: ed2d08a3e3c023e84cbe9316d21bd88fda6ee9552f90c1eb4da41a07c170fb35
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       # packages.yml's "The native libraries, from the release" and its
       # Publish's copy, the archive written where a publish would upload it
