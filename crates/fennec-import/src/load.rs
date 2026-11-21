@@ -7,7 +7,7 @@
 //! README, "Comparison with SQLite and PostgreSQL").
 
 use crate::map::{self, Plan, Target};
-use crate::{Options, Source, Summary};
+use crate::{Options, Source, Summary, BATCH_BYTES};
 use fennec_core::error::{Error, Result};
 use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
@@ -133,22 +133,39 @@ fn load(
     let mut skipped: u64 = 0;
     let mut seen: u64 = 0;
     let mut batch: Vec<Vec<(String, Expr)>> = Vec::with_capacity(opts.batch);
-    while let Some(values) = src.next_row()? {
+    // What the batch's rows hold: put at `opts.batch` rows or at
+    // `BATCH_BYTES`, whichever comes first. A row's bytes are counted once,
+    // from sizes known before its values are looked at: its fields' pairs
+    // and names, once a plan, and what its source read (`next_counted`), with
+    // what `adapt` makes of a number as text added where it makes it. A
+    // row holds nothing past its count but the allocator's rounding -- a
+    // SQLite row's texts and blobs are its record's bytes, or what decoding
+    // made of them, counted as made; its defaults' copies their length,
+    // summed once a table; a number nothing past its size until its field
+    // makes it text -- so a batch holds under `BATCH_BYTES` and the row that
+    // reached it, as it did with each value counted, at a row's cost rather
+    // than a value's.
+    let mut held: usize = 0;
+    let fields = fields_bytes(&plan);
+    while let Some((values, read)) = src.next_counted()? {
         if opts.limit.is_some_and(|n| rows >= n) {
             break;
         }
         seen += 1;
-        let doc = document(&plan, &types, values, seen)?;
+        let mut bytes = fields + read;
+        let doc = built(&plan, &types, values, seen, &mut bytes)?;
         if let Some(f) = &opts.filter {
             if !keep(f, &doc, &ctx, seen)? {
                 skipped += 1;
                 continue;
             }
         }
+        held += bytes;
         batch.push(doc);
         rows += 1;
-        if batch.len() >= opts.batch {
+        if batch.len() >= opts.batch || held >= BATCH_BYTES {
             flush(db, &opts.into, &mut batch, rows)?;
+            held = 0;
             progress(rows);
         }
     }
@@ -177,20 +194,32 @@ fn load(
     // does not rebuild the index.
     db.settle()?;
 
+    // What the source left out is the summary's to say too.
+    let mut warnings = plan.warnings;
+    warnings.extend(src.left_out());
     Ok(Summary {
         rows,
         skipped,
         elapsed: t0.elapsed(),
-        warnings: plan.warnings,
+        warnings,
     })
 }
 
-/// Turns a row into a `put` body.
-pub(crate) fn document(
+/// Turns a row into a `put` body, adding to `grown` the bytes [`adapt`]
+/// made of a number as a text field's or a blob field's value: the one
+/// value a document holds more of than its source read. A text read into
+/// a `json` field stays the text it was (the engine keeps it so), and
+/// bytes made a vector are as many bytes; a number made text is up to 20
+/// bytes as an integer and 327 as a float, which Rust writes digit by
+/// digit (`-5e-324` is `-0.` and 324 decimals), so it is counted where
+/// `adapt` allocates it, by the capacity it got, rather than as the most
+/// a field could make on every row.
+pub(crate) fn built(
     plan: &Plan,
     types: &[Option<DataType>],
     values: Vec<Value>,
     row_no: u64,
+    grown: &mut usize,
 ) -> Result<Vec<(String, Expr)>> {
     if values.len() != plan.targets.len() {
         return Err(Error::Corrupt(format!(
@@ -208,7 +237,7 @@ pub(crate) fn document(
             Target::Field(name) => {
                 let v = match ty {
                     // The position is exact here: known before entering the batch.
-                    Some(ty) => adapt(value, ty).map_err(|e| match e {
+                    Some(ty) => adapt(value, ty, grown).map_err(|e| match e {
                         Error::Type(m) => Error::Type(format!("row {row_no}, field `{name}`: {m}")),
                         other => other,
                     })?,
@@ -219,6 +248,71 @@ pub(crate) fn document(
         }
     }
     Ok(doc)
+}
+
+/// What a document being put holds, in bytes, beside its values' own
+/// ([`values_bytes`]): a pair a field and its name, the same for every row
+/// of the plan -- a document leaving out a `NULL` id holds a pair less,
+/// which this counts, never fewer. The allocator's rounding aside, never
+/// less than the bytes themselves, which [`BATCH_BYTES`] bounds: a field
+/// nobody wrote a value for holds its pair and its name, and a row of a
+/// source's 32 767 columns, its record one byte, is some 3 MB.
+pub(crate) fn fields_bytes(plan: &Plan) -> usize {
+    plan.targets
+        .iter()
+        .map(|t| {
+            std::mem::size_of::<(String, Expr)>()
+                + match t {
+                    Target::Id => "id".len(),
+                    Target::Field(name) => name.len(),
+                }
+        })
+        .sum()
+}
+
+/// The bytes a row's values hold past their own `size_of`, counted value
+/// by value: [`Source::next_counted`](crate::Source::next_counted)'s
+/// default, a PostgreSQL row's and a change's of `--follow`, whose cells'
+/// text a `jsonb`, an array or a vector may make more of.
+pub(crate) fn values_bytes(values: &[Value]) -> usize {
+    values.iter().map(value_bytes).sum()
+}
+
+/// The bytes a value holds past its own `size_of`. A text's and a blob's,
+/// the most of a row's, are read in line; any other a call away
+/// ([`nested_bytes`]).
+#[inline]
+fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::Text(s) => s.capacity(),
+        Value::Bytes(b) => b.capacity(),
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Timestamp(_) => 0,
+        v => nested_bytes(v),
+    }
+}
+
+/// [`value_bytes`] of a vector, a list or an object. A list or an object is
+/// counted by its members, which nest no deeper than every reader of a
+/// value lets them (`value::MAX_JSON_DEPTH`).
+#[cold]
+#[inline(never)]
+fn nested_bytes(v: &Value) -> usize {
+    use std::mem::size_of;
+    match v {
+        Value::Vector(x) => x.capacity() * size_of::<f32>(),
+        Value::Sparse(_, x) => x.capacity() * size_of::<(u32, f32)>(),
+        Value::List(items) => {
+            items.capacity() * size_of::<Value>() + items.iter().map(value_bytes).sum::<usize>()
+        }
+        Value::Object(members) => {
+            members.capacity() * size_of::<(String, Value)>()
+                + members
+                    .iter()
+                    .map(|(k, x)| k.capacity() + value_bytes(x))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// Applies the filter to one row.
@@ -277,7 +371,10 @@ impl RowAccess for ImportedRow<'_> {
 /// row, and everything is text in PostgreSQL COPY output. This is the only
 /// place that binds a loosely typed source to the schema; everything else is
 /// left to `coerce`.
-fn adapt(v: Value, ty: &DataType) -> Result<Value> {
+///
+/// A number made text, the one value it makes larger than it was read
+/// ([`built`]), adds its capacity to `grown`.
+fn adapt(v: Value, ty: &DataType, grown: &mut usize) -> Result<Value> {
     let mismatch = |want: &str, got: &Value| {
         Error::Type(format!("expected {want}, could not parse `{}`", show(got)))
     };
@@ -349,12 +446,18 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
         },
         // A numeric value landing in a text column: in SQLite the type
         // belongs to the value rather than the column, so this is ordinary.
-        (DataType::Text, Value::Int(n)) => Value::Text(n.to_string()),
-        (DataType::Text, Value::Float(f)) => Value::Text(f.to_string()),
-        (DataType::Bytes, Value::Int(n)) => Value::Bytes(n.to_string().into_bytes()),
-        (DataType::Bytes, Value::Float(f)) => Value::Bytes(f.to_string().into_bytes()),
+        (DataType::Text, Value::Int(n)) => Value::Text(made(n.to_string(), grown)),
+        (DataType::Text, Value::Float(f)) => Value::Text(made(f.to_string(), grown)),
+        (DataType::Bytes, Value::Int(n)) => Value::Bytes(made(n.to_string(), grown).into_bytes()),
+        (DataType::Bytes, Value::Float(f)) => Value::Bytes(made(f.to_string(), grown).into_bytes()),
         (_, v) => v,
     })
+}
+
+/// A number's text, its bytes added to `grown` where it is allocated.
+fn made(s: String, grown: &mut usize) -> String {
+    *grown += s.capacity();
+    s
 }
 
 /// Rejects a vector carrying a component its field does not hold
@@ -446,12 +549,86 @@ mod tests {
     use fennec_core::schema::VectorIndexSpec;
     use fennec_core::value::VecPrec;
 
+    /// A batch is put at `--batch` rows or once its rows hold `BATCH_BYTES`,
+    /// whichever comes first: rows of 1 MiB go 16 a batch under
+    /// the default of 2 000, and 5 a batch under `--batch 5`.
+    #[test]
+    fn a_batch_is_put_at_its_rows_or_its_bytes() {
+        let puts = |batch: usize| {
+            let rows: Vec<Vec<Value>> = (0..20)
+                .map(|i| {
+                    vec![Value::Text(
+                        char::from(b'a' + i as u8).to_string().repeat(1 << 20),
+                    )]
+                })
+                .collect();
+            let mut src = Rows::new(vec![Column::new("t", DataType::Text, "text")], rows);
+            let mut opts = Options::new("c");
+            opts.batch = batch;
+            let mut db = Database::new();
+            let mut at = Vec::new();
+            run_with_progress(&mut src, &mut db, &opts, &mut |n| at.push(n)).unwrap();
+            at
+        };
+        assert_eq!(puts(crate::DEFAULT_BATCH), [16, 20]);
+        assert_eq!(puts(5), [5, 10, 15, 20]);
+        // What a row holds: a pair and a name a field, once a plan, what
+        // its source read -- by default each value's bytes past its own
+        // size -- and a number its field makes text, as it is made.
+        let columns = [
+            Column::new("t", DataType::Text, "text"),
+            Column::new("vec", DataType::Json, "json"),
+            Column::new("n", DataType::Text, "text"),
+        ];
+        let plan = crate::map::plan(&columns, &Options::new("c")).unwrap();
+        assert_eq!(
+            plan.targets,
+            [
+                Target::Field("t".into()),
+                Target::Field("vec".into()),
+                Target::Field("n".into())
+            ]
+        );
+        let types: Vec<Option<DataType>> = columns.iter().map(|c| c.ty.clone()).collect();
+        let pairs = 3 * std::mem::size_of::<(String, Expr)>() + 1 + 3 + 1;
+        assert_eq!(fields_bytes(&plan), pairs);
+        let row = vec![
+            Value::Text("x".repeat(100)),
+            Value::List(vec![Value::Text("ab".into()), Value::Int(1)]),
+            Value::Float(-5e-324),
+        ];
+        let (row, read) = Rows::new(columns.to_vec(), vec![row])
+            .next_counted()
+            .unwrap()
+            .unwrap();
+        let list = 2 * std::mem::size_of::<Value>() + 2;
+        assert_eq!(read, 100 + list);
+        let mut grown = 0;
+        let doc = built(&plan, &types, row, 1, &mut grown).unwrap();
+        assert_eq!(doc.len(), 3);
+        // Rust writes the float's every digit: `-0.` and 324 decimals.
+        let Expr::Lit(Value::Text(n)) = &doc[2].1 else {
+            panic!("{doc:?}")
+        };
+        assert_eq!((n.len(), grown), (327, n.capacity()));
+        // The text and the list stay what they were read as: the document
+        // holds what was counted.
+        let kept: Vec<Value> = doc[..2]
+            .iter()
+            .map(|(_, e)| match e {
+                Expr::Lit(v) => v.clone(),
+                _ => Value::Null,
+            })
+            .collect();
+        assert_eq!(values_bytes(&kept), read);
+    }
+
     /// A text bound for a `float` -- SQLite's, a PostgreSQL cell -- past a
     /// float's range is refused naming it, where it read as an infinity or
     /// 0; the infinities and `NaN` spelled as words are kept.
     #[test]
     fn a_text_past_a_float_s_range_is_refused() {
-        let float = |s: &str| adapt(Value::Text(s.into()), &DataType::Float);
+        let float = |s: &str| adapt(Value::Text(s.into()), &DataType::Float, &mut 0);
         let e = float(" 1e400 ").unwrap_err().to_string();
         assert!(e.contains("number `1e400` is past a float's range"), "{e}");
         let e = float("1e-400").unwrap_err().to_string();

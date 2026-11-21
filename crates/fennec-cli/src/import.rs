@@ -49,7 +49,8 @@ options
   --source-where <SQL>    postgres: applies the filter on the server, so the
                           rows never stream. It is SQL, not FennecQL.
   --limit <N>             at most N rows
-  --batch <N>             put batch size (default 2000)
+  --batch <N>             rows a put takes at most (default 2000); a batch
+                          is put sooner once its rows hold 16 MiB
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
   -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be
@@ -291,7 +292,10 @@ fn run(
     };
 
     let columns = src.columns()?;
-    let plan = map::plan(&columns, opts)?;
+    let mut plan = map::plan(&columns, opts)?;
+    // What the source left out -- a SQLite table's VIRTUAL generated
+    // columns -- is a warning line of the plan and of the import.
+    plan.warnings.extend(src.left_out());
 
     if dry_run {
         print_plan(&plan, &columns, target, total.or_else(|| src.row_count()));
