@@ -21,6 +21,8 @@
 //! crate's [`Error`]. The backend can be changed here -- BoringSSL, as Bun
 //! takes it, is weighed against rustls -- without touching a caller.
 
+mod end_point;
+
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::pem::PemObject;
@@ -680,95 +682,15 @@ pub fn server_end_point(cert: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(ring::digest::digest(hash, cert).as_ref().to_vec())
 }
 
-/// One DER element at the start of `b`: its tag, its contents and what
-/// follows it. `None` where its length runs past `b` or is not one DER
-/// writes (an indefinite length, more than four bytes of it).
-fn der(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
-    let (&tag, rest) = b.split_first()?;
-    let (&first, rest) = rest.split_first()?;
-    let (len, rest) = if first < 0x80 {
-        (first as usize, rest)
-    } else {
-        let n = (first & 0x7f) as usize;
-        if n == 0 || n > 4 {
-            return None;
-        }
-        let (bytes, rest) = (rest.get(..n)?, rest.get(n..)?);
-        (bytes.iter().fold(0usize, |l, &d| l << 8 | d as usize), rest)
-    };
-    Some((tag, rest.get(..len)?, rest.get(len..)?))
-}
-
-const SEQUENCE: u8 = 0x30;
-const OID: u8 = 0x06;
-
-/// The hash a certificate's binding is made with, read off its
-/// `signatureAlgorithm` (RFC 5280: `Certificate ::= SEQUENCE {
-/// tbsCertificate, signatureAlgorithm, signatureValue }`).
+/// The ring digest of the hash a certificate's binding is made with
+/// ([`end_point::hash_of`], the DER walk).
 fn end_point_hash(cert: &[u8]) -> Result<&'static ring::digest::Algorithm, &'static str> {
-    use ring::digest::{SHA256, SHA384, SHA512};
-    let malformed = "the certificate is not DER";
-    let (SEQUENCE, outer, _) = der(cert).ok_or(malformed)? else {
-        return Err(malformed);
-    };
-    let (SEQUENCE, _, rest) = der(outer).ok_or(malformed)? else {
-        return Err(malformed);
-    };
-    let (SEQUENCE, alg, _) = der(rest).ok_or(malformed)? else {
-        return Err(malformed);
-    };
-    let (OID, oid, params) = der(alg).ok_or(malformed)? else {
-        return Err(malformed);
-    };
-    // 1.2.840.113549.1.1.x, PKCS #1's; 1.2.840.10045.4.x, ECDSA's.
-    const RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
-    const ECDSA: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04];
-    let sha224 = "the certificate is signed with SHA-224, which this client has not";
-    let none =
-        "the certificate's signature uses no single hash (Ed25519, Ed448, or one not known here)";
-    match oid {
-        // md5WithRSAEncryption, sha1WithRSAEncryption, ecdsa-with-SHA1:
-        // SHA-256, by the RFC's rule.
-        [p @ .., 4 | 5] if p == RSA => Ok(&SHA256),
-        [p @ .., 0x01] if p == ECDSA => Ok(&SHA256),
-        [p @ .., 0x0b] if p == RSA => Ok(&SHA256),
-        [p @ .., 0x0c] if p == RSA => Ok(&SHA384),
-        [p @ .., 0x0d] if p == RSA => Ok(&SHA512),
-        [p @ .., 0x0e] if p == RSA => Err(sha224),
-        [p @ .., 0x03, 0x02] if p == ECDSA => Ok(&SHA256),
-        [p @ .., 0x03, 0x03] if p == ECDSA => Ok(&SHA384),
-        [p @ .., 0x03, 0x04] if p == ECDSA => Ok(&SHA512),
-        [p @ .., 0x03, 0x01] if p == ECDSA => Err(sha224),
-        // RSASSA-PSS: the hash its parameters name, `[0]`, SHA-1 (so
-        // SHA-256) where they name none (RFC 4055).
-        [p @ .., 0x0a] if p == RSA => {
-            let (SEQUENCE, params, _) = der(params).ok_or(malformed)? else {
-                return Err(malformed);
-            };
-            match der(params) {
-                Some((0xa0, hash, _)) => {
-                    let (SEQUENCE, hash, _) = der(hash).ok_or(malformed)? else {
-                        return Err(malformed);
-                    };
-                    let (OID, hash, _) = der(hash).ok_or(malformed)? else {
-                        return Err(malformed);
-                    };
-                    // 1.3.14.3.2.26, SHA-1; 2.16.840.1.101.3.4.2.x, the rest.
-                    const NIST: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
-                    match hash {
-                        [0x2b, 0x0e, 0x03, 0x02, 0x1a] => Ok(&SHA256),
-                        [p @ .., 1] if p == NIST => Ok(&SHA256),
-                        [p @ .., 2] if p == NIST => Ok(&SHA384),
-                        [p @ .., 3] if p == NIST => Ok(&SHA512),
-                        [p @ .., 4] if p == NIST => Err(sha224),
-                        _ => Err(none),
-                    }
-                }
-                _ => Ok(&SHA256),
-            }
-        }
-        _ => Err(none),
-    }
+    use end_point::Hash;
+    Ok(match end_point::hash_of(cert)? {
+        Hash::Sha256 => &ring::digest::SHA256,
+        Hash::Sha384 => &ring::digest::SHA384,
+        Hash::Sha512 => &ring::digest::SHA512,
+    })
 }
 
 /// A fatal `internal_error` alert, a record of its own in the clear: what
@@ -871,8 +793,10 @@ impl TlsStream {
 
     /// A dial's channel binding, RFC 5929's `tls-server-end-point`: the hash
     /// of the certificate the server showed ([`server_end_point`]), which
-    /// SCRAM-SHA-256-PLUS signs into its exchange, so a sign-in relayed
-    /// through someone else's TLS fails at the server. The one channel
+    /// SCRAM-SHA-256-PLUS signs into its exchange, so a bound sign-in
+    /// relayed through someone else's TLS fails at the server (one the
+    /// relay kept from binding, taking `-PLUS` out of the offer, does not:
+    /// fennec-wire's `channel_binding=require` refuses that). The one channel
     /// binding PostgreSQL takes. The certificate is the one shown whatever
     /// the dial checked of it: under an unverified dial it is whoever
     /// answered, which is the point -- the server compares it with its own.
@@ -1230,6 +1154,7 @@ mod tests {
     //! A private CA made as each test runs (rcgen, this crate's dev-dependency
     //! alone), a server on a port of its own, and the dials it is held to.
 
+    use super::end_point::{der, OID, SEQUENCE};
     use super::*;
     use rcgen::{
         date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, DnType,
@@ -1984,12 +1909,6 @@ mod tests {
         assert!(e.to_string().contains("KeyMismatch"), "{e}");
     }
 
-    /// The certificates fennec-wire's tests serve and trust, in
-    /// `crates/fennec-wire/tests/certs`: made here, so rcgen stays this crate's
-    /// dev-dependency alone. `FENNEC_WRITE_CERTS=1 cargo test -p fennec-tls
-    /// wire_certs` writes them again (valid 2026 to 2126); otherwise this holds
-    /// them to what they are for -- the server's chain is good for `localhost`
-    /// under `ca.pem` and unknown under `other-ca.pem`.
     /// A self-signed certificate's DER, signed with `alg`.
     fn signed_with(alg: &'static rcgen::SignatureAlgorithm) -> Vec<u8> {
         let key = KeyPair::generate_for(alg).unwrap();
@@ -2113,6 +2032,12 @@ mod tests {
         );
     }
 
+    /// The certificates fennec-wire's tests serve and trust, in
+    /// `crates/fennec-wire/tests/certs`: made here, so rcgen stays this crate's
+    /// dev-dependency alone. `FENNEC_WRITE_CERTS=1 cargo test -p fennec-tls
+    /// wire_certs` writes them again (valid 2026 to 2126); otherwise this holds
+    /// them to what they are for -- the server's chain is good for `localhost`
+    /// under `ca.pem` and unknown under `other-ca.pem`.
     #[test]
     fn wire_certs() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fennec-wire/tests/certs");

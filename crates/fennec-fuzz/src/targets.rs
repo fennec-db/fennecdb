@@ -65,6 +65,15 @@ pub static TARGETS: &[Target] = &[
         dictionary: SQLITE_TOKENS,
         run: sqlite,
     },
+    Target {
+        name: "certificate",
+        about: "fennec-tls's DER walk of the certificate a PostgreSQL server shows, to its signature algorithm: the hash of a channel binding (tls-server-end-point)",
+        max_len: 16 << 10,
+        smoke: 300_000,
+        seeds: certificate_seeds,
+        dictionary: CERTIFICATE_TOKENS,
+        run: certificate,
+    },
 ];
 
 /// The repository, where the fixtures the seeds are read from are.
@@ -860,4 +869,99 @@ fn sqlite(data: &[u8]) {
         }
         let _ = fennec_import::sqlite::count_rows(&path, table);
     }
+}
+
+// ---------------------------------------------------------- certificate
+
+/// fennec-tls's walk, the file itself: fennec-tls is rustls and ring, which
+/// the fuzzer, taking nothing from outside the workspace, does not link.
+/// The file holds std alone for this (its own words say so).
+#[path = "../../fennec-tls/src/end_point.rs"]
+mod end_point;
+
+const CERTIFICATE_TOKENS: &[&[u8]] = &[
+    &[0x30, 0x82],
+    &[0x30, 0x81],
+    &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff],
+    &[0x30, 0x80],
+    &[0x05, 0x00],
+    &[0xa0],
+    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01],
+    &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03],
+    &[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02],
+    &[0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a],
+    &[0x06, 0x03, 0x2b, 0x65, 0x70],
+];
+
+/// A DER element, its length written short or long as its size asks.
+fn element(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    match contents.len() {
+        n @ 0..=0x7f => out.push(n as u8),
+        n @ 0x80..=0xff => out.extend_from_slice(&[0x81, n as u8]),
+        n => out.extend_from_slice(&[0x82, (n >> 8) as u8, n as u8]),
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// The certificates fennec-wire's tests serve and trust
+/// (`crates/fennec-wire/tests/certs`), and a certificate's shape -- the
+/// parts the walk passes over empty -- for every signature algorithm it
+/// tells apart: RSA's with each hash, ECDSA's, RSASSA-PSS's with and
+/// without its parameters' hash, and Ed25519's, which has no single hash.
+fn certificate_seeds() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for name in ["ca.pem", "other-ca.pem", "server.pem"] {
+        let path = repo().join("crates/fennec-wire/tests/certs").join(name);
+        let Ok(pem) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for block in pem.split("-----BEGIN CERTIFICATE-----").skip(1) {
+            let body = block.split("-----END").next().unwrap_or("");
+            if let Some(der) = fennec_http::crypto::b64_decode(body.trim()) {
+                out.push(der);
+            }
+        }
+    }
+    let oid = |bytes: &[u8]| element(0x06, bytes);
+    let shaped = |alg: &[u8]| {
+        let mut body = element(0x30, &[]);
+        body.extend_from_slice(&element(0x30, alg));
+        body.extend_from_slice(&element(0x03, &[0]));
+        element(0x30, &body)
+    };
+    const RSA: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const ECDSA: [u8; 6] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04];
+    const NIST: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+    for last in [4, 5, 0x0b, 0x0c, 0x0d, 0x0e] {
+        let mut alg = oid(&[&RSA[..], &[last]].concat());
+        alg.extend_from_slice(&element(0x05, &[]));
+        out.push(shaped(&alg));
+    }
+    out.push(shaped(&oid(&[&ECDSA[..], &[0x01]].concat())));
+    for last in 1..=4 {
+        out.push(shaped(&oid(&[&ECDSA[..], &[0x03, last]].concat())));
+    }
+    let pss = |params: &[u8]| {
+        let mut alg = oid(&[&RSA[..], &[0x0a]].concat());
+        alg.extend_from_slice(&element(0x30, params));
+        shaped(&alg)
+    };
+    out.push(pss(&[]));
+    out.push(pss(&element(
+        0xa0,
+        &element(0x30, &oid(&[0x2b, 0x0e, 0x03, 0x02, 0x1a])),
+    )));
+    for last in 1..=4 {
+        let hash = oid(&[&NIST[..], &[last]].concat());
+        out.push(pss(&element(0xa0, &element(0x30, &hash))));
+    }
+    out.push(shaped(&oid(&[0x2b, 0x65, 0x70])));
+    out
+}
+
+fn certificate(data: &[u8]) {
+    // Its answer kept, so no optimizer reads the walk as work for nothing.
+    let _ = std::hint::black_box(end_point::hash_of(data));
 }
