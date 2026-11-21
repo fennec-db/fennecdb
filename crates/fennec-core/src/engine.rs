@@ -2380,7 +2380,8 @@ impl Window<'_> {
 /// the file at a time, and it keeps where each record starts every 64 KiB
 /// and the runs of spills: the answer is the last kept start at or before
 /// that point, or a run reaching it -- up to 64 KiB and a record more read
-/// into memory than a cut could take.
+/// into memory than a cut could take -- and never before the image's end,
+/// where no cut lands: a file with nothing past its image is its length.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn surveyed(
     read: &mut dyn FnMut(&mut [u8], u64) -> std::io::Result<usize>,
@@ -2503,11 +2504,18 @@ pub(crate) fn surveyed(
             break;
         }
     }
+    // No cut lands inside the image -- a walk stopping there refuses the
+    // open -- so never short of its end. A file with nothing past its
+    // image, as a compact, a checkpoint, `.save` and a backup leave one,
+    // has no mark after its last record's start, which was the answer: of
+    // a collection with no graph that record is its data, and the reader
+    // read about the whole file into memory.
     let at = marks
         .iter()
         .rev()
         .find(|&&m| m <= durable)
-        .map_or(MAGIC.len(), |&m| m);
+        .map_or(MAGIC.len(), |&m| m)
+        .max(body_end.min(len));
     let uncut = runs
         .into_iter()
         .filter(|&(_, e)| e >= at)

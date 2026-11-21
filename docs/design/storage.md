@@ -789,14 +789,30 @@ the point is that copy, which no cut reaches, and a file cut by then is
 covered as far as it was read; the load then covers the mapping only to
 the records it took (`Mapping::cover`). What it read holds whatever the
 file does after: cut, appended to, or replaced by a rename, which leaves
-the reader the old file, whose pages its mapping keeps. A server's file
-under `--sync always` is durable to within a page of its end, so the copy
-is the last 64 KiB to 128 KiB and a record; under a periodic sync (a
-server's default, 250 ms) the writes since the last one too; after a
-crash, the torn tail. A file no sync ever claimed past its image -- a
-library's, written and let go of with no `sync` -- is read whole, as one
-with a sync log beside it always was (`read_with_sync_log`). The open is
-cheaper for it, the survey walking a buffer read a mebibyte at a time
+the reader the old file, whose pages its mapping keeps. What it reads
+into memory has no bound but the file's: every byte past the point, and
+the record holding it whole however large -- a graph a server kept in the
+tail, a block's record of up to 16 MB, the spills of a block still open.
+A server's file under `--sync always` is durable to within a page of its
+end, so the copy is the last 64 KiB to 128 KiB and that record; under a
+periodic sync (a server's default, 250 ms) the writes since the last one
+too; under `--sync off`, running or after a crash, every write since the
+server opened the file or last wrote it anew, a compact or a checkpoint,
+until its shutdown syncs it; after a crash, the torn tail. A file no
+sync ever claimed past its image -- a library's, written and let go of
+with no `sync` -- is read whole past the image, and whole where it has
+none, as one with a sync log beside it always was (`read_with_sync_log`). A file with nothing past its image -- what a
+compact, a checkpoint, `.save` and a backup write -- is mapped whole, none
+of it read: no cut lands inside an image (a walk stopping there refuses
+the open), so the point no open cuts before is never short of the image's
+end, and the file's length with nothing past it, its last page mapped
+rather than read. Until 2026-11-21 that point was the last 64 KiB start at
+or before it, which with no record after the image's last is that
+record's start, of a collection with no graph its data: about the whole
+file read into memory (`a_reader_maps_a_file_with_nothing_past_its_image_whole`
+holds a `.save`'s and a checkpoint's to their length and to no byte of
+their rows read, which before was every byte of them). The open is
+cheaper for its survey, which walks a buffer read a mebibyte at a time
 where it faulted mapped pages in (rusage's instruction counter, arm64
 macOS, five runs a side, medians, 2026-11-21): the perf gate's `file-open`
 file -- 100 000 rows, 6.56 MB, written with no `sync`, so read whole --

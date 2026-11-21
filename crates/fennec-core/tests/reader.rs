@@ -132,4 +132,103 @@ fn a_reader_surveys_by_reading_as_the_walk_does_and_maps_short_of_every_cut() {
     );
 }
 
+/// A file with nothing past its image -- what a compact, a checkpoint,
+/// `.save` and a backup write -- is durable to its end, and no open cuts
+/// it: a reader maps it whole and reads none of it into memory of its own.
+/// Until 2026-11-21 its survey's point fell on the start of its last
+/// record: of a collection with no graph that is its data, about the whole
+/// file, and the reader read it into memory.
+#[test]
+fn a_reader_maps_a_file_with_nothing_past_its_image_whole() {
+    let dir = std::env::temp_dir().join(format!("fennecdb-reader-image-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rows = |db: &mut Database| {
+        run(db, "create collection t (body text)", &[]);
+        for i in 0..64 {
+            let body = format!("{i:02}{}", "a".repeat(8 << 10));
+            run(db, "put t {body: $1}", &[Value::Text(body)]);
+        }
+    };
+    // `.save`'s and a backup's: the image alone.
+    let mut db = Database::new();
+    rows(&mut db);
+    let saved = db.snapshot();
+    // A checkpoint's: the same rows appended to a file, which the
+    // checkpoint writes anew, closed with no mark after it.
+    let path = dir.join("checkpointed.fennec");
+    {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        rows(&mut db);
+        db.checkpoint().unwrap();
+    }
+    let checkpointed = std::fs::read(&path).unwrap();
+    for (what, image) in [(".save", saved), ("a checkpoint", checkpointed)] {
+        let (read, walked) = reader_survey(&image);
+        let ((found, uncut), walked) = (read.unwrap(), walked.unwrap());
+        assert_eq!(found, walked, "{what}");
+        assert_eq!(found.1, image.len(), "{what}: durable short of its end");
+        #[cfg(unix)]
+        let copied = copied(&dir.join("read.fennec"), &image);
+        #[cfg(not(unix))]
+        let copied = 0;
+        assert_eq!(
+            (uncut, copied),
+            (image.len(), 0),
+            "{what}, {} bytes: mapped short of {uncut}, {copied} bytes of its rows read into memory",
+            image.len()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The bytes of `image`'s rows a reader holds in memory of its own, as the
+/// rows tell it: `image` written to `path` and opened read-only, then the
+/// rows' text written over in place -- what no writer does, a file only
+/// appended to or replaced by a rename -- and the rows read back: a page
+/// the reader maps reads the new bytes, the page cache's, and one it read
+/// into memory the old.
+#[cfg(unix)]
+fn copied(path: &std::path::Path, image: &[u8]) -> usize {
+    use std::os::unix::fs::FileExt;
+    std::fs::write(path, image).unwrap();
+    let mut reader = fennec_core::fs::open_read_only(path).unwrap();
+    // The rows' text alone: runs of a kilobyte of `a`, which nothing else
+    // of the file holds.
+    let mut over = image.to_vec();
+    let mut i = 0;
+    while i < over.len() {
+        let run = over[i..].iter().take_while(|&&b| b == b'a').count();
+        if run >= 1 << 10 {
+            over[i..i + run].fill(b'b');
+        }
+        i += run.max(1);
+    }
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(&over, 0).unwrap();
+    drop(file);
+    let get = fennec_ql::parse_one("get t").unwrap();
+    let Response::Rows(rs) = reader.execute(&get).unwrap() else {
+        panic!("expected rows");
+    };
+    assert_eq!(rs.rows.len(), 64);
+    let (old, new) = rs
+        .rows
+        .iter()
+        .flat_map(|r| &r.values)
+        .map(|v| match v {
+            Value::Text(t) => (
+                t.bytes().filter(|&b| b == b'a').count(),
+                t.bytes().filter(|&b| b == b'b').count(),
+            ),
+            _ => (0, 0),
+        })
+        .fold((0, 0), |(a, b), (x, y)| (a + x, b + y));
+    // Every row's text read, whichever way.
+    assert_eq!(old + new, 64 << 13, "{old} old bytes, {new} new");
+    drop(reader);
+    let _ = std::fs::remove_file(path);
+    old
+}
+
 const MAGIC_LEN: usize = fennec_core::engine::MAGIC.len();

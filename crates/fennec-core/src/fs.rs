@@ -1039,16 +1039,24 @@ impl Mapping {
     /// ([`open_read_only`]), and the survey its load takes: mapped up to
     /// where no open to write the file cuts it ([`crate::engine::surveyed`],
     /// found by reading it, never through a mapping), and from the page
-    /// holding that point on read into memory of its own. A server opening
-    /// the file after a crash cuts its torn tail while the reader walks it,
-    /// and a page of a mapping wholly past a file's end is the process's end
-    /// to read (`SIGBUS`); bytes read are the reader's whatever happens to
-    /// the file after.
+    /// holding that point on read into memory of its own -- none of it where
+    /// the point is the file's end, as a file with nothing past its image
+    /// has it. A server opening the file after a crash cuts its torn tail
+    /// while the reader walks it, and a page of a mapping wholly past a
+    /// file's end is the process's end to read (`SIGBUS`); bytes read are
+    /// the reader's whatever happens to the file after.
     fn reading(file: &File, len: usize) -> Result<(Mapping, crate::engine::Survey)> {
         use std::os::unix::fs::FileExt;
         let (survey, uncut) = crate::engine::surveyed(&mut |buf, at| file.read_at(buf, at), len)?;
         let m = Mapping::of(file, len)?;
-        let at = uncut / PAGE_MAX * PAGE_MAX;
+        // Nothing an open cuts: no page of the mapping ends up past the
+        // file's end, the last one's part past it zeros as ever, and the
+        // file is mapped whole -- a page rounded down to was up to 64 KiB
+        // read into memory for nothing.
+        let at = match uncut >= len {
+            true => len,
+            false => uncut / PAGE_MAX * PAGE_MAX,
+        };
         if at >= len {
             return Ok((m, survey));
         }
