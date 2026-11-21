@@ -1601,12 +1601,21 @@ fn presence_and_began_edited_are_refused() {
     }
     std::fs::remove_file(root.join("acme/began")).unwrap();
 
-    // A presence an archiver before this version left plain, in a line it
-    // sealed nothing of in this version, reads as it did, and the next
-    // archiver's start seals it before anything else.
+    // A line 0.2.0 sealed (`tests/sealed-v1/`, the same key) with the plain
+    // presence its archiver wrote beside it, sealing nothing of it in this
+    // version: verified and read as it was, and the next archiver's start
+    // seals that presence before anything else, the line verifying still.
+    // Its verify read the presence as a sealed file alone and refused it.
     let olden = root.join("olden");
-    std::fs::create_dir_all(&olden).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sealed-v1/archive");
+    copied_over(&fixture, &olden);
     std::fs::write(olden.join("presence"), "gone 5\n").unwrap();
+    let verified = || {
+        Archive::of_tenant(&olden, Some(key.clone()), "olden")
+            .and_then(|a| a.verify())
+            .map(|v| v.last)
+    };
+    assert_eq!(verified().unwrap(), 7, "0.2.0's line and its plain presence");
     let of_olden = |out: &str| {
         let done = all(out, Target::End);
         done.into_iter().find(|(t, _)| t == "olden").unwrap().1
@@ -1615,5 +1624,6 @@ fn presence_and_began_edited_are_refused() {
     drop(NodeArchive::new(&root, Some(key.clone())).unwrap());
     let stored = std::fs::read(olden.join("presence")).unwrap();
     assert!(fennec_http::seal::is_sealed(&stored));
+    assert_eq!(verified().unwrap(), 7, "its presence sealed");
     assert!(matches!(of_olden("olden-sealed"), Restoring::Gone(5)));
 }

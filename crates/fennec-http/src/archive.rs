@@ -1995,17 +1995,20 @@ impl Archive {
                 "no image: a restore has nothing to start from".into(),
             ));
         };
-        for (name, role) in [("history", Role::History), ("presence", Role::Presence)] {
-            let path = self.dir.join(name);
-            match self.read_whole(&path, role, 0, 0) {
-                Ok(b) if role == Role::History => {
-                    History::decode(&b).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
+        let history = self.dir.join("history");
+        match self.read_whole(&history, Role::History, 0, 0) {
+            Ok(b) => {
+                History::decode(&b).map_err(|e| corrupt(format!("{}: {e}", history.display())))?;
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
+        // A tenant's presence read as `restore --tenants` reads it: one an
+        // archiver before this version left plain in a sealed line is read
+        // until an archiver of this version seals it. Read as a sealed file
+        // alone, every line 0.2.0 sealed with a presence beside it failed
+        // its verify.
+        self.presence_text()?;
         // Every record of each image held to its checksum, which an open
         // does not ask of an image's: written whole and renamed into
         // place, it is read as a whole file is, here alone -- a stretch at
