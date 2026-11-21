@@ -474,7 +474,7 @@ impl Conn {
         match self {
             Conn::Plain(s) => s,
             #[cfg(feature = "tls")]
-            Conn::Tls(t) => &*t.sock,
+            Conn::Tls(t) => &t.sock,
             #[cfg(not(feature = "tls"))]
             Conn::Tls(t) => match *t {},
         }
