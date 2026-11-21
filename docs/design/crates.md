@@ -671,7 +671,7 @@ them, as before; the cost is a sum over a row's fields beside the
 three-byte rows read 46 KB each -- 199 columns named `""` with a default
 of 150 bytes -- held 339 MB at once in `load::run` before
 (`an_import_holds_a_batch_by_its_bytes_not_its_rows`, counted as above),
-and holds under five times `BATCH_BYTES` now.
+and 74 MB now, under five times `BATCH_BYTES`.
 
 *A table's columns are read where SQLite puts them.* A record holds a
 value a column by position, so a column the reader misplaced took its
@@ -723,7 +723,9 @@ constants SQLite reads by its own formatting of a real as text, which its
 versions changed (3.51 writes `9.22337203685477581e+18`), by a text's
 numeric prefix (`-'5 apples'` is -5), or by taking a blob's bytes as text
 or a text's as a blob, in the file's encoding (`(-(-1.5))` in a TEXT
-column, `(CAST(x'41' AS TEXT))`, `(CAST(7 AS BLOB))`). A
+column, `(CAST(x'41' AS TEXT))`, `(CAST(7 AS BLOB))`), and one nested
+past eight parentheses (`DEFAULT_DEPTH`, the bound on the reading's
+recursion), which SQLite reads. A
 constraint is read as tokens (`tokens`, `constraints`): `PRIMARY KEY` in a
 default's string made a rowid alias, whose values the rowid replaced. The
 rowid alias is SQLite's: an `INTEGER` column that is the primary key,
