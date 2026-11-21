@@ -445,8 +445,8 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
         assert!(db.collection_names().is_empty(), "{says}");
         let cid = 1;
         let mut records = vec![fennec_core::engine::record(1, cid, &schema.encode())];
-        // And a document holding a vector, put by hand: the in-memory
-        // database above would build the index it names.
+        // And a document holding a vector, its record by hand as the
+        // create's is: no database holds the collection to put it into.
         let mut doc = Vec::new();
         fennec_core::codec::encode_value(&mut doc, &Value::Int(1));
         fennec_core::codec::encode_value(&mut doc, &Value::Vector(vec![1.0, 2.0]));

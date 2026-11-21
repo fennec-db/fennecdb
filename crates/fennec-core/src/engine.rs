@@ -7240,7 +7240,12 @@ impl Database {
                 // read as heads by chance, and looking past one for a whole
                 // record refused a tear 1.2 MB into 2 MB of `vector<64>`.
             } else if checked
-                || (bytes[at] & CHECKED != 0 && known(bytes[at]) && framed_at(bytes, at).is_ok())
+                || (bytes[at] & CHECKED != 0
+                    && known(bytes[at])
+                    && matches!(
+                        framed_at(bytes, at),
+                        Ok(Some((_, end))) if zero_tail(bytes, end, end)
+                    ))
             {
                 // In a file this version wrote to, a head no record reads
                 // from -- zeros with a byte after them, stale bytes -- is
@@ -7258,16 +7263,21 @@ impl Database {
                 // magic alone, the magic and the counter, or one a version
                 // before checksums wrote -- for a checked head of a kind
                 // this version knows that frames, which the walk stopped at
-                // for the collection it names: a version before read it as
-                // the file's first checked record and judged it by its sum,
-                // cutting it torn, and refused by name, such a file a
-                // crash's stale bytes left did not open (the fuzz fix's
-                // third review). A checked head whose varint does not read,
-                // or of a kind this version does not know, is refused there
-                // as every version refused it: nothing in such a file tells
-                // a crash's tail from damage, and judged, one in the middle
-                // of an old file would be cut with every plain record after
-                // it.
+                // for the collection it names, where it is the file's tail:
+                // its frame ends the file, or zeros run from its end to the
+                // file's (`zero_tail` from where its length says it ends).
+                // A version before read it as the file's first checked
+                // record and judged it by its sum, cutting it torn; refused
+                // by name, such a file a crash's stale bytes left did not
+                // open (the fuzz fix's third review). Anywhere else it is
+                // refused by name, whatever its sum: nothing in such a file
+                // tells a crash's tail from damage, and judged, one in the
+                // middle of an old file was cut with every plain record
+                // after it, as a version before cut it (the third review's
+                // check). So is a checked head whose varint does not read,
+                // or of a kind this version does not know whatever its sum
+                // -- a later version's, refused by its number -- as every
+                // version refused it there.
                 let head = whole_head(bytes, at);
                 if let (Some((_, _, true)), Some(e)) = (head, walk.refused) {
                     return Err(e);
