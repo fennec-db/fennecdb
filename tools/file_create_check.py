@@ -21,8 +21,9 @@ literals of their length, every item a `#[cfg(test)]` is on left out. It
 finds each way a file or a directory is made or renamed into a place:
 `File::create`, `File::create_new`, `fs::write`, `.create(..)` and
 `.create_new(..)` given `true` or a name, `create_dir`, `create_dir_all`,
-`DirBuilder`, `fs::copy`, `fs::rename`, `UnixListener::bind` and
-`UnixDatagram::bind`; a function of `std::fs` imported by its name, or
+`DirBuilder`, `fs::copy`, `fs::rename`, Apple's `clonefile`,
+`clonefileat` and `fclonefileat` (a call, not a declaration),
+`UnixListener::bind` and `UnixDatagram::bind`; a function of `std::fs` imported by its name, or
 under another (`use std::fs::{write, rename as moved}`), is found where it
 is called so, and `File` or `fs` imported under another name too. An open
 with `.create(..)` or `.create_new(..)` passes where its statement puts the
@@ -53,6 +54,7 @@ MAKES = re.compile(
     r"|\bcreate_dir(?:_all)?\s*\("
     r"|\bDirBuilder\b"
     r"|\bUnix(?:Listener|Datagram)\s*::\s*bind\b"
+    r"|\bf?clonefile(?:at)?\s*\("
 )
 # An open whose statement names one of these has the mode on it.
 PRIVATE = re.compile(r"\bprivate(?:_beside)?\s*\(")
@@ -78,6 +80,11 @@ ALLOWED = {
         "DirBuilder": (2, "the helpers themselves: create_dir_private and create_dir_new, mode 0700 on the mkdir"),
         ".create(path)": (2, "the same helpers' DirBuilder::create, the mode set on the builder"),
         ".create(true)": (1, "create_private on Windows, where a file takes its folder's access list"),
+        "fclonefileat(": (
+            1,
+            "copy_private's clone on Apple's systems: CLONE_NOFOLLOW, of an image its owner's alone, the clone "
+            "opened O_NOFOLLOW, held to what it made and to its name, and given 0600 on its handle",
+        ),
     },
     "crates/fennec-core/src/fs/windows.rs": {
         "fs::rename(": (1, "Windows' swap, where a file renamed keeps the access list it was made with"),
@@ -206,7 +213,12 @@ def findings(src):
     """Each way `src` makes a file outside the helpers: its line and kind."""
     code = reader.without_tests(reader.blank(src))
     found = []
-    calls = [(m.start(), kind_of(m.group())) for m in MAKES.finditer(code)]
+    # A declaration (`fn fclonefileat(..)` in an `extern` block) is no make.
+    calls = [
+        (m.start(), kind_of(m.group()))
+        for m in MAKES.finditer(code)
+        if not re.search(r"\bfn\s*$", code[: m.start()])
+    ]
     for pattern, kind in imported(code):
         for m in re.finditer(pattern, code):
             if not re.search(r"\bfn\s*$", code[: m.start()]):
@@ -285,6 +297,11 @@ CASES = [
     ("fn f() { let b = std::fs::DirBuilder::new(); }", ["DirBuilder"]),
     ("fn f() { UnixListener::bind(p); }", ["UnixListener::bind"]),
     ("fn f() { std::os::unix::net::UnixDatagram::bind(p)?; }", ["UnixDatagram::bind"]),
+    # A clone is made with its source's mode, a link at its name followed
+    # without a flag: a make, where it is called and not where declared.
+    ("fn f() { unsafe { fclonefileat(fd, -2, p.as_ptr(), 0) }; }", ["fclonefileat("]),
+    ("fn f() { unsafe { clonefile(a, b, 0) }; clonefileat(-2, a, d, b, 0); }", ["clonefile(", "clonefileat("]),
+    ("extern \"C\" {\n fn fclonefileat(src: i32, dir: i32, dst: *const u8, flags: u32) -> i32;\n}", []),
     ("fn f() { OpenOptions::new().write(true).create(true).open(p)?; }", [".create(true)"]),
     ("fn f() { let mut o = OpenOptions::new();\n o.create_new(true); }", [".create_new(true)"]),
     # Told whether to make it by a name: a make all the same.

@@ -318,7 +318,8 @@ pub fn private(options: &mut OpenOptions) -> &mut OpenOptions {
 /// powerpc, m68k) -- the BSDs' and Apple's is `0x100`, illumos' `0x20000`.
 /// A Unix not listed fails to build, naming this: a `0` there left every
 /// open beside a database following a link, unsaid, as armv7 Android's
-/// library did until this list.
+/// library did until this list. fennec-server's hand-over opens with it
+/// too (`user::sys::AS_FOUND`).
 #[cfg(all(
     any(target_os = "linux", target_os = "android"),
     any(
@@ -332,7 +333,7 @@ pub fn private(options: &mut OpenOptions) -> &mut OpenOptions {
         target_arch = "sparc64"
     )
 ))]
-const NOFOLLOW: i32 = 0o400000;
+pub const NOFOLLOW: i32 = 0o400000;
 #[cfg(all(
     any(target_os = "linux", target_os = "android"),
     any(
@@ -343,7 +344,7 @@ const NOFOLLOW: i32 = 0o400000;
         target_arch = "m68k"
     )
 ))]
-const NOFOLLOW: i32 = 0o100000;
+pub const NOFOLLOW: i32 = 0o100000;
 #[cfg(any(
     target_vendor = "apple",
     target_os = "freebsd",
@@ -351,9 +352,9 @@ const NOFOLLOW: i32 = 0o100000;
     target_os = "netbsd",
     target_os = "dragonfly"
 ))]
-const NOFOLLOW: i32 = 0x100;
+pub const NOFOLLOW: i32 = 0x100;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-const NOFOLLOW: i32 = 0x20000;
+pub const NOFOLLOW: i32 = 0x20000;
 #[cfg(all(
     unix,
     not(any(
@@ -433,6 +434,133 @@ pub fn create_like(path: &Path, like: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+/// `from` copied into a new file at `to`, made as [`create_private`]
+/// makes one, and returned open to read back and to write on at its end:
+/// nothing opens `to` again by its name. An archive's image into a
+/// restore's `.restoring` or a consolidating round's file (fennec-http's
+/// `assemble_into`). On Apple's systems an image no other user may read is
+/// cloned ([`cloned`]), APFS sharing its blocks, where a copy writes them
+/// all: 1 GiB and its fsync took 0.004-0.008 s cloned and 0.81-1.98 s
+/// copied on a Mac (docs/design/durability.md#files-modes).
+/// Elsewhere through a 1 MiB buffer, which on Linux is no buffer at all:
+/// `io::copy` from a `File` into a `BufWriter<File>` is std's
+/// `kernel_copy`, the empty buffer flushed and both descriptors handed to
+/// `copy_file_range` -- a reflink where the file system shares blocks --
+/// as the system's `fs::copy` hands them. On Windows too it writes through
+/// the one handle: a copy opened again after `CopyFileExW` could be held
+/// between by a copier sharing no writer (32) -- a sync tool, an indexer
+/// -- and a consolidating round's image refused.
+pub fn copy_private(from: &Path, to: &Path) -> std::io::Result<File> {
+    let mut source = File::open(from)?;
+    #[cfg(target_vendor = "apple")]
+    if let Some(mut clone) = cloned(&source, to)? {
+        clone.seek(SeekFrom::End(0))?;
+        return Ok(clone);
+    }
+    let mut out = BufWriter::with_capacity(WRITE_BUF, create_private(to)?);
+    std::io::copy(&mut source, &mut out)?;
+    out.into_inner()
+        .map_err(std::io::IntoInnerError::into_error)
+}
+
+/// `source` cloned to `to` (`fclonefileat`), the clone open to read and
+/// write, or `None` where it is to be copied instead. Only an image whose
+/// mode gives its owner read and write and no one else anything: a clone
+/// is made with its source's mode, so a wider image's -- one 0.2.0 made
+/// with the umask's `0644` -- would be another user's to open until an
+/// `fchmod`, long enough to keep a descriptor reading every write after,
+/// and a `0400` one's could not be opened to be written. With
+/// `CLONE_NOFOLLOW` a link at `to` is `EEXIST` as any file there is,
+/// removed and the clone made again once, as `create_private` does;
+/// without it the clone follows one that names no file and is made where
+/// it points (macOS 26.1), which the system's `fs::copy`, passing no flag,
+/// did. `CLONE_NOOWNERCOPY`: made by root, the clone is root's, as a file
+/// root makes is, not the image's owner's. Another file system
+/// (`ENOTSUP`), another volume (`EXDEV`) or a system without a flag
+/// (`EINVAL`) copies instead. The clone gives back no descriptor, so the
+/// name is opened again, as no link (`O_NOFOLLOW`), and held to what the
+/// clone made -- one regular file of one name, the process's, on the
+/// image's volume and of its length -- and to the name ([`still_named`]):
+/// another file a writer of the directory put there between is refused,
+/// but for one of the user's own of that length renamed there from beside
+/// it, a writer the database's directory trusts anyway (SECURITY.md).
+#[cfg(target_vendor = "apple")]
+fn cloned(source: &File, to: &Path) -> std::io::Result<Option<File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    extern "C" {
+        fn fclonefileat(src: i32, dst_dir: i32, dst: *const std::ffi::c_char, flags: u32) -> i32;
+        fn geteuid() -> u32;
+    }
+    // <sys/fcntl.h>, <sys/clonefile.h> and <sys/errno.h>, the same on
+    // every Apple system.
+    const AT_FDCWD: i32 = -2;
+    const CLONE_NOFOLLOW: u32 = 0x1;
+    const CLONE_NOOWNERCOPY: u32 = 0x2;
+    const EEXIST: i32 = 17;
+    const EXDEV: i32 = 18;
+    const EINVAL: i32 = 22;
+    const ENOTSUP: i32 = 45;
+    let image = source.metadata()?;
+    if !image.is_file() || image.mode() & 0o677 != 0o600 {
+        return Ok(None);
+    }
+    let name = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+    let mut again = true;
+    // SAFETY: a descriptor open across the call and a string it only reads.
+    while unsafe {
+        fclonefileat(
+            source.as_raw_fd(),
+            AT_FDCWD,
+            name.as_ptr(),
+            CLONE_NOFOLLOW | CLONE_NOOWNERCOPY,
+        )
+    } != 0
+    {
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(EEXIST) if again => {
+                again = false;
+                match std::fs::remove_file(to) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+            }
+            Some(ENOTSUP | EXDEV | EINVAL) => return Ok(None),
+            _ => return Err(e),
+        }
+    }
+    let clone = private_beside(OpenOptions::new().read(true).write(true)).open(to)?;
+    let made = clone.metadata()?;
+    // SAFETY: no argument, and it cannot fail.
+    let me = unsafe { geteuid() };
+    if !made.is_file()
+        || made.nlink() != 1
+        || made.uid() != me
+        || (made.dev(), made.len()) != (image.dev(), image.len())
+    {
+        return Err(std::io::Error::other(format!(
+            "{} is not the clone made of the image: another file was put at its name",
+            to.display()
+        )));
+    }
+    still_named(&clone, to)?;
+    if made.mode() & 0o777 != 0o600 {
+        clone.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(test)]
+    CLONED_HERE.with(|c| c.set(c.get() + 1));
+    Ok(Some(clone))
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+thread_local! {
+    /// The images [`cloned`] cloned on this thread, for a test that holds
+    /// [`copy_private`] to its clone.
+    static CLONED_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The permission bits a file `new` made by this process takes from
 /// `like`, the file it is to stand for: `like`'s, but for a group's where
 /// `new`'s group is another -- the process's or its directory's, where
@@ -495,9 +623,10 @@ pub fn mode_like(new: &File, like: &Path) -> std::io::Result<()> {
 /// open on: what a rename by that name would move is then another file
 /// than the one written through `file` -- a link or a file put there by a
 /// writer of its directory since -- and is not renamed into a database's
-/// place. An `fstat` and an `lstat`, a rewrite.
+/// place. An `fstat` and an `lstat`, a rewrite: `swap_in`'s, and before
+/// each rename of fennec-http's archive, a backup and an unseal.
 #[cfg(unix)]
-fn still_named(file: &File, path: &Path) -> std::io::Result<()> {
+pub fn still_named(file: &File, path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
     if (open.dev(), open.ino()) != (there.dev(), there.ino()) {
@@ -2554,6 +2683,74 @@ mod tests {
         );
         drop(sink);
         keep_sync_log(false);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An image copied for a restore is its owner's alone, follows no link
+    /// at its name -- one naming a file, which keeps its bytes and mode,
+    /// or one naming none, which stays none -- and comes back open at its
+    /// end, the file at the name, whatever was there. On Apple's systems an
+    /// image its owner's alone is cloned, and one another user may read,
+    /// or its owner not write, copied: a clone has its image's mode from
+    /// its making. Without `CLONE_NOFOLLOW` the clone made the file a link
+    /// naming none pointed at, as `fs::copy` did.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_an_image_is_cloned_where_it_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("image"), dir.join("restoring"));
+        let target = dir.join("elsewhere");
+        let nowhere = dir.join("nowhere");
+        std::fs::write(&target, b"another file").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for image in [0o600, 0o700, 0o644, 0o400] {
+            let _ = std::fs::remove_file(&from);
+            std::fs::write(&from, b"image").unwrap();
+            std::fs::set_permissions(&from, std::fs::Permissions::from_mode(image)).unwrap();
+            for there in ["nothing", "a link to a file", "a link to none", "a file"] {
+                let _ = std::fs::remove_file(&to);
+                match there {
+                    "a link to a file" => std::os::unix::fs::symlink(&target, &to).unwrap(),
+                    "a link to none" => std::os::unix::fs::symlink(&nowhere, &to).unwrap(),
+                    "a file" => {
+                        std::fs::write(&to, b"left by a crash").unwrap();
+                        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o644))
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                let what = format!("an image {image:o}, {there} at its copy's name");
+                #[cfg(target_vendor = "apple")]
+                let before = CLONED_HERE.with(|c| c.get());
+                let made = copy_private(&from, &to);
+                assert!(!nowhere.exists(), "made where a link pointed: {what}");
+                let mut f = made.unwrap();
+                #[cfg(target_vendor = "apple")]
+                assert_eq!(
+                    CLONED_HERE.with(|c| c.get()) - before,
+                    usize::from(image & 0o077 == 0 && image & 0o600 == 0o600),
+                    "cloned: {what}"
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), b"another file", "{what}");
+                assert_eq!(mode(&target), 0o644, "{what}");
+                assert!(std::fs::symlink_metadata(&to).unwrap().is_file(), "{what}");
+                assert_eq!(mode(&to), 0o600, "{what}");
+                assert_eq!(
+                    std::os::unix::fs::MetadataExt::ino(&f.metadata().unwrap()),
+                    inode(&to),
+                    "the handle is the file at the name: {what}"
+                );
+                f.write_all(b" and its writes").unwrap();
+                f.seek(SeekFrom::Start(0)).unwrap();
+                let mut read = Vec::new();
+                f.read_to_end(&mut read).unwrap();
+                assert_eq!(read, b"image and its writes", "{what}");
+                assert_eq!(std::fs::read(&from).unwrap(), b"image", "{what}");
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

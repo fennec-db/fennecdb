@@ -1220,11 +1220,22 @@ impl Archive {
         // move: the checkpoint below renames its image over with this
         // file's mode, as every rewrite keeps a database's.
         fennec_core::fs::mode_like(&written, out)?;
-        drop(written);
         // Opened to check it whole, and forked: from here its writes are no
         // longer the primary's. The checkpoint lands the graph the open just
         // built in the file, as a clean shutdown would, so the database's
-        // first real open does not build it a second time.
+        // first real open does not build it a second time. Opened by its
+        // name, as a database is (`fs::open`, through a link): held to the
+        // handle that wrote it first, a link or another file put there
+        // since the copy is refused, but one put there between the two is
+        // opened, forked and renamed over `out` -- by a writer of the
+        // directory, whom the database's files are trusted to (SECURITY.md:
+        // that writer may remove or replace the database itself). Closing
+        // it would take an open of a database over a handle, which
+        // fennec-core has not, and the rename below held to the file the
+        // checkpoint renamed in (`swap_in`), which it does not hand back.
+        #[cfg(unix)]
+        fennec_core::fs::still_named(&written, &tmp)?;
+        drop(written);
         let mut db = fennec_core::fs::open(&tmp).map_err(|e| corrupt(e.to_string()))?;
         if db.change_seq() != r.seq {
             return Err(corrupt(format!(
@@ -1638,7 +1649,7 @@ impl Archive {
         // The image, then the writes after it: that is a fennecdb file.
         let _ = fs::remove_file(tmp);
         let mut f = match &self.key {
-            None => copied(&self.image_path(image, taken), tmp)?,
+            None => fennec_core::fs::copy_private(&self.image_path(image, taken), tmp)?,
             Some(_) => {
                 let mut f = fennec_core::fs::create_private(tmp)?;
                 f.write_all(&self.read_whole(&self.image_path(image, taken))?)?;
@@ -1751,29 +1762,6 @@ fn scratch_name(end: u64, left: &[String]) -> String {
     name
 }
 
-/// `from` copied into `to`, a file made for it, and the handle it was
-/// written through, open to read back and append to: nothing opens `to`
-/// again by its name. Made by `fennec_core::fs::create_private` -- its
-/// owner's alone whatever mode the image has, an archive an earlier
-/// release made with the umask's included, and by `O_EXCL`, which follows
-/// no link put at the name: one there is removed, never the file it names.
-/// It was the system's copy, `fs::copy`, which opens `to` through a link
-/// (a clone on APFS refused by one, the copy after opening it) and gives
-/// it the image's mode, and then an open by the name again. On Linux
-/// `io::copy` from one file to another is `copy_file_range`, a reflink
-/// where the file system shares blocks, as `fs::copy` was; elsewhere the
-/// bytes go a mebibyte a call, where macOS cloned (a restore, and a
-/// consolidating round of an archive with no key). On Windows it was this
-/// already: opened again after `CopyFileExW`, `to` could be held between
-/// by a copier that shares no writer (32) -- a sync tool, an indexer,
-/// `fs::copy` itself -- and the round's image refused.
-fn copied(from: &Path, to: &Path) -> io::Result<File> {
-    let out = fennec_core::fs::create_private(to)?;
-    let mut w = io::BufWriter::with_capacity(1 << 20, out);
-    io::copy(&mut File::open(from)?, &mut w)?;
-    w.into_inner().map_err(io::IntoInnerError::into_error)
-}
-
 /// Where `verify` restores the archive's end to: a directory of its own a
 /// call, made new and its owner's alone in the process's temp directory
 /// (`fennec_core::fs::create_dir_new`), a random name refused where
@@ -1864,6 +1852,10 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
         crate::tenant_hooks::put_away_beside(given)?;
+        // The rename goes by the name: held to the file written first, as
+        // a record's (`renamed`).
+        #[cfg(unix)]
+        fennec_core::fs::still_named(&f, &tmp)?;
         fs::rename(&tmp, out)?;
         sync_dir_of(out)?;
     }
@@ -1879,21 +1871,29 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     let bytes = seal::open_whole(key, &fs::read(sealed)?)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
     let tmp = out.with_extension("tmp");
-    fennec_core::fs::create_like(&tmp, out)?.write_all(&bytes)?;
-    // Opened to check it whole, as a restore checks its file.
+    let mut f = fennec_core::fs::create_like(&tmp, out)?;
+    f.write_all(&bytes)?;
+    // Opened to check it whole, as a restore checks its file: by its name,
+    // held to the handle that wrote it first as a restore's is, to be read
+    // alone, mapped as a server maps it. A link put there in the moment
+    // between is read in its place, written to never, and the rename below
+    // refused. Read from `bytes` instead, it was every document copied
+    // into memory, where the mapped open adopts the image's offset index.
+    #[cfg(unix)]
+    fennec_core::fs::still_named(&f, &tmp)?;
     let seq = fennec_core::fs::open_read_only(&tmp)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
         .change_seq();
-    #[cfg(not(windows))]
-    File::open(&tmp)?.sync_all()?;
-    // Through a handle that may write: Windows' `FlushFileBuffers` refuses
-    // a read-only one (5, access denied), where a Unix fsyncs any -- every
-    // `fennec unseal` there failed so (archive.rs's sealed archive test).
-    #[cfg(windows)]
-    File::options().write(true).open(&tmp)?.sync_all()?;
+    // Through the handle that wrote it, which may write: opened again by
+    // the name, a link there was synced in its place, and on Windows a
+    // read-only handle's `FlushFileBuffers` is refused (5, access denied),
+    // which failed every `fennec unseal` there until it opened one to write.
+    f.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
     crate::instance::put_away_beside(given)?;
     crate::tenant_hooks::put_away_beside(given)?;
+    #[cfg(unix)]
+    fennec_core::fs::still_named(&f, &tmp)?;
     fs::rename(&tmp, out)?;
     sync_dir_of(out)?;
     Ok(seq)
@@ -1904,8 +1904,13 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
 /// flushes a renamed file before its directory (docs/design/windows.md,
 /// decision 3); [`names_synced`] then flushes the directory alone, once
 /// for every name renamed in before it, as a Unix's directory fsync does.
+/// On a Unix `tmp` is first held to `f` (`fennec_core::fs::still_named`):
+/// the rename goes by the name, and another file put there since -- by a
+/// writer of the archive's directory -- is renamed into no record's place,
+/// the write failing as a failed rename fails it.
 #[cfg(not(windows))]
-fn renamed(_f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+fn renamed(f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+    fennec_core::fs::still_named(f, tmp)?;
     fs::rename(tmp, to)
 }
 
@@ -1962,51 +1967,38 @@ mod tests {
         }
     }
 
-    /// A restore's copy of an image follows no link put at its name: the
-    /// link is removed and the file made anew, the file it named keeping
-    /// its bytes and its mode, the copy its owner's alone whatever the
-    /// image's mode and read back and appended to through the handle that
-    /// made it, which is the file at the name. Up to 0.2.0 the system's
-    /// copy opened the name through the link (on macOS once the clone was
-    /// refused by it) and wrote the image into the file it named, with the
-    /// image's mode.
+    /// A record -- an image, `history`, `began` -- is renamed into its
+    /// place only from the file written through its handle: another put at
+    /// the side file's name since, a link to a file or a file of its own,
+    /// is renamed nowhere, and the record there stays as it was. Up to
+    /// 0.2.0 the rename went by the name alone, and moved whatever was there.
     #[cfg(unix)]
     #[test]
-    fn a_copy_of_an_image_follows_no_link_at_its_name() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!("fennec-copied-{}", std::process::id()));
+    fn a_record_is_renamed_in_only_from_the_file_it_wrote() {
+        let dir = std::env::temp_dir().join(format!("fennec-renamed-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let (tmp, to) = (dir.join("history.tmp"), dir.join("history"));
         let target = dir.join("elsewhere");
         fs::write(&target, b"another file").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        for image in [0o600, 0o644] {
-            let from = dir.join("image");
-            fs::write(&from, b"image").unwrap();
-            fs::set_permissions(&from, fs::Permissions::from_mode(image)).unwrap();
-            let to = dir.join("restoring");
-            let _ = fs::remove_file(&to);
-            std::os::unix::fs::symlink(&target, &to).unwrap();
-            let mut f = copied(&from, &to).unwrap();
-            assert_eq!(
-                (fs::read(&target).unwrap(), mode(&target)),
-                (b"another file".to_vec(), 0o644),
-                "the file a link at the copy's name named, an image {image:o}"
-            );
-            assert!(fs::symlink_metadata(&to).unwrap().is_file());
-            assert_eq!(mode(&to), 0o600, "the copy of an image {image:o}");
-            assert_eq!(
-                f.metadata().unwrap().ino(),
-                fs::metadata(&to).unwrap().ino(),
-                "the handle is the file at the name"
-            );
-            f.write_all(b" and its writes").unwrap();
-            f.seek(SeekFrom::Start(0)).unwrap();
-            let mut read = Vec::new();
-            f.read_to_end(&mut read).unwrap();
-            assert_eq!(read, b"image and its writes");
+        fs::write(&to, b"the record").unwrap();
+        for put in ["a link to a file", "a file"] {
+            let mut f = fennec_core::fs::create_like(&tmp, &to).unwrap();
+            f.write_all(b"the new record").unwrap();
+            fs::remove_file(&tmp).unwrap();
+            match put {
+                "a link to a file" => std::os::unix::fs::symlink(&target, &tmp).unwrap(),
+                _ => fs::write(&tmp, b"put there").unwrap(),
+            }
+            assert!(renamed(&f, &tmp, &to).is_err(), "{put} renamed in");
+            assert_eq!(fs::read(&to).unwrap(), b"the record", "{put}");
+            assert_eq!(fs::read(&target).unwrap(), b"another file", "{put}");
+            fs::remove_file(&tmp).unwrap();
         }
+        let mut f = fennec_core::fs::create_like(&tmp, &to).unwrap();
+        f.write_all(b"the new record").unwrap();
+        renamed(&f, &tmp, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"the new record");
         let _ = fs::remove_dir_all(&dir);
     }
 
