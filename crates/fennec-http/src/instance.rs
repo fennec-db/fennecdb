@@ -192,12 +192,14 @@ fn write(dir: &Path, name: &str, id: u64, bound: Binding, following: bool) -> io
     );
     // Made its owner's alone, as its tenant's file is; one there keeps its
     // mode (`fennec_core::fs::private`).
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    std::io::Write::write_all(
-        &mut fennec_core::fs::private(&mut options).open(path(dir, name))?,
-        line.as_bytes(),
+    let mut file = fennec_core::fs::private(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
     )
+    .open(path(dir, name))?;
+    std::io::Write::write_all(&mut file, line.as_bytes())
 }
 
 /// The identity `file` carries: the sidecar's, where it names this file in
