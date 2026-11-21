@@ -9,6 +9,7 @@ use fennec_core::prelude::*;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_http::tenants::{Refused, Tenants};
 use fennec_server::durability::{self, SyncPolicy};
+use fennec_server::exit::{self, Code};
 use std::io::{IsTerminal, Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -114,6 +115,16 @@ usage: fennec-server [options]
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a keep-alive connection silent for this
                             long (0 = never)  default: 60
+      --header-timeout <s>  a request's time from its first byte, and a
+                            second more for each KiB of it that came, head
+                            and body alike: slower than 1 KiB a second, it
+                            is answered 408 and its connection ended
+                            (0 = only --idle-timeout, a read at a time)
+                            default: 10
+      --write-timeout <s>   the longest a write of an answer waits for its
+                            client to take any of it: a client reading
+                            nothing is let go within twice this (0 = never)
+                            default: 30
       --max-memory <MiB>    data footprint ceiling (0 = off, the default).
                             Above it, writes stop with 507; reads, `del`
                             and `compact` keep working. A third of the
@@ -130,7 +141,8 @@ usage: fennec-server [options]
                             image sets to 65534:65534; started as anyone
                             else, the variable is passed over. Unix only
       --insecure            allow listening without a token on a non-loopback
-                            address
+                            address, and, with no token, answering a router
+                            that listens on one
       --tls-cert <pem>      serve HTTPS alone, with this certificate chain
       --tls-key <pem>       (the server's first, then its intermediates) and
                             its private key, both or neither. --metrics
@@ -348,14 +360,24 @@ usage: fennec-server [options]
                             its copy when there is no whole one, then its
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
-                            but the follower's. TLS is the URL's ?sslmode=,
-                            libpq's, and its &sslrootcert= (else
-                            ~/.postgresql/root.crt if there): prefer, the
-                            default, and require encrypt but check nothing
-                            of the server (require: unless a CA file is
-                            there), so anyone in the path can stand in for
-                            it; across a network, use verify-full, which
-                            checks its certificate and name
+                            but the follower's, and fills as the copy lands.
+                            TLS is the URL's ?sslmode=, libpq's, and its
+                            &sslrootcert= (else ~/.postgresql/root.crt if
+                            there): verify-full, the default for a host off
+                            this machine, checks the certificate and name,
+                            against Mozilla's CAs or the file's; prefer, the
+                            default on this machine, and require check
+                            nothing (require: unless a CA file is there).
+                            Holding a password, the follower signs in by
+                            SCRAM alone, bound to TLS where the server
+                            offers it (&require_auth=, &channel_binding=,
+                            libpq's); a sign-in is held to
+                            &connect_timeout=, 30 s. Give the password in
+                            PGPASSWORD rather than the URL, which any user
+                            of the machine can read in the process list. A
+                            follower that cannot go on stops the server
+                            (exit 1): the PostgreSQL it follows is trusted
+                            that far
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>
@@ -389,7 +411,7 @@ terminator such as nginx or Caddy. What it dials -- a primary, a collector
 
 fn fail(msg: &str) -> ! {
     fennec_http::log!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// A token or a key from the environment: set and empty is unset, as a
@@ -481,7 +503,7 @@ fn health_over_tls(_: &str) -> std::io::Result<String> {
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
 /// token and takes no lock -- during a long `compact` a probe that queried
 /// would wait too, and a healthy server would look dead.
-fn health_check(addr: &str) -> i32 {
+fn health_check(addr: &str) -> Code {
     // A server listening on every address answers on loopback as well.
     let addr = match addr.rsplit_once(':') {
         Some(("0.0.0.0" | "", port)) => format!("127.0.0.1:{port}"),
@@ -503,15 +525,15 @@ fn health_check(addr: &str) -> i32 {
         Ok(out)
     })();
     match asked {
-        Ok(out) if out.starts_with("HTTP/1.1 200") => 0,
+        Ok(out) if out.starts_with("HTTP/1.1 200") => Code::Ok,
         Ok(out) => {
             let line = out.lines().next().unwrap_or("no answer");
             fennec_http::log!("ping failed: {line}");
-            1
+            Code::Failed
         }
         Err(e) => {
             fennec_http::log!("ping failed: {e}");
-            1
+            Code::Failed
         }
     }
 }
@@ -667,6 +689,17 @@ fn main() {
                     fail(&format!("--idle-timeout expects seconds, got `{v}`"))
                 });
                 http_cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            "--header-timeout" | "--write-timeout" => {
+                let v = next(&mut i, flag);
+                let secs: u64 = v
+                    .parse()
+                    .unwrap_or_else(|_| fail(&format!("{flag} expects seconds, got `{v}`")));
+                let bound = (secs > 0).then(|| Duration::from_secs(secs));
+                match flag {
+                    "--header-timeout" => http_cfg.header_timeout = bound,
+                    _ => http_cfg.write_timeout = bound,
+                }
             }
             "--max-memory" => {
                 let v = next(&mut i, "--max-memory");
@@ -1021,7 +1054,7 @@ fn main() {
     // checks a `FENNEC_JWT_SECRET` with no `--policy` on the probe's command
     // line failed it (2), and the container never turned healthy.
     if ping {
-        std::process::exit(health_check(&http_cfg.addr));
+        exit::now(health_check(&http_cfg.addr));
     }
 
     // The files the flags name, opened as the user the server runs as: the
@@ -1341,6 +1374,8 @@ fn main() {
         admin_token: http_cfg.admin_token.clone(),
         insecure: http_cfg.insecure,
         idle_timeout: http_cfg.idle_timeout,
+        header_timeout: http_cfg.header_timeout,
+        write_timeout: http_cfg.write_timeout,
         // The same certificate: no listener of a server told to speak
         // HTTPS is plain, so a token a scrape sends never goes in the clear.
         tls: http_cfg.tls.clone(),
@@ -1407,7 +1442,7 @@ fn main() {
                 _ => String::new(),
             };
             fennec_http::log!("could not open {path}: {e}{who}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         })
     });
     let mut feed = None;
@@ -1439,7 +1474,7 @@ fn main() {
                 }
                 Err(e) => {
                     fennec_http::log!("could not open {path}: {e}");
-                    std::process::exit(1);
+                    exit::now(Code::Failed);
                 }
             }
         }
@@ -1474,7 +1509,7 @@ fn main() {
         Ok(l) => l,
         Err(e) => {
             fennec_http::log!("could not open the HTTP endpoint: {e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     };
 
@@ -1482,7 +1517,7 @@ fn main() {
         if let Err(e) = db.install_plugin(&fennec_server::mirror::GuardPlugin(m.opts.into.clone()))
         {
             fennec_http::log!("could not load the plugin: {e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     }
 
@@ -1496,7 +1531,7 @@ fn main() {
             promote,
         ) {
             fennec_http::log!("{e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     }
 
@@ -1600,7 +1635,7 @@ fn main() {
                 what,
                 &shared,
                 sync == SyncPolicy::Always,
-                durability::stop_with,
+                durability::stop_failed,
             )?;
         }
 
@@ -1621,7 +1656,7 @@ fn main() {
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
                     fennec_http::log!("HTTP server error: {e}");
-                    durability::stop_with(1);
+                    durability::stop_with(Code::Failed);
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
@@ -1642,16 +1677,18 @@ fn main() {
     // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fennec_http::log!("{e}");
-        durability::stop_with(2);
+        durability::stop_with(Code::Refused);
     }
 
     durability::run_syncer(shared, sync, checkpoint);
 }
 
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
-/// thread the syncer a single file gets from [`durability::run_syncer`] --
-/// periodic sync, idle close, and on the shutdown signal a final sync and
-/// checkpoint of every open tenant.
+/// thread what a single file's [`durability::run_syncer`] does but its
+/// periodic sync -- idle close, and on the shutdown signal a final sync and
+/// checkpoint of every open tenant. Under `--sync <ms>` each tenant is
+/// synced on a thread of its own (`Tenants::sync_every`), so that its
+/// window is a file's, whatever the others' syncs take.
 #[allow(clippy::too_many_arguments)]
 fn serve_dir(
     dir: &str,
@@ -1755,12 +1792,20 @@ fn serve_dir(
         // After `with_tenants` gave each tenant its `--call-max-rows`, and
         // before the endpoint takes a request.
         if let Some(s) = &scheduler {
-            s.start(durability::stop_with)?;
+            s.start(durability::stop_failed)?;
         }
         // A test build's clock, moved by a file (`make chaos`), its thread
         // started with the node's as the scheduler's is.
         #[cfg(feature = "test-clock")]
         fennec_http::test_clock::follow(&tenants)?;
+        // `--sync <ms>`: each tenant synced on a thread of its own, every
+        // interval. Synced in turn on this thread, a tenant's sync waited
+        // for every one before it and the next for the slowest: two
+        // tenants on the power-cut rig handed a write over 772 ms after its
+        // answer, past the 650 ms a file's window holds (run 43696612848).
+        if matches!(sync, SyncPolicy::Interval(_)) {
+            tenants.sync_every(sync.tick(), durability::stop_failed)?;
+        }
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();
         std::thread::Builder::new()
@@ -1768,7 +1813,7 @@ fn serve_dir(
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
                     fennec_http::log!("HTTP server error: {e}");
-                    durability::stop_with(1);
+                    durability::stop_with(Code::Failed);
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
@@ -1780,7 +1825,7 @@ fn serve_dir(
     // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fennec_http::log!("{e}");
-        durability::stop_with(2);
+        durability::stop_with(Code::Refused);
     }
 
     let tick = sync.tick();
@@ -1810,10 +1855,7 @@ fn serve_dir(
             }
             let open = tenants.shutdown_with(durability::checkpoints());
             fennec_http::log!("\nshutting down: {open} open tenant(s) synced");
-            std::process::exit(durability::exit_code());
-        }
-        if matches!(sync, SyncPolicy::Interval(_)) {
-            tenants.sync_dirty();
+            exit::now(durability::exit_code());
         }
         tenants.rebind_hooks();
         if !idle_close.is_zero() {

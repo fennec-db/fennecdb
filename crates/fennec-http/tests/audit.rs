@@ -118,12 +118,17 @@ fn verify_nothing(port: u16, cases: &[Case], held: Duration) {
 }
 
 /// Each request, a good token in it, answered as its case says -- and the
-/// count, grown first, started again: the token was verified, whatever the
-/// answer says of the rest of the request.
+/// count of its kind, grown first, started again: the token was verified,
+/// whatever the answer says of the rest of the request. A JWT starts the
+/// count of refused JWTs alone (`audit::Kind`).
 fn verify(port: u16, cases: &[Case]) {
     for &(method, target, headers, body, status) in cases {
-        audit::failed(LOCAL);
-        audit::failed(LOCAL);
+        let kind = match headers.matches('.').count() {
+            2 => audit::Kind::Jwt,
+            _ => audit::Kind::Token,
+        };
+        audit::failed_as(LOCAL, kind);
+        audit::failed_as(LOCAL, kind);
         assert!(would_wait(LOCAL) >= ms(200));
         let (got, out) = ask(port, method, target, headers, body);
         assert_eq!(got, status, "{method} {target}: {out}");
@@ -772,4 +777,85 @@ fn a_full_failure_table_keeps_its_counts() {
         audit::succeeded(other(i));
     }
     audit::succeeded(guessing);
+}
+
+/// A good JSON Web Token starts again the count of refused tokens of its
+/// own kind alone. It started every count of its address again, so the
+/// holder of a scoped token guessing the server's or the admin's token
+/// sent one request with its own token after each guess, and every guess
+/// waited the first wait, never the doubled ones. The server's or the
+/// admin's token starts its kind's count again, and a refused JWT's count
+/// is started again by a good one, as before.
+#[test]
+fn a_good_jwt_clears_no_count_of_guesses_at_a_servers_token() {
+    let _turn = turn();
+    let dir = scratch("kinds");
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    tenants.create("acme").unwrap();
+    let access = Arc::new(Access::new(SECRET, "notes  read  where owner = $jwt.sub\n").unwrap());
+    let port = serve(Server::with_tenants(
+        tenants,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            admin_token: Some("adm".into()),
+            token: Some("data".into()),
+            access: Some(Arc::clone(&access)),
+            ..Config::default()
+        },
+    ));
+    let data = "Authorization: Bearer data\r\n";
+    let create = r#"{"query":"create collection notes (owner text, title text)"}"#;
+    assert_eq!(ask(port, "POST", "/t/acme/query", data, create).0, 200);
+    let vera = access.mint(r#"{"sub":"vera","tenant":"acme"}"#).unwrap();
+    let good = format!("Authorization: Bearer {vera}\r\n");
+
+    // A guess at the data token, then at the admin's, each followed by a
+    // request with the guesser's own good token: the guesses' count grows.
+    let mut want = ms(50);
+    for target in [
+        "/t/acme/notes",
+        "/_admin/stats",
+        "/t/acme/notes",
+        "/_admin/stats",
+    ] {
+        let (got, out) = ask(port, "GET", target, GUESSED, "");
+        assert_eq!(got, 401, "{target}: {out}");
+        want *= 2;
+        assert_eq!(would_wait(LOCAL), want, "{target}");
+        let (got, out) = ask(port, "GET", "/t/acme/notes", &good, "");
+        assert_eq!(got, 200, "{out}");
+        assert_eq!(
+            would_wait(LOCAL),
+            want,
+            "after {target}: a good JWT started the count of guesses at a token again"
+        );
+    }
+    // The admin's token, verified, starts its kind's count again.
+    let adm = "Authorization: Bearer adm\r\n";
+    assert_eq!(ask(port, "GET", "/_admin/stats", adm, "").0, 200);
+    assert_eq!(would_wait(LOCAL), ms(50));
+
+    // On a server whose one credential is a JWT, a refused one is counted
+    // as a JWT's, and a good one starts that count again, as before.
+    let jwt_only = serve(Server::new(
+        Arc::new(RwLock::new(Database::new())),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            access: Some(Arc::clone(&access)),
+            ..Config::default()
+        },
+    ));
+    let mine = format!(
+        "Authorization: Bearer {}\r\n",
+        access.mint(r#"{"sub":"vera"}"#).unwrap()
+    );
+    for _ in 0..2 {
+        assert_eq!(ask(jwt_only, "GET", "/notes", GUESSED, "").0, 401);
+    }
+    assert_eq!(would_wait(LOCAL), ms(200));
+    let get = r#"{"query":"get notes"}"#;
+    let (got, out) = ask(jwt_only, "POST", "/query", &mine, get);
+    assert!(got != 401, "{out}");
+    assert_eq!(would_wait(LOCAL), ms(50));
+    let _ = std::fs::remove_dir_all(&dir);
 }

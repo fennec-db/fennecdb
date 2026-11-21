@@ -141,6 +141,16 @@ const CUT: [&str; 3] = ["sent_again", "may_have_run", "stream_ended"];
 pub fn cut(how: Cut, n: u64) {
     CUTS[how as usize].fetch_add(n, Ordering::Relaxed);
 }
+/// Requests refused (403) for going to a node that asks no data token,
+/// this router listening past loopback (`Router::open_node`): one set of
+/// the process's, a misconfiguration's count and no request's path.
+static OPEN_NODE_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// A request refused for going to a node that asks no token.
+pub fn open_node_refused() {
+    OPEN_NODE_REFUSALS.fetch_add(1, Ordering::Relaxed);
+}
+
 static GIVEN_UP: AtomicI64 = AtomicI64::new(0);
 
 /// A read replica given up on (`1`), or let go of (`-1`): see
@@ -482,6 +492,16 @@ pub fn counters(out: &mut Text) {
         GIVEN_UP.load(Ordering::Relaxed).max(0) as u64,
     );
     out.family(
+        "fennec_router_open_node_refusals_total",
+        "counter",
+        "Requests refused (403) because their tenant's node asks no data token (--http-token, --jwt-keys) while this router listens past loopback without --insecure: anyone on the network would read and write that node's tenants through it.",
+    );
+    out.sample(
+        "fennec_router_open_node_refusals_total",
+        &[],
+        OPEN_NODE_REFUSALS.load(Ordering::Relaxed),
+    );
+    out.family(
         "fennec_router_connections",
         "gauge",
         "Client connections open now.",
@@ -493,6 +513,9 @@ pub fn counters(out: &mut Text) {
     );
     fennec_http::metrics::connections_refused(out, "fennec_router_connections_refused_total");
     fennec_http::metrics::handshakes_failed(out, "fennec_router_tls_handshakes_failed_total");
+    // Its clients' requests read through `fennec_http::conn::Paced`, and
+    // its answers written through a `Conn`, counted as a node's.
+    fennec_http::metrics::client_timeouts(out, "fennec_router_client_timeouts_total");
     // The exporter's, when the router traces (`--otlp-endpoint`).
     fennec_http::trace::metrics(out);
 }

@@ -8,11 +8,11 @@
 //! The mutator, the coverage it is guided by and what keeps a crashing
 //! input are this crate's own, with no dependency, so the zero-dependency
 //! rule holds here too: no libFuzzer, no cargo-fuzz. `make fuzz` lists the
-//! targets and runs one; `make fuzz-smoke` runs each for 30 s built with
-//! AddressSanitizer and LLVM's coverage counters on a nightly compiler
-//! pinned to a date -- CI's `fuzz-smoke` job, and `fuzz.yml` each week for
-//! longer. A build without them (`cargo test`) runs every target over its
-//! seeds and a few hundred of their mutations.
+//! targets and runs one; `make fuzz-smoke` runs each for a count of runs its
+//! own, about 30 s, built with AddressSanitizer and LLVM's coverage counters on
+//! a nightly compiler pinned to a date -- CI's `fuzz-smoke` job -- and `fuzz.yml`
+//! each week for half an hour. A build without them (`cargo test`) runs every
+//! target over its seeds and a few hundred of their mutations.
 
 pub mod cover;
 pub mod guard;
@@ -33,6 +33,11 @@ pub struct Target {
     pub about: &'static str,
     /// The longest input it is handed.
     pub max_len: usize,
+    /// The runs `make fuzz-smoke` gives it (`--smoke`): a count, never a
+    /// time, so a commit's smoke hands it the same inputs on any runner --
+    /// about what 30 s of CI's runner ran under ASan when it was set --
+    /// bounded by [`SMOKE_CAP`] of CPU time.
+    pub smoke: u64,
     /// The inputs it starts from: built here, and read from the
     /// repository's fixtures where they are found.
     pub seeds: fn() -> Vec<Vec<u8>>,
@@ -57,16 +62,22 @@ pub struct Options {
     pub crashes: PathBuf,
     /// A run longer than this is a finding.
     pub timeout: Duration,
+    /// The CPU time every run together may take, past which the process
+    /// ends failing, naming the target and the run it reached
+    /// ([`guard::cap`]): `--smoke`'s [`SMOKE_CAP`]. A bound on a fuzzer
+    /// whose runs all slowed, never what ends one that passes.
+    pub cap: Option<Duration>,
     /// The most one allocation may ask for.
     pub max_alloc: usize,
     /// Progress lines, or none.
     pub quiet: bool,
     /// A finding says its recipe alone -- the target, the seed, the run and
     /// its input's hash ([`guard::say_recipe`]) -- and never its message
-    /// or its backtrace: CI's runs, whose logs a public repository shows
-    /// anyone, never its input either (SECURITY.md asks a finding be told
-    /// privately). A maintainer makes the input again from the recipe
-    /// ([`reproduce`]).
+    /// or its backtrace: the weekly run's, whose log a public repository
+    /// shows anyone (SECURITY.md asks a finding be told privately). A
+    /// maintainer makes the input again from the recipe ([`reproduce`]).
+    /// The smoke says its message: its inputs are its commit's, which
+    /// anyone makes again with `make fuzz-smoke`.
     pub private: bool,
 }
 
@@ -84,13 +95,30 @@ pub enum Outcome {
     },
 }
 
+/// The CPU time a target's smoke may take (`--smoke`, [`Options::cap`]):
+/// six minutes, twelve times the 30 s of CI's runner each count was set
+/// from. Generous, so a machine slower than the runner never meets it --
+/// an M-series Mac under ASan spent 104 s of CPU on `http`'s count at a
+/// load near 15 and 110 s at one of 70 to 200, the most of any target --
+/// and short enough that eight targets each just under it, 48 minutes, end
+/// inside ci.yml's 57 with the build's minute and a half: a smoke slowed
+/// past the job's timeout ends at a target's cap first, named, rather
+/// than at the timeout, naming none.
+pub const SMOKE_CAP: Duration = Duration::from_secs(360);
+
 /// The stack a run is on: a server's connection thread's
 /// (`fennec_http::CONNECTION_STACK`), which a request parses, plans and
 /// reads on, so that what overflows here overflows there.
 pub const RUN_STACK: usize = 8 << 20;
 
-/// Runs `target` as `opts` say, on a thread of [`RUN_STACK`].
+/// Runs `target` as `opts` say, on a thread of [`RUN_STACK`]. A task the
+/// engine cuts in shares runs them on that thread ([`fennec_core::one_thread`]):
+/// the coverage counters are bumped unlocked, and threads beside one
+/// another lost counts as their scheduler had it, so that one process kept
+/// an input another did not.
 pub fn fuzz(target: &'static Target, opts: Options) -> Outcome {
+    fennec_core::one_thread();
+    let _stops = Stops;
     std::thread::Builder::new()
         .name(format!("fuzz-{}", target.name))
         .stack_size(RUN_STACK)
@@ -98,6 +126,87 @@ pub fn fuzz(target: &'static Target, opts: Options) -> Outcome {
         .expect("the run's thread")
         .join()
         .unwrap_or_else(|_| panic!("the fuzzer itself panicked"))
+}
+
+/// Stops the timers a fuzzer sets -- its cap of CPU time, a run's
+/// timeout -- as it is dropped: where [`fuzz`] returns, and where it
+/// unwinds from its thread's panic, which skipped the call after the join
+/// that stopped the cap. Left set, a test binary's tests after it ran
+/// under a timer none of them set, whose handler ends the process.
+struct Stops;
+
+impl Drop for Stops {
+    fn drop(&mut self) {
+        guard::disarm();
+        guard::cap(None, 0);
+    }
+}
+
+/// What `fennec-fuzz` says of how it is run, after a flag that does not
+/// read.
+pub const USAGE: &str = "usage: fennec-fuzz list | names | run <target> [--seconds N] [--runs N] \
+    [--smoke] [--seed N] [--corpus DIR|none] [--crashes DIR] [--timeout-ms N] [--max-alloc-mb N] [--quiet] \
+    [--private] | replay <target> <file>... | reproduce <target> --seed N --start HASH \
+    [--corpus DIR] --run N --fnv HASH --kept RUNS [--out FILE]";
+
+/// The options `fennec-fuzz run <target> <args>` fuzzes `target` with, or
+/// what to say of a flag that does not read. Here rather than in the
+/// binary, so that a test holds `--smoke` -- the flag `make fuzz-smoke`
+/// runs each target with -- to the count and the cap of CPU time it sets
+/// ([`SMOKE_CAP`]).
+pub fn run_options(target: &Target, args: &[String]) -> Result<Options, String> {
+    let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/fuzz"));
+    let mut opts = Options {
+        seconds: None,
+        runs: None,
+        seed: 1,
+        corpus: Some(root.join("corpus").join(target.name)),
+        crashes: root.join("crashes"),
+        // Wall time: a loop that never ends is caught at any bound, and at
+        // 10 s a machine at a load of 40 took 8 000 numbers of 1e255, 2.5 s
+        // of a quiet one's under ASan, for a hang.
+        timeout: Duration::from_secs(30),
+        cap: None,
+        max_alloc: 2048 << 20,
+        quiet: false,
+        private: false,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} takes a value\n{USAGE}"))
+        };
+        let number = |v: String| -> Result<u64, String> {
+            v.parse()
+                .map_err(|_| format!("{flag} takes a number, not `{v}`"))
+        };
+        match flag.as_str() {
+            "--seconds" => opts.seconds = Some(number(value()?)?),
+            "--runs" => opts.runs = Some(number(value()?)?),
+            "--smoke" => {
+                opts.runs = Some(target.smoke);
+                opts.cap = Some(SMOKE_CAP);
+            }
+            "--seed" => opts.seed = number(value()?)?,
+            "--corpus" => {
+                opts.corpus = match value()? {
+                    v if v == "none" => None,
+                    v => Some(PathBuf::from(v)),
+                }
+            }
+            "--crashes" => opts.crashes = PathBuf::from(value()?),
+            "--timeout-ms" => opts.timeout = Duration::from_millis(number(value()?)?),
+            "--max-alloc-mb" => {
+                opts.max_alloc = (number(value()?)? as usize).saturating_mul(1 << 20)
+            }
+            "--quiet" => opts.quiet = true,
+            "--private" => opts.private = true,
+            other => return Err(format!("unknown flag `{other}`\n{USAGE}")),
+        }
+    }
+    Ok(opts)
 }
 
 /// What a run starts from: the target's seeds, and the inputs a corpus
@@ -373,10 +482,31 @@ fn fuzz_here(target: &'static Target, opts: &Options) -> Outcome {
     if let Some(c) = cover.as_mut() {
         inputs.warm_up();
         c.ignore_reached();
+        // This thread's keys drawn, whoever drew them.
+        let _ = std::hash::RandomState::new();
+        if !guard::KEYS_FIXED.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "fennec-fuzz: {}: std's hash keys were drawn at random, so what a run reaches \
+                 -- and the inputs after it -- is this process's alone: a count of runs makes \
+                 other inputs elsewhere (crates/fennec-fuzz/src/main.rs)",
+                target.name
+            );
+        }
     }
 
+    // From the first run on, the seeds made and taken in: what the runs
+    // spend.
+    guard::cap(opts.cap, opts.runs.unwrap_or(0));
     let started = Instant::now();
     let mut last_report = Instant::now();
+    // Where a count of runs bounds the run, progress is said by the count:
+    // the clock read between runs would be counted in the next one's
+    // coverage -- `Duration`'s comparison is code the counters count --
+    // and a process the clock reads otherwise would keep another input.
+    let report_every = match (opts.runs, opts.seconds) {
+        (Some(n), None) => Some((n / 6).max(1)),
+        _ => None,
+    };
     let ended = |input: &[u8], message: String, runs: u64| -> Outcome {
         let name = format!("crash-{}-{:016x}", target.name, guard::fnv(input));
         let path = opts.crashes.join(name);
@@ -430,7 +560,12 @@ fn fuzz_here(target: &'static Target, opts: &Options) -> Outcome {
                 let _ = std::fs::write(dir.join(format!("{:016x}", guard::fnv(&input))), &input);
             }
         }
-        if !opts.quiet && last_report.elapsed() >= Duration::from_secs(5) {
+        let report = !opts.quiet
+            && match report_every {
+                Some(every) => (runs + 1).is_multiple_of(every),
+                None => last_report.elapsed() >= Duration::from_secs(5),
+            };
+        if report {
             last_report = Instant::now();
             let secs = started.elapsed().as_secs_f64();
             eprintln!(
@@ -448,11 +583,24 @@ fn fuzz_here(target: &'static Target, opts: &Options) -> Outcome {
     }
     let runs = inputs.run();
     if !opts.quiet {
+        // The time on a line of its own: the last says what the runs were
+        // -- the same line from a commit wherever a count bounded them
+        // (`make fuzz-smoke`), on every machine of a platform.
         eprintln!(
-            "fennec-fuzz: {}: done, {runs} runs in {:.1} s, corpus {}",
+            "fennec-fuzz: {}: done, {runs} runs in {:.1} s",
             target.name,
             started.elapsed().as_secs_f64(),
-            inputs.corpus.len()
+        );
+        eprintln!(
+            "fennec-fuzz: {}: {runs} runs from seed {}, corpus {} of fingerprint {:016x}{}",
+            target.name,
+            opts.seed,
+            inputs.corpus.len(),
+            fingerprint(&inputs.corpus),
+            cover
+                .as_ref()
+                .map(|c| format!(", {} edges", c.edges))
+                .unwrap_or_default()
         );
     }
     Outcome::Clean {
@@ -477,6 +625,7 @@ fn run_one(target: &Target, run: u64, input: &[u8]) -> Option<String> {
 /// Runs `target` once over each input, as a crash is reproduced: the
 /// message of the first that panics.
 pub fn replay(target: &'static Target, inputs: Vec<Vec<u8>>) -> Option<String> {
+    fennec_core::one_thread();
     std::thread::Builder::new()
         .stack_size(RUN_STACK)
         .spawn(move || inputs.iter().find_map(|i| run_one(target, 0, i)))

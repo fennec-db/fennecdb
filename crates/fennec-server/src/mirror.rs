@@ -37,10 +37,13 @@ thread_local! {
 /// How long the shutdown waits for the follower to put its last changes on
 /// disk and confirm them, then end its stream, the slot let go for the
 /// next start -- counted from the shutdown's start, as the follower's stop
-/// is, since it looks at the same flag (within `IDLE_WAIT`, 0.2 s). Past
-/// it, a copy still being made is left for the next start to make again,
-/// as a copy cut short always is, and a stream the server has not ended
-/// yet is closed by the exit.
+/// is, since it looks at the same flag (within `IDLE_WAIT`, 0.2 s). A copy
+/// still being made stops too, within `fennec_wire::client::LOOK` of the
+/// flag, and is left unfinished for the next start to make again, as a copy
+/// cut short always is: it holds no lock while it waits on PostgreSQL, so
+/// the shutdown is never held up by it, whatever PostgreSQL does, nor by a
+/// dial or a sign-in, each bounded by `connect_timeout`. Past the wait, a
+/// stream the server has not ended yet is closed by the exit.
 ///
 /// The follower's own wait for the stream's end (`follow::END_WAIT`, 3 s)
 /// fits inside it with a second and more for the settle's fsync before, so
@@ -126,6 +129,8 @@ impl Plugin for GuardPlugin {
 /// short a shutdown already under way -- its sync among what was cut -- and
 /// skipped the sync of the writes it had applied.
 pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
+    // What the dials ask of TLS, and why, said once before the first.
+    fennec_http::log!("follow: {}", m.url.tls_said());
     let wait = spawn(m.table.clone(), move |stop, cut| {
         FOLLOWER.with(|f| f.set(true));
         let mut report = reporter(&m);
@@ -198,11 +203,13 @@ impl Drop for Ending {
         // and the follower returned an error before anything of it waited
         // (`follow::run`).
         if failed {
-            crate::durability::exit_with(1);
+            crate::durability::exit_with(crate::exit::Code::Failed);
         }
         match &self.ended {
             Some(Ok(())) => {}
-            Some(Err(e)) => fennec_http::log!("follow: the mirror of {} stopped: {e}", self.table),
+            Some(Err(e)) => {
+                fennec_http::log!("follow: the mirror of {} stopped: {}", self.table, said(e))
+            }
             None => fennec_http::log!(
                 "follow: the mirror of {} stopped: its thread panicked",
                 self.table
@@ -217,6 +224,14 @@ impl Drop for Ending {
             crate::durability::request_shutdown();
         }
     }
+}
+
+/// The follower's words for a log line: an error or a warning may carry
+/// PostgreSQL's -- a column's name, a cell -- or whoever's stands in its
+/// place: control characters escaped, the line cut at 4 KiB, as only the
+/// follower's lines are. Every other log line is the server's own.
+fn said(e: &impl std::fmt::Display) -> String {
+    fennec_import::pg::peer_text(e.to_string().as_bytes(), 4096)
 }
 
 /// What the follower reports, as log lines: its progress now and then
@@ -261,7 +276,7 @@ fn reporter(m: &Mirror) -> impl FnMut(Event) {
                 s.elapsed
             );
             for w in &s.warnings {
-                fennec_http::log!("follow: {w}");
+                fennec_http::log!("follow: {}", said(w));
             }
         }
         Event::Streaming => fennec_http::log!("follow: {table}: streaming its changes"),
@@ -281,10 +296,11 @@ fn reporter(m: &Mirror) -> impl FnMut(Event) {
         Event::Ignored(c) => fennec_http::log!(
             "follow: column `{c}` of {table} has no field in the collection; its values are not kept"
         ),
-        Event::Reconnecting { error, wait } => {
-            fennec_http::log!("follow: {table}: the stream broke ({error}); again in {wait:.1?}")
-        }
-        Event::SlotHeld(why) => fennec_http::log!("follow: {table}: {why}"),
+        Event::Reconnecting { error, wait } => fennec_http::log!(
+            "follow: {table}: the stream broke ({}); again in {wait:.1?}",
+            said(&error)
+        ),
+        Event::SlotHeld(why) => fennec_http::log!("follow: {table}: {}", said(&why)),
     }
     }
 }
@@ -306,13 +322,13 @@ mod tests {
     /// that stores an exit code or asks for a shutdown, both the process's.
     #[test]
     fn a_follower_that_panics_stops_the_server_with_its_code() {
-        assert_eq!(crate::durability::exit_code(), 0);
+        assert_eq!(crate::durability::exit_code(), crate::exit::Code::Ok);
         let wait = spawn("items".into(), |_, _| panic!("a follower's bug")).unwrap();
         let began = Instant::now();
         wait(began);
         // Ended by the thread's end, not by `STOP_WAIT`.
         assert!(began.elapsed() < STOP_WAIT, "{:?}", began.elapsed());
-        assert_eq!(crate::durability::exit_code(), 1);
+        assert_eq!(crate::durability::exit_code(), crate::exit::Code::Failed);
         let until = Instant::now() + Duration::from_secs(10);
         while !crate::durability::shutdown_requested() {
             assert!(Instant::now() < until, "no shutdown asked for");

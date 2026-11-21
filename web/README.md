@@ -88,8 +88,8 @@ const db = await Fennec.open(await file('fennec.wasm'), {
 `@fennecdb/web/client` and loads no module; a database in the page, or a
 synced replica, loads `fennec.wasm`, with every feature and the schema
 check. A page that needs fewer can build its own module with them alone --
-`make wasm FEATURES="text sorted"`, `FEATURES=none SCHEMA=0` for none (191.0 KB
-brotli against 287.9), and `SCHEMA=0` alone leaves the schema check out (9.4 KB
+`make wasm FEATURES="text sorted"`, `FEATURES=none SCHEMA=0` for none (191.1 KB
+brotli against 287.7), and `SCHEMA=0` alone leaves the schema check out (9.2 KB
 brotli) -- and the file is the same either way: a store one build wrote
 opens in the other. Without the graph a `near` measures every vector, as
 `exact` does; without the text index a `match` throws a `FennecError`

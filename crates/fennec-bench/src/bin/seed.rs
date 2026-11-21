@@ -148,38 +148,46 @@ fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     Some(from + at)
 }
 
-/// A stream opened and read to the end of its `seed` event into `buf`,
-/// which may hold what came after it too: the stream, the seed's time to
-/// its last byte (ms), and where in `buf` the event ends.
+/// A stream opened and read to the end of its seed into `buf` -- its last
+/// part, where it came in parts (`"more":true` ending every part but the
+/// last) -- which may hold what came after it too: the stream, the seed's
+/// time to its last byte (ms), and where in `buf` the seed ends.
 fn seed_event(addr: &str, buf: &mut Vec<u8>) -> (TcpStream, f64, usize) {
     let t = Instant::now();
     let mut s = TcpStream::connect(addr).unwrap();
     write!(s, "GET /items/changes HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     buf.clear();
     let mut chunk = vec![0u8; 1 << 20];
-    // The seed's data is one line, and the event ends at the first blank
-    // line after its start.
+    // A part's data is one line, and its event ends at the first blank line
+    // after its start.
     const START: &[u8] = b"event: seed\ndata: ";
-    let mut data = None;
-    let mut looked = 0;
+    const MORE: &[u8] = b",\"more\":true}";
+    let (mut data, mut looked): (Option<usize>, usize) = (None, 0);
     loop {
         let n = s.read(&mut chunk).unwrap();
         assert!(n > 0, "the stream ended before its seed");
         buf.extend_from_slice(&chunk[..n]);
-        let Some(from) = data.or_else(|| {
-            let at = buf.windows(START.len()).position(|w| w == START)?;
-            Some(at + START.len())
-        }) else {
-            assert!(buf.len() < 1 << 16, "no seed event");
-            continue;
-        };
-        data = Some(from);
-        looked = looked.max(from);
-        if let Some(at) = buf[looked..].windows(2).position(|w| w == b"\n\n") {
+        loop {
+            let Some(from) = data.or_else(|| {
+                let at = find(buf, looked.saturating_sub(START.len()), START)?;
+                Some(at + START.len())
+            }) else {
+                assert!(buf.len() - looked < 1 << 16, "no seed event");
+                break;
+            };
+            data = Some(from);
+            looked = looked.max(from);
+            let Some(at) = find(buf, looked, b"\n\n") else {
+                looked = buf.len() - 1;
+                break;
+            };
+            if buf[..at].ends_with(MORE) {
+                (data, looked) = (None, at + 2);
+                continue;
+            }
             let took = t.elapsed().as_secs_f64() * 1e3;
-            return (s, took, looked + at + 2);
+            return (s, took, at + 2);
         }
-        looked = buf.len() - 1;
     }
 }
 

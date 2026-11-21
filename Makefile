@@ -24,10 +24,10 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -95,6 +95,21 @@ test-js:
 ## what passed to target/sync-scenarios/, and a skip fails here
 sync-scenarios-check:
 	node integrations/sync-scenarios-check.mjs
+
+## The three float tests `make test` leaves out (#[ignore]), on every core:
+## every f32 written as std's `{}` writes it and 10^8 random f64s so
+## (num.rs; FENNEC_FLOATS=n for another count), every f32 read back through
+## an f64 (json.rs) -- the hand-written formatter and reader held to the
+## standard library's, which a toolchain can move. A toolchain bump carries
+## them (docs/design/crates.md#toolchain); float-tests.yml runs them weekly.
+## The three are listed first: one renamed would otherwise pass unrun.
+float_tests := num::tests::every_f32_is_written_as_display_writes_it \
+	num::tests::many_f64s_are_written_as_display_writes_them \
+	json::tests::every_f32_reads_back_through_an_f64
+float-test:
+	@n=$$($(CARGO) test -q -p fennec-core --release --lib -- --ignored --exact --list $(float_tests) | grep -c ': test$$'); \
+	if [ "$$n" != 3 ]; then echo "float-test: $$n of the three tests found: renamed? (Makefile)" >&2; exit 1; fi
+	$(CARGO) test -p fennec-core --release --lib -- --ignored --exact $(float_tests)
 
 ## integrations/builder-golden.json written again from the JS builder's
 ## answers: the text and parameters the Python, Go and .NET builders are
@@ -223,6 +238,42 @@ openapi-golden:
 	$(CARGO) test -p fennec-server --test all openapi::
 	python3 tools/openapi_compat.py --write
 
+## fennec.h's prototypes and macros, web/fennec.d.ts's and web/client.d.ts's
+## exports, the flags and exit codes of fennec, fennec-server and fennec-shard
+## and the metrics the server and the router serve, held to the baselines in
+## integrations/api-golden/ (frozen at the 1.0 tag): a removed or changed one
+## fails unless tools/api_compat.py's BREAKS names it, and every dump is held
+## to BASE's (origin/main). The three files' dumps must be what the sources
+## dump to; the CLI's and the metrics' what the binaries give, which their
+## crates' tests/api_golden.rs hold under `cargo test` (make test), not here.
+## `make api-golden` after an addition. First the checker's own tests, then
+## BASE's checker over the same sources, as CI's `test` job runs it
+## (docs/design/compatibility.md)
+api-check:
+	python3 tools/test_api_compat.py
+	python3 tools/api_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/api_compat.py" 2>/dev/null; then \
+	  mkdir -p target/tmp && git show "$$base:tools/api_compat.py" > target/tmp/api_compat_base.py && \
+	  python3 -I target/tmp/api_compat_base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/api_compat.py; \
+	else echo "$$base has no tools/api_compat.py yet: no base pass"; fi
+
+## integrations/api-golden/ written again: fennec.h's and the JS types' dumps
+## from the sources, the CLI's and the metrics' from the binaries themselves,
+## which the tests/api_golden.rs of fennec-shard, fennec-server and fennec-cli
+## write into target/api-golden (the router's first: the server's test holds
+## every metric name the sources declare to both dumps); refused where a dump
+## breaks what the baseline holds and BREAKS names it not. After every change
+## of a surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
+## (RELEASING.md)
+api-golden:
+	@rm -rf target/api-golden && mkdir -p target/api-golden
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-shard --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-server --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-cli --test api_golden
+	python3 tools/api_compat.py --write --built target/api-golden
+
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples
 types-check:
@@ -344,6 +395,20 @@ perf-gate:
 	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),5) \
 	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
 
+## The I/O half of the gate, which CI's `perf (instructions)` job also
+## judges: this tree's fennec-server and BASE's (origin/main), built in
+## perf-gate's trees and target directories (KEEP=1 there leaves them),
+## each sent the I/O workloads of crates/fennec-http/examples/gate.rs by
+## this tree's program under `strace -f` -- the server's fsyncs, renames
+## and bytes written to files, RUNS (3) times a side -- and any count
+## that is not the base's fails unless the pull request adds a
+## PERF_ACCEPTED entry naming it. HEAD=<ref> and TARGET as perf-gate.
+## Linux with strace: on macOS, in Docker (docs/design/benchmarks.md#the-gate)
+perf-gate-io:
+	python3 tools/perf_gate.py io --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),3) \
+	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
+
 ## This tree's build against BASE's (origin/main) in instructions an op, on
 ## macOS: the allocator there takes paths a binary's identity picks, moving a
 ## request by hundreds of instructions with the code unchanged, so each build
@@ -430,13 +495,16 @@ fennecql-corpus:
 # fuzz.yml). Moved forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
-# Flags for each run, CI's: `--private --corpus none` (a finding says its
-# recipe alone), the weekly run's `--seed`.
+# Flags for each run, CI's: `--corpus none`, and the weekly run's
+# `--private` (a finding says its recipe alone) and `--seed`.
 FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
 # fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
+# std's hash keys are fixed by the binary's own `getrandom` on Linux, which
+# std references weakly, so it binds at the static link: no flag of ours
+# (crates/fennec-fuzz/src/main.rs).
 FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
 FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
 
@@ -456,13 +524,18 @@ else
 endif
 	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
 
-## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
-## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
+## Every target of the fuzzer for a count of runs its own (`--smoke`, about
+## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
+## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
+## commit's smoke hands each the same inputs on any machine of a platform,
+## and ends on the same line; six minutes of CPU time end one failing,
+## named. FUZZ_SECONDS=N runs each that long instead; SMOKE_ASAN=0 a plain
+## build
 SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
-	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
+	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
 
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:
@@ -628,6 +701,24 @@ node-archive-bench:
 	$(CARGO) run --release -p fennec-http --example node_archive -- $(or $(ARGS),1000 10 20 always)
 	$(CARGO) run --release -p fennec-http --example node_archive_passes -- $(or $(PASSES),node 20 32)
 
+## A --dir node's window under --sync 250, as the power-cut rig reads it: a
+## node of each of TENANTS (2,8,32,64) tenants, every one written RATE (100)
+## times a second, its pages' gaps and its writes' handover read from
+## /_changes; HEAVY=spill,batch the first tenant slow to sync beside the
+## rest, FILE=1 a file's server too, SECONDS (20) a run. This tree's release
+## build against BASE_BIN (another build's fennec-server, copied aside) in
+## turns, ROUNDS (2) of each, each run once the 1-minute load is under QUIET
+## (4): one line a run to OUT (target/node-syncs/results.jsonl), the medians
+## to its .log (crates/fennec-http/examples/node_syncs.py;
+## docs/design/durability.md#a-nodes-syncs)
+node_sync_tenants := 2,8,32,64
+node-sync-bench:
+	$(CARGO) build --release -p fennec-server
+	python3 crates/fennec-http/examples/node_syncs.py $(if $(BASE_BIN),--base '$(BASE_BIN)') \
+	  --tenants '$(or $(TENANTS),$(node_sync_tenants))' --rate $(or $(RATE),100) --seconds $(or $(SECONDS),20) \
+	  --heavy '$(or $(HEAVY),none)' --rounds $(or $(ROUNDS),2) --quiet $(or $(QUIET),4) \
+	  $(if $(FILE),--file) $(if $(OUT),--out '$(OUT)')
+
 ## Writers and readers at once, fennecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
 ## beside writers and beside blocks of 1 000 writes (a /batch's). ARGS=blocks
@@ -743,9 +834,11 @@ load-bench:
 	$(CARGO) run --release -p fennec-bench --bin load
 
 ## When size comes first: no import, abort instead of panic unwinding.
+## TARGET=x86_64-unknown-linux-musl builds it as CI's build job does, which
+## holds its size to tools/size-budgets.json.
 small:
-	@$(CARGO) build --profile cli -p fennec-cli --no-default-features
-	@echo "target/cli/fennec  $$(wc -c < target/cli/fennec) bytes"
+	@$(CARGO) build --profile cli -p fennec-cli --no-default-features $(if $(TARGET),--target $(TARGET))
+	@f="$${CARGO_TARGET_DIR:-target}/$(if $(TARGET),$(TARGET)/)cli/fennec"; echo "$$f  $$(wc -c < "$$f") bytes"
 
 ## Scale measurement (clustered embedding distribution). --uniform gives
 ## the pathological case.
@@ -1015,6 +1108,21 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fennecdb
+
+## Slow clients against a release fennec-server, bounded and on loopback:
+## 2 x MAX (50) clients for SECS (300) trickling a head, a body, or asking
+## answers and reading none, each cut at its bound (--header-timeout,
+## --write-timeout) and coming back, a refusal waiting its Retry-After,
+## beside one client asking a request every 50 ms on a kept-alive
+## connection, which must see no failure and a p99 under 1 s
+## (tools/slow_client_check.py; docs/design/http.md#slow-clients). The
+## server ends with the script (--exit-on-stdin-close), which is killed on
+## the way out. Run it on a quiet machine: the p99 is a time
+slow-client-check:
+	$(CARGO) build --release -p fennec-server
+	@python3 tools/slow_client_check.py --server target/release/fennec-server \
+	  --max $(or $(MAX),50) --secs $(or $(SECS),300) & pid=$$!; \
+	  trap 'kill $$pid 2>/dev/null' EXIT INT TERM; wait $$pid
 
 ## The "fennecdb data" Grafana dashboards end to end (Docker): monitoring/'s
 ## compose with fennec-server and Grafana's fennecdb-datasource built from this
@@ -1366,6 +1474,30 @@ packaging-test:
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
+
+## Two releases' processes beside each other: this tree's fennec-server,
+## fennec and fennec-shard against the last published release's, OLD (a tag;
+## `latest`, the default, is the published release highest in version order
+## up to this tree's, asked of GitHub with gh), through
+## tools/compat-matrix.sh: replication both ways, archives and backups plain
+## and sealed, the values 0.2.0 wrote that this tree does not read whole, a
+## router over nodes of the other release, and a rolling upgrade of a router
+## and a node pair under durable writes, each write classed and read back
+## (docs/design/compatibility.md#the-compatibility-matrix). The harness's
+## own tests run first. The release's fennec-server and fennec come from its
+## tarball, checked against its SHA256SUMS by site/install.sh
+## (OLD_ASSETS_DIR, a directory holding the two files, in place of `gh
+## release download`); its fennec-shard, which no release ships, is built
+## from the tag's sources into target/compat-shard (SHARD_TARGET_DIR), kept
+## (tools/release-bins.sh). compat.yml runs it weekly, on release tags and
+## by dispatch: minutes. Needs curl, jq, openssl and python3, and gh unless
+## OLD_ASSETS_DIR holds the release's files and this clone its tag.
+compat-check:
+	bash tools/compat-matrix.sh --self-test
+	bash tools/test_release_bins.sh
+	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
+	CARGO=$(CARGO) bash tools/release-bins.sh $(or $(OLD),latest) $(CURDIR)/target/compat-old
+	bash tools/compat-matrix.sh $(CURDIR)/target/compat-old $(CURDIR)/target/debug
 
 ## Publishes to Cloudflare Workers (fennecdb.com). Needs `wrangler login`
 ## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.

@@ -15,6 +15,7 @@ pub static TARGETS: &[Target] = &[
         name: "http",
         about: "fennec_http::http::read_request: a request's head, its body by length or chunked, pipelined, read whole or a few bytes at a time",
         max_len: 64 << 10,
+        smoke: 120_000,
         seeds: http_seeds,
         dictionary: HTTP_TOKENS,
         run: http,
@@ -23,6 +24,7 @@ pub static TARGETS: &[Target] = &[
         name: "json",
         about: "fennec_core::json: parse_json, parse, a page's documents and a query's parameters; what parses is written back and read as itself",
         max_len: 64 << 10,
+        smoke: 70_000,
         seeds: json_seeds,
         dictionary: JSON_TOKENS,
         run: json,
@@ -31,6 +33,7 @@ pub static TARGETS: &[Target] = &[
         name: "fennecql",
         about: "fennec_ql::parse and parse_exact, FennecQL and SQL's spellings, over the repository's corpus of texts",
         max_len: 16 << 10,
+        smoke: 180_000,
         seeds: fennecql_seeds,
         dictionary: FENNECQL_TOKENS,
         run: fennecql,
@@ -39,6 +42,7 @@ pub static TARGETS: &[Target] = &[
         name: "codec",
         about: "fennec_core::codec: a value's and a type's encoding decoded, skipped, read by a path and as a document's fields",
         max_len: 64 << 10,
+        smoke: 60_000,
         seeds: codec_seeds,
         dictionary: CODEC_TOKENS,
         run: codec,
@@ -47,6 +51,7 @@ pub static TARGETS: &[Target] = &[
         name: "image",
         about: "a .fennec file opened read into memory (Database::load) and mapped as a server opens it (load_mapped: an image's index of its frames adopted, in shares on threads, the rest replayed in place), each read whole, its indexes built and its vectors linked, and its records applied as a replica applies a primary's",
         max_len: 256 << 10,
+        smoke: 35_000,
         seeds: image_seeds,
         dictionary: IMAGE_TOKENS,
         run: image,
@@ -54,10 +59,28 @@ pub static TARGETS: &[Target] = &[
     Target {
         name: "sqlite",
         about: "fennec_import::sqlite: a SQLite file's schema found, its table's rows read and counted",
-        max_len: 64 << 10,
+        // Four pages of SQLite's largest, 64 KiB: page 1, a leaf and its
+        // overflow pages. At 64 KiB a file of such pages held page 1
+        // alone, and the reader's paths of large pages were never fuzzed.
+        max_len: 256 << 10,
+        // Each run writes its input as a file, now up to four times as
+        // long: 80 000 runs took 65 s on an M-series Mac where 64 KiB
+        // inputs took 36, run back to back. 45 000, about 37 s at that
+        // rate, hold its time and reach some 3 570 edges where the 64 KiB
+        // inputs' 80 000 reached 2 431.
+        smoke: 45_000,
         seeds: sqlite_seeds,
         dictionary: SQLITE_TOKENS,
         run: sqlite,
+    },
+    Target {
+        name: "certificate",
+        about: "fennec-tls's DER walk of the certificate a PostgreSQL server shows, to its signature algorithm: the hash of a channel binding (tls-server-end-point)",
+        max_len: 16 << 10,
+        smoke: 300_000,
+        seeds: certificate_seeds,
+        dictionary: CERTIFICATE_TOKENS,
+        run: certificate,
     },
 ];
 
@@ -91,6 +114,19 @@ fn seeds_dir() -> PathBuf {
         Some(d) => PathBuf::from(d),
         None => repo().join("target/fuzz/seeds"),
     }
+}
+
+/// The inputs the repository keeps for target `name`, in
+/// `crates/fennec-fuzz/seeds/<name>/`, in the order of their names: a
+/// target's fixtures, and each finding's input once it was fixed, so every
+/// run -- `cargo test` among them -- hands it the target again.
+fn kept_seeds(name: &str) -> Vec<Vec<u8>> {
+    let dir = repo().join("crates/fennec-fuzz/seeds").join(name);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
 }
 
 /// `with` before each of `inputs`: a target whose first byte picks how it
@@ -335,10 +371,12 @@ fn json(data: &[u8]) {
     let _ = json::parse_documents(&text);
     let _ = json::parse_params(&text);
     let _ = json::parse_object(&text);
-    // What is read is written back and read as itself, as `=` compares --
-    // a number past a double's range aside: the reader takes `1e400` as
-    // infinity, which JSON cannot say and the writer writes as `null`.
-    if let Some(v) = json::parse_json(&text).ok().filter(finite) {
+    // What is read is written back and read as itself, as `=` compares,
+    // every number among it: one past a double's range, which JSON cannot
+    // say back, is refused by the reader (`num::past_range`), where it
+    // read `1e400` as an infinity written back as `null`, and the round
+    // trip was held to finite values alone.
+    if let Ok(v) = json::parse_json(&text) {
         let out = json::to_string(&v);
         let again =
             json::parse_json(&out).unwrap_or_else(|e| panic!("{out:?} written, then refused: {e}"));
@@ -346,16 +384,6 @@ fn json(data: &[u8]) {
             again.cmp_value(&v) == std::cmp::Ordering::Equal,
             "{text:?} read as {v:?}, written as {out:?}, read back as {again:?}"
         );
-    }
-}
-
-/// Whether every number `v` holds is finite.
-fn finite(v: &Value) -> bool {
-    match v {
-        Value::Float(f) => f.is_finite(),
-        Value::List(items) => items.iter().all(finite),
-        Value::Object(members) => members.iter().all(|(_, v)| finite(v)),
-        _ => true,
     }
 }
 
@@ -572,6 +600,7 @@ fn codec_seeds() -> Vec<Vec<u8>> {
         fennec_core::codec::encode_type(&mut b, &ty);
         s.push(b);
     }
+    s.extend(kept_seeds("codec"));
     s
 }
 
@@ -727,7 +756,10 @@ fn image_seeds() -> Vec<Vec<u8>> {
             files.push(b);
         }
     }
-    each_way(&files, 2)
+    // A finding's input carries the byte that says how it was read.
+    let mut seeds = each_way(&files, 2);
+    seeds.extend(kept_seeds("image"));
+    seeds
 }
 
 /// The collections of `db` read whole -- every document decoded, every
@@ -754,6 +786,17 @@ fn read_all(db: &Database) {
     }
 }
 
+/// The time every database of the `image` target reads as now, in
+/// milliseconds: 2026-01-01T00:00:00Z. A read of a collection whose rows
+/// expire (`@ttl`, seed `s`'s `e`) asks the clock for its cutoff
+/// (`Database::alive`), and the system's moves between runs and between
+/// processes: a row alive in one run and expired in the next reached
+/// other code, the corpus a process's own -- what a count of runs must
+/// never be (docs/design/conventions.md#fuzzing). Before seed `s`'s
+/// `2030-01-01` and after the epoch, so its row is read alive and a
+/// mutated time on either side of it is met.
+const CLOCK: i64 = 1_767_225_600_000;
+
 fn image(data: &[u8]) {
     let Some((&how, bytes)) = data.split_first() else {
         return;
@@ -766,6 +809,7 @@ fn image(data: &[u8]) {
     }
     let _ = fennec_core::engine::check_records(&file);
     let mut db = Database::new();
+    db.set_clock(Some(CLOCK));
     if db.load(&file).is_ok() {
         read_all(&db);
     }
@@ -776,6 +820,7 @@ fn image(data: &[u8]) {
     // of the graphs linked after, as a server links them beside its
     // queries.
     let mut served = Database::new();
+    served.set_clock(Some(CLOCK));
     served.defer_linking();
     let base: fennec_core::store::Base = std::sync::Arc::new(file.clone());
     if served.load_mapped(base).is_ok() {
@@ -785,6 +830,7 @@ fn image(data: &[u8]) {
     let magic = fennec_core::engine::MAGIC.len();
     if file.len() > magic && file[..magic] == fennec_core::engine::MAGIC[..] {
         let mut replica = Database::new();
+        replica.set_clock(Some(CLOCK));
         if replica.apply(&file[magic..]).is_ok() {
             read_all(&replica);
         }
@@ -807,15 +853,38 @@ const SQLITE_TOKENS: &[&[u8]] = &[
     b" COLLATE NOCASE",
     b"\xc2\xa0",
     b"WITHOUT ROWID",
+    b" AS (a * 2) VIRTUAL",
+    b" GENERATED ALWAYS AS (a) STORED",
+    b" DEFAULT ",
+    b" PRIMARY KEY DESC",
+    b"\"\"",
+    b"-- ",
+    b"/* ",
+    b" */",
+    b"x'00ff'",
+    b" DEFAULT (CAST(",
+    b" AS TEXT))",
+    b" DEFAULT (-(-",
+    b"0x100000000",
+];
+
+/// The tables the target opens: `t` and `u`, and those of the seeds SQLite
+/// wrote for `fennec-import`'s tests (`tests/sqlite-files/`), so their
+/// schemas are read and not only found.
+const SQLITE_TABLES: &[&str] = &[
+    "t",
+    "u",
+    "quotes",
+    "comments",
+    "empty",
+    "my (table",
+    "desc_pk",
+    "named_pk",
+    "Ünits",
 ];
 
 fn sqlite_seeds() -> Vec<Vec<u8>> {
-    let dir = repo().join("crates/fennec-fuzz/seeds/sqlite");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.sort();
-    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
+    kept_seeds("sqlite")
 }
 
 fn sqlite(data: &[u8]) {
@@ -824,9 +893,10 @@ fn sqlite(data: &[u8]) {
     if std::fs::write(&path, data).is_err() {
         return;
     }
-    for table in ["t", "u"] {
+    for &table in SQLITE_TABLES {
         if let Ok(mut r) = fennec_import::sqlite::Reader::open_sampled(&path, table, 16) {
             let _ = r.columns();
+            let _ = r.left_out();
             for _ in 0..100_000 {
                 match r.next_row() {
                     Ok(Some(_)) => {}
@@ -836,4 +906,99 @@ fn sqlite(data: &[u8]) {
         }
         let _ = fennec_import::sqlite::count_rows(&path, table);
     }
+}
+
+// ---------------------------------------------------------- certificate
+
+/// fennec-tls's walk, the file itself: fennec-tls is rustls and ring, which
+/// the fuzzer, taking nothing from outside the workspace, does not link.
+/// The file holds std alone for this (its own words say so).
+#[path = "../../fennec-tls/src/end_point.rs"]
+mod end_point;
+
+const CERTIFICATE_TOKENS: &[&[u8]] = &[
+    &[0x30, 0x82],
+    &[0x30, 0x81],
+    &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff],
+    &[0x30, 0x80],
+    &[0x05, 0x00],
+    &[0xa0],
+    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01],
+    &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03],
+    &[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02],
+    &[0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a],
+    &[0x06, 0x03, 0x2b, 0x65, 0x70],
+];
+
+/// A DER element, its length written short or long as its size asks.
+fn element(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    match contents.len() {
+        n @ 0..=0x7f => out.push(n as u8),
+        n @ 0x80..=0xff => out.extend_from_slice(&[0x81, n as u8]),
+        n => out.extend_from_slice(&[0x82, (n >> 8) as u8, n as u8]),
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// The certificates fennec-wire's tests serve and trust
+/// (`crates/fennec-wire/tests/certs`), and a certificate's shape -- the
+/// parts the walk passes over empty -- for every signature algorithm it
+/// tells apart: RSA's with each hash, ECDSA's, RSASSA-PSS's with and
+/// without its parameters' hash, and Ed25519's, which has no single hash.
+fn certificate_seeds() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for name in ["ca.pem", "other-ca.pem", "server.pem"] {
+        let path = repo().join("crates/fennec-wire/tests/certs").join(name);
+        let Ok(pem) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for block in pem.split("-----BEGIN CERTIFICATE-----").skip(1) {
+            let body = block.split("-----END").next().unwrap_or("");
+            if let Some(der) = fennec_http::crypto::b64_decode(body.trim()) {
+                out.push(der);
+            }
+        }
+    }
+    let oid = |bytes: &[u8]| element(0x06, bytes);
+    let shaped = |alg: &[u8]| {
+        let mut body = element(0x30, &[]);
+        body.extend_from_slice(&element(0x30, alg));
+        body.extend_from_slice(&element(0x03, &[0]));
+        element(0x30, &body)
+    };
+    const RSA: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const ECDSA: [u8; 6] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04];
+    const NIST: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+    for last in [4, 5, 0x0b, 0x0c, 0x0d, 0x0e] {
+        let mut alg = oid(&[&RSA[..], &[last]].concat());
+        alg.extend_from_slice(&element(0x05, &[]));
+        out.push(shaped(&alg));
+    }
+    out.push(shaped(&oid(&[&ECDSA[..], &[0x01]].concat())));
+    for last in 1..=4 {
+        out.push(shaped(&oid(&[&ECDSA[..], &[0x03, last]].concat())));
+    }
+    let pss = |params: &[u8]| {
+        let mut alg = oid(&[&RSA[..], &[0x0a]].concat());
+        alg.extend_from_slice(&element(0x30, params));
+        shaped(&alg)
+    };
+    out.push(pss(&[]));
+    out.push(pss(&element(
+        0xa0,
+        &element(0x30, &oid(&[0x2b, 0x0e, 0x03, 0x02, 0x1a])),
+    )));
+    for last in 1..=4 {
+        let hash = oid(&[&NIST[..], &[last]].concat());
+        out.push(pss(&element(0xa0, &element(0x30, &hash))));
+    }
+    out.push(shaped(&oid(&[0x2b, 0x65, 0x70])));
+    out
+}
+
+fn certificate(data: &[u8]) {
+    // Its answer kept, so no optimizer reads the walk as work for nothing.
+    let _ = std::hint::black_box(end_point::hash_of(data));
 }

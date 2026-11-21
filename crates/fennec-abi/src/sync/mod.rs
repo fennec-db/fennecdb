@@ -65,7 +65,10 @@
 //! idempotency key and what puts it back) and `_sync_temps` (the rows an
 //! optimistic insert made under a temporary id, until the server's copy
 //! arrives). A replica opened again resumes from its cursors, and sends its
-//! queue first, under the keys it was written with.
+//! queue first, under the keys it was written with. A seed sent in parts
+//! has each part but the last in `_sync_seed` until the last lands them
+//! all in one block ([`Sync::seed`]): nothing reads a shape half seeded,
+//! and nothing holds the seed whole.
 
 pub mod shape;
 pub mod sse;
@@ -121,24 +124,31 @@ const STATE: &[&str] = &[
     "create collection if not exists _sync_shapes (collection text, shape text, cursor int, seeded bool)",
     "create collection if not exists _sync_queue (path text, body text, key text, undo text, label text)",
     "create collection if not exists _sync_temps (collection text, key text, op int, until int)",
+    "create collection if not exists _sync_seed (collection text, part int, rows text)",
 ];
 const PUT_SHAPE: usize = 0;
 const PUT_OP: usize = 1;
 const DEL_OP: usize = 2;
 const PUT_TEMP: usize = 3;
 const DEL_TEMP: usize = 4;
+const PUT_PART: usize = 5;
+const GET_PART: usize = 6;
+const DEL_PARTS: usize = 7;
 const STATEMENTS: &[&str] = &[
     "put _sync_shapes {id: $1, collection: $2, shape: $3, cursor: $4, seeded: $5}",
     "put _sync_queue {id: $1, path: $2, body: $3, key: $4, undo: $5, label: $6}",
     "del _sync_queue where id = $1",
     "put _sync_temps {id: $1, collection: $2, key: $3, op: $4, until: $5}",
     "del _sync_temps where id = $1",
+    "put _sync_seed {id: $1, collection: $2, part: $3, rows: $4}",
+    "get _sync_seed where id = $1 select rows",
+    "del _sync_seed where collection = $1",
 ];
 
 /// Whether a collection is the sync's own.
 fn own(name: &str) -> bool {
-    use fennec_core::declared::{SYNC_QUEUE, SYNC_SHAPES, SYNC_TEMPS};
-    matches!(name, SYNC_SHAPES | SYNC_QUEUE | SYNC_TEMPS)
+    use fennec_core::declared::{SYNC_QUEUE, SYNC_SEED, SYNC_SHAPES, SYNC_TEMPS};
+    matches!(name, SYNC_SHAPES | SYNC_QUEUE | SYNC_TEMPS | SYNC_SEED)
 }
 
 /// `t` as a JSON text, or `null`.
@@ -170,6 +180,12 @@ struct Shape {
     /// Opened without `since` though seeded: the whole shape again, after
     /// the collection was made anew.
     fresh: bool,
+    /// A seed in parts under way: its change, and how many of its parts
+    /// are in `_sync_seed`.
+    staged: Option<(u64, u64)>,
+    /// Parts of a seed its stream dropped are in `_sync_seed`, deleted at
+    /// the next event ([`Sync::sweep`]).
+    loose: bool,
 }
 
 /// What a seed or a change names of a collection ([`Sync::heard`]).
@@ -895,6 +911,8 @@ impl Sync {
                     frames: Default::default(),
                     rebuild: false,
                     fresh: false,
+                    staged: None,
+                    loose: false,
                 });
             }
         }
@@ -950,6 +968,14 @@ impl Sync {
             last_state: "",
         };
         sync.load(db)?;
+        // Parts of a seed a crash or a close left: the shape is seeded
+        // again whole, its parts never landed.
+        if !Self::rows(db, "get _sync_seed select id limit 1")?
+            .rows
+            .is_empty()
+        {
+            db.execute_with(&fennec_ql::parse_one("del _sync_seed where id > 0")?, &[])?;
+        }
         sync.flushing = !sync.queue.is_empty();
         sync.kick(db);
         Ok(sync)
@@ -1444,6 +1470,25 @@ impl Sync {
             }
         }
         self.shapes[i].connected = false;
+        // The seed it was sending is sent again whole: its parts go.
+        if self.shapes[i].staged.take().is_some() {
+            self.shapes[i].loose = true;
+        }
+    }
+
+    /// The parts of seeds whose streams dropped, deleted: a stream opened
+    /// again is seeded again from its start, so nothing of one is left
+    /// behind. At every event, where a drop's parts can be written away.
+    fn sweep(&mut self, db: &mut Database) {
+        for i in 0..self.shapes.len() {
+            if !self.shapes[i].loose {
+                continue;
+            }
+            let c = Value::Text(self.shapes[i].spec.collection.clone());
+            if self.exec(db, DEL_PARTS, &[c]).is_ok() {
+                self.shapes[i].loose = false;
+            }
+        }
     }
 
     /// Opens shape `i`'s stream again after the backoff, or after the
@@ -1466,6 +1511,7 @@ impl Sync {
     /// `body` saying why), the `Fennec-Seq` it carried (0 for none), and its
     /// body.
     pub fn response(&mut self, db: &mut Database, id: u64, status: u16, seq: u64, body: &str) {
+        self.sweep(db);
         if let Some((_, carried)) = self.schema_req.filter(|(r, _)| *r == id) {
             self.schema_req = None;
             self.answered(status, carried);
@@ -1919,6 +1965,7 @@ impl Sync {
 
     /// A stream's response began: `status`, and `body` when it is not 200.
     pub fn opened(&mut self, db: &mut Database, id: u64, status: u16, body: &str) {
+        self.sweep(db);
         let Some(i) = self.shape_of(id) else {
             return;
         };
@@ -1964,6 +2011,7 @@ impl Sync {
 
     /// A piece of a stream's body.
     pub fn bytes(&mut self, db: &mut Database, id: u64, bytes: &[u8]) {
+        self.sweep(db);
         let Some(i) = self.shape_of(id) else {
             return;
         };
@@ -2024,6 +2072,7 @@ impl Sync {
             return;
         };
         self.drop_stream(i, false);
+        self.sweep(db);
         let c = self.shapes[i].spec.collection.clone();
         let why = if why.is_empty() {
             "the server closed it"
@@ -2037,6 +2086,7 @@ impl Sync {
 
     /// A timer [`Sync::actions`] asked for ran out.
     pub fn timer(&mut self, db: &mut Database, id: u64) {
+        self.sweep(db);
         let Some(at) = self.timers.iter().position(|t| t.0 == id) else {
             return;
         };
@@ -2157,6 +2207,7 @@ impl Sync {
             }
             self.timers.clear();
         }
+        self.sweep(db);
         self.once("{\"do\":\"status\"}");
         self.kick(db);
         Ok(())
@@ -2164,25 +2215,67 @@ impl Sync {
 
     // ----------------------------------------------------------- applying
 
-    /// The seed: the whole shape. What the replica holds of the collection
-    /// and the seed does not is deleted -- written over rather than cleared
-    /// first, so a row that stayed keeps its vector's node -- except the
-    /// rows of writes the server has not answered yet, whose copies come
-    /// later. One block, the cursor in it.
+    /// A part of the seed: the whole shape, or a part of it where it came
+    /// in parts (`fennec_http::sse::SEED_PART`). A part without `part`
+    /// begins the seed, the parts of one before it let go; each with
+    /// `more` is kept in `_sync_seed` in a block of its own, as it came --
+    /// the replica's file holds it, not the memory -- and the last lands
+    /// them all ([`Self::land`]). So every read before the last answers the
+    /// replica as it was, and a stream dropped before it leaves that as it
+    /// was: its parts are deleted ([`Self::sweep`]) and the stream, opened
+    /// again, seeds again from its start.
     fn seed(&mut self, db: &mut Database, i: usize, data: &str) -> Result<()> {
         let m = members(data)?;
         let seq: u64 = field(&m, "seq").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let part: u64 = field(&m, "part").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let more = field(&m, "more") == Some("true");
         let rows = field(&m, "rows").unwrap_or("[]");
+        let c = self.shapes[i].spec.collection.clone();
+        if part == 0 {
+            let shape = &mut self.shapes[i];
+            if shape.staged.take().is_some() || shape.loose {
+                self.exec(db, DEL_PARTS, &[Value::Text(c.clone())])?;
+                self.shapes[i].loose = false;
+            }
+        } else if self.shapes[i].staged != Some((seq, part)) {
+            // A part of no seed under way, or not the next: the stream is
+            // opened again, and seeds again from its start.
+            return Err(Error::Query(format!(
+                "part {part} of a seed at {seq} came out of order"
+            )));
+        }
+        if !more {
+            return self.land(db, i, seq, rows);
+        }
+        let id = (self.shapes[i].row << 32) + part as i64;
+        let params = [
+            Value::Int(id),
+            Value::Text(c),
+            Value::Int(part as i64),
+            Value::Text(rows.to_string()),
+        ];
+        self.exec(db, PUT_PART, &params)?;
+        self.shapes[i].staged = Some((seq, part + 1));
+        Ok(())
+    }
+
+    /// The seed landed: its parts in `_sync_seed`, then `last`, written
+    /// over the shape's collection, and what the replica holds of it and
+    /// the seed does not deleted -- written over rather than cleared first,
+    /// so a row that stayed keeps its vector's node -- except the rows of
+    /// writes the server has not answered yet, whose copies come later. One
+    /// block, the cursor in it and the parts deleted with it; a part at a
+    /// time in memory, so a seed of any size holds one part's documents
+    /// (and the block, which spills past 16 MB). A part naming a field the
+    /// replica has not got puts the block back, and the collection is made
+    /// again before the shape is seeded again whole ([`Self::refresh`]).
+    fn land(&mut self, db: &mut Database, i: usize, seq: u64, last: &str) -> Result<()> {
         let c = self.shapes[i].spec.collection.clone();
         let fields = json_fields(db, &c);
         let names: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-        let docs = json::parse_documents_json(rows, &names)?;
-        if !fits(db, &c, &docs) {
-            self.refresh(i);
-            return Ok(());
-        }
+        let parts = self.shapes[i].staged.take().map_or(0, |(_, n)| n);
         db.begin()?;
-        let r = (|| -> Result<()> {
+        let r = (|| -> Result<bool> {
             let held = match db.execute_with(
                 &Statement::Select(Select {
                     collection: c.clone(),
@@ -2194,15 +2287,36 @@ impl Sync {
                 Response::Rows(rs) => rs.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            let came: std::collections::HashSet<DocId> = docs
-                .iter()
-                .filter_map(|d| {
+            let mut came: HashSet<DocId> = HashSet::new();
+            for p in 0..=parts {
+                let kept;
+                let rows = match p < parts {
+                    true => {
+                        let id = Value::Int((self.shapes[i].row << 32) + p as i64);
+                        kept = match self.exec(db, GET_PART, &[id])? {
+                            Response::Rows(rs) => rs.rows.first().map(|r| text_of(&r.values[0])),
+                            _ => None,
+                        };
+                        kept.as_deref().ok_or_else(|| {
+                            Error::Query(format!("part {p} of a seed at {seq} is not held"))
+                        })?
+                    }
+                    false => last,
+                };
+                let docs = json::parse_documents_json(rows, &names)?;
+                if !fits(db, &c, &docs) {
+                    return Ok(false);
+                }
+                came.extend(docs.iter().filter_map(|d| {
                     d.iter()
                         .find(|(k, _)| k == "id")
                         .map(|(_, v)| int_of(v) as DocId)
-                })
-                .collect();
-            self.reconcile(db, i, &docs)?;
+                }));
+                self.reconcile(db, i, &docs)?;
+                if !docs.is_empty() {
+                    db.execute_with(&put_docs(&c, docs), &[])?;
+                }
+            }
             // Kept: an unanswered write's rows, and an answered one's the
             // seed is from before.
             let keep: Vec<DocId> = self
@@ -2231,15 +2345,30 @@ impl Sync {
                 self.exec(db, DEL_TEMP, &[Value::Int(*t)])?;
             }
             self.temps.retain(|t| !dropped.contains(&t.temp));
-            if !docs.is_empty() {
-                db.execute_with(&put_docs(&c, docs), &[])?;
+            if parts > 0 {
+                self.exec(db, DEL_PARTS, &[Value::Text(c.clone())])?;
             }
             self.shapes[i].cursor = seq;
             self.shapes[i].seeded = true;
             self.shapes[i].fresh = false;
-            self.save_shape(db, i)
+            self.save_shape(db, i).map(|_| true)
         })();
-        self.finish(db, r)
+        match r {
+            Ok(false) => {
+                db.rollback();
+                // The temporary rows as the file holds them again.
+                self.load(db).ok();
+                self.shapes[i].loose |= parts > 0;
+                self.refresh(i);
+                Ok(())
+            }
+            r => {
+                if r.is_err() {
+                    self.shapes[i].loose |= parts > 0;
+                }
+                self.finish(db, r.map(|_| ()))
+            }
+        }
     }
 
     /// A change: the rows that changed as they are now, and the ids that

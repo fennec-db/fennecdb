@@ -467,14 +467,31 @@ fn without_http_cors_the_nodes_headers_pass_through() {
     let r = ask(port, "GET", "/t/acme/collections", Some(APP), "");
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.one("access-control-allow-origin"), Some("*"));
-    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), "");
+    // The router's own answer, a tenant it does not place told to a caller
+    // holding its token, carries none.
+    let root = "Authorization: Bearer root\r\n";
+    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), root);
     assert_eq!(r.status, 404);
     r.tells_nothing();
+    // Anyone else's goes to a node in the tenant's place, which answers it
+    // as it answers a tenant it holds: its headers pass through.
+    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), "");
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert_eq!(r.one("access-control-allow-origin"), Some("*"));
     // The preflight goes to the node, which answers it.
     let r = ask(port, "OPTIONS", "/t/acme/query", Some(APP), PREFLIGHT);
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(r.one("access-control-allow-origin"), Some("*"));
     let r = ask(port, "OPTIONS", "/t/nosuch/query", Some(APP), PREFLIGHT);
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert_eq!(r.one("access-control-allow-origin"), Some("*"));
+    let r = ask(
+        port,
+        "OPTIONS",
+        "/t/nosuch/query",
+        Some(APP),
+        &format!("{root}{PREFLIGHT}"),
+    );
     assert_eq!(r.status, 404);
     r.tells_nothing();
 }
@@ -699,6 +716,136 @@ fn a_token_router_tells_an_open_node_the_name_its_client_reached_it_by() {
     assert!(r.body.contains("\"notes\""), "{}", r.body);
 }
 
+/// A `--dir` node taking no data token, `--insecure` where `insecure`.
+fn open_node(tag: &str, insecure: bool) -> Node {
+    fennec_http::audit::set_delay(0);
+    let dir = std::env::temp_dir().join(format!(
+        "fennec-shard-cors-{tag}-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    let cfg = fennec_http::Config {
+        addr: "127.0.0.1:0".into(),
+        admin_token: Some("adm".into()),
+        insecure,
+        ..fennec_http::Config::default()
+    };
+    let server = fennec_http::Server::with_tenants(tenants, cfg);
+    let listener = server.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    Node { addr, dir }
+}
+
+/// The `--token` of [`past_loopback`]'s routers: 32 bytes, as past loopback
+/// a router takes no shorter one.
+const PAST_ROOT: &str = "a router's token of thirty-two bytes, at least";
+
+/// A router with `--token` listening on every address of this machine,
+/// `0.0.0.0` -- a listener past loopback, as one reached from the network
+/// is, which a test reaches on 127.0.0.1 -- in front of `n`, which holds
+/// `acme`: `--insecure` where `insecure`.
+fn past_loopback(n: &Node, insecure: bool) -> u16 {
+    fennec_http::audit::set_delay(0);
+    let root = PAST_ROOT;
+    let cfg = Config {
+        addr: "0.0.0.0:0".into(),
+        token: Some(root.into()),
+        insecure,
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let auth = format!("Authorization: Bearer {root}\r\n");
+    let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, n.addr);
+    let r = send(port, "PUT", "/_shard/nodes/n1", "localhost", &auth, &body);
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = send(port, "PUT", "/_shard/tenants/acme", "localhost", &auth, "");
+    assert_eq!(r.status, 201, "{}", r.body);
+    port
+}
+
+/// A router with `--token` listening past loopback, in front of a node
+/// that takes no data token: the router asks no token of a tenant's
+/// request, and the node took the client's `Host` -- `localhost`, the
+/// router's own address -- for this machine's, so anyone on the network
+/// read and wrote every tenant through it, though nobody passed
+/// `--insecure`. The router refuses to forward to such a node, and the
+/// node refuses a request a router listening past loopback forwarded;
+/// each lets it through where its own operator said `--insecure`, and a
+/// router on loopback in front of one, the local recipe, forwards as
+/// before ([`a_token_router_tells_an_open_node_the_name_its_client_reached_it_by`]).
+#[test]
+fn a_router_past_loopback_reaches_no_node_that_takes_no_token() {
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let refused = |port: u16, by: &str| {
+        let own = format!("127.0.0.1:{port}");
+        for host in ["localhost", own.as_str()] {
+            for (method, target, body) in [
+                ("GET", "/t/acme/collections", ""),
+                ("GET", "/t/acme/_changes", ""),
+                ("POST", "/t/acme/query", make),
+            ] {
+                let r = send(port, method, target, host, "", body);
+                assert_eq!(
+                    r.status, 403,
+                    "{by}: {method} {target} as {host}: {}",
+                    r.body
+                );
+                assert!(r.body.contains("--insecure"), "{by}: {}", r.body);
+                assert!(r.body.contains("token"), "{by}: {}", r.body);
+            }
+        }
+    };
+    // Neither said so: the router refuses, naming the fix.
+    let n = open_node("past-neither", false);
+    let port = past_loopback(&n, false);
+    refused(port, "the router");
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(
+        r.body.contains("n1"),
+        "the refusal names the node: {}",
+        r.body
+    );
+    // Each of the seven refusals counted, in the process's count.
+    let auth = format!("Authorization: Bearer {PAST_ROOT}\r\n");
+    let scrape = send(port, "GET", "/_metrics", "localhost", &auth, "");
+    let counted = (scrape.body.lines())
+        .find_map(|l| l.strip_prefix("fennec_router_open_node_refusals_total "))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(counted >= 7, "{}", scrape.body);
+    // Nothing was written: the node, asked on its own loopback, holds no
+    // collection.
+    let node_port: u16 = n.addr.rsplit_once(':').unwrap().1.parse().unwrap();
+    let straight = send(node_port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert_eq!(straight.status, 200, "{}", straight.body);
+    assert!(!straight.body.contains("notes"), "{}", straight.body);
+
+    // The node said so alone: the router still refuses.
+    let n = open_node("past-node", true);
+    refused(past_loopback(&n, false), "the router, the node --insecure");
+
+    // The router said so alone: the node refuses what it forwards.
+    let n = open_node("past-router", false);
+    refused(past_loopback(&n, true), "the node");
+
+    // Both said so: anyone on the network reaches it, as they were told.
+    let n = open_node("past-both", true);
+    let port = past_loopback(&n, true);
+    let r = send(port, "POST", "/t/acme/query", "localhost", "", make);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
 /// A relay to the home region's router carries the name the first
 /// router's client reached it by: the router it relays to keeps it, the
 /// request marked by the `--token` both hold, and its node is told the
@@ -774,4 +921,414 @@ fn a_relay_keeps_the_name_its_client_reached_the_first_router_by() {
     assert_eq!(r.status, 200, "{}", r.body);
     let head = next();
     assert_eq!(forwarded(&head), ["localhost"], "{head}");
+}
+
+/// What a [`scripted`] node says of its data token.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Said {
+    /// `no_token: false`.
+    Token,
+    /// `no_token: true`.
+    Open,
+    /// Nothing in its stats, as v0.2.0's; `/_whoami` with no token answers
+    /// `"kind":"open"`.
+    OldOpen,
+    /// Nothing in its stats, and `/_whoami` with no token is its 401.
+    OldToken,
+    /// Its stats refuse the router's admin token: one given another since.
+    Fails,
+}
+
+/// A node the test scripts, answering 200 to every tenant's request as one
+/// asking no token answers whoever reaches it -- one from before, or one
+/// running `--insecure` -- and saying of its token what [`Said`] it is set
+/// to. Each request's line is sent on `seen`, the order the node met them;
+/// its stats are answered only while not `held`.
+struct Scripted {
+    addr: String,
+    said: Arc<std::sync::atomic::AtomicU8>,
+    seen: std::sync::mpsc::Receiver<String>,
+    held: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl Scripted {
+    fn set(&self, said: Said) {
+        self.said
+            .store(said as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Holds its stats' answers, each request for them met (`seen`) and
+    /// answered once [`Self::release`]d.
+    fn hold(&self) {
+        *self.held.0.lock().unwrap() = true;
+    }
+
+    fn release(&self) {
+        *self.held.0.lock().unwrap() = false;
+        self.held.1.notify_all();
+    }
+
+    /// The request lines it met so far.
+    fn taken(&self) -> Vec<String> {
+        self.seen.try_iter().collect()
+    }
+
+    /// Waits for a request whose line holds `what`, bounded: the lines it
+    /// met until then, that one the last.
+    fn until(&self, what: &str) -> Vec<String> {
+        let mut met = Vec::new();
+        loop {
+            let line = self
+                .seen
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("no request for {what}; met {met:?}"));
+            met.push(line);
+            if met.last().is_some_and(|l| l.contains(what)) {
+                return met;
+            }
+        }
+    }
+}
+
+fn scripted(tag: &'static str, said: Said) -> Scripted {
+    use std::io::{BufRead, BufReader};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let state = Arc::new(AtomicU8::new(said as u8));
+    let (to, seen) = std::sync::mpsc::channel::<String>();
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (held, gated) = (Arc::clone(&state), Arc::clone(&gate));
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else { return };
+            let (to, state, gate) = (to.clone(), Arc::clone(&held), Arc::clone(&gated));
+            std::thread::spawn(move || {
+                let mut out = conn.try_clone().unwrap();
+                let mut r = BufReader::new(conn);
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut length = 0usize;
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if h.trim_end().is_empty() {
+                            break;
+                        }
+                        if let Some((k, v)) = h.split_once(':') {
+                            if k.eq_ignore_ascii_case("content-length") {
+                                length = v.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    if r.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    let said = [
+                        Said::Token,
+                        Said::Open,
+                        Said::OldOpen,
+                        Said::OldToken,
+                        Said::Fails,
+                    ][state.load(Ordering::SeqCst) as usize];
+                    let open =
+                        r#"{"node":"tenants","tenant":null,"read_only":false,"kind":"open"}"#;
+                    let refused = r#"{"error":"invalid or missing token"}"#;
+                    let (status, answer) = if line.contains(" /_admin/stats ") {
+                        match said {
+                            Said::Token => (200, r#"{"tenants":1,"no_token":false}"#.to_string()),
+                            Said::Open => (200, r#"{"tenants":1,"no_token":true}"#.to_string()),
+                            Said::OldOpen | Said::OldToken => (200, r#"{"tenants":1}"#.to_string()),
+                            Said::Fails => (401, r#"{"error":"invalid admin token"}"#.to_string()),
+                        }
+                    } else if line.contains(" /_whoami ") {
+                        match said {
+                            Said::Token | Said::OldToken => (401, refused.to_string()),
+                            _ => (200, open.to_string()),
+                        }
+                    } else if line.contains(" /_admin/") {
+                        (404, "{}".to_string())
+                    } else {
+                        (200, format!(r#"{{"node":"{tag}"}}"#))
+                    };
+                    let _ = to.send(line.trim_end().to_string());
+                    if line.contains(" /_admin/stats ") {
+                        let (holding, released) = &*gate;
+                        let mut holding = holding.lock().unwrap();
+                        while *holding {
+                            holding = released.wait(holding).unwrap();
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\n\r\n",
+                        answer.len()
+                    );
+                    if out
+                        .write_all(head.as_bytes())
+                        .and_then(|_| out.write_all(answer.as_bytes()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    Scripted {
+        addr,
+        said: state,
+        seen,
+        held: gate,
+    }
+}
+
+/// A router with `--token` on `0.0.0.0` -- past loopback, as one reached
+/// from the network is -- over `dir`, its config `cfg`'s change of the
+/// default: its port.
+fn past_loopback_over(dir: Directory, cfg: impl FnOnce(Config) -> Config) -> u16 {
+    fennec_http::audit::set_delay(0);
+    let router = Router::new(
+        dir,
+        cfg(Config {
+            addr: "0.0.0.0:0".into(),
+            token: Some(PAST_ROOT.into()),
+            upstream_timeout: Duration::from_secs(30),
+            ..Config::default()
+        }),
+    );
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    port
+}
+
+/// A node from before says nothing of its data token in its stats -- v0.2.0
+/// has no `no_token` -- and read so, it was taken for one asking a token:
+/// behind a router listening past loopback, the routers upgraded first as
+/// the runbook says, a v0.2.0 node asking none stayed open to the network
+/// for the whole upgrade, holding no line of its own. Its `/_whoami`, asked
+/// with no token, says `"kind":"open"` of a node asking none, and is its
+/// 401 where it asks one.
+#[test]
+fn a_router_past_loopback_asks_a_node_from_before_whether_it_is_open() {
+    for (said, tag) in [(Said::OldOpen, "old-open"), (Said::OldToken, "old-token")] {
+        let node = scripted(tag, said);
+        let port = past_loopback_over(placed_at(&node.addr), |c| c);
+        // Recorded again, as an operator gives a node its new address: the
+        // router asks it then.
+        let auth = format!("Authorization: Bearer {PAST_ROOT}\r\n");
+        let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, node.addr);
+        let r = send(port, "PUT", "/_shard/nodes/n1", "localhost", &auth, &body);
+        assert!(r.status / 100 == 2, "{tag}: {} {}", r.status, r.body);
+        let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+        let met = node.taken();
+        match said {
+            Said::OldOpen => {
+                assert_eq!(r.status, 403, "{tag}: {}", r.body);
+                assert!(
+                    r.body.contains("`n1`") && r.body.contains("--insecure"),
+                    "{}",
+                    r.body
+                );
+                assert!(!met.iter().any(|l| l.contains("/t/acme")), "{tag}: {met:?}");
+            }
+            _ => {
+                assert_eq!(r.status, 200, "{tag}: {}", r.body);
+                assert!(r.body.contains(tag), "{}", r.body);
+            }
+        }
+        // Its stats asked, then its `/_whoami`, before any request went.
+        let stats = met.iter().position(|l| l.contains("/_admin/stats"));
+        let whoami = met.iter().position(|l| l.contains("/_whoami"));
+        assert!(stats.is_some() && stats < whoami, "{tag}: {met:?}");
+    }
+}
+
+/// A node the router has not asked -- one its directory held as it
+/// started, or a standby's directory brought -- is asked before a request
+/// goes to it, and one whose stats do not answer the router's admin token
+/// gets nothing: forwarded meanwhile, a node asking no token and running
+/// `--insecure` itself -- holding no line of its own -- answered whoever
+/// reached a router past loopback, and so did one from before.
+#[test]
+fn a_router_past_loopback_forwards_to_no_node_it_could_not_ask() {
+    let open = scripted("unasked", Said::Open);
+    let port = past_loopback_over(placed_at(&open.addr), |c| c);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    let met = open.taken();
+    assert!(
+        met.first().is_some_and(|l| l.contains("/_admin/stats")),
+        "the node was not asked first: {met:?}"
+    );
+    assert!(
+        !met.iter().any(|l| l.contains("/t/acme")),
+        "forwarded: {met:?}"
+    );
+
+    let silent = scripted("silent", Said::Fails);
+    let port = past_loopback_over(placed_at(&silent.addr), |c| c);
+    for _ in 0..2 {
+        let r = send(port, "POST", "/t/acme/query", "localhost", "", "{}");
+        assert_eq!(r.status, 503, "{}", r.body);
+        assert!(r.body.contains("`n1`"), "{}", r.body);
+        assert!(r.one("retry-after").is_some(), "{}", r.head);
+    }
+    assert!(
+        !silent.taken().iter().any(|l| l.contains("/t/acme")),
+        "forwarded to a node it could not ask"
+    );
+
+    // One that asks a token is asked once, and forwarded to.
+    let closed = scripted("closed", Said::Token);
+    let port = past_loopback_over(placed_at(&closed.addr), |c| c);
+    for _ in 0..3 {
+        let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let met = closed.taken();
+    assert_eq!(
+        met.iter().filter(|l| l.contains("/_admin/stats")).count(),
+        1,
+        "{met:?}"
+    );
+}
+
+/// A node's ask is one at a time, and no request waits for it: one meeting
+/// the ask out to a node not yet known is answered 503 with `Retry-After`
+/// as the ask goes on, and the node asked once. Each waiting on a lock the
+/// ask held, every request to the node queued behind a call bounded by
+/// `--upstream-timeout` alone, against the rule that no lock is held
+/// across a call to a node.
+#[test]
+fn a_request_meeting_a_nodes_ask_out_waits_for_none() {
+    let node = scripted("asked", Said::Token);
+    node.hold();
+    let port = past_loopback_over(placed_at(&node.addr), |c| c);
+    let first =
+        std::thread::spawn(move || send(port, "GET", "/t/acme/collections", "localhost", "", ""));
+    // The first request's ask is out, its answer held.
+    node.until("/_admin/stats");
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert_eq!(r.status, 503, "{}", r.body);
+    assert!(
+        r.body.contains("`n1`") && r.body.contains("being asked"),
+        "{}",
+        r.body
+    );
+    assert!(r.one("retry-after").is_some(), "{}", r.head);
+    node.release();
+    let r = first.join().unwrap();
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("asked"), "{}", r.body);
+    // Asked once, and the request it answered 503 never sent.
+    let met = node.taken();
+    assert!(
+        !met.iter().any(|l| l.contains("/_admin/stats")),
+        "asked again: {met:?}"
+    );
+    assert_eq!(
+        met.iter().filter(|l| l.contains("/t/acme")).count(),
+        1,
+        "{met:?}"
+    );
+}
+
+/// A marked read (`Fennec-Read: replica`) goes to the tenant's read
+/// replica in the router's region, unless that copy's node asks no token
+/// and the router listens past loopback: then it goes home, as asked of
+/// the home's node as any forward is. A copy's node the router has not
+/// asked is asked beside the read, which goes home meanwhile: sent to the
+/// copy unasked, a node asking none and running `--insecure` answered it.
+#[test]
+fn a_marked_read_goes_to_no_copy_on_a_node_past_loopback_could_not_tell_is_closed() {
+    let home = scripted("home", Said::Token);
+    let copy = scripted("copy", Said::Open);
+    let mut d = Directory::in_memory();
+    for (name, at, region) in [("n1", &home.addr, "eu"), ("r1", &copy.addr, "us")] {
+        d.set_node(
+            name,
+            Placed {
+                addr: at.clone(),
+                token: "adm".into(),
+                region: region.into(),
+                ..Placed::default()
+            },
+        )
+        .unwrap();
+    }
+    d.place("acme", "n1", State::Active).unwrap();
+    d.set_reader("acme", "r1", "n1", None, false).unwrap();
+    let port = past_loopback_over(d, |c| Config {
+        near: Some("us".into()),
+        ..c
+    });
+    let marked = "Fennec-Read: replica\r\n";
+    let r = send(port, "GET", "/t/acme/collections", "localhost", marked, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("\"home\""), "the copy answered: {}", r.body);
+    // The copy's node is asked on a thread beside the read.
+    let met = copy.until("/_admin/stats");
+    assert!(!met.iter().any(|l| l.contains("/t/acme")), "{met:?}");
+    let r = send(port, "GET", "/t/acme/collections", "localhost", marked, "");
+    assert!(r.body.contains("\"home\""), "the copy answered: {}", r.body);
+    assert!(
+        !copy.taken().iter().any(|l| l.contains("/t/acme")),
+        "a read went to the copy on a node asking no token"
+    );
+}
+
+/// A node that said it asks no token is asked again by a request refused
+/// once its word is [`Config::open_asked_again`] old -- 10 s unless set --
+/// so one given a token since is forwarded to with no router started
+/// again, and within that its word holds, the node asked no more. One that
+/// said so and then says nothing -- its admin token changed, its stats
+/// refusing the router's -- is refused still: reset to not known, it was
+/// forwarded to, and a node running `--insecure` answered.
+#[test]
+fn a_router_past_loopback_asks_an_open_node_again_once_its_word_is_old() {
+    let get = |port: u16| send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    let stats = |met: &[String]| met.iter().filter(|l| l.contains("/_admin/stats")).count();
+
+    let node = scripted("fresh", Said::Open);
+    let port = past_loopback_over(placed_at(&node.addr), |c| c);
+    assert_eq!(get(port).status, 403);
+    node.set(Said::Token);
+    assert_eq!(get(port).status, 403, "asked again inside its 10 s");
+    let met = node.taken();
+    assert_eq!(stats(&met), 1, "{met:?}");
+
+    let node = scripted("aged", Said::Open);
+    let again = |c: Config| Config {
+        open_asked_again: Duration::ZERO,
+        ..c
+    };
+    let port = past_loopback_over(placed_at(&node.addr), again);
+    assert_eq!(get(port).status, 403);
+    node.set(Said::Token);
+    let r = get(port);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("aged"), "{}", r.body);
+    assert_eq!(stats(&node.taken()), 2);
+
+    let node = scripted("gone-silent", Said::Open);
+    let port = past_loopback_over(placed_at(&node.addr), again);
+    assert_eq!(get(port).status, 403);
+    node.set(Said::Fails);
+    for _ in 0..2 {
+        let r = get(port);
+        assert_eq!(r.status, 403, "{}", r.body);
+    }
+    let met = node.taken();
+    assert_eq!(stats(&met), 3, "asked at each refusal: {met:?}");
+    assert!(!met.iter().any(|l| l.contains("/t/acme")), "{met:?}");
 }

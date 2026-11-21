@@ -20,7 +20,7 @@ check -- fennec-ql's `corpus` -- runs in CI's test job.
 
 **[Every parser of untrusted bytes is fuzzed](../docs/design/conventions.md#fuzzing)**
 by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
-fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+fuzz` lists the targets; CI's `fuzz-smoke` runs each by count, `fuzz.yml`
 weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
 finding a regression test in its own crate.
 
@@ -34,4 +34,6 @@ write is held to its RFC's vectors, every one, to every case of Project
 Wycheproof's file for it where there is one (committed unchanged, an
 `acceptable` case to the answer chosen for its kind), and where a key
 meets its block to another implementation's, each test's count of cases
-held.
+held. `SECURITY.md` is held to the tree the same way, by
+`tools/security_md_check.py` (CI's fmt job): a flag, path, link or primitive
+it names that is gone fails, and so does any kind of check counting zero.

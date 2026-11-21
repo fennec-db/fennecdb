@@ -3,38 +3,45 @@
 //! a stack overflow, a failed allocation and AddressSanitizer's report end
 //! in `abort` (ASan told so by [`__asan_default_options`]), whose handler
 //! writes the input from where [`arm`] left it with nothing but system
-//! calls; a run past the timeout is written by the watchdog; an allocation
-//! past the cap aborts before it is made -- what a length read off the
-//! input and allocated before it was checked looks like.
+//! calls; a run past the timeout is written the same way by the handler of
+//! a timer the run set ([`arm`]); an allocation past the cap aborts before
+//! it is made -- what a length read off the input and allocated before it
+//! was checked looks like.
 //!
 //! Each of those ends says the finding's recipe as well ([`say_recipe`]):
 //! the target, the seed, the run and its input's hash, and the runs whose
 //! inputs the corpus took -- all a maintainer needs to make the input
 //! again ([`crate::reproduce`]), where CI keeps none (`--private`).
+//!
+//! A smoke past its cap of CPU time ends the process the same way, by a
+//! timer's handler, saying the run it reached rather than keeping one
+//! input of many that slowed ([`cap`]).
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Duration;
 
-/// The input of the run in flight, kept where the watchdog reads it.
+/// The input of the run in flight.
 static CURRENT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// The same bytes for the abort's handler, which takes no lock.
 static PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static LEN: AtomicUsize = AtomicUsize::new(0);
-/// When the run in flight began, in milliseconds from [`BASE`] plus one; 0
-/// between runs.
-static BEGAN: AtomicU64 = AtomicU64::new(0);
-static BASE: OnceLock<Instant> = OnceLock::new();
+/// Whether a run is in flight.
+static BEGAN: AtomicBool = AtomicBool::new(false);
 /// Where the abort's handler writes the input, NUL-ended, and the same
 /// bytes for the handler, which takes no lock.
 static ABORT_PATH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static ABORT_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static ABORT_LEN: AtomicUsize = AtomicUsize::new(0);
-/// The watchdog's timeout and the file it writes, the target's of the
-/// fuzzer that last called [`install`].
-static WATCHED: Mutex<Option<(Duration, PathBuf)>> = Mutex::new(None);
+/// A run's timeout, in microseconds, and the file the timer's handler
+/// writes its input to, NUL-ended: the target's of the fuzzer that last
+/// called [`install`]. A timer, not a thread watching: a thread's code is
+/// instrumented as the targets' is, and what it counted on waking landed
+/// in whichever run was in flight -- in another run in another process.
+static TIMEOUT_US: AtomicU64 = AtomicU64::new(0);
+static TIMEOUT_PATH: Shared = Shared::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
 /// A panic's message, the first since the last [`take_panic`].
 static PANIC: Mutex<Option<String>> = Mutex::new(None);
@@ -43,8 +50,18 @@ static PANICKED: AtomicBool = AtomicBool::new(false);
 static CAP: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Whether a finding says its recipe alone: no message, no backtrace.
 static PRIVATE: AtomicBool = AtomicBool::new(false);
+/// Whether std's hash keys were taken from the fuzzer's own fixed bytes
+/// rather than the system's random source: set where the binary takes
+/// std's call for them (`src/main.rs`), read where a run is guided by
+/// coverage, which hashing at random makes a process's own.
+pub static KEYS_FIXED: AtomicBool = AtomicBool::new(false);
 /// The run in flight, counted from 0.
 static RUN: AtomicU64 = AtomicU64::new(0);
+/// The CPU time a fuzzer's runs may take, in milliseconds, and the runs it
+/// was asked for: what the handler of the cap's timer says ([`cap`]).
+static CAP_MS: AtomicU64 = AtomicU64::new(0);
+static OF_RUNS: AtomicU64 = AtomicU64::new(0);
+static CAPPED: std::sync::Once = std::sync::Once::new();
 /// The recipe's parts: the target's name; the command making the input
 /// again, up to the run; the runs kept, as [`push_kept`] writes them; and
 /// the last of them.
@@ -221,7 +238,6 @@ fn too_big(size: usize) -> ! {
 /// finding, as is an allocation past `cap` bytes. `private`, a finding
 /// says its recipe alone ([`crate::Options::private`]).
 pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize, private: bool) {
-    let _ = BASE.set(Instant::now());
     let pid = std::process::id();
     let mut path = dir
         .join(format!("crash-{target}-{pid}"))
@@ -234,12 +250,19 @@ pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize, private:
         ABORT_PTR.store(held.as_mut_ptr(), Ordering::Relaxed);
         ABORT_LEN.store(held.len(), Ordering::Relaxed);
     }
-    *WATCHED.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((timeout, dir.join(format!("timeout-{target}-{pid}"))));
+    TIMEOUT_PATH.edit(|b| {
+        b.clear();
+        let file = dir.join(format!("timeout-{target}-{pid}"));
+        b.extend_from_slice(file.as_os_str().as_encoded_bytes());
+        b.push(0);
+    });
+    let us = timeout.as_micros().clamp(1, u64::MAX as u128) as u64;
+    TIMEOUT_US.store(us, Ordering::Relaxed);
     CAP.store(cap, Ordering::Relaxed);
     PRIVATE.store(private, Ordering::Relaxed);
     STARTED.call_once(|| {
         sys::on_abort();
+        sys::on_timer();
         std::panic::set_hook(Box::new(|info| {
             if !PANICKED.swap(true, Ordering::Relaxed) {
                 let message = info.to_string();
@@ -255,10 +278,6 @@ pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize, private:
                 *PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
             }
         }));
-        std::thread::Builder::new()
-            .name("fuzz-watchdog".into())
-            .spawn(watch)
-            .expect("the watchdog's thread");
     });
 }
 
@@ -357,13 +376,43 @@ pub fn arm(run: u64, input: &[u8]) {
     cur.extend_from_slice(input);
     PTR.store(cur.as_mut_ptr(), Ordering::Relaxed);
     LEN.store(cur.len(), Ordering::Relaxed);
-    let now = BASE.get().map_or(0, |b| b.elapsed().as_millis() as u64);
-    BEGAN.store(now + 1, Ordering::Release);
+    BEGAN.store(true, Ordering::Release);
+    sys::set_timer(TIMEOUT_US.load(Ordering::Relaxed));
 }
 
-/// The run is over.
+/// Ends the process, failing with 4, once its runs have spent `cpu` of
+/// CPU time from here, saying the target and the run it reached of
+/// `runs`: a bound on a fuzzer whose every run slowed, which a count of
+/// runs alone would leave to its job's timeout, naming no target. Set by
+/// `--smoke` ([`crate::SMOKE_CAP`]); `None` stops it. A timer of the
+/// process's CPU time (`ITIMER_PROF`, `SIGPROF`), set once: nothing runs
+/// beside the runs until it goes off -- a thread watching would run code
+/// the coverage counts, as [`TIMEOUT_US`]'s timer says -- so a smoke that
+/// ends within it ran the inputs it would have run without it. CPU time,
+/// not the wall's: a machine others load lengthens a target by the clock
+/// more than by its CPU time (`http` took 375 s by the clock and 110 s of
+/// CPU at a load of 70 to 200, 150 s and 104 s near 15).
+pub fn cap(cpu: Option<Duration>, runs: u64) {
+    let ms = cpu.map_or(0, |c| c.as_millis().clamp(1, u64::MAX as u128) as u64);
+    CAP_MS.store(ms, Ordering::Relaxed);
+    OF_RUNS.store(runs, Ordering::Relaxed);
+    if ms > 0 {
+        CAPPED.call_once(sys::on_cap);
+    }
+    sys::set_cpu_timer(ms.saturating_mul(1000));
+}
+
+/// What is left of the cap of CPU time [`cap`] set, read off its timer
+/// rather than what was asked of it: zero once stopped, or where nothing
+/// set it. What a test of the smoke's cap, and of its stop, reads.
+pub fn cap_left() -> Duration {
+    sys::cpu_timer_left()
+}
+
+/// The run is over, its timer stopped.
 pub fn disarm() {
-    BEGAN.store(0, Ordering::Release);
+    sys::set_timer(0);
+    BEGAN.store(false, Ordering::Release);
 }
 
 /// A panic since the last call, caught where it happened or not: its
@@ -375,49 +424,33 @@ pub fn take_panic() -> Option<String> {
     PANIC.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// The watchdog: every tenth of the timeout, whether the run in flight
-/// began longer ago than it, and if so its input written and the process
-/// ended -- a run that loops for ever is a finding the run itself never
-/// returns to report.
-fn watch() {
-    loop {
-        let watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some((timeout, file)) = watched else {
-            std::thread::sleep(Duration::from_millis(100));
-            continue;
-        };
-        let step = (timeout / 10).clamp(Duration::from_millis(10), Duration::from_secs(1));
-        let limit = timeout.as_millis().min(u64::MAX as u128) as u64;
-        std::thread::sleep(step);
-        let began = BEGAN.load(Ordering::Acquire);
-        let now = BASE.get().map_or(0, |b| b.elapsed().as_millis() as u64) + 1;
-        if began == 0 || now.saturating_sub(began) <= limit {
-            continue;
-        }
-        let input = CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // The same run still: a new one began after the lock was taken
-        // would have moved `BEGAN`.
-        if BEGAN.load(Ordering::Acquire) != began {
-            continue;
-        }
-        let _ = std::fs::write(&file, &input);
-        eprintln!(
-            "fennec-fuzz: a run took more than {} ms; its input is {}",
-            limit,
-            file.display()
-        );
-        say_recipe(b"a run past the timeout");
-        sys::exit(3);
-    }
-}
-
 #[cfg(unix)]
 mod sys {
     use std::os::raw::{c_char, c_int, c_uint, c_void};
     use std::sync::atomic::Ordering;
 
+    /// `struct timeval`: its microseconds an `int` on Apple's systems, a
+    /// `long` on Linux, either way the struct 16 bytes.
+    #[repr(C)]
+    struct Timeval {
+        sec: i64,
+        #[cfg(target_vendor = "apple")]
+        usec: i32,
+        #[cfg(not(target_vendor = "apple"))]
+        usec: std::os::raw::c_long,
+    }
+
+    /// `struct itimerval`: no interval, the one value.
+    #[repr(C)]
+    struct Itimerval {
+        interval: Timeval,
+        value: Timeval,
+    }
+
     extern "C" {
         fn signal(sig: c_int, handler: usize) -> usize;
+        fn setitimer(which: c_int, new: *const Itimerval, old: *mut Itimerval) -> c_int;
+        fn getitimer(which: c_int, value: *mut Itimerval) -> c_int;
         fn creat(path: *const c_char, mode: c_uint) -> c_int;
         fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
         fn close(fd: c_int) -> c_int;
@@ -425,6 +458,11 @@ mod sys {
     }
 
     const SIGABRT: c_int = 6;
+    const SIGALRM: c_int = 14;
+    /// The same number on Linux and Apple's systems, as the timer's is.
+    const SIGPROF: c_int = 27;
+    const ITIMER_REAL: c_int = 0;
+    const ITIMER_PROF: c_int = 2;
 
     /// Writes `bytes` to standard error, a system call and nothing else.
     pub fn say(bytes: &[u8]) {
@@ -453,32 +491,88 @@ mod sys {
     /// left it, perhaps the one a stack overflow's handler ran on -- then
     /// the process ended.
     extern "C" fn aborted(_: c_int) {
+        let path = (
+            super::ABORT_PTR.load(Ordering::Relaxed) as *const u8,
+            super::ABORT_LEN.load(Ordering::Relaxed),
+        );
+        if keep_input(
+            path,
+            b"fennec-fuzz: the process aborted on an input, written to ",
+        ) {
+            super::say_recipe(b"an abort");
+        }
+        exit(2);
+    }
+
+    /// The timer's handler, on whatever thread took the signal: a run past
+    /// its timeout -- one that loops for ever is a finding the run never
+    /// returns to report -- its input written as the abort's handler
+    /// writes it, then the process ended.
+    extern "C" fn timed_out(_: c_int) {
+        let file = super::TIMEOUT_PATH.read();
+        let mut ms = [0u8; 20];
+        let ms = super::digits(super::TIMEOUT_US.load(Ordering::Relaxed) / 1000, &mut ms);
+        say(b"fennec-fuzz: a run took more than ");
+        say(ms);
+        say(b" ms\n");
+        if keep_input(
+            (file.as_ptr(), file.len()),
+            b"fennec-fuzz: its input is written to ",
+        ) {
+            super::say_recipe(b"a run past the timeout");
+        }
+        exit(3);
+    }
+
+    /// The cap's handler ([`super::cap`]), on whatever thread took the
+    /// signal: the target, the cap and how far its runs got, with system
+    /// calls alone, then the process ended. No input is kept: the run in
+    /// flight is one of many that slowed, its recipe the same as the
+    /// smoke's own.
+    extern "C" fn capped_out(_: c_int) {
+        let (mut ms, mut run, mut of) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+        for part in [
+            &b"fennec-fuzz: "[..],
+            super::NAME.read(),
+            b": past its cap of ",
+            super::digits(super::CAP_MS.load(Ordering::Relaxed), &mut ms),
+            b" ms of CPU time at run ",
+            super::digits(super::RUN.load(Ordering::Relaxed), &mut run),
+            b" of ",
+            super::digits(super::OF_RUNS.load(Ordering::Relaxed), &mut of),
+            b": its runs took far longer than its count was set for (`Target::smoke`), \
+              a commit's slowing or the machine's\n",
+        ] {
+            say(part);
+        }
+        exit(4);
+    }
+
+    /// The input of the run in flight written to the NUL-ended `path`, and
+    /// where said after `saying`: whether a run was in flight.
+    fn keep_input((path, path_len): (*const u8, usize), saying: &[u8]) -> bool {
         let began = super::BEGAN.load(Ordering::Acquire);
         let (p, n) = (
             super::PTR.load(Ordering::Relaxed),
             super::LEN.load(Ordering::Relaxed),
         );
-        let (path, path_len) = (
-            super::ABORT_PTR.load(Ordering::Relaxed),
-            super::ABORT_LEN.load(Ordering::Relaxed),
-        );
-        if began != 0 && !p.is_null() && !path.is_null() && path_len > 1 {
-            // SAFETY: a NUL-ended path and the input's bytes, each where
-            // `install` and `arm` left them, which nothing has moved since
-            // the run that aborted began.
-            unsafe {
-                let fd = creat(path as *const c_char, 0o644);
-                if fd >= 0 {
-                    write_all(fd, p, n);
-                    close(fd);
-                }
-                say(b"fennec-fuzz: the process aborted on an input, written to ");
-                write_all(2, path, path_len - 1);
-                say(b"\n");
-            }
-            super::say_recipe(b"an abort");
+        if !began || p.is_null() || path.is_null() || path_len <= 1 {
+            return false;
         }
-        exit(2);
+        // SAFETY: a NUL-ended path and the input's bytes, each where
+        // `install` and `arm` left them, which nothing has moved since the
+        // run in flight began.
+        unsafe {
+            let fd = creat(path as *const c_char, 0o644);
+            if fd >= 0 {
+                write_all(fd, p, n);
+                close(fd);
+            }
+            say(saying);
+            write_all(2, path, path_len - 1);
+            say(b"\n");
+        }
+        true
     }
 
     pub fn on_abort() {
@@ -487,13 +581,80 @@ mod sys {
             signal(SIGABRT, aborted as extern "C" fn(c_int) as usize);
         }
     }
+
+    pub fn on_timer() {
+        // SAFETY: as `on_abort`.
+        unsafe {
+            signal(SIGALRM, timed_out as extern "C" fn(c_int) as usize);
+        }
+    }
+
+    pub fn on_cap() {
+        // SAFETY: as `on_abort`.
+        unsafe {
+            signal(SIGPROF, capped_out as extern "C" fn(c_int) as usize);
+        }
+    }
+
+    /// The process's one real-time timer set to go off in `us`
+    /// microseconds, or stopped at 0.
+    pub fn set_timer(us: u64) {
+        set(ITIMER_REAL, us);
+    }
+
+    /// The process's CPU-time timer, the same way.
+    pub fn set_cpu_timer(us: u64) {
+        set(ITIMER_PROF, us);
+    }
+
+    /// What the CPU-time timer has left to go off in: zero where stopped.
+    pub fn cpu_timer_left() -> std::time::Duration {
+        let none = || Timeval { sec: 0, usec: 0 };
+        let mut timer = Itimerval {
+            interval: none(),
+            value: none(),
+        };
+        // SAFETY: a timer of the C layout, written by the call.
+        unsafe {
+            getitimer(ITIMER_PROF, &mut timer);
+        }
+        std::time::Duration::from_secs(timer.value.sec.max(0) as u64)
+            + std::time::Duration::from_micros(timer.value.usec.max(0) as u64)
+    }
+
+    fn set(which: c_int, us: u64) {
+        let value = Timeval {
+            sec: (us / 1_000_000).min(i64::MAX as u64) as i64,
+            usec: (us % 1_000_000) as _,
+        };
+        let timer = Itimerval {
+            interval: Timeval { sec: 0, usec: 0 },
+            value,
+        };
+        // SAFETY: a timer of the C layout, read and not kept.
+        unsafe {
+            setitimer(which, &timer, std::ptr::null_mut());
+        }
+    }
 }
 
 #[cfg(not(unix))]
 mod sys {
-    /// Elsewhere an abort ends the process with its input unkept: the
-    /// fuzzer runs on Linux and macOS.
+    /// Elsewhere an abort ends the process with its input unkept, and a
+    /// run is given no timeout: the fuzzer runs on Linux and macOS.
     pub fn on_abort() {}
+
+    pub fn on_timer() {}
+
+    pub fn set_timer(_: u64) {}
+
+    pub fn on_cap() {}
+
+    pub fn set_cpu_timer(_: u64) {}
+
+    pub fn cpu_timer_left() -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 
     pub fn say(bytes: &[u8]) {
         use std::io::Write;

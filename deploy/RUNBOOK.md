@@ -161,7 +161,7 @@ On every machine (Debian 12 or later, Ubuntu 22.04 or later -- systemd 248
 or later for `LoadCredential=`'s `%d`):
 
 ```sh
-install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # from a release
+install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # fennec-server and fennec from a release; fennec-shard built from its tag (no release publishes it yet)
 install -m 0644 systemd/fennecdb.sysusers /etc/sysusers.d/fennecdb.conf && systemd-sysusers
 install -m 0644 systemd/*.service systemd/*.timer /etc/systemd/system/
 install -D -m 0755 bin/fennec-archive-sync /usr/local/libexec/fennecdb/fennec-archive-sync   # an archiver's machine
@@ -680,8 +680,9 @@ run again once it is gone.
 
 **Remove `<t>.instance` when you replace a tenant's file by hand.** The
 identity is bound to the file's device, inode and birth time; where the
-node reads no birth time -- every Linux build, and file systems keeping
-none -- to its device and inode alone, and a file copied into place after
+node reads no birth time -- every Linux release binary, and file systems
+keeping none -- or the node that wrote the sidecar read none, to its device
+and inode alone, and a file copied into place after
 an `rm` may be given
 the inode of the one it replaced -- and with the sidecar kept, its
 identity, which a router's reclaim or follow would then act on. Every way
@@ -800,15 +801,55 @@ alerts between steps:
    through it as the connection ends: the entry sends a read or a keyed
    write on to the standby, and answers any other write 502, which may have
    run (send writes with an `Idempotency-Key` and they are retried safely).
-   Then the global standby and the global router the same way.
-3. **Nodes**, one at a time, a zone at a time: replace the binary and
-   `systemctl restart fennec-node`. A restart shorter than the lease costs
-   its tenants the restart; one longer -- a shutdown checkpointing large
-   graphs -- has them failed over to their replicas, and the node comes
-   back as a replica of each (A node back). Either way no acknowledged
-   write is lost. Wait for `FennecTenantsWithoutReplica` to clear before the
-   next node.
+   Not across this upgrade, though: a key a 0.2.0 node kept is not looked
+   up once its node runs the new release (a key is its caller's now, kept
+   another way), so a keyed write first sent to a 0.2.0 node and sent
+   again after that node's upgrade in step 3 runs twice. Let the clients'
+   retries of writes made before a node's upgrade end before it.
+   Then the global standby and the global router the same way. No release
+   publishes `fennec-shard` yet: upgrading a router means building it from
+   the release's tag (`cargo build --release --locked -p fennec-shard`, or
+   the `kit` image `deploy/Dockerfile` builds). Routers first holds a node
+   that asks no data token too: such a node refuses (403) what a 0.2.0
+   router forwards it, a router on loopback included -- that router's one
+   mark is the one a router listening past loopback sends -- unless the
+   node runs `--insecure`; and a new router listening past loopback asks a
+   0.2.0 node's `/_whoami` and forwards nothing to one asking no token.
+   The kit's nodes take a data token, and meet neither.
+3. **Nodes**, one at a time, a zone at a time, and in a node pair the
+   standby's node first: replace the binary and `systemctl restart
+   fennec-node`. A restart shorter than the lease costs its tenants their
+   writes for the restart -- the router answers each "the request was not
+   sent" (503, `Fennec-Unsent`), safe to send again; one longer -- a
+   shutdown checkpointing large graphs -- has them failed over to their
+   replicas (the kit's routers run `--auto-failover`; a router started
+   without it never fails a node over), and the node comes back as a
+   replica of each (A node back). Either way no acknowledged write is
+   lost. Before the next node, wait until its standby holds what its
+   primary does: on the primary's node `/t/<tenant>/_replication/status`
+   (with the replication token) lists the standby's stream with `sent`
+   equal to `durable`, or the standby's own says `"connected": true` and
+   `"behind": 0` -- for a file's replica, `fennec_replica_connected` 1 and
+   `fennec_replica_behind` 0. Not `FennecTenantsWithoutReplica`: it fires
+   only for a tenant with no copy at all, after 15 minutes, never for a
+   standby that is behind after its restart.
 4. **The entry Worker** last: it reads only the routers' answers.
+
+Every reader -- an archiver, a router, a node, the `fennec` that restores
+-- runs the new release before any primary does, and one a release back
+works beside the new one or stops in words, never reading wrong
+(RELEASING.md). A node holding both primaries and replicas -- its own
+tenants and another node's standbys -- cannot be upgraded before every
+primary: in such a fleet nothing uses a feature that moves the format
+until every node runs the release. `compat.yml` drives steps 2 and 3 with
+the last release's `fennec-server` and `fennec` and its router -- built
+from the release's tag with its `Cargo.lock` by the tree's toolchain, a
+debug build, since no release publishes one -- weekly and on every
+release tag: a router restarted, then a standby's node, then its
+primary's, under durable writes, waiting on the condition above before
+each node, every acknowledged write read back from both nodes and none the
+router said it did not send landed. A file 0.2.0 wrote holding a value
+1.x does not read whole is RELEASING.md's *The first 1.x release's notes*.
 
 **Named statements move the format by their first use, not their
 install.** A `create statement` writes record kind 13, which every binary
@@ -901,21 +942,50 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
-**A sealed archive's next file is bound to itself, which older readers
-refuse.** From the release that binds a sealed frame to its file, an
+**A sealed archive's next file is bound to what it is, which older readers
+refuse.** From the release that binds a sealed file to what it is, an
 archiver restarted on it seals its next image and segment, and `fennec
-backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
-`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
-file (`not a sealed file`, `<image>: not sealed, where the archive is`).
-The files sealed before still open in the new release, and a segment an
-older archiver began goes on as it was. So `fennec` is upgraded on every
-machine that restores or verifies -- an operator's, the weekly restore's --
-with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+backup --key-file` its backup, as version 3 (`FENECSL\x03`: its own key,
+its frames chained, its head naming its role, archive, tenant and first
+change), and a `fennec restore` or `fennec verify` from 0.2.0 or earlier
+refuses such a file (`not a sealed file`, `<image>: not sealed, where the
+archive is`). The files sealed before still open in the new release, and a
+segment an older archiver began is closed: before the next write the
+archiver seals an image of the archive's end as version 3 -- read from the
+archive as the hourly image is, once a line; a node's archiver seals each
+tenant's as it starts, on the thread beside its stream, and a tenant
+written before its turn at that write -- and the write begins a version 3
+segment after it. That image is a one-time lag of the archiver's: about
+9 s a GB of database (2.1 to 2.4 s for a 267 MB image on an 8-core arm64
+Mac), which `fennec archive` of one database spends on its stream before
+it takes the primary's next write. Its primary meanwhile fills the stream's socket and
+then waits for it at most `SENT_WAIT` (1 s), once, on one durable write,
+marks the stream lagging and answers the writes after without it until it
+catches up; a send held up past `SILENCE` (10 s) ends the stream, which the
+archiver makes again and goes on from its end. A node's archiver
+assembles beside its stream, so its stream lags only for a tenant written
+before the pass reaches it, by that tenant's assembly. An archive whose
+end does not restore stops `fennec archive` (a node's archiver passes over
+that tenant) naming why and the ways out: put right what `fennec verify`
+refuses in it, or begin a new line and keep the old one for restores to
+earlier moments -- `fennec archive` into a new directory, or, for a node's
+tenant, with the archiver stopped, its directory moved aside as
+`<root>/<tenant>.<any name>` beside it, and the archiver begins the new
+line with the node's image. So `fennec` is upgraded on every machine that
+restores or verifies -- an operator's, the weekly restore's -- with step 1, before
+any archiver is restarted on the new release. The older files still open
+under their key, bound to nothing a restore holds them to, and whoever
 holds two of them can build a third from their frames: to be rid of that,
 make a new key (`fennec key`), point every archiver and backup at it, and
 begin a new archive under it, keeping the old key to read the older one
 (Archives and restores; the site's replication page, *How archives and
-backups are sealed*).
+backups are sealed*). A file sealed before the upgrade that `verify` or a
+restore refuses as standing at or past the archive's first file of
+version 3 (`<file>: an image of change N, sealed before version 3, at or
+past its image of change N taken at <ms>, the first file this archive
+holds of version 3: no archiver puts it there, so it is not this
+archive's`) was put there by no archiver: move it out of the archive's
+directory, and the archive is read without it.
 
 **A tenant's `github` hook set with `key delivery` is kept, its events
 refused.** From the release that refuses `key delivery`, a set a node kept

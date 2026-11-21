@@ -135,7 +135,8 @@ pub struct Config {
     /// may have left behind -- the new primary's may hold a statement this
     /// copy answers 404 for. Never set on a server's own configuration.
     pub come_back: bool,
-    /// Since there is no TLS, binding outside loopback without auth is refused.
+    /// Binding outside loopback without auth is refused: the data would be open
+    /// to the network, over TLS or not.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
     /// a thread.
@@ -145,6 +146,18 @@ pub struct Config {
     pub max_body: usize,
     /// Silence ceiling while waiting for the next request on a keep-alive connection.
     pub idle_timeout: Option<Duration>,
+    /// `--header-timeout`: a request's time from its first byte, head and
+    /// body, and a second more for every [`conn::MIN_RATE`] bytes that came
+    /// ([`conn::Paced`]). `None`: no bound but the idle timeout's on each
+    /// read.
+    pub header_timeout: Option<Duration>,
+    /// `--write-timeout`: the longest one write of an answer waits for its
+    /// client to take any of it ([`conn::WRITE_TIMEOUT`]): the write that
+    /// filled the socket's buffers returns what went in, the next, taking
+    /// nothing, fails and ends the connection -- a client that never reads
+    /// holds its thread and its `--max-connections` slot twice this at
+    /// most. A stream's is `stream_write_timeout`. `None`: for ever.
+    pub write_timeout: Option<Duration>,
     /// `sync` after every write (the equivalent of fennec-server's `--sync always`).
     pub sync_on_write: bool,
     /// How long a write's `Idempotency-Key` and answer are kept.
@@ -192,11 +205,14 @@ pub struct Config {
     /// Data footprint ceiling in bytes (0 = off): fennec-server's
     /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
-    /// What a router marks the requests it forwards with
-    /// ([`audit::router_mark`]): made from `admin_token` on a tenant node,
-    /// which a router reaches with it. A request bearing it is waited out
-    /// at the router after a refusal, keyed by the client it names.
-    pub router_mark: Option<String>,
+    /// What a router marks the requests it forwards with, of either class
+    /// of listener ([`audit::router_marks`]): made from `admin_token` on a
+    /// tenant node, which a router reaches with it. A request bearing one
+    /// is waited out at the router after a refusal, keyed by the client it
+    /// names; and on a node asking no token answered only where it is the
+    /// mark of a router on loopback alone, or under `--insecure`
+    /// ([`open_refusal`]).
+    pub router_mark: Option<Arc<audit::RouterMarks>>,
     /// The studio's files, served under `/_studio/` (`--studio`); `None`
     /// answers that path 404.
     pub studio: Option<Arc<studio::Studio>>,
@@ -246,6 +262,8 @@ impl Default for Config {
             max_connections: 100,
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
+            header_timeout: Some(conn::HEADER_TIMEOUT),
+            write_timeout: Some(conn::WRITE_TIMEOUT),
             sync_on_write: false,
             idempotency_ttl: Duration::from_secs(24 * 3600),
             max_streams: 64,
@@ -365,7 +383,8 @@ impl Server {
         fennec_ql::install();
         let mut cfg = cfg.settled();
         if cfg.router_mark.is_none() {
-            cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
+            cfg.router_mark =
+                (cfg.admin_token.as_deref()).map(|t| Arc::new(audit::router_marks(t)));
         }
         // A tenant's hooks are its file's, kept beside it and set through
         // `/_admin/` ([`tenant_hooks`]): a node reads no hooks file, and
@@ -574,8 +593,23 @@ fn authenticate(
     // by a code as well (`token_expired`), which no other refusal carries:
     // a client refreshes at it without a second thought, and asks its
     // issuer at the others, which a fresh token may or may not cure.
+    // A refusal is counted as a guess at the server's token where the value
+    // could have been it, and as a JWT's otherwise: a good JWT starts the
+    // JWTs' count alone (`audit::Kind`), so its holder guessing the
+    // server's token waits the doubled waits. A value shaped as a JWT --
+    // two dots -- equals no token not so shaped, and is a JWT's guess
+    // unless the token has two dots too; none at all guesses nothing.
+    let refused_kind = |given: Option<&str>| {
+        let shaped = |s: &str| s.matches('.').count() == 2;
+        match (&cfg.token, given) {
+            _ if cfg.access.is_none() => audit::Kind::Token,
+            (Some(t), Some(g)) if !shaped(g) || shaped(t) => audit::Kind::Token,
+            _ => audit::Kind::Jwt,
+        }
+    };
     let refuse = |why: &'static str| {
         audit::refusal(why);
+        audit::refused_as(refused_kind(given));
         match access::refusal_code(why) {
             Some(code) => Response::coded(401, why, code),
             None => Response::error(401, why),
@@ -595,7 +629,7 @@ fn authenticate(
                 .map_or(0, |d| d.as_secs());
             return match access.scope(given, now) {
                 Ok(mut scope) => {
-                    audit::verified();
+                    audit::verified_jwt();
                     if let Some(db) = db {
                         scope.charge(calls::Runs::to(cfg.call_rate, db));
                         if let Some(refused) = rate::admitted(cfg.request_rate, db, &scope) {
@@ -956,6 +990,13 @@ fn warn_proxied(req: &Request) {
     }
 }
 
+/// What a node asking no token answers a request a router listening past
+/// loopback forwarded ([`open_refusal`]).
+const OPEN_BEHIND_A_ROUTER: &str = "this node asks no token, and the router that forwarded the \
+     request listens past loopback, where anyone on the network reaches it: give the node \
+     --http-token or --jwt-keys, or start it with --insecure if the network may read and write \
+     its tenants";
+
 /// Why a listener that asks for no token refuses `req` for where it comes
 /// from ([`cors::foreign`]), as a 403, or `None`. Open is no `--http-token`
 /// and no JSON Web Tokens: a tenant node with `--admin-token` alone runs
@@ -975,6 +1016,17 @@ fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Respon
     let scrape_token = matches!(backend, Backend::Metrics { .. }) && cfg.admin_token.is_some();
     if cfg.token.is_some() || cfg.access.is_some() || scrape_token {
         return None;
+    }
+    // A router whose listener is not loopback alone forwarded it, by the
+    // mark it bore ([`audit::router_mark`]): its clients are the network's,
+    // and their `Host` -- `localhost`, an address -- is theirs to name. A
+    // router asks a forward no token, so behind one with `--token` an open
+    // node ran every tenant's statements for anyone; such a router forwards
+    // nothing to an open node itself, and this holds a router from before,
+    // whose one mark is this one. A router on loopback alone sends the
+    // other mark, and `--insecure` says the network may reach it.
+    if !cfg.insecure && audit::routed_past_loopback() {
+        return Some(Response::error(403, OPEN_BEHIND_A_ROUTER));
     }
     cors::foreign(
         cfg.cors.as_deref(),
@@ -1033,13 +1085,19 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     // finds its place free.
     let _slot = slot;
     let _ = conn.set_read_timeout(cfg.idle_timeout);
+    // Once a connection, so an answer pays nothing for it: a write the
+    // client takes nothing of for this long returns what went in, the next
+    // fails, and the connection ends. A stream sets its own.
+    let _ = conn.set_write_timeout(cfg.write_timeout);
     let peer = conn.peer_addr().ok();
     audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
     trace::connection(conn.local_addr().ok(), peer);
     // The reader and the answers borrow the one connection, as std's
     // `&TcpStream` reads and writes: no `dup` for a write half, and over
-    // TLS the one session both need.
-    let mut reader = BufReader::new(&conn);
+    // TLS the one session both need. Each request is read in time
+    // ([`conn::Paced`]).
+    let paced = conn::Paced::new(&conn, cfg.idle_timeout, cfg.header_timeout);
+    let mut reader = BufReader::new(paced);
     let mut out = &conn;
     // After the socket, so it is dropped first: a client that saw the
     // connection close finds it no longer counted. A scrape is not one of
@@ -1051,6 +1109,8 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     let imports = matches!(backend, Backend::Tenants(_));
 
     loop {
+        // The next request waited for under the idle timeout.
+        reader.get_mut().waiting();
         // With the `timing` feature the clock starts once the request's
         // first bytes are in, not while the connection waits for them.
         #[cfg(feature = "timing")]
@@ -1093,7 +1153,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                         let (req, refused) = *refused;
                         request_id::begin_request(&req);
                         if cfg.router_mark.is_some() {
-                            audit::request(&req, cfg.router_mark.as_deref());
+                            audit::forwarded(&req, cfg.router_mark.as_deref());
                         }
                         trace::begin(&req);
                         audit::http(&req, refused.status, peer);
@@ -1114,7 +1174,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         metrics::begin_request();
         proxied(&req);
         if cfg.router_mark.is_some() {
-            audit::request(&req, cfg.router_mark.as_deref());
+            audit::forwarded(&req, cfg.router_mark.as_deref());
         }
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
@@ -2043,8 +2103,14 @@ fn route_tenant(
     }
     // No body past `max_body` comes this far: an image's import, the one
     // read past it, is `/_admin/`'s, answered above ([`body_ceiling`]).
-    let name = match segs.as_slice() {
-        ["t", name, ..] => name.to_string(),
+    // A router's stand-in for a tenant it does not place names it past
+    // [`tenants::STAND_IN`]: asked as that tenant, answered as one with no
+    // file here.
+    let (name, standing_in) = match segs.as_slice() {
+        ["t", name, ..] => match name.strip_prefix(tenants::STAND_IN) {
+            Some(name) => (name.to_string(), true),
+            None => (name.to_string(), false),
+        },
         _ => {
             return Err(Response::error(
                 404,
@@ -2097,6 +2163,13 @@ fn route_tenant(
         scope
             .reaches(&name)
             .map_err(|why| Response::error(403, why))?;
+    }
+    // A router's stand-in, every credential asked as of a tenant held: the
+    // tenant is not here, whatever file of its name is -- one the router
+    // does not place is a leftover, opened by no request.
+    if standing_in {
+        let absent = tenants::Refused(404, format!("no tenant `{name}` on this node"));
+        return Err(absent.response().header(ABSENT_HEADER, "absent"));
     }
     // A tenant this node has no file of says so in a header besides the
     // words: a router reading a read replica's 404 tells a copy gone from

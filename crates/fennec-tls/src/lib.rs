@@ -21,6 +21,8 @@
 //! crate's [`Error`]. The backend can be changed here -- BoringSSL, as Bun
 //! takes it, is weighed against rustls -- without touching a caller.
 
+mod end_point;
+
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::pem::PemObject;
@@ -301,7 +303,7 @@ impl Client {
         }
         Ok(TlsStream {
             conn: Conn::Client(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -334,7 +336,7 @@ impl Client {
         )?;
         Ok(TlsStream {
             conn: Conn::Client(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -540,7 +542,7 @@ impl Server {
         }
         Ok(TlsStream {
             conn: Conn::Server(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 
@@ -558,7 +560,7 @@ impl Server {
         handshake_by(&mut conn, &mut sock, deadline, within, &peer, "client")?;
         Ok(TlsStream {
             conn: Conn::Server(conn),
-            sock,
+            sock: Arc::new(sock),
         })
     }
 }
@@ -661,6 +663,36 @@ fn sock_peer(sock: &TcpStream) -> String {
         .map_or_else(|_| "the client".to_string(), |a| a.to_string())
 }
 
+// ------------------------------------------------------ channel binding
+
+/// RFC 5929's `tls-server-end-point` of a certificate, its DER bytes: their
+/// hash by the hash function the certificate's `signatureAlgorithm` uses,
+/// SHA-256 where that is MD5 or SHA-1 (section 4.1), as PostgreSQL's server
+/// and libpq compute it (`be_tls_get_certificate_hash`,
+/// `pgtls_get_peer_certificate_hash`) -- RSASSA-PSS by the hash its
+/// parameters name, SHA-1 where they name none. Where the algorithm uses no
+/// single hash (Ed25519, Ed448) the binding is undefined, an error, as it is
+/// to PostgreSQL ("could not find digest"); so is SHA-224, which ring has
+/// not. The walk reads three elements of the DER and no further, each length
+/// held to the bytes there: a certificate from whoever answered a dial that
+/// checked nothing is no one's to trust.
+pub fn server_end_point(cert: &[u8]) -> Result<Vec<u8>, Error> {
+    let undefined = |why: &str| config(format!("tls-server-end-point is undefined here: {why}"));
+    let hash = end_point_hash(cert).map_err(undefined)?;
+    Ok(ring::digest::digest(hash, cert).as_ref().to_vec())
+}
+
+/// The ring digest of the hash a certificate's binding is made with
+/// ([`end_point::hash_of`], the DER walk).
+fn end_point_hash(cert: &[u8]) -> Result<&'static ring::digest::Algorithm, &'static str> {
+    use end_point::Hash;
+    Ok(match end_point::hash_of(cert)? {
+        Hash::Sha256 => &ring::digest::SHA256,
+        Hash::Sha384 => &ring::digest::SHA384,
+        Hash::Sha512 => &ring::digest::SHA512,
+    })
+}
+
 /// A fatal `internal_error` alert, a record of its own in the clear: what
 /// a listener tells a connection it will not serve without running a
 /// handshake for it, the one answer TLS has before keys are agreed. Its
@@ -683,21 +715,46 @@ macro_rules! with_stream {
     ($self:ident, $s:ident => $e:expr) => {
         match &mut $self.conn {
             Conn::Client(c) => {
-                let mut $s = rustls::Stream::new(c, &mut $self.sock);
+                let mut sock: &TcpStream = &$self.sock;
+                let mut $s = rustls::Stream::new(c, &mut sock);
                 $e
             }
             Conn::Server(c) => {
-                let mut $s = rustls::Stream::new(c, &mut $self.sock);
+                let mut sock: &TcpStream = &$self.sock;
+                let mut $s = rustls::Stream::new(c, &mut sock);
                 $e
             }
         }
     };
 }
 
+/// When a record that comes in parts must be whole ([`TlsStream::read_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// By this moment.
+    At(Instant),
+    /// Within this of its first part, read first by the socket's own
+    /// timeout: the clock is read only once a part came and more is waited
+    /// for, and the bound is `At` that moment and this from then on --
+    /// written back to the caller's, who learns so when the record began
+    /// (fennec-http's `conn::Paced` runs a request's time from it). Left
+    /// `Within` where the record came whole, the clock never read, or where
+    /// the moment is past what `Instant` can name.
+    Within(Duration),
+}
+
 /// A connection whose handshake is done: plaintext in, plaintext out.
+///
+/// Its socket is one handle, shared ([`Self::socket`]) rather than
+/// duplicated: an option a caller sets beside the session -- a timeout,
+/// blocking or not -- is set on the handle the session reads and writes
+/// through. On Windows a `try_clone` is `WSADuplicateSocketW` and a new
+/// `SOCKET`, and the timeouts that bound a blocking `recv` and `send`
+/// are the handle's own: one set through the clone left the session's
+/// reads with none (docs/design/http.md#slow-clients).
 pub struct TlsStream {
     conn: Conn,
-    sock: TcpStream,
+    sock: Arc<TcpStream>,
 }
 
 impl fmt::Debug for TlsStream {
@@ -716,12 +773,41 @@ impl TlsStream {
         &self.sock
     }
 
+    /// The socket beneath as a handle to keep beside the session, for its
+    /// options, its address, a `poll` or a shutdown while the session is
+    /// borrowed elsewhere: the session's own handle, never a `dup`, so
+    /// what is set through it bounds the session's reads and writes on
+    /// every platform. Closed once the session and every such handle are
+    /// gone. Reading or writing it directly would break the stream.
+    pub fn socket(&self) -> Arc<TcpStream> {
+        Arc::clone(&self.sock)
+    }
+
     /// The protocol ALPN settled on, if any.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         match &self.conn {
             Conn::Client(c) => c.alpn_protocol(),
             Conn::Server(c) => c.alpn_protocol(),
         }
+    }
+
+    /// A dial's channel binding, RFC 5929's `tls-server-end-point`: the hash
+    /// of the certificate the server showed ([`server_end_point`]), which
+    /// SCRAM-SHA-256-PLUS signs into its exchange, so a bound sign-in
+    /// relayed through someone else's TLS fails at the server (one the
+    /// relay kept from binding, taking `-PLUS` out of the offer, does not:
+    /// fennec-wire's `channel_binding=require` refuses that). The one channel
+    /// binding PostgreSQL takes. The certificate is the one shown whatever
+    /// the dial checked of it: under an unverified dial it is whoever
+    /// answered, which is the point -- the server compares it with its own.
+    /// An error for an accepted connection, which has no server's.
+    pub fn server_end_point(&self) -> Result<Vec<u8>, Error> {
+        let shown = match &self.conn {
+            Conn::Client(c) => c.peer_certificates().and_then(|c| c.first()),
+            Conn::Server(_) => None,
+        };
+        let cert = shown.ok_or_else(|| config("the server showed no certificate"))?;
+        server_end_point(cert.as_ref())
     }
 
     /// Whether plaintext is ready to read, waiting up to `wait` for it:
@@ -771,8 +857,8 @@ impl TlsStream {
                     .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
             )?;
             let got = match &mut self.conn {
-                Conn::Client(c) => c.read_tls(&mut self.sock),
-                Conn::Server(c) => c.read_tls(&mut self.sock),
+                Conn::Client(c) => c.read_tls(&mut &*self.sock),
+                Conn::Server(c) => c.read_tls(&mut &*self.sock),
             };
             // What the read took in is read whatever the peer did since.
             unless_gone(self.sock.set_read_timeout(before))?;
@@ -793,17 +879,128 @@ impl TlsStream {
         }
     }
 
+    /// [`Read::read`], a record that comes in parts read by `by`, and a
+    /// second past it for every `rate` bytes of it that came in the call
+    /// (`0`: none): the first read of the socket waits as the socket's
+    /// timeout says, as `read`'s does, and each one after it in the call --
+    /// the record not whole yet, which `read` reads again inside one call
+    /// until plaintext comes -- the time left at most, the socket's timeout
+    /// put back after. A peer sending a record a byte at a time, each
+    /// inside the socket's timeout, held a `read` as long as it liked; a
+    /// served connection holds a request to a pace with this (fennec-http's
+    /// `conn::Paced`), and a record's bytes earn their time as they come,
+    /// as a plain request's do, where its plaintext counts only once the
+    /// record is whole: a 16 KiB record held to the bound alone was a floor
+    /// of 1.6 KiB a second within ten seconds. A wait run out is
+    /// `TimedOut`, the part that came kept in rustls's buffer for the next
+    /// read. Plaintext already buffered is read with no read of the socket,
+    /// as `read` reads it. A `By::Within` whose clock was read is left `By::At`
+    /// ([`By::Within`]).
+    pub fn read_by(&mut self, buf: &mut [u8], by: &mut By, rate: u64) -> io::Result<usize> {
+        let mut before = None;
+        let read = self.read_parts_by(buf, by, rate, &mut before);
+        if let Some(before) = before {
+            unless_gone(self.sock.set_read_timeout(before))?;
+        }
+        read
+    }
+
+    /// [`Self::read_by`]'s reads, `before` the socket's timeout where they
+    /// changed it.
+    fn read_parts_by(
+        &mut self,
+        buf: &mut [u8],
+        by: &mut By,
+        rate: u64,
+        before: &mut Option<Option<Duration>>,
+    ) -> io::Result<usize> {
+        // The bound, named once a part came: `Some(None)` past what the
+        // clock can name.
+        let mut named = None;
+        // Bytes read off the socket in this call, and whether the read
+        // waiting now waits under a timeout set here.
+        let (mut got, mut timed) = (0u64, false);
+        loop {
+            let (plain, closed) = self.processed()?;
+            if plain || closed {
+                return with_stream!(self, s => s.read(buf));
+            }
+            // What a post-handshake message asked to have sent (a key
+            // update's answer) goes out before the wait, as `read` sends it.
+            self.flush_tls()?;
+            if got > 0 {
+                // A bound past what the clock can name -- `Within`
+                // centuries, which `+` would panic at -- is none: the
+                // socket's own timeout a part, as `read`'s.
+                let at = *named.get_or_insert_with(|| match *by {
+                    By::At(at) => Some(at),
+                    By::Within(within) => {
+                        let at = Instant::now().checked_add(within);
+                        if let Some(at) = at {
+                            *by = By::At(at);
+                        }
+                        at
+                    }
+                });
+                let earned = match rate {
+                    0 => Duration::ZERO,
+                    rate => Duration::from_millis(got.saturating_mul(1000) / rate),
+                };
+                if let Some(at) = at.and_then(|at| at.checked_add(earned)) {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "a TLS record not whole in time",
+                        ));
+                    }
+                    if before.is_none() {
+                        *before = Some(self.sock.read_timeout()?);
+                    }
+                    // A zero timeout is refused by the socket, and is
+                    // "forever" to the kernel.
+                    unless_gone(
+                        self.sock
+                            .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
+                    )?;
+                    timed = true;
+                }
+            }
+            let read = match &mut self.conn {
+                Conn::Client(c) => c.read_tls(&mut &*self.sock),
+                Conn::Server(c) => c.read_tls(&mut &*self.sock),
+            };
+            match read {
+                // The end: told as `read` tells it, `close_notify` or not.
+                Ok(0) => return with_stream!(self, s => s.read(buf)),
+                Ok(n) => got += n as u64,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                // The time left ran out in the read (EAGAIN, or Windows'
+                // timeout): the bound's, told as one.
+                Err(e)
+                    if timed && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        "a TLS record not whole in time",
+                    ))
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Everything rustls holds to send, sent.
     fn flush_tls(&mut self) -> io::Result<()> {
         match &mut self.conn {
             Conn::Client(c) => {
                 while c.wants_write() {
-                    c.write_tls(&mut self.sock)?;
+                    c.write_tls(&mut &*self.sock)?;
                 }
             }
             Conn::Server(c) => {
                 while c.wants_write() {
-                    c.write_tls(&mut self.sock)?;
+                    c.write_tls(&mut &*self.sock)?;
                 }
             }
         }
@@ -846,8 +1043,8 @@ impl TlsStream {
         }
         self.sock.set_nonblocking(true)?;
         let got = match &mut self.conn {
-            Conn::Client(c) => c.read_tls(&mut self.sock),
-            Conn::Server(c) => c.read_tls(&mut self.sock),
+            Conn::Client(c) => c.read_tls(&mut &*self.sock),
+            Conn::Server(c) => c.read_tls(&mut &*self.sock),
         };
         self.sock.set_nonblocking(false)?;
         let ended = match got {
@@ -913,8 +1110,9 @@ impl TlsStream {
 
     /// The socket beneath, the TLS session let go of: once [`Self::close`]
     /// has sent its end, what is left is to read off what the peer still
-    /// sends before closing it.
-    pub fn into_socket(self) -> TcpStream {
+    /// sends before closing it. Shared with the handles [`Self::socket`]
+    /// gave out, open while any of them is.
+    pub fn into_socket(self) -> Arc<TcpStream> {
         self.sock
     }
 }
@@ -956,6 +1154,7 @@ mod tests {
     //! A private CA made as each test runs (rcgen, this crate's dev-dependency
     //! alone), a server on a port of its own, and the dials it is held to.
 
+    use super::end_point::{der, OID, SEQUENCE};
     use super::*;
     use rcgen::{
         date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, DnType,
@@ -1227,6 +1426,66 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::UnexpectedEof);
     }
 
+    /// The handle the system knows a socket by, to tell the session's own
+    /// from a `dup` of it.
+    #[cfg(unix)]
+    fn handle(s: &TcpStream) -> u64 {
+        use std::os::fd::AsRawFd;
+        s.as_raw_fd() as u64
+    }
+
+    #[cfg(windows)]
+    fn handle(s: &TcpStream) -> u64 {
+        use std::os::windows::io::AsRawSocket;
+        s.as_raw_socket()
+    }
+
+    /// A timeout and a mode set through [`TlsStream::socket`] bound a read
+    /// through the session: the session's own handle, where a `dup`'s are
+    /// its own on Windows and a read through the session waited with none.
+    /// The peer sends nothing, and ends only once told or at 20 s, so a
+    /// read the timeout did not bound reads that end, not a timeout. On
+    /// Linux and macOS a `dup` shares the socket's file description, and
+    /// the timings would pass over one: the handles' numbers, a dial's and
+    /// an accept's, tell it on every platform.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn what_is_set_through_the_socket_bounds_the_session() {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (done, wait) = mpsc::channel::<()>();
+        let served = thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let s = server.accept(sock).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(20));
+            assert_eq!(handle(&s.socket()), handle(s.get_ref()), "an accept's");
+        });
+        let mut s = dial(&trusting(&ca), port, "localhost").unwrap();
+        let within = Duration::from_millis(300);
+        let sock = s.socket();
+        assert_eq!(handle(&sock), handle(s.get_ref()), "a dial's");
+        sock.set_read_timeout(Some(within)).unwrap();
+        let started = Instant::now();
+        let e = s.read(&mut [0u8; 16]).unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+            "{e} after {took:?}"
+        );
+        // A timeout's wait, Windows' clock ticks of 15.6 ms aside: not a
+        // non-blocking read's at once.
+        assert!(took >= within - Duration::from_millis(50), "{took:?}");
+        sock.set_read_timeout(None).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let e = s.read(&mut [0u8; 16]).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::WouldBlock, "{e}");
+        assert_eq!(s.get_ref().read_timeout().unwrap(), None);
+        done.send(()).unwrap();
+        served.join().unwrap();
+    }
+
     /// A handshake trickled a byte at a time, each well inside the bound,
     /// is cut at the bound as a whole: a timeout a read held a thread for
     /// as long as the client kept sending.
@@ -1260,6 +1519,181 @@ mod tests {
         // The trickle goes on for ten seconds: cut well before it ends.
         assert!(took < Duration::from_secs(5), "{took:?}");
         trickle.join().unwrap();
+    }
+
+    /// A [`proxy`]'s gate: what the client sends passed on at once.
+    const AT_ONCE: usize = usize::MAX;
+    /// A [`proxy`]'s gate: a byte every 50 ms.
+    const TRICKLED: usize = usize::MAX - 1;
+
+    /// Between a client and the listener at `port`, a proxy passing on what
+    /// the client sends as `gate` says -- [`AT_ONCE`], [`TRICKLED`], or a
+    /// count: that many bytes at once, in one write, then nothing until the
+    /// gate changes. Its port. A test leaves the gate [`AT_ONCE`], so the
+    /// proxy ends with its client.
+    fn proxy(port: u16, gate: Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+        use std::sync::atomic::Ordering::SeqCst;
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front_port = front.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut from, _) = front.accept().unwrap();
+            let mut to = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            to.set_nodelay(true).unwrap();
+            let (mut back_from, mut back_to) = (to.try_clone().unwrap(), from.try_clone().unwrap());
+            thread::spawn(move || {
+                let _ = io::copy(&mut back_from, &mut back_to);
+            });
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = from.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let mut i = 0;
+                while i < n {
+                    let passed = match gate.load(SeqCst) {
+                        AT_ONCE => to.write_all(&buf[i..n]).map(|()| n - i),
+                        TRICKLED => {
+                            thread::sleep(Duration::from_millis(50));
+                            to.write_all(&buf[i..=i]).map(|()| 1)
+                        }
+                        0 => {
+                            thread::sleep(Duration::from_millis(5));
+                            Ok(0)
+                        }
+                        // Taken from the count only where the test did not
+                        // change the gate meanwhile.
+                        g => match gate.compare_exchange(g, g - g.min(n - i), SeqCst, SeqCst) {
+                            Ok(_) => {
+                                let k = g.min(n - i);
+                                to.write_all(&buf[i..i + k]).map(|()| k)
+                            }
+                            Err(_) => Ok(0),
+                        },
+                    };
+                    match passed {
+                        Ok(k) => i += k,
+                        Err(_) => return,
+                    }
+                }
+            }
+        });
+        front_port
+    }
+
+    /// A session through a [`proxy`] whose gate is `gate`: the server's
+    /// end, its socket's read timeout ten seconds, and the client's.
+    fn proxied(gate: &Arc<std::sync::atomic::AtomicUsize>) -> (TlsStream, TlsStream) {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front = proxy(listener.local_addr().unwrap().port(), Arc::clone(gate));
+        let client = trusting(&ca);
+        let dialed = thread::spawn(move || dial(&client, front, "localhost").unwrap());
+        let (sock, _) = listener.accept().unwrap();
+        let s = server.accept_within(sock, Duration::from_secs(10)).unwrap();
+        let c = dialed.join().unwrap();
+        s.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        (s, c)
+    }
+
+    /// A record trickled a byte at a time, each well inside the socket's
+    /// timeout, is a `read_by` timed out at its bound, where `read` read
+    /// on as long as the bytes came; the part that came is kept, and read
+    /// whole once the rest comes, the socket's timeout put back. `Within`
+    /// is left `At` the bound from the record's first part.
+    #[test]
+    fn read_by_bounds_a_record_that_comes_in_parts() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+        let (mut s, mut c) = proxied(&gate);
+
+        // 200 bytes of plaintext, a record of some 220: eleven seconds a
+        // byte at a time, each 50 ms inside the socket's ten.
+        gate.store(TRICKLED, SeqCst);
+        let sent: Vec<u8> = (0..200u8).collect();
+        c.write_all(&sent).unwrap();
+        c.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let mut by = By::Within(within);
+        let e = s.read_by(&mut buf, &mut by, 0).unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(e.kind(), ErrorKind::TimedOut, "{e}");
+        assert!(took >= within, "{took:?}");
+        // The clock was read once the first part came, after `started`.
+        match by {
+            By::At(at) => assert!(at >= started + within, "{:?}", at - started),
+            By::Within(_) => panic!("the bound its first part named was not written back"),
+        }
+        assert_eq!(
+            s.get_ref().read_timeout().unwrap(),
+            Some(Duration::from_secs(10)),
+            "the socket's timeout is put back"
+        );
+        // The rest at once: the record is read whole, its first part kept.
+        gate.store(AT_ONCE, SeqCst);
+        let by = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let n = s.read_by(&mut buf, &mut By::At(by), 0).unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, sent);
+
+        // A bound past what the clock can name is none, never a panic at
+        // `+`: a record of some 23 bytes in parts, read on under the
+        // socket's own timeout, its bytes earning nothing past it.
+        gate.store(TRICKLED, SeqCst);
+        c.write_all(b"x").unwrap();
+        c.flush().unwrap();
+        let mut by = By::Within(Duration::MAX);
+        let n = s.read_by(&mut buf, &mut by, 1024).unwrap();
+        assert_eq!(&buf[..n], b"x");
+        assert_eq!(by, By::Within(Duration::MAX));
+        gate.store(AT_ONCE, SeqCst);
+    }
+
+    /// A record's bytes earn it time as they come, `rate` of them a second:
+    /// one whose first 150 bytes came at once, and the rest not, is cut no
+    /// sooner than its bound and the 750 ms they earned at 200 a second --
+    /// with no rate, at its bound -- and read whole once the rest comes.
+    /// Its plaintext counts for nothing until it is whole: a 16 KiB record
+    /// held to the bound alone had to come at 1.6 KiB a second.
+    #[test]
+    fn read_by_earns_a_records_time_by_its_bytes() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+        let (mut s, mut c) = proxied(&gate);
+
+        // 150 bytes of a record of some 220 passed in one write: the
+        // server's first read of the record takes them whole.
+        gate.store(150, SeqCst);
+        let sent: Vec<u8> = (0..200u8).collect();
+        c.write_all(&sent).unwrap();
+        c.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let e = s
+            .read_by(&mut buf, &mut By::Within(within), 200)
+            .unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(e.kind(), ErrorKind::TimedOut, "{e}");
+        assert!(took >= within + Duration::from_millis(750), "{took:?}");
+
+        gate.store(AT_ONCE, SeqCst);
+        let by = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let n = s.read_by(&mut buf, &mut By::At(by), 200).unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, sent);
     }
 
     /// A client that finishes its handshake, writes and closes at once is
@@ -1493,6 +1927,129 @@ mod tests {
         }
         let e = Server::from_pem(&read("server.pem"), &read("other.key")).unwrap_err();
         assert!(e.to_string().contains("KeyMismatch"), "{e}");
+    }
+
+    /// A self-signed certificate's DER, signed with `alg`.
+    fn signed_with(alg: &'static rcgen::SignatureAlgorithm) -> Vec<u8> {
+        let key = KeyPair::generate_for(alg).unwrap();
+        let p = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        p.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    /// A DER element, its length written short or long as its size asks.
+    fn element(tag: u8, contents: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match contents.len() {
+            n @ 0..=0x7f => out.push(n as u8),
+            n @ 0x80..=0xff => out.extend_from_slice(&[0x81, n as u8]),
+            n => out.extend_from_slice(&[0x82, (n >> 8) as u8, n as u8]),
+        }
+        out.extend_from_slice(contents);
+        out
+    }
+
+    /// A certificate's shape with `alg` its signatureAlgorithm, the parts
+    /// the walk passes over empty.
+    fn shaped(alg: &[u8]) -> Vec<u8> {
+        let mut body = element(SEQUENCE, &[]);
+        body.extend_from_slice(&element(SEQUENCE, alg));
+        body.extend_from_slice(&element(0x03, &[0]));
+        element(SEQUENCE, &body)
+    }
+
+    fn oid(bytes: &[u8]) -> Vec<u8> {
+        element(OID, bytes)
+    }
+
+    /// RFC 5929's rule, as PostgreSQL's server and libpq follow it: the hash
+    /// of the signature's algorithm, SHA-256 for MD5 and SHA-1, and none
+    /// for a signature with no single hash, Ed25519's. The binding is that
+    /// hash of the certificate's whole DER.
+    #[test]
+    fn a_channel_binding_hashes_by_the_certificates_signature() {
+        use ring::digest::{digest, SHA256, SHA384};
+        let p256 = signed_with(&rcgen::PKCS_ECDSA_P256_SHA256);
+        assert_eq!(
+            server_end_point(&p256).unwrap(),
+            digest(&SHA256, &p256).as_ref()
+        );
+        let p384 = signed_with(&rcgen::PKCS_ECDSA_P384_SHA384);
+        let bound = server_end_point(&p384).unwrap();
+        assert_eq!(bound, digest(&SHA384, &p384).as_ref());
+        assert_eq!(bound.len(), 48);
+        let e = server_end_point(&signed_with(&rcgen::PKCS_ED25519)).unwrap_err();
+        assert!(e.to_string().contains("no single hash"), "{e}");
+
+        let rsa = |last: u8| {
+            let mut o = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, last];
+            o = oid(&o);
+            o.extend_from_slice(&element(0x05, &[]));
+            o
+        };
+        let len = |alg: &[u8]| end_point_hash(&shaped(alg)).map(|h| h.output_len());
+        assert_eq!(len(&rsa(4)), Ok(32), "md5WithRSAEncryption: SHA-256");
+        assert_eq!(len(&rsa(5)), Ok(32), "sha1WithRSAEncryption: SHA-256");
+        assert_eq!(len(&rsa(0x0b)), Ok(32));
+        assert_eq!(len(&rsa(0x0c)), Ok(48));
+        assert_eq!(len(&rsa(0x0d)), Ok(64));
+        assert!(len(&rsa(0x0e)).unwrap_err().contains("SHA-224"));
+        let ecdsa_sha1 = oid(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01]);
+        assert_eq!(len(&ecdsa_sha1), Ok(32));
+        let ecdsa_sha512 = oid(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04]);
+        assert_eq!(len(&ecdsa_sha512), Ok(64));
+        // RSASSA-PSS: the hash its parameters name, SHA-1's default (so
+        // SHA-256) where they name none.
+        let pss = |params: &[u8]| {
+            let mut o = oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a]);
+            o.extend_from_slice(&element(SEQUENCE, params));
+            o
+        };
+        let named = |last: u8| {
+            let hash = oid(&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, last]);
+            element(0xa0, &element(SEQUENCE, &hash))
+        };
+        assert_eq!(len(&pss(&named(2))), Ok(48));
+        assert_eq!(len(&pss(&named(3))), Ok(64));
+        assert_eq!(len(&pss(&[])), Ok(32));
+        let sha1 = element(
+            0xa0,
+            &element(SEQUENCE, &oid(&[0x2b, 0x0e, 0x03, 0x02, 0x1a])),
+        );
+        assert_eq!(len(&pss(&sha1)), Ok(32));
+        assert!(len(&pss(&named(4))).unwrap_err().contains("SHA-224"));
+        assert!(len(&oid(&[0x2b, 0x65, 0x70]))
+            .unwrap_err()
+            .contains("no single hash"));
+    }
+
+    /// The walk's lengths are the certificate's, which a dial that checked
+    /// nothing took from whoever answered: every cut of a certificate and
+    /// every byte of it changed is an error or a hash, never a panic nor a
+    /// read past its end; a length of more than four bytes, or one past
+    /// the bytes, is refused.
+    #[test]
+    fn a_certificate_cut_or_changed_never_panics_the_binding() {
+        for cert in [
+            signed_with(&rcgen::PKCS_ECDSA_P256_SHA256),
+            signed_with(&rcgen::PKCS_ED25519),
+        ] {
+            for n in 0..cert.len() {
+                assert!(server_end_point(&cert[..n]).is_err(), "cut at {n}");
+                for x in [0x00, 0x7f, 0x80, 0x84, 0x85, 0xff] {
+                    let mut changed = cert.clone();
+                    changed[n] = x;
+                    let _ = server_end_point(&changed);
+                }
+            }
+        }
+        assert_eq!(der(&[0x30, 0x85, 1, 0, 0, 0, 0]), None);
+        assert_eq!(der(&[0x30, 0x80]), None);
+        assert_eq!(der(&[0x30, 0x84, 0xff, 0xff, 0xff, 0xff, 0]), None);
+        assert_eq!(der(&[0x30, 0x02, 0x01]), None);
+        assert_eq!(
+            der(&[0x30, 0x01, 0x01, 0x02]),
+            Some((0x30, &[1u8][..], &[2u8][..]))
+        );
     }
 
     /// The certificates fennec-wire's tests serve and trust, in

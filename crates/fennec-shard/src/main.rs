@@ -12,6 +12,7 @@
 use fennec_http::crypto::ct_eq;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_shard::directory::Directory;
+use fennec_shard::exit::{self, Code};
 use fennec_shard::{Config, Router};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -28,7 +29,8 @@ usage: fennec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token.
                             Past loopback 32 bytes at least
-      --insecure            allow a non-loopback address without --token
+      --insecure            allow a non-loopback address without --token, and
+                            forwarding there to a node that asks no token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
       --tls-key <pem>       chain and its private key, both or neither. Read
                             at the start: a renewed certificate takes a
@@ -80,6 +82,15 @@ usage: fennec-shard [options]
                             a minute, 5 s at most; 0 turns it off. default: 100
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
+      --header-timeout <s>  a client's request's time from its first byte,
+                            and a second more for each KiB of it that came,
+                            head and body alike: slower than 1 KiB a second,
+                            it is answered 408 and its connection ended
+                            (0 = only the 60 s a read)  default: 10
+      --write-timeout <s>   the longest a write to a client, an answer or a
+                            relayed stream, waits for it to take any of it:
+                            a client reading nothing is let go within twice
+                            this (0 = never)  default: 30
       --upstream-timeout <s> connect/read bound towards a node  default: 60
       --fanout-timeout <s>  the longest a query across tenants (POST /_shard/query)
                             runs, every call to a node within it; a request
@@ -113,8 +124,9 @@ usage: fennec-shard [options]
       --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
                             to this collector: http://localhost:4318 (the
                             OpenTelemetry Collector, the Datadog Agent's OTLP
-                            receiver). No TLS: a collector on this host or
-                            network forwards over TLS. Also read from
+                            receiver), or https:// to dial one over TLS.
+                            A collector on this host or network may forward
+                            over TLS instead. Also read from
                             OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
                             OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
       --otlp-header <k=v>   a header on every post, such as an API key;
@@ -179,25 +191,31 @@ each 32 bytes too: a shorter one is warned of at the first request it sends.
 
 fn fail(msg: &str) -> ! {
     fennec_http::log!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// `<path>.lock` (`fennec_abi::lock`) for as long as the router runs, taken
 /// before the file is opened, as `fennec-server --file` takes its file's: a
 /// second router over the directory, or a shell over it, would corrupt it,
-/// and each takes the lock and is refused while another holds it. Refused,
-/// the router exits 1 having written nothing but the lock file, naming the
-/// holder where it can be told. The system lets the lock go at the exit.
+/// and each takes the lock and is refused while another holds it. Held by
+/// another, the router exits 1 having written nothing but the lock file,
+/// naming the holder where it can be told; a lock file that cannot be made
+/// -- a directory missing, or not the router's to write -- is a path that
+/// cannot be opened, 2, as a directory file that cannot be is. The system
+/// lets the lock go at the exit.
 fn hold_file(path: &str, what: &str) -> fennec_abi::lock::FileLock {
     fennec_abi::lock::hold(path).unwrap_or_else(|e| {
-        let who = match e {
-            fennec_abi::lock::Refused::Held => fennec_abi::lock::holder(path)
-                .filter(|h| h.is_known())
-                .map_or(String::new(), |h| format!(" (held by {h})")),
-            _ => String::new(),
+        let (who, code) = match e {
+            fennec_abi::lock::Refused::Held => (
+                fennec_abi::lock::holder(path)
+                    .filter(|h| h.is_known())
+                    .map_or(String::new(), |h| format!(" (held by {h})")),
+                Code::Failed,
+            ),
+            fennec_abi::lock::Refused::Io(_) => (String::new(), Code::Refused),
         };
         fennec_http::log!("could not open {what} {path}: {e}{who}");
-        std::process::exit(1);
+        exit::now(code);
     })
 }
 
@@ -248,6 +266,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut tls_cert: Option<String> = None;
     let mut tls_key: Option<String> = None;
+    // The files the flags name, read or made once the whole line is read
+    // and none of it refused: opened as each flag was read, `--audit
+    // --help <no such flag>` made a file named `--help` before the flag
+    // after it was refused, and `--tls-ca` read one.
+    let mut tls_ca: Option<String> = None;
+    let mut audit_paths: Vec<String> = Vec::new();
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -268,22 +292,14 @@ fn main() {
             "--insecure" => cfg.insecure = true,
             "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
             "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
-            // Before any dial: every one is made after the flags are read.
-            "--tls-ca" => {
-                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
-            }
+            "--tls-ca" => tls_ca = Some(next(&mut i, "--tls-ca")),
             "--http-cors" => cfg.cors = Some(next(&mut i, "--http-cors")),
             "--studio" => {
                 let s = fennec_http::studio::Studio::new(fennec_http::studio::ASSETS, None)
                     .unwrap_or_else(|e| fail(&e));
                 cfg.studio = Some(Arc::new(s));
             }
-            "--audit" => {
-                let p = next(&mut i, "--audit");
-                if let Err(e) = fennec_http::audit::open(std::path::Path::new(&p)) {
-                    fail(&format!("could not open {p}: {e}"));
-                }
-            }
+            "--audit" => audit_paths.push(next(&mut i, "--audit")),
             "--auth-delay" => {
                 fennec_http::audit::set_delay(number(next(&mut i, "--auth-delay"), "--auth-delay"))
             }
@@ -320,6 +336,14 @@ fn main() {
             }
             "--max-body" => {
                 cfg.max_body = (number(next(&mut i, "--max-body"), "--max-body") as usize) << 20
+            }
+            flag @ ("--header-timeout" | "--write-timeout") => {
+                let secs = number(next(&mut i, flag), flag);
+                let bound = (secs > 0).then(|| Duration::from_secs(secs));
+                match flag {
+                    "--header-timeout" => cfg.header_timeout = bound,
+                    _ => cfg.write_timeout = bound,
+                }
             }
             "--upstream-timeout" => {
                 let secs = number(next(&mut i, "--upstream-timeout"), "--upstream-timeout");
@@ -420,17 +444,13 @@ fn main() {
     cfg.tls = fennec_http::conn::from_flags(tls_cert.as_deref(), tls_key.as_deref())
         .unwrap_or_else(|e| fail(&e));
 
-    match tracing.settings("fennec-shard") {
-        Err(e) => fail(&e),
-        Ok(None) => {}
-        Ok(Some(s)) => {
-            let (url, sample) = (s.endpoint.url(), s.sample);
-            if let Err(e) = fennec_http::trace::install(s) {
-                fail(&format!("could not start the tracing thread: {e}"));
-            }
-            fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
-        }
-    }
+    // Read with the line, refused with it; the thread is started once the
+    // files the flags name were read: started before, a `--tls-ca` or an
+    // `--audit` refused (2) printed `tracing:` and started an exporter
+    // first, where fennec-server reads them before it starts tracing.
+    let tracing = tracing
+        .settings("fennec-shard")
+        .unwrap_or_else(|e| fail(&e));
 
     // An empty key would let anyone make the entry's mark, and a token
     // the entry's Worker holds that this router takes for something else
@@ -510,6 +530,24 @@ fn main() {
             "--global names the global router to a region's router (--region); a router of the \
              global directory follows its primary with --replica-of",
         );
+    }
+
+    // The CAs before any dial, the audit log before any request: each once
+    // every flag was read and the line as a whole was not refused.
+    if let Some(pem) = &tls_ca {
+        fennec_http::dial::trust_ca(pem).unwrap_or_else(|e| fail(&e));
+    }
+    for p in &audit_paths {
+        if let Err(e) = fennec_http::audit::open(std::path::Path::new(p)) {
+            fail(&format!("could not open {p}: {e}"));
+        }
+    }
+    if let Some(s) = tracing {
+        let (url, sample) = (s.endpoint.url(), s.sample);
+        if let Err(e) = fennec_http::trace::install(s) {
+            fail(&format!("could not start the tracing thread: {e}"));
+        }
+        fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
     }
 
     // Held until the process ends, every way it ends.
@@ -631,6 +669,6 @@ fn main() {
     }
     if let Err(e) = router.serve_on(listener) {
         fennec_http::log!("router error: {e}");
-        std::process::exit(1);
+        exit::now(Code::Failed);
     }
 }

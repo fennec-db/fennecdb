@@ -8,6 +8,9 @@
 // ids it sent, so a row the token may not read never reaches the page, nor
 // does the deletion of one. A shape's seed is every row it holds, so one
 // past `MOST` rows is refused here before it is opened: narrow it first.
+// The server sends a long seed in parts and keeps none of it whole, but the
+// view keeps every row it shows, and puts each written row first in its
+// order, a pass over every row a write: the bound is the page's.
 
 import { h, fill, number } from './dom.js';
 import { Grid } from './grid.js';
@@ -142,11 +145,17 @@ export function mount(host, ctx) {
   function apply(ev) {
     const now = Date.now();
     if (ev.type === 'seed') {
-      rows = new Map(ev.rows.map((r) => [r.id, r]));
-      order = ev.rows.map((r) => r.id).sort((a, b) => b - a);
-      marks.clear();
+      // A long seed comes in parts: the first replaces what the view held,
+      // each after it adds, and the last shows them.
+      if (!ev.part) {
+        rows = new Map();
+        marks.clear();
+      }
+      for (const r of ev.rows) rows.set(r.id, r);
+      if (ev.more) return;
+      order = [...rows.keys()].sort((a, b) => b - a);
       seq = ev.seq;
-      entry(ev.seq, `seed, ${number(ev.rows.length)} ${ev.rows.length === 1 ? 'row' : 'rows'}`);
+      entry(ev.seq, `seed, ${number(rows.size)} ${rows.size === 1 ? 'row' : 'rows'}`);
     } else {
       seq = ev.seq;
       let made = 0;

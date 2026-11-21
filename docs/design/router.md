@@ -65,6 +65,98 @@ refusal at the node, so it needs no mark of its own. It is never the
 router that judges a forward by what a client sent: the node asks the
 name, and a client can only make its own request refused.
 
+A router whose listener is not loopback alone forwards nothing to a node
+asking no token, and marks what it forwards by its listener's class
+(`open_node`, `mark_of`): [http.md](http.md#open-servers) holds why and
+how.
+
+## Tenants it does not place
+
+**A caller the router cannot vouch for learns no more of which tenants
+exist from the router than from a node** (`Router::elsewhere`,
+`vouches_for`, `stand_in`; the G14 review, finding 2). A node asks the
+token before it looks a tenant up, so that a 404 against a 401 tells a
+caller holding nothing nothing (`route_tenant`), and every refusal of a
+hook's event before it verifies is one 401, "whatever is missing: the
+tenant". The router answered a tenant it does not place itself, before
+any token was asked: 404 "no tenant `x` in the directory", or for one at
+home in a region with no router recorded a 503 naming the region, while a
+tenant it held was its node's 401 -- the same oracle, through the router.
+Now a router with `--token` tells that only to a caller it can vouch
+for: another router relaying under the `--token` both hold, the global
+entry naming its client under `--entry-token`, and a caller holding its
+own `--token` -- the entry's 404 and 503s, which it reads to send a
+request on, are as they were. Anyone else's request goes to a node of
+the router's own directory in the tenant's place, chosen by the tenant's
+name: the node answers it as it answers a tenant it holds -- the token's
+401, a JWT bound to another tenant's 403, a hook's one 401 after the same
+two HMACs, a hook's 405 for another method, the replication token's 401 --
+and to a token that does reach the tenant, the 404 a node gives a tenant
+it holds no file of; the refusal waits at the router by its client as any
+node's does. Answering the 401 at the router instead, written to look
+like a node's, was the first shape: a JWT bound to a third tenant told
+them apart (the node's 403 for a tenant it holds, the router's 401 for
+one it does not), as would a token the router cannot verify of any kind,
+and the hook's refusal would come back without the node's work. A router
+with no nodes says 404 as before, there being no tenant to keep from
+anyone, and a standby whose maps have not arrived says 503 of every
+tenant alike. A router with no `--token` lists every tenant in
+`/_shard/tenants` to whoever reaches it, and answers as before. Its cost
+is a forward where a 404 was, for a tenant no client of the app sends.
+Not closed: the time a forward takes against the time a node takes to
+answer for a tenant it holds is one round trip either way, but a node
+that is down answers a tenant it holds 502 and a missing one the stand-in's
+401.
+
+**A stand-in's request opens no file** (`tenants::STAND_IN`,
+`region::stand_in_target`; the review of the G14 fixes, finding A). Sent
+`/t/x/...` as it came, the node the stand-in picked opened any `x.fennec`
+in its directory for a token reaching `x` -- the node's own token, an
+unbound JWT, a deleted tenant's user whose JWT had not expired -- and a
+file of a name the router does not place is a normal state on a node: a
+deleted tenant's replica or standby copy that would not come off, a
+create taken back whose delete failed ([tenants.md](tenants.md)). Through
+the router they read it, and on a node without leases wrote into it,
+where before the stand-in the router answered 404. So the stand-in names
+the tenant past `~` (`/t/~x/...`), a character no tenant's name holds
+(`check_name`): no tenant can be made under it, and no node opens a file
+for it. A node reads the tenant past the mark, asks every credential of
+it as of a tenant it holds -- the token and its tenant claim, a hook's
+signature, the replication token -- and answers as for one it holds no
+file of, 404 with `Fennec-Tenant: absent`, before `Tenants::get`; what
+the stand-in is for, a node's own status, body, headers and wait, holds
+for every caller who could not reach the tenant, and a caller who could
+is told it is not there, as the router told it before. A marked header
+was the other shape: a node from before reads no header it does not
+know, and during a rolling upgrade, routers first, it would have opened
+the file; it refuses `~x` as a name, after its token, so a token reaching
+`x` is told 400 or, a JWT bound to `x`, 403 by such a node, and nothing
+is opened. A client sending `/t/~x/` itself, to a router or a node, is
+answered 404 after its own credentials, the file unopened.
+`tests/refusals.rs`'s `a_stand_in_opens_no_file_its_router_does_not_place`
+leaves `nosuch.fennec` on the stand-in's node, written and closed, and
+sends a read, a listing and a write through the router with the node's
+token and a JWT bound to `nosuch`: each 404, the node holding the file
+unopened and its row count as it was. Before the mark, `GET
+/t/nosuch/left` answered the leftover's row, `[{"id":1,"n":1}]`. The same
+test holds a tenant at home in a region with no router recorded: 503
+naming the region to the router's own token, acme's 401 to anyone else.
+
+A tenant's home is named (`Fennec-Home`) to the same callers alone
+(`region::home_asked`): named to anyone asking, a 401 carrying it and one
+not told the tenants apart, and told the home of each. A router relaying
+for a caller it cannot vouch for drops the header from what it sends the
+home's router (`relay_send`), which would name it to the relaying router.
+The global entry learns homes as it did with `ENTRY_TOKEN` set, which
+names its clients; one without it learns none, and every request of a
+tenant it has not heard costs the one relay the nearest region's router
+makes. `tests/refusals.rs`'s
+`a_router_tells_no_one_it_cannot_vouch_for_which_tenants_exist` holds a
+missing tenant's status, body, headers and wait to acme's for no token, a
+guessed one, a JWT of a third tenant, `Fennec-Home: 1`, a hook's event, a
+hook's `GET` and a replication token, and the router's token and the
+entry's mark told the truth.
+
 ## Pooled connections
 
 **The router looks at a pooled connection before it writes, and sends a
@@ -342,6 +434,23 @@ answers for a TLS one; its entry reads the scheme once, as it is made,
 and the pool, the exchange and an answer's reads are generic over the
 transport (`upstream::Wire`), so a plain request runs no match on it
 ([http.md](http.md#dialing-https)).
+
+A client's side of the router is held in time as a node's is
+([http.md](http.md#slow-clients)): its requests read through
+`fennec_http::conn::Paced` -- a request within `--header-timeout` of its
+first byte and a second more for each KiB that came, else the router's
+own 408, nothing sent on -- and `--write-timeout` set once a
+connection, so an answer the client takes nothing of, and a node's stream
+relayed to a client that stopped reading (`io::copy`, which held a router
+thread for as long before), end the connection. Every 408 and every cut
+is the router's alone: a request it did not read whole is sent to no
+node, and a node's answer it could not hand on is its own connection's to
+cut (`relayed.is_err()`, no `close_notify` over TLS); each is counted in
+`fennec_router_client_timeouts_total` by the bound it ran past. The router's
+`--max-connections` is a thousand, a node's a hundred: a slot held by a
+slow client is the router's to give back, not a node's. fennec-shard's
+`tests/slow_clients.rs` is fennec-http's three tests, through a router of
+one slot in front of a node.
 
 ## Failover cuts
 

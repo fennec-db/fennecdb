@@ -1588,6 +1588,46 @@ data: {"error":"the token has expired","status":401,"code":"token_expired"}"#
     );
 }
 
+/// An `exp` past what milliseconds in a `u64` hold -- `i64::MAX` seconds,
+/// `u64::MAX`, `1e300` -- is the furthest instant, on a request and on a
+/// stream: multiplied by 1000 it panicked the connection's thread in a
+/// debug build, its request never answered, and wrapped in a release build,
+/// where the stream it opened was ended at once as expired.
+#[test]
+fn an_exp_past_the_range_is_the_furthest_instant_on_a_request_and_a_stream() {
+    let n = start();
+    for exp in ["9223372036854775807", "18446744073709551615", "1e300"] {
+        let far = n.token(&format!(r#"{{"sub":"alice","exp":{exp}}}"#));
+        let (status, body) = n.call(Some(&far), "GET", "/notes", "");
+        assert_eq!(status, 200, "exp {exp}: {body}");
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        write!(
+            s,
+            "GET /notes/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {far}\r\n\r\n"
+        )
+        .unwrap();
+        let mut heard = String::new();
+        let seed = |h: &str| h.contains("event: seed");
+        listen(&mut s, &mut heard, &seed, Duration::from_secs(30));
+        assert!(heard.contains("event: seed"), "exp {exp}: {heard}");
+        // A write of alice's reaches the stream: it was not ended.
+        let title = format!("far {exp}");
+        let made = n.call(
+            Some(ROOT),
+            "POST",
+            "/notes",
+            &format!(r#"{{"owner":"alice","title":"{title}"}}"#),
+        );
+        assert_eq!(made.0, 201, "{}", made.1);
+        let changed = |h: &str| h.contains("event: change") || h.contains("event: error");
+        listen(&mut s, &mut heard, &changed, Duration::from_secs(30));
+        assert!(heard.contains("event: change"), "exp {exp}: {heard}");
+        assert!(!heard.contains("token_expired"), "exp {exp}: {heard}");
+    }
+}
+
 /// A replica told an expired token and any other refusal alike could not
 /// refresh at the one without a second thought, nor be careful at the
 /// others. A token this server took until its `exp` is refused past it with
@@ -2539,4 +2579,101 @@ fn a_rule_over_a_path_checks_writes_by_the_path() {
         n.query(ROOT, "get docs select title order id").1,
         r#"[{"title":"z"},{"title":"b"}]"#
     );
+}
+
+/// `--jwt-keys`' file read again as it changes, through a request: a
+/// rotation put in place by a rename is taken at a look, the key it took
+/// out refusing its tokens from then on; a file that does not parse leaves
+/// the keys read before, and the next one written is read all the same.
+/// Each waits for the server to take the file, a request at a time.
+#[test]
+fn a_jwks_file_rotated_by_a_rename_is_read_through_a_request() {
+    fennec_http::audit::set_delay(0);
+    let dir = std::env::temp_dir().join(format!(
+        "fennec-jwks-route-{}-{}",
+        std::process::id(),
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let oct = |kid: &str, byte: u8| {
+        let k = fennec_http::crypto::b64url_encode(&[byte; 32]);
+        format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+    };
+    let path = dir.join("keys.json");
+    // A file written beside it and renamed over it, as the docs say, its
+    // time set apart from the one before by whole seconds.
+    let put = |name: &str, text: &str, ahead: u64| {
+        let next = dir.join(name);
+        std::fs::write(&next, text).unwrap();
+        let at = std::time::SystemTime::now() + Duration::from_secs(ahead);
+        std::fs::File::options()
+            .write(true)
+            .open(&next)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        std::fs::rename(&next, &path).unwrap();
+    };
+    let minter = |kid: &str, byte: u8| {
+        let file = dir.join(format!("{kid}.json"));
+        std::fs::write(&file, oct(kid, byte)).unwrap();
+        Access::from_jwks(&file, "")
+            .unwrap()
+            .mint(r#"{"sub":"alice"}"#)
+            .unwrap()
+    };
+    let (old, new, third) = (minter("old", 1), minter("new", 2), minter("third", 3));
+    put("first.json", &oct("old", 1), 0);
+    let access = Arc::new(Access::from_jwks(&path, POLICY).unwrap());
+    let mut db = Database::new();
+    db.execute(
+        &fennec_ql::parse_one("create collection notes (owner text @hash, title text)").unwrap(),
+    )
+    .unwrap();
+    let server = Server::new(
+        Arc::new(RwLock::new(db)),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            access: Some(access),
+            ..Config::default()
+        },
+    );
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let get = |token: &str| -> u16 {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(
+            s,
+            "GET /notes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out.get(9..12).and_then(|c| c.parse().ok()).unwrap_or(0)
+    };
+    // Waits, bounded, for `token` to be answered `status`.
+    let until = |token: &str, status: u16, what: &str| {
+        let t = Instant::now();
+        while get(token) != status {
+            assert!(t.elapsed() < Duration::from_secs(60), "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    assert_eq!(get(&old), 200);
+    assert_eq!(get(&new), 401);
+    put("second.json", &oct("new", 2), 5);
+    until(&new, 200, "the rotation was not read");
+    assert_eq!(get(&old), 401, "the key taken out still verifies");
+    // A file that does not parse, then the next whole one.
+    put("broken.json", r#"{"keys":[{"kty":"oct","#, 10);
+    assert_eq!(get(&new), 200, "the keys read before stay");
+    put("third.json", &oct("third", 3), 15);
+    until(&third, 200, "the file after a broken one was not read");
+    assert_eq!(get(&new), 401);
+    let _ = std::fs::remove_dir_all(&dir);
 }

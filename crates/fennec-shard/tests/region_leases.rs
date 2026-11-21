@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const ROOT: &str = "routers-token";
+/// The global entry's token (`--entry-token`): a home is named to the
+/// entry alone, which names its client under it.
+const ENTRY: &str = "the-global-entrys-token";
 const DIRS: &str = "directory-replication";
 const REPL: &str = "tenant-replication";
 /// The lease the routers grant. A renewal comes every third of it, and a
@@ -59,6 +62,10 @@ fn node(tag: &str) -> Node {
         addr: "127.0.0.1:0".into(),
         admin_token: Some(format!("adm-{tag}")),
         sync_on_write: true,
+        // It asks no token, and a request another region's router relayed,
+        // or the entry named the client of, is the network's: a node asking
+        // none answers it only under `--insecure`.
+        insecure: true,
         ..fennec_http::Config::default()
     };
     let server = fennec_http::Server::with_tenants(Arc::new(tenants), cfg);
@@ -194,6 +201,7 @@ fn config(region: Option<&str>, global: Option<String>) -> Config {
     Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
+        entry_token: Some(ENTRY.into()),
         // Bounds every call the routers make, the relays among them: short,
         // a create relayed through a loaded machine came back 503.
         upstream_timeout: Duration::from_secs(60),
@@ -286,13 +294,31 @@ fn query(port: u16, tenant: &str, sql: &str) -> (u16, String) {
 }
 
 /// A count of `tenant`'s notes through the router at `port`, asking for the
-/// tenant's home region (`Fennec-Home`) or not: the status and the region
+/// tenant's home region (`Fennec-Home`) as the global entry does, its
+/// client named (`Fennec-Client`), or not asking: the status and the region
 /// the answer names.
 fn home(port: u16, tenant: &str, ask: bool) -> (u16, Option<String>) {
+    let asked = match ask {
+        true => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string();
+            let mark = fennec_http::audit::EntryKey::new(ENTRY).mark("127.0.0.1", &secs);
+            let mark = std::str::from_utf8(&mark).unwrap();
+            format!("Fennec-Client: 127.0.0.1 {secs} {mark}\r\nFennec-Home: 1\r\n")
+        }
+        false => String::new(),
+    };
+    home_with(port, tenant, &asked)
+}
+
+/// [`home`], `asked` the request's headers.
+fn home_with(port: u16, tenant: &str, asked: &str) -> (u16, Option<String>) {
     let body = r#"{"query":"get notes count"}"#;
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
-    let asked = if ask { "Fennec-Home: 1\r\n" } else { "" };
     write!(
         s,
         "POST /t/{tenant}/query HTTP/1.1\r\nHost: localhost\r\n{asked}Content-Length: {}\r\n\
@@ -742,7 +768,9 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
 /// and so is it where the placing router cannot reach the node. One that
 /// does not ask is told nothing: the global entry
 /// (integrations/cloudflare/entry) learns where to send a tenant from it.
-/// Every answer carries the router's mark (`Fennec-Shard`).
+/// Nor is one whose asker the routers cannot vouch for: the entry names
+/// its client under `--entry-token`. Every answer carries the router's
+/// mark (`Fennec-Shard`).
 #[test]
 fn a_tenants_home_is_named_to_a_request_asking_for_it() {
     let w = World::new("home");
@@ -764,6 +792,15 @@ fn a_tenants_home_is_named_to_a_request_asking_for_it() {
     assert_eq!(home(w.global, "acme", true), (200, us.clone()));
     assert_eq!(home(w.global, "acme", false), (200, None));
     assert_eq!(home(w.us, "acme", false), (200, None));
+    // Asked by a caller no router can vouch for -- no entry's mark -- the
+    // home is named to no one, and a relaying router asks none of the
+    // home's router for it: it told a caller holding nothing which names
+    // were tenants, and where.
+    assert_eq!(home_with(w.us, "acme", "Fennec-Home: 1\r\n"), (200, None));
+    assert_eq!(
+        home_with(w.global, "acme", "Fennec-Home: 1\r\n"),
+        (200, None)
+    );
     until("the standby's directory arrives", || {
         home(w.standby, "acme", true) == (200, us.clone())
     });
