@@ -197,11 +197,12 @@ repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are
-but `size (browser module)`, which only runs on a pull request and so would
-never report in the merge queue, and a job is left out until it has passed
-on main: `perf (instructions)` until the gate's holdout has
-([benchmarks.md](benchmarks.md#the-gate)), a new job until the merge group
-that brought it has. A job skipped by an `if:` reports success
+-- 38 checks since 2026-11-21 -- but `size (browser module)`, which only
+runs on a pull request and so would never report in the merge queue, and a
+job is left out until it has passed on main: a new job until the merge
+group that brought it has. `perf (instructions)` was left out until the
+gate's holdout had a green run on main, and is required since 2026-11-21
+([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so

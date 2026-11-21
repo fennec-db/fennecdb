@@ -238,7 +238,7 @@ at the merge's first parent, which is a pull request's base branch or the
 commit a merge group queues onto, and in the change -- and counts each of
 its workloads under valgrind's callgrind, five runs a side, each run
 tallying what its loop asked of the allocator. `perf (instructions)`
-judges the counts, and is the check a merge may require. A side's figure
+judges the counts, and is the check a merge requires (since 2026-11-21). A side's figure
 is the median of its runs' instructions, each run's calls into the
 allocator counted at what the base's runs paid a call (*The allocator,
 priced*, below), and its bytes the median of what its runs asked the
@@ -675,9 +675,11 @@ no pair names a metric that may fail. The 0.29% `http-scoped-get` spreads
 by as counted on #474's first head is the allocator's cost a call, 178.7
 or 180.0 instructions by the heap's layout, which the judged figure prices
 at the base's, 178.1 or 178.5 a run, pooled: with 53 calls an op on both
-sides, only 231 a call would bring it to +1%. `perf (instructions)` stays
-a check no merge requires until the corrected workflow, on main, has a
-green run.
+sides, only 231 a call would bring it to +1%. `perf (instructions)` stayed
+a check no merge required until the corrected workflow had a green run on
+main (the holdout's, 43709604383); since 2026-11-21 it is required, one of
+the 38 checks every merge group passes, `size (browser module)` alone left
+out ([conventions.md](conventions.md#reruns)).
 
 *Why fennec-http's examples.* The program reaches every crate a request
 does and no more. In `fennec-bench`, its bundled SQLite, the MongoDB
