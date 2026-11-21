@@ -159,7 +159,17 @@ fn fennec_verifies_and_restores_every_release_s_files() {
     for set in sets() {
         let name = set_name(&set);
         let scratch = Scratch::new(&format!("cli-{name}"));
-        let key = set.join("key");
+        // The set's key as `fennec key` left it, its owner's alone: a
+        // checkout keeps no mode but the executable bit, and a key file
+        // others may read is warned of on every command that reads it,
+        // which the release's lines never held.
+        let key = scratch.0.join("key");
+        std::fs::copy(set.join("key"), &key).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let key_flag = Path::new("--key-file");
 
         // Every database file, the sync log's writes put back first: a

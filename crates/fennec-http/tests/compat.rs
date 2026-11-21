@@ -74,7 +74,10 @@ fn sealed_whole(bytes: &[u8], file: &str, key: &Key, seen: &mut Seen) -> Vec<u8>
             bytes.len()
         );
     }
-    seal::open_whole(key, bytes).unwrap_or_else(|e| panic!("{file}: {e}"))
+    let (plain, binding) = seal::open_whole(key, bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
+    // Version 1 says nothing of what the file is: a version 3 head would.
+    assert!(binding.is_none(), "{file}: a release's file read as bound");
+    plain
 }
 
 /// Every file of an archive by its name -- `history`, each base image
@@ -186,13 +189,17 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) -> Vec<(u64
             .unwrap();
         let plain = match sealed {
             true => {
-                walk::seal_frames(bytes, &file);
-                let (plain, end, frames, _) =
+                let frames = walk::seal_frames(bytes, &file).len();
+                let opened =
                     seal::open_appended(key, bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
-                assert_eq!(end, bytes.len(), "{file}: a frame cut short");
+                assert_eq!(opened.end, bytes.len(), "{file}: a frame cut short");
                 assert!(frames > 1, "{file}: {frames} frames");
+                assert!(
+                    opened.binding.is_none(),
+                    "{file}: a release's segment read as bound"
+                );
                 seen.shape("seal: appended frames");
-                plain
+                opened.plain
             }
             false => bytes.clone(),
         };
