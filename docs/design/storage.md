@@ -338,7 +338,57 @@ this writes.
 
 *What it costs.* A byte a document for each dropped place a field
 follows, for the collection's life, and a value every read of such a field
-passes: MEASURED_STORAGE
+passes. Counted (`crates/fennec-core/examples/places.rs`, macOS, the
+instructions an op over 8 identities a build, 7 runs each,
+[benchmarks.md](benchmarks.md#instruction-counts)) against main's build
+over the same rows stripped as its compact left them -- `x (a int, b text,
+c int, d text)`, 100 000 rows read into memory, `b` dropped and the
+collection compacted:
+
+| | stripped (main) | kept (this) | |
+|---|---|---|---|
+| bytes a document, 1 / 4 / 16 text fields dropped | 43.04 | 44.04 / 47.04 / 59.04 | +1 a place |
+| a get by id | 13 419 | 13 446 | inside the draw |
+| a scan by `c` with a limit, every row read | 43.92 M | 45.75 M | +4.17%, 18 a row |
+| a plain `get` of 100 rows as JSON | 234 082 | 238 783 | +2.01%, 47 a row |
+| a put over a row | 11 959 | 12 038 | +79, +0.66% |
+
+A read passing a dropped place as any value calls the skip for it, 34
+instructions of its frame and its match and 10 of the loop's by a trace:
+the scan paid 44 a row (+8.7%). A `null` passed by its byte
+(`codec::skip_passing`) is a compare and an add. A filter over a
+collection holding a dropped place before a field it reads reads its
+fields out of line with its paths (`Store::read_fields_passing`, a second
+copy of the reader), through the branch every filter takes for its paths
+already: 18 a row. `Schema::read_doc` passes only dropped places in its
+skip, so it passes them so at no cost to another collection: a put's read
+of the row it writes over took the put from +119 to +53 and +79 in two
+counts, the rest the
+`null` it writes, each field's place worked out and a byte more framed and
+copied. Asked anywhere every collection's rows go
+through -- in the reader's loop, or in the JSON writer's, where a page of
+another collection paid 150 instructions held as a bool across its rows
+and 518 asked of the collection -- the test cost every other collection's
+reads, so the JSON writer passes a dropped place as any value. With no
+dropped place, the same reads and the put counted inside the draw of
+main's (-81, -403, +33, -12). A compact:
+
+| | stripped (main) | kept (this) | |
+|---|---|---|---|
+| `x` beside the database, a tenth of its rows written over, after a compact in the same process | 81.12 M | 81.49 M | +0.46%: a byte more a row to copy |
+| the same, the first after an open | 82.87 M | 103.82 M | +25.3%: the walk, 209 a row |
+| the perf gate's `file-compact`, no dropped place | 10.50 M | 10.51 M | inside the draw; `p`'s too (+77 of 81.09 M) |
+| two collections a field dropped each, 2 x 500 000 rows mapped, under the lock, peak footprint above the open | 2 480 M, 44.8 MB | 2 053 M, 37.7 MB | the first after the drop |
+| the same, 2 x 200 000 rows read into memory | 729 M, 7.3 MB | 570 M, 7.2 MB | |
+
+The first compact after a drop writes the documents holding a value at the
+place again, where the strip wrote every document again. The first after
+an open walks every document of a collection holding a dropped place, a
+value at a time as far as its last one, copying nothing where it finds
+only `null`s (`schema::reclaims`); building the copy to compare took that
+compact to +47%; walked, +25%, with no lock held beside the database.
+The store notes the places it reclaimed, so the compacts
+after it walk nothing; an open forgets them, the note being in no file.
 
 *How many places.* A collection holds `schema::MAX_PLACES`, 4 096, over
 its life: its fields and its dropped ones. An `alter ... add field` past
