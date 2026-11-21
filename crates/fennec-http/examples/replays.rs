@@ -16,7 +16,8 @@
 //!     server's table after, without a key and with one of its own: what a
 //!     key costs a scoped caller -- its key kept under its caller
 //!     (`Scope::authority`), where the server's token keeps it under none.
-//!     A scoped token puts no document by id.
+//!     A scoped token puts no document by id. A third argument is the
+//!     token's `sub`, `bench` unless given.
 //!   * `batch`: N writes of 100 documents each (`put t [{id: 1, n: $1},
 //!     ...]`, the same 100 ids written over), no key: a record of 100
 //!     frames, where `put` writes one of one.
@@ -78,6 +79,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "put".into());
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
+    // The scoped modes' `sub`, `bench` unless given: a key is kept under
+    // its caller, whose length is the subject's before G14 and 32 hex
+    // digits after, so a short `sub` reads the longer key's bytes as a
+    // cost -- an identity provider's is 28 to 36 characters (`auth0|` and
+    // 24 hex digits, a UUID).
+    let sub = args.next().unwrap_or_else(|| "bench".into());
     let dir = std::env::temp_dir().join(format!("fennec-replays-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.fennec");
@@ -88,7 +95,7 @@ fn main() {
     });
     let jwt = access
         .as_ref()
-        .map(|a| a.mint(r#"{"sub":"bench"}"#).unwrap());
+        .map(|a| a.mint(&format!(r#"{{"sub":"{sub}"}}"#)).unwrap());
     let cfg = Config {
         sync_on_write: mode == "replay",
         // The collection is made by the server's own token, the writes by
