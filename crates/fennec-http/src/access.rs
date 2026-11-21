@@ -392,8 +392,15 @@ type Claims = Arc<Verified>;
 #[derive(Debug)]
 struct Verified {
     claims: Vec<(String, Value)>,
-    authority: std::sync::OnceLock<String>,
+    authority: std::sync::OnceLock<[u8; AUTHORITY_LEN]>,
 }
+
+/// The bytes of a caller's digest ([`Scope::authority`]): 128 bits of a
+/// SHA-256. Two callers name one with a chance of 2^-128 a pair, a server
+/// of 2^32 callers 2^-65 that any two of them do, and a token whose claims
+/// were ground to name another's needs 2^128 hashes; and the claims are an
+/// issuer's to sign, not a caller's to choose.
+pub const AUTHORITY_LEN: usize = 16;
 
 impl Verified {
     fn new(claims: Vec<(String, Value)>) -> Verified {
@@ -2869,19 +2876,21 @@ impl Scope {
         }
     }
 
-    /// The caller the token is, as what it may do is decided: 32 hex digits
-    /// of a SHA-256 over the values of the claims that decide it -- its
-    /// issuer, its subject, its tenants', its roles' and every claim a rule
-    /// reads ([`authority_claims`]), each named, an absent one told from a
-    /// `null` -- so two tokens of one caller name one, and a token of
-    /// another issuer, or of the same subject with other rights, another.
-    /// What is kept for a caller alone is kept under it: an
-    /// `Idempotency-Key`'s answer, whose `returning` rows are those its
-    /// first caller could read. Made where it is asked, a keyed write's,
-    /// never as a scope is made: no request without a key pays for it; and
-    /// once a token, kept with its claims while the token is
-    /// ([`Verified`]).
-    pub fn authority(&self) -> &str {
+    /// The caller the token is, as what it may do is decided: the first 16
+    /// bytes ([`AUTHORITY_LEN`]) of a SHA-256 over the values of the claims
+    /// that decide it -- its issuer, its subject, its tenants', its roles'
+    /// and every claim a rule reads ([`authority_claims`]), each named, an
+    /// absent one told from a `null` -- so two tokens of one caller name
+    /// one, and a token of another issuer, or of the same subject with
+    /// other rights, another. What is kept for a caller alone is kept under
+    /// it: an `Idempotency-Key`'s answer, whose `returning` rows are those
+    /// its first caller could read. Made where it is asked, a keyed
+    /// write's, never as a scope is made: no request without a key pays
+    /// for it; and once a token, kept with its claims while the token is
+    /// ([`Verified`]). Bytes, not text: a key's caller in the 32 hex
+    /// digits of these made the `_idempotency` row of a keyed write past
+    /// the 64 bytes its record is begun in ([`crate::idempotent`]).
+    pub fn authority(&self) -> &[u8; AUTHORITY_LEN] {
         let verified = &self.roles.0;
         verified
             .authority
@@ -2890,7 +2899,7 @@ impl Scope {
 
     /// [`Self::authority`] of `claims`, worked out.
     #[cold]
-    fn authority_of(&self, claims: &[(String, Value)]) -> String {
+    fn authority_of(&self, claims: &[(String, Value)]) -> [u8; AUTHORITY_LEN] {
         let mut text = String::new();
         for name in &self.lines.authority {
             fennec_core::json::escape_into(&mut text, name);
@@ -2904,11 +2913,8 @@ impl Scope {
             text.push('\n');
         }
         let digest = crate::crypto::sha256(text.as_bytes());
-        let mut out = String::with_capacity(32);
-        for b in &digest[..16] {
-            out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-            out.push(char::from_digit((b & 15) as u32, 16).unwrap_or('0'));
-        }
+        let mut out = [0u8; AUTHORITY_LEN];
+        out.copy_from_slice(&digest[..AUTHORITY_LEN]);
         out
     }
 

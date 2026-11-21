@@ -80,10 +80,11 @@ fn main() {
     let mode = args.next().unwrap_or_else(|| "put".into());
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
     // The scoped modes' `sub`, `bench` unless given: a key is kept under
-    // its caller, whose length is the subject's before G14 and 32 hex
-    // digits after, so a short `sub` reads the longer key's bytes as a
-    // cost -- an identity provider's is 28 to 36 characters (`auth0|` and
-    // 24 hex digits, a UUID).
+    // its caller, whose length is the subject's and a separator before G14
+    // and 17 bytes after (a byte saying whose, 16 of the caller's digest),
+    // so a short `sub` reads the longer key's bytes as a cost -- an
+    // identity provider's is 28 to 36 characters (`auth0|` and 24 hex
+    // digits, a UUID).
     let sub = args.next().unwrap_or_else(|| "bench".into());
     let dir = std::env::temp_dir().join(format!("fennec-replays-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

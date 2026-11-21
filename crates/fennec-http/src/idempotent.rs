@@ -11,8 +11,9 @@
 //! as durable, and as sent, as the first try's answer waited for it to be
 //! ([`replay`]). A key is its caller's, for a scoped token -- the issuer,
 //! the subject and every claim deciding what the token may do
-//! (`Scope::authority`) -- so no caller is handed an answer another could
-//! read and it cannot; the request it came with is kept as a hash,
+//! (`Scope::authority`), kept as 16 bytes of their digest ahead of the key
+//! ([`key`]) -- so no caller is handed an answer another could read and it
+//! cannot; the request it came with is kept as a hash,
 //! and the key sent with another request is refused (422), as the IETF
 //! draft has it. Kept for `idempotency_ttl`: the collection's `at` is
 //! `@ttl`, so a key past its time is out of every read at once and the
@@ -43,9 +44,19 @@ const SUB_NOT_TEXT: &str = "an Idempotency-Key needs a token with a subject, and
 
 /// A key, its caller's for a scoped token, and a hash of the request.
 pub struct Key {
-    name: String,
+    /// `Value::Bytes`: [`SERVER`] and the key, or [`CALLER`], the caller's
+    /// digest and the key. Held as the value the statements take, so a
+    /// lookup is handed it and copies nothing.
+    name: Value,
     request: i64,
 }
+
+/// The first byte of a key the server's own token sent.
+const SERVER: u8 = 0xff;
+
+/// The first byte of a key a scoped token sent: its caller's
+/// [`crate::access::AUTHORITY_LEN`] bytes follow, then the key.
+const CALLER: u8 = 0xfe;
 
 /// The request's key, if it has one: `None` without, a refusal for one
 /// that cannot be kept.
@@ -56,10 +67,11 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
     if given.is_empty() || given.len() > 255 {
         return Err(Response::error(400, "an Idempotency-Key is 1 to 255 bytes"));
     }
-    // A key is kept as its owner, `U+001F` and the key: one holding that
-    // character, beside a subject holding it too, named another subject's
-    // key -- `sub` "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c".
-    // Without one in the key, the last `U+001F` parts the two.
+    // A key was kept as its owner, `U+001F` and the key, where one holding
+    // that character, beside a subject holding it too, named another
+    // subject's key -- `sub` "a\u{1f}b" with key "c" was `sub` "a" with key
+    // "b\u{1f}c". A caller is of one width now, so none can; the refusal
+    // stays as the docs give it.
     if given.chars().any(char::is_control) {
         return Err(Response::error(
             400,
@@ -76,10 +88,27 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
     // token with no subject has no one to keep them for -- nor one whose
     // `sub` is a number, which names none: told so, an app minting its
     // numeric ids as `"sub": 42` knows what to change.
-    let owner = match who {
-        Who::Full => "",
+    //
+    // The caller goes in as the 16 bytes of its digest, not as text: its
+    // 32 hex digits, where a subject's 5 letters had been, took a scoped
+    // keyed `set`'s `_idempotency` row past the 64 bytes its record is
+    // begun in, and each copy of the key into a larger block, 2 532
+    // instructions a request more (`make replay-bench MODE=scoped-keyed`,
+    // `sub` "bench"); in 17 bytes it is 11 more than "bench" and its
+    // separator, and fewer than a subject of an identity provider's
+    // length (`auth0|` and 24 hex digits) had taken. Its first
+    // byte says whose a key is, and is never the first of a text, so the
+    // server's keys and a caller's never meet, a caller's being of one
+    // width; nor does the hash index read one as a text first
+    // (`codec::key_bytes_tag`).
+    let mut name = Vec::with_capacity(1 + crate::access::AUTHORITY_LEN + given.len());
+    match who {
+        Who::Full => name.push(SERVER),
         Who::Scoped(scope) => match scope.subject() {
-            Some(_) => scope.authority(),
+            Some(_) => {
+                name.push(CALLER);
+                name.extend_from_slice(scope.authority());
+            }
             None => {
                 let why = match scope.sub_not_text() {
                     true => SUB_NOT_TEXT,
@@ -88,13 +117,10 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
                 return Err(Response::error(400, why));
             }
         },
-    };
-    let mut name = String::with_capacity(owner.len() + 1 + given.len());
-    name.push_str(owner);
-    name.push('\u{1f}');
-    name.push_str(given);
+    }
+    name.extend_from_slice(given.as_bytes());
     Ok(Some(Key {
-        name,
+        name: Value::Bytes(name),
         request: fnv(&[
             req.method.name().as_bytes(),
             req.target.as_bytes(),
@@ -144,13 +170,19 @@ const PUT: usize = 2;
 /// The keys' collection as `ttl_ms` keeps them, made, or made to keep them
 /// so: a server started again with another `--idempotency-ttl` moves the
 /// expiry (`alter field at @ttl`), and a collection from before the expiry
-/// -- `at int @sorted`, whose keys a purge let go of -- is made again, the
-/// keys it held a day's retries at most.
+/// -- `at int @sorted`, whose keys a purge let go of -- or from before a
+/// key was bytes ([`key`]) -- `key text`, whose keys no request names now
+/// -- is made again, the keys it held a day's retries at most.
 fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
     let ttl = fennec_core::schema::ttl_text(ttl_ms.max(1) as u64);
     let at = db.collection(KEYS).ok().map(|c| {
+        let bytes = c
+            .schema
+            .field("key")
+            .is_some_and(|f| f.ty == DataType::Bytes);
         c.schema
             .field("at")
+            .filter(|_| bytes)
             .map(|f| (f.ty == DataType::Timestamp, f.index.ttl()))
     });
     let sql = match at {
@@ -166,7 +198,7 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
                 })?;
             }
             format!(
-                "create collection {KEYS} (key text @hash, request int, status int, \
+                "create collection {KEYS} (key bytes @hash, request int, status int, \
                  body text, at timestamp @ttl({ttl}))"
             )
         }
@@ -264,7 +296,7 @@ pub fn replay(db: &Database, key: &Key, ttl_ms: i64, durable: bool) -> Option<Re
 fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
     db.collection(KEYS).ok()?;
     let fennec_core::query::Response::Rows(rs) =
-        db.query(stmt(GET), &[Value::Text(key.name.clone())]).ok()?
+        db.query(stmt(GET), std::slice::from_ref(&key.name)).ok()?
     else {
         return None;
     };
@@ -317,7 +349,7 @@ pub fn keep(
         ),
     };
     let row = [
-        Value::Text(key.name.clone()),
+        key.name.clone(),
         Value::Int(key.request),
         Value::Int(resp.status as i64),
         Value::Text(body),

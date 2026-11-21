@@ -265,10 +265,11 @@ fn a_key_is_replayed_only_to_a_caller_of_the_same_authority() {
     }
 }
 
-/// A key is kept as its owner, `U+001F` and the key, so a key holding that
+/// A key was kept as its owner, `U+001F` and the key, so a key holding that
 /// character, beside a subject holding it, named another subject's: `sub`
-/// "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c", which was
-/// replayed the other's answer. A key holds no control character.
+/// "a\u{1f}b" with key "c" was `sub` "a" with key "b\u{1f}c", which was
+/// replayed the other's answer. A key holds no control character; its
+/// caller is of one width now, and the two run apart either way.
 #[test]
 fn a_key_holding_a_control_character_is_refused() {
     let n = start(Duration::from_secs(3600));
@@ -395,4 +396,45 @@ fn the_keys_collection_follows_the_ttl_it_is_started_with() {
     assert!(kept.replayed, "a key kept is kept across the move");
     moved.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
     assert_eq!(ttl(&moved), (DataType::Timestamp, Some(3_600_000)));
+}
+
+/// Keys kept as text -- the owner, `U+001F` and the key, from before a
+/// caller was the bytes of its digest -- are made again as bytes, the
+/// expiry the server keeps or not: no request names one of them now. The
+/// server token's key and a caller's of the same text never meet.
+#[test]
+fn keys_kept_as_text_are_made_again_as_bytes() {
+    let n = start_over(
+        Duration::from_secs(60),
+        &[
+            "create collection _idempotency (key text @hash, request int, status int, \
+             body text, at timestamp @ttl(1m))",
+            "put _idempotency {key: \"x\", request: 1, status: 200, body: \"{}\", at: 1}",
+        ],
+    );
+    let ty = |n: &Node| {
+        let db = n.db.read().unwrap();
+        let c = db.collection("_idempotency").unwrap();
+        c.schema.field("key").unwrap().ty.clone()
+    };
+    let put = "put notes {owner: \"alice\", t: \"x\"}";
+    let first = n.query(ROOT, Some("k"), put);
+    assert_eq!(
+        (first.status, first.replayed),
+        (200, false),
+        "{}",
+        first.body
+    );
+    assert_eq!(ty(&n), DataType::Bytes);
+    assert!(n.query(ROOT, Some("k"), put).replayed);
+    let alice = n.access.mint("{\"sub\":\"alice\"}").unwrap();
+    let hers = n.query(&alice, Some("k"), put);
+    assert_eq!(
+        (hers.status, hers.replayed),
+        (200, false),
+        "the server's key is no caller's: {}",
+        hers.body
+    );
+    assert!(n.query(&alice, Some("k"), put).replayed);
+    assert_eq!(n.count("notes"), "[{\"count\":2}]");
 }
