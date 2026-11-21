@@ -311,32 +311,82 @@ pub fn private(options: &mut OpenOptions) -> &mut OpenOptions {
 }
 
 /// `open`'s `O_NOFOLLOW`: the path's last name is opened only where it is
-/// no link (`ELOOP` otherwise). Each target's own number, read from its
-/// libc (Linux's differs by processor, as fennec-server's `user::sys`
-/// reads it); none where it was not read, which leaves the open as it was.
+/// no link (`ELOOP` otherwise). Each target's own number, as its libc's
+/// `fcntl.h` has it, the way fennec-abi's `F_SETLK` is read: Linux's
+/// differs by processor -- the kernel's generic `0o400000`, and
+/// `0o100000` where an architecture's own header moves it (arm, arm64,
+/// powerpc, m68k) -- the BSDs' and Apple's is `0x100`, illumos' `0x20000`.
+/// A Unix not listed fails to build, naming this: a `0` there left every
+/// open beside a database following a link, unsaid, as armv7 Android's
+/// library did until this list.
 #[cfg(all(
     any(target_os = "linux", target_os = "android"),
-    target_arch = "x86_64"
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "sparc64"
+    )
 ))]
 const NOFOLLOW: i32 = 0o400000;
 #[cfg(all(
     any(target_os = "linux", target_os = "android"),
-    target_arch = "aarch64"
+    any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "m68k"
+    )
 ))]
 const NOFOLLOW: i32 = 0o100000;
-#[cfg(target_vendor = "apple")]
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 const NOFOLLOW: i32 = 0x100;
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+const NOFOLLOW: i32 = 0x20000;
 #[cfg(all(
     unix,
     not(any(
         all(
             any(target_os = "linux", target_os = "android"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
+            any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "riscv64",
+                target_arch = "s390x",
+                target_arch = "loongarch64",
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "sparc64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "m68k"
+            )
         ),
-        target_vendor = "apple"
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "illumos",
+        target_os = "solaris"
     ))
 ))]
-const NOFOLLOW: i32 = 0;
+compile_error!(
+    "fennec_core::fs::NOFOLLOW: this Unix's O_NOFOLLOW is not known; add it from its libc's fcntl.h"
+);
 
 /// [`private`] for a file kept beside a database and opened again when
 /// there -- its sync log, its lock -- never opened through a link put at
@@ -438,6 +488,25 @@ pub fn mode_like(new: &File, like: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     let _ = (new, like);
+    Ok(())
+}
+
+/// Fails where `path` no longer names, as no link, the file `file` is
+/// open on: what a rename by that name would move is then another file
+/// than the one written through `file` -- a link or a file put there by a
+/// writer of its directory since -- and is not renamed into a database's
+/// place. An `fstat` and an `lstat`, a rewrite.
+#[cfg(unix)]
+fn still_named(file: &File, path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
+    if (open.dev(), open.ino()) != (there.dev(), there.ino()) {
+        return Err(std::io::Error::other(format!(
+            "{} is no longer the file written: another was put at its name, which is not \
+             renamed into the database's place",
+            path.display()
+        )));
+    }
     Ok(())
 }
 
@@ -598,21 +667,34 @@ thread_local! {
 }
 
 impl FileSink {
-    /// Renames `from`, a whole image fsynced, over the file and appends to
-    /// it from then on. Whatever was pending is in the image: written after
-    /// it, it would be there twice. A failure after the rename leaves the
-    /// sink failed, so nothing waiting is told its write is durable.
-    fn swap_in(&self, disk: &mut Disk, from: &Path) -> Result<()> {
+    /// Renames `from`, a whole image fsynced and open as `image`, over the
+    /// file and appends to it from then on. Whatever was pending is in the
+    /// image: written after it, it would be there twice. A failure after
+    /// the rename leaves the sink failed, so nothing waiting is told its
+    /// write is durable.
+    fn swap_in(
+        &self,
+        disk: &mut Disk,
+        #[cfg(not(windows))] image: File,
+        from: &Path,
+    ) -> Result<()> {
         let swapped = (|| -> Result<File> {
-            // Opened before the rename, the image it renames and the file
-            // the sink appends to after: it takes the mode of the file it
-            // replaces on this handle, never by a name a link could move
-            // (`mode_like`), so an operator's `chmod 640` lasts through
-            // every compact.
+            // The handle that wrote the image, or one that followed no link
+            // to it ([`Sink::adopt`]), and the file the sink appends to
+            // after: it takes the mode of the file it replaces on this
+            // handle (`mode_like`), so an operator's `chmod 640` lasts
+            // through every compact. Opened again by its name, as up to
+            // G14's review, a link put at `.compacting` meanwhile led the
+            // open, the `fchmod` and every append after to the file it
+            // named.
             #[cfg(not(windows))]
-            let mut f = OpenOptions::new().read(true).write(true).open(from)?;
+            let mut f = image;
             #[cfg(not(windows))]
             mode_like(&f, &self.path)?;
+            // The rename goes by the name: one another file was put at
+            // since is renamed over nothing.
+            #[cfg(unix)]
+            still_named(&f, from)?;
             #[cfg(unix)]
             disk.tail.forget(&disk.file)?;
             #[cfg(not(windows))]
@@ -865,27 +947,40 @@ impl Sink for FileSink {
             return Err(e.clone());
         }
         let tmp = beside(&self.path, "compacting");
-        let written = (|| -> Result<()> {
+        let written = (|| -> Result<File> {
             let mut out = FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, create_private(&tmp)?),
                 at: 0,
             };
             image(&mut out)?;
-            out.w
+            let file = out
+                .w
                 .into_inner()
-                .map_err(|e| crate::error::Error::Io(e.to_string()))?
-                .sync_all()?;
-            Ok(())
+                .map_err(|e| crate::error::Error::Io(e.to_string()))?;
+            file.sync_all()?;
+            Ok(file)
         })();
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
+        let written = match written {
+            Ok(file) => file,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
         {
             self.mapping = None;
         }
-        self.swap_in(&mut disk, &tmp)?;
+        // Renamed in through the handle that wrote it, never opened again
+        // by its name (`swap_in`).
+        #[cfg(not(windows))]
+        self.swap_in(&mut disk, written, &tmp)?;
+        // Windows' swap opens it again itself, once this handle is closed.
+        #[cfg(windows)]
+        {
+            drop(written);
+            self.swap_in(&mut disk, &tmp)?;
+        }
         drop(disk);
         self.rewritten();
         Ok(())
@@ -902,10 +997,18 @@ impl Sink for FileSink {
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
+        // Opened where it is no link (`O_NOFOLLOW`): the side file's
+        // handle stays with its writer, and a link put at `.beside` since
+        // is refused here, the database as it was, rather than followed.
+        #[cfg(not(windows))]
+        let image = private_beside(OpenOptions::new().read(true).write(true)).open(side)?;
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
         {
             self.mapping = None;
         }
+        #[cfg(not(windows))]
+        self.swap_in(&mut disk, image, side)?;
+        #[cfg(windows)]
         self.swap_in(&mut disk, side)?;
         drop(disk);
         self.rewritten();
@@ -2335,7 +2438,13 @@ mod tests {
     /// the link. Up to this fix a side file was opened through the link,
     /// which wrote the image into the file the link named, set its mode
     /// there and renamed the link over the database; the sync log wrote
-    /// its zeros into it.
+    /// its zeros into it. A link put there while the image is written --
+    /// after the side file was made, before its rename -- is refused, the
+    /// database as it was: the image was opened again by its name to be
+    /// renamed in, through the link, until `swap_in` took the writer's
+    /// handle (`.compacting`) or an open that follows none (`.beside`).
+    /// fennec-http's `a_link_at_the_sidecars_name_is_never_followed` holds
+    /// a tenant's `.instance` alike.
     #[cfg(all(unix, target_pointer_width = "64"))]
     #[test]
     fn a_link_at_a_side_files_name_is_never_followed() {
@@ -2384,7 +2493,66 @@ mod tests {
             .unwrap();
         untouched(&target, "a link at a compact beside's side file");
         assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+
+        // Put at `.beside` once the compact made it, before its image is
+        // renamed in: the compact fails, and the database is as it was.
+        let target = elsewhere("beside-meanwhile");
+        db.write().unwrap().fork(9).unwrap();
+        let before = inode(&path);
+        let mut planted = false;
+        let compacted =
+            Database::maintain_with(&db, &crate::query::Statement::Compact(None), &mut || {
+                let side = beside(&path, "beside");
+                if !planted && side.exists() {
+                    std::fs::remove_file(&side).unwrap();
+                    std::os::unix::fs::symlink(&target, &side).unwrap();
+                    planted = true;
+                }
+            })
+            .unwrap();
+        assert!(planted, "the compact made its side file");
+        assert!(
+            compacted.is_err(),
+            "a compact renamed in a link put at its side file's name"
+        );
+        untouched(
+            &target,
+            "a link put at a compact beside's side file meanwhile",
+        );
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().is_file(),
+            "the database renamed over by a link"
+        );
+        assert_eq!(inode(&path), before, "the database as it was");
         drop(db);
+
+        // Put at `.compacting` while a rewrite writes its image.
+        let other = dir.join("other.fennec");
+        drop(open(&other).unwrap());
+        let before = (std::fs::read(&other).unwrap(), inode(&other));
+        let (mut sink, _) = FileSink::open(&other).unwrap();
+        let target = elsewhere("compacting-meanwhile");
+        let rewritten = sink.rewrite_with(&mut |out| {
+            let side = beside(&other, "compacting");
+            std::fs::remove_file(&side).unwrap();
+            std::os::unix::fs::symlink(&target, &side).unwrap();
+            out.write(&MAGIC[..])
+        });
+        assert!(
+            rewritten.is_err(),
+            "a rewrite renamed in a link put at its side file's name"
+        );
+        untouched(&target, "a link put at a rewrite's side file meanwhile");
+        assert!(
+            std::fs::symlink_metadata(&other).unwrap().is_file(),
+            "the database renamed over by a link"
+        );
+        assert_eq!(
+            (std::fs::read(&other).unwrap(), inode(&other)),
+            before,
+            "the database as it was"
+        );
+        drop(sink);
         keep_sync_log(false);
         std::fs::remove_dir_all(&dir).unwrap();
     }
