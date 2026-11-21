@@ -6,9 +6,13 @@
 //! alone, and each database the binary restored answers as the release's
 //! own restore of it did -- then is written, opened again, compacted and
 //! answers alike, and verifies; `fennec verify` says of each archive what
-//! the release's said, line for line, and of the node's archive of every
-//! tenant too, whose `fennec restore --tenants` to each moment the
-//! release's was run to says what it said and answers as it did. A file
+//! the release's said, line for line, and its `fennec restore --to` of each
+//! archive to every moment the release's was run to says what the
+//! release's said and exits as it did -- refused before the image, the
+//! image alone before the first write, each write's change after; and of
+//! the node's archive of every tenant too, whose `fennec restore
+//! --tenants` to each moment the release's was run to says what it said
+//! and answers as it did. A file
 //! the release wrote torn, as a crash leaves one, is refused as it lies,
 //! naming its damage. fennec-core's
 //! `compat::` holds the files themselves to their answers, fennec-http's
@@ -249,6 +253,48 @@ fn fennec_verifies_and_restores_every_release_s_files() {
                 found.push(format!(
                     "{name}/{dirname}: fennec verify\n  release: {theirs:?}\n  this build: {ours:?}"
                 ));
+            }
+            // To each moment the release's own restore was asked
+            // (`<archive>.restores.json`): what it said, and its exit.
+            let recorded =
+                std::fs::read_to_string(set.join(format!("{dirname}.restores.json"))).unwrap();
+            let recorded = fennec_core::json::parse_json(&recorded).unwrap();
+            let Value::List(moments) = member(&recorded, "moments") else {
+                panic!("{dirname}.restores.json: moments")
+            };
+            assert!(
+                moments.len() > 2,
+                "{name}/{dirname}: {} moments",
+                moments.len()
+            );
+            for (i, m) in moments.iter().enumerate() {
+                let Value::Text(to) = member(m, "to") else {
+                    panic!("{dirname}.restores.json: to")
+                };
+                let status = match member(m, "status") {
+                    Value::Int(n) => *n as i32,
+                    v => panic!("status: {v:?}"),
+                };
+                let into = scratch.0.join(format!("{dirname}-to-{i}.fennec"));
+                let (code, out) = run(with_key(&[
+                    Path::new("restore"),
+                    &arch,
+                    &into,
+                    Path::new("--to"),
+                    Path::new(to),
+                ]));
+                let ours: Vec<String> = out
+                    .replace(into.to_str().unwrap(), "<out>")
+                    .lines()
+                    .map(String::from)
+                    .collect();
+                let theirs = texts(member(m, "said"));
+                if code != status || ours != theirs {
+                    found.push(format!(
+                        "{name}/{dirname}: restore --to {to}\n  release: {status} {theirs:?}\n  this build: {code} {ours:?}"
+                    ));
+                }
+                let _ = std::fs::remove_file(&into);
             }
             let (code, out) = run(with_key(&[Path::new("restore"), &arch, &restored]));
             assert_eq!(code, 0, "{name}/{dirname}: {out}");

@@ -9,9 +9,13 @@
 //! (`compat/walk.rs`): a seal's frames, an archive's names, images,
 //! segments and history, the database inside each, holding the set to the
 //! seals' and archives' alternatives the release writes, both ways. A
-//! restore to a time stops at the write the walk's times say; a file
-//! sealed whole in several frames, cut at a frame's end, is refused; and
-//! the node's archive -- a line a tenant, one moved aside, `began` and
+//! restore to each moment the release's own `fennec restore --to` was asked
+//! -- before the image, its time, the image alone before the first write,
+//! each write's time and the moment before the next, which the walk's
+//! times hold the record to covering -- stops where the release's did,
+//! saying what it said, and answers as its database did; a file sealed
+//! whole in several frames, cut at a frame's end, is refused; and the
+//! node's archive -- a line a tenant, one moved aside, `began` and
 //! `presence` -- restores its tenants as the release's restore did.
 //! A file is told sealed by the release's own magic, `FENECSL\x01`,
 //! never by this build's test of it (`seal::is_sealed`), which is only
@@ -212,19 +216,6 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) -> Vec<(u64
     writes
 }
 
-/// The change a restore to `at` stops at, by the walk's times: the last
-/// write appended at or before it, up to the first appended after it.
-fn change_at(writes: &[(u64, u64, u64)], at: u64) -> Option<u64> {
-    let mut kept = None;
-    for &(time, seq, _) in writes {
-        if time > at {
-            break;
-        }
-        kept = Some(seq);
-    }
-    kept
-}
-
 /// What a restore of every tenant said of each, as the release's `fennec
 /// restore --tenants` prints it.
 fn said(name: &str, r: &Restoring) -> String {
@@ -260,6 +251,100 @@ fn texts(v: &Value) -> Vec<String> {
             .collect(),
         v => panic!("not a list: {v:?}"),
     }
+}
+
+/// The release's restores of `<dirname>` to a moment, as the writer
+/// recorded them, and each moment.
+fn restores(set: &Path, dirname: &str) -> (Value, Vec<u64>) {
+    let text = std::fs::read_to_string(set.join(format!("{dirname}.restores.json"))).unwrap();
+    let record = fennec_core::json::parse_json(&text).unwrap();
+    let moments = match member(&record, "moments") {
+        Value::List(l) => l
+            .iter()
+            .map(|m| match member(m, "at") {
+                Value::Int(at) => *at as u64,
+                v => panic!("{dirname}.restores.json: at {v:?}"),
+            })
+            .collect(),
+        v => panic!("{dirname}.restores.json: moments {v:?}"),
+    };
+    (record, moments)
+}
+
+/// What a restore of an archive to a moment says, as the release's `fennec
+/// restore --to` prints it: the change, the image and the last write's
+/// time.
+fn restore_said(r: &archive::Restored) -> String {
+    let when = r.time.map_or(String::new(), |t| {
+        format!(
+            ", the last written {}",
+            fennec_core::time::format_iso(t as i64)
+        )
+    });
+    format!(
+        "<out>: change {} -- image {} and the writes after it{when}",
+        r.seq, r.image
+    )
+}
+
+/// The archive restored by this build to each moment the release's own
+/// restore was asked: refused where the release's was, in its words,
+/// otherwise stopping at its change and saying what it said, the database
+/// answering `restore.fennecql` as the release's restore of that change
+/// did. What differs.
+fn restored_at_moments(
+    arch: &Archive,
+    set: &Path,
+    dirname: &str,
+    record: &Value,
+    scratch: &Path,
+) -> Vec<String> {
+    let name = set_name(set);
+    let statements = answers::statements(set, "restore");
+    let mut found = Vec::new();
+    let Value::List(moments) = member(record, "moments") else {
+        panic!("moments")
+    };
+    for m in moments {
+        let at = match member(m, "at") {
+            Value::Int(at) => *at as u64,
+            v => panic!("at {v:?}"),
+        };
+        let status = match member(m, "status") {
+            Value::Int(s) => *s,
+            v => panic!("status {v:?}"),
+        };
+        let said = texts(member(m, "said"));
+        let out = scratch.join(format!("{dirname}-to-{at}.fennec"));
+        match (arch.restore(&out, Target::Time(at)), status) {
+            (Ok(r), 0) => {
+                let ours = restore_said(&r);
+                if said != [ours.clone()] {
+                    found.push(format!(
+                        "{name}/{dirname}: a restore to {at}\n  release: {said:?}\n  this build: {ours:?}"
+                    ));
+                    continue;
+                }
+                let theirs = texts(member(member(record, "answers"), &r.seq.to_string()));
+                let db = fennec_core::fs::open_read_only(&out).unwrap();
+                for (q, theirs) in statements.iter().zip(theirs) {
+                    let ours = answers::answer(&db, q);
+                    if ours != theirs {
+                        found.push(format!(
+                            "{name}/{dirname} restored to {at}: {q}\n  release: {theirs}\n  this build: {ours}"
+                        ));
+                    }
+                }
+            }
+            (Err(e), s) if s != 0 && said.iter().any(|l| l.contains(&e.to_string())) => {}
+            (got, _) => found.push(format!(
+                "{name}/{dirname}: a restore to {at}\n  release: exit {status} {said:?}\n  this build: {:?}",
+                got.map(|r| restore_said(&r)).map_err(|e| e.to_string())
+            )),
+        }
+        let _ = std::fs::remove_file(&out);
+    }
+    found
 }
 
 /// The node's archive: every line walked as an archive, then every tenant
@@ -429,29 +514,32 @@ fn a_release_s_backup_and_archives_restore_and_answer_as_it_did() {
                 .unwrap_or_else(|e| panic!("{name}/{dirname}: a restore: {e}"));
             assert_eq!(r.seq, v.last, "{name}/{dirname}: restored to its end");
             found.extend(written_and_compacted(&out, &set, &dirname));
-            // A restore to each write's time, and to a moment before the
-            // next: the change the walk's times say, each.
+            // A restore to each moment the release's own restore was
+            // asked (`<archive>.restores.json`): where it stopped, what it
+            // said and what the database it restored answered.
+            let (record, moments) = restores(&set, &dirname);
             for (i, &(time, _, _)) in writes.iter().enumerate() {
                 let next = writes.get(i + 1).map(|w| w.0);
                 for at in [Some(time), next.filter(|&n| n > time + 1).map(|n| n - 1)]
                     .into_iter()
                     .flatten()
                 {
-                    let want = change_at(&writes, at).unwrap();
-                    let out = scratch.0.join(format!("{dirname}-at-{at}.fennec"));
-                    let r = arch
-                        .restore(&out, Target::Time(at))
-                        .unwrap_or_else(|e| panic!("{name}/{dirname}: a restore to {at}: {e}"));
-                    if r.seq != want {
-                        found.push(format!(
-                            "{name}/{dirname}: a restore to {at} stopped at change {}, the walk's times at {want}",
-                            r.seq
-                        ));
-                    }
-                    let _ = std::fs::remove_file(&out);
-                    timed += 1;
+                    assert!(
+                        moments.contains(&at),
+                        "{name}/{dirname}: no restore of the release's to {at}, a write's time or the \
+                         moment before the next"
+                    );
                 }
             }
+            let first = writes.first().map(|w| w.0).unwrap();
+            assert!(
+                moments.iter().any(|&at| at >= v.from && at < first),
+                "{name}/{dirname}: no restore to its image alone, before its first write"
+            );
+            found.extend(restored_at_moments(
+                &arch, &set, &dirname, &record, &scratch.0,
+            ));
+            timed += moments.len();
         }
         assert!(timed > 2, "{name}: {timed} restores to a time");
         found.extend(node_archive(&set, &name, &scratch.0, &key, &mut seen));

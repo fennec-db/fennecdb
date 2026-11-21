@@ -22,12 +22,16 @@ pub const SETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fennec-core/test
 pub const ACCEPTED: &[(&str, &str, &str, &str)] = &[];
 
 /// What this build does with a file a release wrote that it reads
-/// otherwise on purpose (docs/design/crates.md, *How deep a value nests*
-/// and *Limits*).
+/// otherwise on purpose (docs/design/compatibility.md, *What 1.x does not
+/// read of 0.2.0's files*).
 pub enum Otherwise {
-    /// The file opens; a row past a limit is refused where it is read, in
-    /// these words, and every other answer is the release's.
-    RowRefused(&'static str),
+    /// The file opens; a row past a limit is refused where it is read: the
+    /// statements named, each in these words, and every other answer is
+    /// the release's.
+    RowRefused {
+        words: &'static str,
+        statements: &'static [&'static str],
+    },
     /// The open is refused, in these words.
     OpenRefused(&'static str),
 }
@@ -38,7 +42,12 @@ pub enum Otherwise {
 pub const ON_PURPOSE: &[(&str, Otherwise)] = &[
     (
         "deep",
-        Otherwise::RowRefused("a value nests more than 64 levels deep"),
+        // The one row nesting 66 levels; the other row, the collection's
+        // count and the fields before the deep one answer.
+        Otherwise::RowRefused {
+            words: "a value nests more than 64 levels deep",
+            statements: &["get deep where n = 2"],
+        },
     ),
     (
         "refused-lists",
@@ -50,12 +59,12 @@ pub const ON_PURPOSE: &[(&str, Otherwise)] = &[
         "refused-dims",
         Otherwise::OpenRefused("a vector's dimension is 1 to 1000000000"),
     ),
-    // Its row is read past the bound today; the change that follows on
-    // `fuzz-codec-image-panics` refuses its schema at the open, and moves
-    // this entry to `OpenRefused`.
     (
         "points-deep",
-        Otherwise::RowRefused("a value nests more than 64 levels deep"),
+        // A point is a level of its type as it is of the value it reads as:
+        // 64 lists around one are 65, refused where the schema is read
+        // (`decode_type`), as `refused-lists` is.
+        Otherwise::OpenRefused("a value nests more than 64 levels deep"),
     ),
 ];
 
@@ -129,7 +138,8 @@ pub fn id_differences(db: &Database, set: &Path, name: &str, when: &str) -> Vec<
 /// Every set, oldest first: those under `FENNEC_COMPAT_SETS` where it names
 /// a directory -- a set `tools/compat_fixtures.py write` has just written,
 /// held to every test before it lands -- and the tree's otherwise. A
-/// directory of sets holds sets alone, each `v<major>.<minor>.<patch>/`
+/// directory of sets holds sets alone, each `v<major>.<minor>.<patch>/`,
+/// or `v<major>.<minor>.<patch>+<n>/` for a further set of the same tag,
 /// with its README and sums: pointed at a set itself, or at a directory
 /// holding none, every test fails rather than pass over nothing or read
 /// `archive/` as a release's set.
@@ -146,7 +156,7 @@ pub fn sets() -> Vec<PathBuf> {
     for p in &v {
         let name = set_name(p);
         assert!(
-            version_of(&name) != (0, 0, 0),
+            version_of(&name) != (0, 0, 0, 0),
             "{}: {name} is no set (`v<version>/`): FENNEC_COMPAT_SETS names the directory \
              holding the sets, never a set itself",
             root.display()
@@ -162,18 +172,32 @@ pub fn sets() -> Vec<PathBuf> {
     v
 }
 
-/// `v1.2.3`'s numbers, or zeros where the name is no version.
-pub fn version_of(name: &str) -> (u32, u32, u32) {
-    let n: Vec<u32> = name
+/// A set's place among the sets: `v1.2.3`'s numbers and 1, `v1.2.3+2`'s
+/// and 2 -- a further set of the same tag after the first -- or zeros
+/// where the name is no set's.
+pub fn version_of(name: &str) -> (u32, u32, u32, u32) {
+    let (tag, nth) = match name.split_once('+') {
+        Some((tag, n)) => match n.parse::<u32>() {
+            Ok(k) if k >= 2 && n == k.to_string() => (tag, k),
+            _ => return (0, 0, 0, 0),
+        },
+        None => (name, 1),
+    };
+    let n: Vec<u32> = tag
         .strip_prefix('v')
         .unwrap_or("")
         .split('.')
         .map_while(|x| x.parse().ok())
         .collect();
     match n[..] {
-        [a, b, c] if name == format!("v{a}.{b}.{c}") => (a, b, c),
-        _ => (0, 0, 0),
+        [a, b, c] if tag == format!("v{a}.{b}.{c}") => (a, b, c, nth),
+        _ => (0, 0, 0, 0),
     }
+}
+
+/// The tag a set's binaries were built from: its name, `+<n>` aside.
+pub fn tag_of(name: &str) -> &str {
+    name.split_once('+').map_or(name, |(tag, _)| tag)
 }
 
 pub fn set_name(set: &Path) -> String {

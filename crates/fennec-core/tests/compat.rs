@@ -17,10 +17,10 @@ mod answers;
 mod walk;
 
 use answers::{
-    at_clock, copied, differences, id_differences, on_purpose, release_ids, set_name, sets, torn,
-    verified, written_and_compacted, Otherwise, Scratch, ON_PURPOSE, SETS,
+    at_clock, copied, differences, id_differences, on_purpose, release_ids, set_name, sets, tag_of,
+    torn, verified, written_and_compacted, Otherwise, Scratch, ON_PURPOSE, SETS,
 };
-use fennec_core::schema::{IndexKind, Quant};
+use fennec_core::schema::{IndexKind, Metric, Quant};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::Ordering::Relaxed;
@@ -119,11 +119,15 @@ fn not_a_format_file(name: &str) -> bool {
         ".sealed",
         ".ids",
         ".verify",
+        ".restores.json",
         "node-archive.json",
     ]
     .iter()
     .any(|s| name.ends_with(s))
-        || matches!(name, "README.md" | "SHA256SUMS" | "key" | "clock")
+        || matches!(
+            name,
+            "README.md" | "SHA256SUMS" | "MANIFEST.json" | "key" | "clock"
+        )
 }
 
 /// A file's bytes as an open reads them: the sync log beside it put back
@@ -199,6 +203,10 @@ fn walked(set: &Path) -> Vec<(String, Seen)> {
             let text = std::fs::read_to_string(&path).unwrap();
             walk::page_records(&text, &format!("{name}/{entry}"), &mut seen);
             seen.finish();
+        } else if entry.starts_with("do-") && entry.ends_with(".json") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            walk::durable_object(&text, &format!("{name}/{entry}"), &mut seen);
+            seen.finish();
         } else if not_a_format_file(&entry) {
             continue;
         } else {
@@ -233,11 +241,13 @@ fn both_ways<T: Ord + std::fmt::Debug + Copy>(
 /// index kind and alternative inside them a release writes is in a file of
 /// its set, and no file holds one its line does not name: what makes the
 /// answers above a check of each. Every alternative the walk tells apart
-/// is placed by the newest release's line: in a file, or absent with why,
-/// which the set's README names.
+/// is placed by the newest release's sets: in a file of one, or absent from
+/// it with why, which its README names -- a further set of the same tag
+/// holding what the first was found to miss.
 #[test]
 fn every_kind_and_shape_a_release_writes_is_in_its_set() {
-    let newest = RELEASES.last().unwrap().set;
+    let newest = RELEASES.last().unwrap().tag;
+    let (mut placed_newest, mut absent_newest) = (BTreeSet::new(), BTreeSet::new());
     for set in sets() {
         let name = set_name(&set);
         let writes = writes_of(&name);
@@ -277,12 +287,9 @@ fn every_kind_and_shape_a_release_writes_is_in_its_set() {
             "{name}: {:?} are no alternative the walk knows",
             named.difference(&every).collect::<Vec<_>>()
         );
-        if name == newest {
-            assert!(
-                named == every,
-                "{name}: alternatives {:?} are neither in a file nor absent with why",
-                every.difference(&named).collect::<Vec<_>>()
-            );
+        if writes.tag == newest {
+            placed_newest.extend(placed.iter().copied());
+            absent_newest.extend(absent.iter().copied());
         }
         let readme = std::fs::read_to_string(set.join("README.md")).unwrap();
         // The count the README states, derived here from the code: the forms
@@ -327,12 +334,25 @@ fn every_kind_and_shape_a_release_writes_is_in_its_set() {
             writes.indexes.len()
         );
     }
+    // A form a later set of the tag holds was absent from an earlier one:
+    // it is named either way.
+    let named: BTreeSet<&str> = placed_newest.union(&absent_newest).copied().collect();
+    let every: BTreeSet<&str> = ALTERNATIVES.iter().copied().collect();
+    assert!(
+        named == every,
+        "{newest}: alternatives {:?} are neither in a file of its sets nor absent with why",
+        every.difference(&named).collect::<Vec<_>>()
+    );
 }
 
 /// Every line of `RELEASES` has its set in the tree, and every set in the
 /// tree its line: a set deleted, or never written for a release that
 /// names one, fails here whichever sets `FENNEC_COMPAT_SETS` points the
-/// other tests at.
+/// other tests at. And no landed set changes: each holds every file its
+/// `SHA256SUMS` names, by that sum, and nothing else, and the digest of the
+/// `SHA256SUMS` is the one its line pins -- a set written again, its sums
+/// with it, fails here. Its manifest names its tag, and its README the
+/// commit its programs were built from.
 #[test]
 fn every_release_named_has_its_set_in_the_tree() {
     let tree: BTreeSet<String> = std::fs::read_dir(SETS)
@@ -357,6 +377,85 @@ fn every_release_named_has_its_set_in_the_tree() {
         RELEASES.iter().map(|w| w.set).collect::<Vec<_>>(),
         "RELEASES oldest first"
     );
+    for w in RELEASES {
+        let dir = std::path::PathBuf::from(SETS).join(w.set);
+        assert_eq!(tag_of(w.set), w.tag, "{}: a set of another tag", w.set);
+        assert!(
+            RELEASES.iter().any(|f| f.set == w.tag),
+            "{}: a further set of {}, whose first set has no line",
+            w.set,
+            w.tag
+        );
+        let sums = std::fs::read(dir.join("SHA256SUMS")).unwrap();
+        assert_eq!(
+            walk::hex(&walk::sha256(&sums)),
+            w.sums,
+            "{}/SHA256SUMS is not the one its RELEASES line pins: a landed set is never written again \
+             (a form found missing goes into a further set of {}, `{}+2/`)",
+            w.set,
+            w.tag,
+            w.tag
+        );
+        let mut listed = BTreeSet::new();
+        for line in String::from_utf8(sums).unwrap().lines() {
+            let (digest, file) = line
+                .split_once("  ")
+                .unwrap_or_else(|| panic!("{}/SHA256SUMS: {line:?}", w.set));
+            let bytes = std::fs::read(dir.join(file))
+                .unwrap_or_else(|e| panic!("{}/{file}, in its SHA256SUMS: {e}", w.set));
+            assert_eq!(
+                walk::hex(&walk::sha256(&bytes)),
+                digest,
+                "{}/{file}: not the bytes its release wrote",
+                w.set
+            );
+            listed.insert(file.to_string());
+        }
+        let mut held = BTreeSet::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let path = e.unwrap().path();
+                match path.is_dir() {
+                    true => stack.push(path),
+                    false => {
+                        let rel = path.strip_prefix(&dir).unwrap();
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        if rel != "SHA256SUMS" {
+                            held.insert(rel);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            held, listed,
+            "{}: its files and its SHA256SUMS' lines",
+            w.set
+        );
+        let manifest = std::fs::read_to_string(dir.join("MANIFEST.json")).unwrap();
+        let manifest = fennec_core::json::parse_json(&manifest).unwrap();
+        let member = |k: &str| match &manifest {
+            fennec_core::prelude::Value::Object(o) => o
+                .iter()
+                .find(|(m, _)| m == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{}/MANIFEST.json: no `{k}`", w.set)),
+            _ => panic!("{}/MANIFEST.json: not an object", w.set),
+        };
+        let text = |v: fennec_core::prelude::Value| match v {
+            fennec_core::prelude::Value::Text(t) => t,
+            v => panic!("{}/MANIFEST.json: {v:?}", w.set),
+        };
+        assert_eq!(text(member("tag")), w.tag, "{}/MANIFEST.json's tag", w.set);
+        let commit = text(member("commit"));
+        let readme = std::fs::read_to_string(dir.join("README.md")).unwrap();
+        assert!(
+            commit.len() == 40 && readme.contains(&commit),
+            "{}/README.md does not name the commit its programs were built from, {commit}",
+            w.set
+        );
+    }
 }
 
 /// Each database file of each set, walked: its bytes as an open reads
@@ -406,6 +505,49 @@ fn every_claim_a_release_wrote_reads_as_its_bytes() {
     assert!(wide > 0, "no claim of two bytes");
 }
 
+/// `HEAD`'s reading of an index's options, laid out as the walk reads them
+/// off the bytes (`walk::index`): a graph's metric, `m`, `ef_construction`,
+/// `ef_search` and quantization; a text index's flags (kind 11), k1 and b in
+/// hundredths, longest and shortest prefix; an expiry's milliseconds.
+fn index_options(k: &IndexKind) -> Vec<u64> {
+    match k {
+        IndexKind::Vector(s) => {
+            let metric = match s.metric {
+                Metric::Cosine => 0,
+                Metric::L2 => 1,
+                Metric::Dot => 2,
+            };
+            let mut v = vec![
+                metric,
+                s.m as u64,
+                s.ef_construction as u64,
+                s.ef_search as u64,
+            ];
+            if s.quant != Quant::None {
+                v.push(s.quant.code() as u64);
+            }
+            v
+        }
+        IndexKind::Text(s) => text_options(s),
+        IndexKind::Sorted { ttl: Some(t) } => vec![*t],
+        _ => Vec::new(),
+    }
+}
+
+fn text_options(s: &fennec_core::schema::TextIndexSpec) -> Vec<u64> {
+    let mut v = Vec::new();
+    if s.accents {
+        v.push(if s.chars { 3 } else { 2 });
+    }
+    v.extend([
+        s.k1_pct as u64,
+        s.b_pct as u64,
+        s.prefix_max as u64,
+        s.prefix_min as u64,
+    ]);
+    v
+}
+
 /// `HEAD`'s index kind of `k`, as a schema writes it.
 fn index_code(k: &IndexKind) -> u8 {
     match k {
@@ -428,10 +570,12 @@ fn index_code(k: &IndexKind) -> u8 {
 
 /// Every collection's schema a release's file holds reads in this build as
 /// its bytes say: each field's `required` byte, collation, `nocase`, index
-/// and the `@text` beside it, and each index over several fields, unique
-/// or not, its parts descending or not. A byte read otherwise changes no
-/// answer where no statement asks the rule it carries, and every later
-/// write it would have held.
+/// and every option of it -- a graph's metric, `m`, `ef_construction`,
+/// `ef_search` and quantization, a text index's k1, b and prefixes, an
+/// expiry -- and the `@text` beside it with its options, and each index
+/// over several fields, unique or not, its parts descending or not. A byte
+/// read otherwise changes no answer where no statement asks the rule it
+/// carries, and every later write it would have held.
 #[test]
 fn every_schema_a_release_wrote_reads_as_its_bytes() {
     fennec_ql::install();
@@ -458,7 +602,9 @@ fn every_schema_a_release_wrote_reads_as_its_bytes() {
                     collate: f.collate.map(|c| c.code()),
                     nocase: f.nocase,
                     index: index_code(&f.index),
+                    options: index_options(&f.index),
                     beside: f.beside.map(|s| (s.chars, s.accents)),
+                    beside_options: f.beside.as_ref().map(text_options).unwrap_or_default(),
                 })
                 .collect();
             assert_eq!(ours, facts.fields, "{set}/{file}: {}'s fields", facts.name);
@@ -656,12 +802,79 @@ fn a_spent_sync_log_is_never_put_back_again() {
     assert!(held > 0, "no spent sync log");
 }
 
+/// A sync log is put back only over the file it was written beside, as
+/// that file stood when its generation began: its header names the file by
+/// device and inode and fingerprints the 4 096 bytes below `base`, where
+/// the generation began (`synclog::fingerprint`). Each begun log of a
+/// release's set, stamped as its copy's, is put back over the copy; with a
+/// byte below `base` changed -- another file at that inode, or the file
+/// rewritten -- it is not, and the copy reads as its own bytes.
+#[cfg(unix)]
+#[test]
+fn a_sync_log_is_put_back_only_over_the_bytes_it_fingerprints() {
+    let mut held = 0;
+    for set in sets() {
+        let name = set_name(&set);
+        for file in files(&set) {
+            let log = set.join(format!("{file}.fennec.sync"));
+            if !log.is_file() || std::fs::read(&log).unwrap()[..8] != *b"FENECSYN" {
+                continue;
+            }
+            let scratch = Scratch::new(&format!("print-{name}-{file}"));
+            let path = copied(&set, &file, &scratch.0);
+            assert!(
+                fennec_core::fs::read_with_sync_log(&path)
+                    .unwrap()
+                    .is_some(),
+                "{name}/{file}: its log, stamped as the copy's, not put back"
+            );
+            let header = std::fs::read(format!("{}.sync", path.display())).unwrap();
+            let base = u64::from_le_bytes(header[24..32].try_into().unwrap()) as usize;
+            let mut bytes = std::fs::read(&path).unwrap();
+            assert!(
+                base > 0 && base <= bytes.len(),
+                "{name}/{file}: a base of {base}"
+            );
+            bytes[base - 1] ^= 0x01;
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(
+                fennec_core::fs::read_with_sync_log(&path)
+                    .unwrap()
+                    .is_none(),
+                "{name}/{file}: its log put back over a file whose byte below its base changed"
+            );
+            held += 1;
+        }
+    }
+    assert!(held > 0, "no begun sync log");
+}
+
+/// A statement over `db` as a write, its outcome: the words of a refusal.
+fn tried(db: &mut fennec_core::prelude::Database, q: &str) -> Result<(), String> {
+    let stmt = fennec_ql::parse_for(db, q)
+        .map_err(|e| e.to_string())?
+        .remove(0);
+    db.execute_with(&stmt, &[])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Whether `answer` is a refusal in `words`.
+fn refused_in(answer: &str, words: &str) -> bool {
+    answer.starts_with("{\"kind\":\"error\"") && answer.contains(words)
+}
+
 /// The files a release wrote that this build reads otherwise on purpose
-/// (docs/design/crates.md, [`ON_PURPOSE`]): a row nesting past 64 levels
-/// refused where it is read, in its words, every other answer the
-/// release's; a schema past a limit refused at the open, read-only and to
-/// write, in its words. What a write, a drop of the field and a compact do
-/// beside the deep row is held as it is today.
+/// (docs/design/compatibility.md, *What 1.x does not read of 0.2.0's
+/// files*; [`ON_PURPOSE`]): a schema past a limit refused at the open,
+/// read-only and to write, in its words; a row nesting past 64 levels
+/// refused where it is read -- exactly the statements named, each in its
+/// words, and every other statement over the file answering as the release
+/// did -- and, on copies of `deep.fennec`, what stands on 1.x whatever a
+/// compact does: the row's `del` refused; its field dropped, the row read
+/// and its `del` taken where no field is declared after the dropped one,
+/// and refused, the row with it, once one is; the collection dropped and
+/// the rest of the file answering as the release did.
 #[test]
 fn the_files_this_build_refuses_on_purpose_are_refused_in_its_words() {
     fennec_ql::install();
@@ -689,97 +902,203 @@ fn the_files_this_build_refuses_on_purpose_are_refused_in_its_words() {
                         }
                     }
                 }
-                Otherwise::RowRefused(words) => {
-                    let db = at_clock(fennec_core::fs::open_read_only(&path).unwrap(), &set);
+                Otherwise::RowRefused { words, statements } => {
                     let texts = answers::statements(&set, file);
+                    for s in *statements {
+                        assert!(
+                            texts.iter().any(|t| t == s),
+                            "{name}/{file}: `{s}` is none of its statements"
+                        );
+                    }
                     let release =
                         std::fs::read_to_string(set.join(format!("{file}.answers"))).unwrap();
-                    let mut refused = 0;
-                    for (text, theirs) in texts.iter().zip(release.lines()) {
-                        let ours = answers::answer(&db, text);
-                        if ours == theirs {
-                            continue;
-                        }
-                        assert!(
-                            ours.contains(words),
-                            "{name}/{file}: {text}\n  release: {theirs}\n  this build: {ours}"
+                    let release: Vec<String> = release.lines().map(str::to_string).collect();
+                    // Every answer over a copy as it stands: the statements
+                    // named refused in the words (where `refused` asks it),
+                    // every other the release's.
+                    let held_to = |path: &Path, when: &str, refused: bool| -> Vec<String> {
+                        let db = at_clock(
+                            fennec_core::fs::open_read_only(path)
+                                .unwrap_or_else(|e| panic!("{name}/{file} ({when}): {e}")),
+                            &set,
                         );
-                        refused += 1;
+                        texts
+                            .iter()
+                            .zip(&release)
+                            .filter_map(|(text, theirs)| {
+                                let ours = answers::answer(&db, text);
+                                match statements.contains(&text.as_str()) {
+                                    true if refused && !refused_in(&ours, words) => Some(format!(
+                                        "{name}/{file} ({when}): {text} answered {ours}, where this \
+                                         build refuses it in `{words}`"
+                                    )),
+                                    false if ours != *theirs => Some(format!(
+                                        "{name}/{file} ({when}): {text}\n  release: {theirs}\n  this build: {ours}"
+                                    )),
+                                    _ => None,
+                                }
+                            })
+                            .collect()
+                    };
+                    let mut found = held_to(&path, "as the release wrote it", true);
+                    if *file == "deep" {
+                        found.extend(deep_steps(&set, &scratch.0, words, &held_to));
                     }
-                    assert!(refused > 0, "{name}/{file}: no row refused");
-                    drop(db);
-                    if *file != "deep" {
-                        held += 1;
-                        continue;
-                    }
-                    // Beside the row, each on a copy of its own: what a
-                    // write does today, and what the row reads as after.
-                    // A `del` finds the row by reading it, and is refused
-                    // in the same words; a drop of its field rewrites no
-                    // document, the row read without it after; a compact
-                    // copies the row's bytes as they are, still refused
-                    // where it is read once the file opens again.
-                    let row = "get deep where n = 2";
-                    let mut found = Vec::new();
-                    for (what, q, outcome, after) in [
-                        (
-                            "a del of the row",
-                            "del deep where n = 2",
-                            Err(*words),
-                            Err(*words),
-                        ),
-                        (
-                            "a drop of its field",
-                            "alter collection deep drop field j",
-                            Ok(()),
-                            Ok(()),
-                        ),
-                        ("a compact", "compact", Ok(()), Err(*words)),
-                        (
-                            "a put beside it",
-                            "put deep {n: 3, j: [[1]]}",
-                            Ok(()),
-                            Err(*words),
-                        ),
-                    ] {
-                        let dir = scratch.0.join(what.replace(' ', "-"));
-                        std::fs::create_dir_all(&dir).unwrap();
-                        let path = copied(&set, file, &dir);
-                        let mut db = fennec_core::fs::open(&path).unwrap();
-                        let stmt = fennec_ql::parse_for(&db, q).unwrap().remove(0);
-                        let got = db
-                            .execute_with(&stmt, &[])
-                            .map(|_| ())
-                            .map_err(|e| e.to_string());
-                        drop(db);
-                        let db = fennec_core::fs::open_read_only(&path).unwrap_or_else(|e| {
-                            panic!("{name}/{file}: opened again after {what}: {e}")
-                        });
-                        let read = answers::answer(&db, row);
-                        let read: Result<(), String> = match read.contains(words) {
-                            true => Err(read),
-                            false => Ok(()),
-                        };
-                        eprintln!("{name}/{file}: {what} ({q}): {got:?}; then `{row}`: {read:?}");
-                        for (when, want, got) in
-                            [("itself", outcome, &got), ("the row after", after, &read)]
-                        {
-                            match (want, got) {
-                                (Ok(()), Ok(())) => {}
-                                (Err(w), Err(e)) if e.contains(w) => {}
-                                _ => found.push(format!(
-                                    "{what}, {when}: {got:?}, where {want:?} was held"
-                                )),
-                            }
-                        }
-                    }
-                    assert!(found.is_empty(), "{name}/{file}:\n{}", found.join("\n"));
+                    assert!(found.is_empty(), "{}", found.join("\n"));
                 }
             }
             held += 1;
         }
     }
     assert!(held > 0, "no file read otherwise on purpose");
+}
+
+/// What stands on 1.x beside `deep.fennec`'s row -- its field `j`, a
+/// `[[json]]`, the collection's last -- each on a copy of its own, a step
+/// each, the file opened anew after each write: its `del` refused, the
+/// rest answering as the release did; `j` dropped, the row read and its `del` taken --
+/// no field is declared after it, and the skip of a dropped place is
+/// depth-bound; `j` dropped and a field added after it, the row
+/// refused again, its `del` too, and the way out the collection dropped,
+/// the rest of the file answering as the release did. A compact, whatever
+/// it answers, changes no other answer of the file.
+fn deep_steps(
+    set: &Path,
+    scratch: &Path,
+    words: &str,
+    held_to: &dyn Fn(&Path, &str, bool) -> Vec<String>,
+) -> Vec<String> {
+    let row = "get deep where n = 2";
+    let mut found = Vec::new();
+    let copy = |step: &str| {
+        let dir = scratch.join(step);
+        std::fs::create_dir_all(&dir).unwrap();
+        copied(set, "deep", &dir)
+    };
+    let open = |path: &Path| fennec_core::fs::open(path).unwrap();
+    let read = |path: &Path, q: &str| {
+        let db = at_clock(fennec_core::fs::open_read_only(path).unwrap(), set);
+        answers::answer(&db, q)
+    };
+    let mut want = |what: &str, ok: bool, got: Result<(), String>| {
+        let held = match (&got, ok) {
+            (Ok(()), true) => true,
+            (Err(e), false) => e.contains(words),
+            _ => false,
+        };
+        eprintln!("deep: {what}: {got:?}");
+        if !held {
+            found.push(format!(
+                "deep: {what}: {got:?}, where {} was held",
+                if ok {
+                    "Ok".to_string()
+                } else {
+                    format!("a refusal in `{words}`")
+                }
+            ));
+        }
+    };
+    let answered = |a: String| {
+        if a.starts_with("{\"kind\":\"error\"") {
+            Err(a)
+        } else {
+            Ok(())
+        }
+    };
+
+    // As the release wrote it: the row's `del` refused, the row and the
+    // rest of the file as they were.
+    let path = copy("del");
+    want(
+        "a del of the row",
+        false,
+        tried(&mut open(&path), "del deep where n = 2"),
+    );
+    let after_del = held_to(&path, "its del refused", true);
+
+    // Its field dropped, the collection's last: the row reads, and goes.
+    let path = copy("drop");
+    want(
+        "a drop of its field",
+        true,
+        tried(&mut open(&path), "alter collection deep drop field j"),
+    );
+    want(
+        "the row, its field dropped",
+        true,
+        answered(read(&path, row)),
+    );
+    want(
+        "a del of the row, its field dropped",
+        true,
+        tried(&mut open(&path), "del deep where n = 2"),
+    );
+    want(
+        "the row gone",
+        true,
+        match read(&path, "get deep count").contains("\"count\":1") {
+            true => Ok(()),
+            false => Err(read(&path, "get deep count")),
+        },
+    );
+
+    // A field added after the dropped one: reading it skips the dropped
+    // place first, which refuses the row again, and its `del`.
+    let path = copy("drop-and-add");
+    let mut db = open(&path);
+    want(
+        "a drop of its field",
+        true,
+        tried(&mut db, "alter collection deep drop field j"),
+    );
+    want(
+        "a field added after it",
+        true,
+        tried(&mut db, "alter collection deep add field k int"),
+    );
+    drop(db);
+    want(
+        "the row, a field after the dropped one",
+        false,
+        answered(read(&path, row)),
+    );
+    want(
+        "a del of the row, a field after the dropped one",
+        false,
+        tried(&mut open(&path), "del deep where n = 2"),
+    );
+    want(
+        "the other row",
+        true,
+        answered(read(&path, "get deep where n = 1")),
+    );
+    // The way out: the collection dropped, the rest of the file as it was.
+    want(
+        "the collection dropped",
+        true,
+        tried(&mut open(&path), "drop collection deep"),
+    );
+    let untouched = copy("untouched");
+    for q in ["get plain order n", "get plain where n = 2"] {
+        let theirs = read(&untouched, q);
+        want(
+            &format!("`{q}` once the collection went"),
+            true,
+            match read(&path, q) == theirs {
+                true => Ok(()),
+                false => Err(read(&path, q)),
+            },
+        );
+    }
+
+    // A compact: whatever it answers, every other answer stands.
+    let path = copy("compact");
+    let compacted = tried(&mut open(&path), "compact");
+    eprintln!("deep: a compact: {compacted:?}");
+    let mut found_after = held_to(&path, "a compact tried", false);
+    found_after.extend(after_del);
+    found.extend(found_after);
+    found
 }
 
 #[test]

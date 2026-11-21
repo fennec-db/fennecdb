@@ -14,15 +14,24 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What a release writes, by its own source, and its set holds: every
+/// What a release writes, by its own source, and a set of it holds: every
 /// record kind, statement op, graph version, schema tag, value tag and
 /// index kind, two ways -- each in a file, and no file holding another --
 /// and every byte-level alternative its encoders emit ([`ALTERNATIVES`]):
 /// in a file of its set (`shapes`), or named with why in `absent`, which
 /// the set's README.md names too. A set without its line fails, and so
-/// does a line without its set.
+/// does a line without its set. A landed set never changes: `sums` pins
+/// the SHA-256 of its `SHA256SUMS`, so a set written again whole fails. A
+/// form found missing after a set landed is held by a further set of the
+/// same tag (`<tag>+2`, ...), a line of its own written by binaries built
+/// from the same commit, never by amending the first.
 pub struct Writes {
+    /// The set's directory: its tag, or `<tag>+<n>` for a further set.
     pub set: &'static str,
+    /// The release whose binaries wrote it.
+    pub tag: &'static str,
+    /// The SHA-256 of its `SHA256SUMS`, in hex.
+    pub sums: &'static str,
     pub kinds: &'static [u8],
     pub ops: &'static [u8],
     pub graphs: &'static [u8],
@@ -69,6 +78,13 @@ pub const ALTERNATIVES: &[&str] = &[
     "document: fewer values than places",
     "value: bool false",
     "value: bool true",
+    // Numbers below zero and past their type's range: a zigzag's sign, a
+    // float's infinity, an f32's and an f16's.
+    "value: int below zero",
+    "value: timestamp before 1970",
+    "value: float infinite",
+    "value: vector component infinite",
+    "value: f16 component past 65 504",
     // What a release wrote that this build refuses on purpose
     // (docs/design/crates.md, *How deep a value nests* and *Limits*).
     "value: nesting past 64 levels",
@@ -140,6 +156,7 @@ pub const ALTERNATIVES: &[&str] = &[
     "schedule: zone offset",
     "schedule: every from the epoch",
     "schedule: every from an origin",
+    "statement: a number past a float's range in its text",
     "mark: ran",
     "mark: refused",
     "mark: none passed over",
@@ -191,6 +208,13 @@ pub const ALTERNATIVES: &[&str] = &[
     "index: quant bit",
     "index: text accents",
     "index: text chars accents",
+    "index: text k1 not its default",
+    "index: text b not its default",
+    "index: text prefix not its default",
+    "index: text prefix_min not its default",
+    "index: hnsw m not its default",
+    "index: hnsw ef_construction not its default",
+    "index: hnsw ef_search not its default",
     "path: index kind 1",
     "path: index kind 4",
     "path: index kind 8",
@@ -256,11 +280,18 @@ pub const ALTERNATIVES: &[&str] = &[
     "page: sealed image",
     "page: sealed chunk",
     "page: a rewrite's copy beside its file",
+    "durable object: sql image",
+    "durable object: sql writes",
+    "durable object: values image",
+    "durable object: values writes",
 ];
 
-/// The releases whose sets are in the tree, oldest first.
+/// The sets in the tree, oldest first: a release's, then any further set
+/// of the same tag.
 pub const RELEASES: &[Writes] = &[Writes {
     set: "v0.2.0",
+    tag: "v0.2.0",
+    sums: "9a209946cb5a9df35bbc79e9101085011e7efa9a663eb7a41136ff1618484089",
     kinds: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     ops: &[1, 2, 3, 4, 5, 6],
     graphs: &[9, 10],
@@ -282,14 +313,8 @@ pub const RELEASES: &[Writes] = &[Writes {
             "a record of 256 MiB: one collection's data in an image that large, 256 MiB of working tree",
         ),
         (
-            "graph: links of 3 bytes",
-            "a graph past 65 536 nodes: about 1.5 MB of links git cannot compress, and its restore \
-             and rewrite in every test run",
-        ),
-        ("graph: links of 4 bytes", "a graph past 16 777 216 nodes"),
-        (
-            "graph: steps of 3 bytes",
-            "a step past 65 535 between a list's links: a graph past 65 536 nodes",
+            "graph: links of 4 bytes",
+            "a graph past 16 777 216 nodes: some 300 MB of graph record",
         ),
         (
             "graph: steps of 4 bytes",
@@ -322,6 +347,11 @@ const V0_2_0_SHAPES: &[&str] = &[
     "document: fewer values than places",
     "value: bool false",
     "value: bool true",
+    "value: int below zero",
+    "value: timestamp before 1970",
+    "value: float infinite",
+    "value: vector component infinite",
+    "value: f16 component past 65 504",
     "value: nesting past 64 levels",
     "type: lists nested past 64",
     "type: a point under 64 lists",
@@ -384,6 +414,7 @@ const V0_2_0_SHAPES: &[&str] = &[
     "schedule: zone offset",
     "schedule: every from the epoch",
     "schedule: every from an origin",
+    "statement: a number past a float's range in its text",
     "mark: ran",
     "mark: refused",
     "mark: none passed over",
@@ -433,6 +464,13 @@ const V0_2_0_SHAPES: &[&str] = &[
     "index: quant bit",
     "index: text accents",
     "index: text chars accents",
+    "index: text k1 not its default",
+    "index: text b not its default",
+    "index: text prefix not its default",
+    "index: text prefix_min not its default",
+    "index: hnsw m not its default",
+    "index: hnsw ef_construction not its default",
+    "index: hnsw ef_search not its default",
     "path: index kind 1",
     "path: index kind 4",
     "path: index kind 8",
@@ -459,10 +497,12 @@ const V0_2_0_SHAPES: &[&str] = &[
     "graph: doc ids of 4 bytes",
     "graph: doc ids of 8 bytes",
     "graph: links of 2 bytes",
+    "graph: links of 3 bytes",
     "graph: list empty",
     "graph: list of one",
     "graph: steps of 1 byte",
     "graph: steps of 2 bytes",
+    "graph: steps of 3 bytes",
     "graph: upper layers",
     "graph: aliases",
     "graph: halves",
@@ -491,6 +531,10 @@ const V0_2_0_SHAPES: &[&str] = &[
     "page: sealed image",
     "page: sealed chunk",
     "page: a rewrite's copy beside its file",
+    "durable object: sql image",
+    "durable object: sql writes",
+    "durable object: values image",
+    "durable object: values writes",
 ];
 
 /// The alternatives only fennec-http's walk meets: a seal is opened by
@@ -690,6 +734,15 @@ pub struct Mark {
     pub skipped: u64,
 }
 
+/// Whether a statement's text holds a number no `f64` holds (`1e400`): a
+/// run of digits, a point and an exponent, read as Rust reads a float.
+fn past_range(text: &str) -> bool {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '-')))
+        .map(|w| w.trim_start_matches(['-', '+']))
+        .filter(|w| w.starts_with(|ch: char| ch.is_ascii_digit()) && w.contains(['e', 'E']))
+        .any(|w| w.parse::<f64>().is_ok_and(f64::is_infinite))
+}
+
 fn unzigzag(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
@@ -712,10 +765,12 @@ pub struct FieldFacts {
     /// The collation's code.
     pub collate: Option<u8>,
     pub nocase: bool,
-    /// Its own index's kind byte.
+    /// Its own index's kind byte, and the numbers after it ([`index`]).
     pub index: u8,
-    /// The `@text` beside its own: chars, accents.
+    pub options: Vec<u64>,
+    /// The `@text` beside its own: chars, accents, and its numbers.
     pub beside: Option<(bool, bool)>,
+    pub beside_options: Vec<u64>,
 }
 
 /// A graph whose record a file keeps -- its collection's last -- and what
@@ -868,11 +923,19 @@ fn value_in(c: &mut Cur, seen: &mut Seen, levels: usize) {
             1 => seen.shape("value: bool true"),
             b => c.fail(&format!("a bool of byte {b}")),
         },
+        // A zigzag: its low bit is the sign.
         2 | 9 => {
-            c.uv();
+            if c.uv() & 1 == 1 {
+                seen.shape(match tag {
+                    2 => "value: int below zero",
+                    _ => "value: timestamp before 1970",
+                });
+            }
         }
         3 => {
-            c.take(8);
+            if f64::from_le_bytes(c.take(8).try_into().unwrap()).is_infinite() {
+                seen.shape("value: float infinite");
+            }
         }
         4 => {
             c.str();
@@ -883,11 +946,29 @@ fn value_in(c: &mut Cur, seen: &mut Seen, levels: usize) {
         }
         6 => {
             let n = c.uv() as usize;
-            c.take(4 * n);
+            let past = c
+                .take(4 * n)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|b| f32::from_le_bytes(*b).is_infinite());
+            if past {
+                seen.shape("value: vector component infinite");
+            }
         }
+        // An f16 past 65 504 is its infinity: the exponent's bits all set,
+        // no mantissa.
         8 => {
             let n = c.uv() as usize;
-            c.take(2 * n);
+            let past = c
+                .take(2 * n)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|b| u16::from_le_bytes(*b) & 0x7fff == 0x7c00);
+            if past {
+                seen.shape("value: f16 component past 65 504");
+            }
         }
         7 => {
             for _ in 0..c.uv() {
@@ -985,43 +1066,75 @@ fn ty(c: &mut Cur, seen: &mut Seen, lists: usize) -> u8 {
     tag
 }
 
-/// An index's kind and its options, as a schema writes one: its kind.
-fn index(c: &mut Cur, seen: &mut Seen) -> u8 {
+/// An index's kind and its options, as a schema writes one: its kind,
+/// and every number after it in order -- a graph's metric, `m`,
+/// `ef_construction`, `ef_search` and quantization, a text index's flags,
+/// k1 and b in hundredths, longest and shortest prefix, an expiry's
+/// milliseconds -- which this build's reading is held to. Each option
+/// away from the release's default is a form of its own (`Default for
+/// VectorIndexSpec`, `TextIndexSpec`: m 16, ef_construction 200,
+/// ef_search 100 or a bit index's 200; k1 0.9, b 0.4, prefix 0, prefix_min
+/// 3).
+fn index(c: &mut Cur, seen: &mut Seen) -> (u8, Vec<u64>) {
     let kind = c.u8();
+    let mut opts = Vec::new();
     match kind {
         0 | 1 | 4 | 6 | 8 | 10 => {}
         2 | 5 => {
-            seen.shape(match c.u8() {
+            let metric = c.u8();
+            seen.shape(match metric {
                 0 => "index: metric cosine",
                 1 => "index: metric l2",
                 2 => "index: metric dot",
                 m => c.fail(&format!("a metric the release writes none of: {m}")),
             });
-            c.uv();
-            c.uv();
-            c.uv();
+            let (m, construction, search) = (c.uv(), c.uv(), c.uv());
+            opts.extend([metric as u64, m, construction, search]);
+            let mut quant = 0;
             if kind == 5 {
-                seen.shape(match c.u8() {
+                quant = c.u8();
+                seen.shape(match quant {
                     1 => "index: quant int8",
                     2 => "index: quant bit",
                     q => c.fail(&format!("a quantization kind 5 never holds: {q}")),
                 });
+                opts.push(quant as u64);
+            }
+            if m != 16 {
+                seen.shape("index: hnsw m not its default");
+            }
+            if construction != 200 {
+                seen.shape("index: hnsw ef_construction not its default");
+            }
+            if search != if quant == 2 { 200 } else { 100 } {
+                seen.shape("index: hnsw ef_search not its default");
             }
         }
         3 | 7 | 11 => {
             if kind == 11 {
-                seen.shape(match c.u8() {
+                let flags = c.u8();
+                seen.shape(match flags {
                     2 => "index: text accents",
                     3 => "index: text chars accents",
                     f => c.fail(&format!("text options the release writes none of: {f}")),
                 });
+                opts.push(flags as u64);
             }
-            for _ in 0..4 {
-                c.uv();
+            let (k1, b, longest, shortest) = (c.uv(), c.uv(), c.uv(), c.uv());
+            opts.extend([k1, b, longest, shortest]);
+            for (set, shape) in [
+                (k1 != 90, "index: text k1 not its default"),
+                (b != 40, "index: text b not its default"),
+                (longest != 0, "index: text prefix not its default"),
+                (shortest != 3, "index: text prefix_min not its default"),
+            ] {
+                if set {
+                    seen.shape(shape);
+                }
             }
         }
         9 => {
-            c.uv();
+            opts.push(c.uv());
         }
         k => {
             c.at -= 1;
@@ -1029,7 +1142,7 @@ fn index(c: &mut Cur, seen: &mut Seen) -> u8 {
         }
     }
     seen.indexes.insert(kind);
-    kind
+    (kind, opts)
 }
 
 /// A schema (`Schema::encode`), every byte: its places, each field's tags,
@@ -1097,7 +1210,9 @@ pub fn schema(c: &mut Cur, seen: &mut Seen) -> (Facts, usize) {
             collate: None,
             nocase: false,
             index: 0,
+            options: Vec::new(),
             beside: None,
+            beside_options: Vec::new(),
         };
         let mut tags = Vec::new();
         if c.peek() == Some(11) {
@@ -1122,7 +1237,8 @@ pub fn schema(c: &mut Cur, seen: &mut Seen) -> (Facts, usize) {
             c.u8();
             seen.schema_tags.insert(18);
             let from = c.at;
-            let kind = index(c, seen);
+            let (kind, opts) = index(c, seen);
+            f.beside_options = opts;
             let (shape, spec) = match (kind, c.b[from + 1..].first()) {
                 (3, _) => ("beside: text", (false, false)),
                 (7, _) => ("beside: text chars", (true, false)),
@@ -1156,13 +1272,13 @@ pub fn schema(c: &mut Cur, seen: &mut Seen) -> (Facts, usize) {
             b => c.fail(&format!("a required byte of {b}")),
         });
         f.required = required == 1;
-        f.index = index(c, seen);
+        (f.index, f.options) = index(c, seen);
         facts.fields.push(f);
         if t == 14 {
             for _ in 0..c.uv() {
                 c.str();
                 let from = c.at;
-                let kind = index(c, seen);
+                let (kind, _) = index(c, seen);
                 seen.shape(match kind {
                     1 => "path: index kind 1",
                     4 => "path: index kind 4",
@@ -1795,6 +1911,9 @@ fn statement(c: &mut Cur, seen: &mut Seen) {
     if op == 2 && !text.is_empty() {
         c.fail("a drop's text");
     }
+    if past_range(text) {
+        seen.shape("statement: a number past a float's range in its text");
+    }
     let mut timing = None;
     if op == 4 {
         let tag = c.u8();
@@ -2397,9 +2516,253 @@ pub fn page_records(text: &str, file: &str, seen: &mut Seen) {
     assert!(records.len() > 1, "{file}: an image and no chunk");
 }
 
+/// A Durable Object's storage as `tools/compat/cloudflare.mjs` dumped what
+/// a release's @fennecdb/cloudflare kept in it, every member read: a
+/// SQLite-backed object's one table, `<key>:<gen>` -- the `CREATE TABLE`
+/// the module ran, then its rows by id, the image's (`image` 1) before the
+/// writes' (0) -- or a key-value backed object's values: the record
+/// `<key>:meta` naming the generation and how many pieces and bytes its
+/// image and its writes take, and those pieces, `<key>:<gen>:i:` and
+/// `:l:` numbered from 0, none of another generation. Either way the
+/// image's bytes walked as a database and the writes' as the records they
+/// hold, each piece ending where it filled, inside a record or not.
+pub fn durable_object(text: &str, file: &str, seen: &mut Seen) {
+    use fennec_core::value::Value;
+    let doc = fennec_core::json::parse_json(text).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let Value::Object(top) = doc else {
+        panic!("{file}: not an object")
+    };
+    let get = |o: &[(String, Value)], k: &str| -> Value {
+        o.iter()
+            .find(|(m, _)| m == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("{file}: no `{k}`"))
+    };
+    // An object's members by name, sorted: the JSON reader keeps an
+    // object's members in its own order, not the file's.
+    let names = |o: &[(String, Value)]| -> Vec<String> {
+        let mut v: Vec<String> = o.iter().map(|(k, _)| k.clone()).collect();
+        v.sort();
+        v
+    };
+    let text_of = |v: Value| match v {
+        Value::Text(s) => s,
+        v => panic!("{file}: {v:?} where a text is due"),
+    };
+    let int_of = |v: Value| match v {
+        Value::Int(n) if n >= 0 => n as u64,
+        v => panic!("{file}: {v:?} where a count is due"),
+    };
+    let list_of = |v: Value| match v {
+        Value::List(l) => l,
+        v => panic!("{file}: {v:?} where a list is due"),
+    };
+    let object_of = |v: Value| match v {
+        Value::Object(o) => o,
+        v => panic!("{file}: {v:?} where an object is due"),
+    };
+    let (mut image, mut writes) = (Vec::new(), Vec::new());
+    let sql = match names(&top).as_slice() {
+        [t] if t == "tables" => true,
+        [v] if v == "values" => false,
+        m => panic!("{file}: members {m:?}"),
+    };
+    if sql {
+        let tables = list_of(get(&top, "tables"));
+        assert_eq!(tables.len(), 1, "{file}: one generation's table kept");
+        let table = object_of(tables[0].clone());
+        assert_eq!(
+            names(&table),
+            ["name", "rows", "sql"],
+            "{file}: a table's members"
+        );
+        let name = text_of(get(&table, "name"));
+        let generation = name
+            .strip_prefix("fennec:")
+            .and_then(|g| g.parse::<u64>().ok())
+            .filter(|&g| g > 0)
+            .unwrap_or_else(|| panic!("{file}: a table named {name:?}"));
+        assert_eq!(
+            text_of(get(&table, "sql")),
+            format!("CREATE TABLE \"fennec:{generation}\" (id INTEGER PRIMARY KEY, image INTEGER NOT NULL, data BLOB NOT NULL)"),
+            "{file}: the table as the module makes it"
+        );
+        let (mut last, mut in_image) = (0, true);
+        for r in list_of(get(&table, "rows")) {
+            let r = object_of(r);
+            assert_eq!(
+                names(&r),
+                ["data", "id", "image"],
+                "{file}: a row's members"
+            );
+            let id = int_of(get(&r, "id"));
+            assert!(id > last, "{file}: row {id} after {last}");
+            last = id;
+            let bytes = unbase64(&text_of(get(&r, "data")));
+            assert!(!bytes.is_empty(), "{file}: row {id} empty");
+            match int_of(get(&r, "image")) {
+                1 if in_image => image.extend(bytes),
+                0 => {
+                    in_image = false;
+                    writes.extend(bytes);
+                }
+                b => panic!("{file}: row {id}'s image is {b}, after the writes' rows"),
+            }
+        }
+    } else {
+        let values = list_of(get(&top, "values"));
+        let mut record = None;
+        let mut pieces: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for v in values {
+            let v = object_of(v);
+            let key = text_of(get(&v, "key"));
+            match names(&v).as_slice() {
+                [b, k] if k == "key" && b == "bytes" => {
+                    pieces.insert(key, unbase64(&text_of(get(&v, "bytes"))));
+                }
+                [k, r] if k == "key" && r == "value" && key == "fennec:meta" => {
+                    record = Some(object_of(get(&v, "value")));
+                }
+                m => panic!("{file}: {key}'s members {m:?}"),
+            }
+        }
+        let record = record.unwrap_or_else(|| panic!("{file}: no fennec:meta"));
+        assert_eq!(
+            names(&record),
+            ["gen", "image", "log", "v"],
+            "{file}: the record's members"
+        );
+        assert_eq!(int_of(get(&record, "v")), 1, "{file}: the record's version");
+        let generation = int_of(get(&record, "gen"));
+        for (part, into, what) in [("i", &mut image, "image"), ("l", &mut writes, "log")] {
+            let counts: Vec<u64> = list_of(get(&record, what))
+                .into_iter()
+                .map(int_of)
+                .collect();
+            let [count, bytes] = counts[..] else {
+                panic!("{file}: the record's {what}: {counts:?}")
+            };
+            for n in 0..count {
+                let key = format!("fennec:{generation}:{part}:{n:09}");
+                into.extend(
+                    pieces
+                        .remove(&key)
+                        .unwrap_or_else(|| panic!("{file}: no {key}")),
+                );
+            }
+            assert_eq!(
+                into.len() as u64,
+                bytes,
+                "{file}: the {what}'s pieces' bytes"
+            );
+        }
+        assert!(
+            pieces.is_empty(),
+            "{file}: pieces no record names: {:?}",
+            pieces.keys()
+        );
+    }
+    let kind = if sql { "sql" } else { "values" };
+    assert!(
+        !image.is_empty() && !writes.is_empty(),
+        "{file}: an image and writes after it"
+    );
+    database(&image, &format!("{file}: the image"), seen);
+    seen.shape(match sql {
+        true => "durable object: sql image",
+        false => "durable object: values image",
+    });
+    chunk(&writes, &format!("{file}: the writes"), seen);
+    seen.shape(match sql {
+        true => "durable object: sql writes",
+        false => "durable object: values writes",
+    });
+    eprintln!(
+        "{file}: {kind}, an image of {} bytes and {} bytes of writes",
+        image.len(),
+        writes.len()
+    );
+}
+
+/// SHA-256 (FIPS 180-4), the walk's own, as its AES is: what a set's
+/// `SHA256SUMS` names each file by and its line in `RELEASES` pins the
+/// sums by, read here with no crate.
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in block.chunks(4).enumerate() {
+            w[i] = u32::from_be_bytes(word.try_into().unwrap());
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *x = x.wrapping_add(y);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, x) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&x.to_be_bytes());
+    }
+    out
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The walk's own AES held to FIPS-197's AES-256 example (appendix C.3),
-/// and its counter to GCM's test case 15 (McGrew and Viega): a page record
-/// it misreads is caught here first.
+/// its counter to GCM's test case 15 (McGrew and Viega), and its SHA-256 to
+/// FIPS 180-4's: a page record it misreads, or a set's sums, is caught here
+/// first.
 pub fn aes_holds_its_vectors() {
     let hex = |s: &str| -> Vec<u8> {
         (0..s.len())
@@ -2428,4 +2791,32 @@ pub fn aes_holds_its_vectors() {
     );
     sealed.extend_from_slice(&[0; 16]);
     assert_eq!(aes_gcm_plain(&key, &iv, &sealed), plain, "GCM test case 15");
+    // FIPS 180-4's examples (NIST's SHA256.pdf), and a message of a whole
+    // block plus one byte, whose padding takes a block of its own.
+    for (msg, want) in [
+        (
+            &b""[..],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        (
+            b"abc",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        (
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        ),
+    ] {
+        assert_eq!(
+            self::hex(&sha256(msg)),
+            want,
+            "SHA-256 of {} bytes",
+            msg.len()
+        );
+    }
+    assert_eq!(
+        self::hex(&sha256(&[b'a'; 1_000_000])),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+        "SHA-256 of a million `a`s"
+    );
 }

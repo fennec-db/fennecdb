@@ -1,16 +1,16 @@
 {
  "prune": [
-  "a: let go of 2 images and 2 segments",
+  "a: let go of 2 images and 1 segments",
   "b: let go of 1 images and 0 segments",
-  "b.a1d079f8c07d44e1: let go of 1 images and 0 segments",
+  "b.6cc36d68ac02725e: let go of 1 images and 0 segments",
   "c: let go of 3 images and 1 segments",
   "<root>: 3 tenants in 4 archives, 0 failed"
  ],
  "verify": [
-  "a: changes 4 to 5, from 2026-11-15T10:27:34.281Z to 2026-11-15T10:27:38.370Z",
-  "b: changes 3 to 3, from 2026-11-15T10:27:37.586Z to 2026-11-15T10:27:37.586Z",
-  "b.a1d079f8c07d44e1: changes 2 to 2, from 2026-11-15T10:27:33.356Z to 2026-11-15T10:27:33.356Z, gone from the node 2026-11-15T10:27:35.074Z",
-  "c: changes 3 to 3, from 2026-11-15T10:27:36.921Z to 2026-11-15T10:27:36.921Z",
+  "a: changes 5 to 5, from 2026-11-15T12:35:57.507Z to 2026-11-15T12:35:57.507Z",
+  "b: changes 3 to 3, from 2026-11-15T12:35:56.750Z to 2026-11-15T12:35:56.750Z",
+  "b.6cc36d68ac02725e: changes 2 to 2, from 2026-11-15T12:35:52.591Z to 2026-11-15T12:35:52.591Z, gone from the node 2026-11-15T12:35:54.253Z",
+  "c: changes 3 to 3, from 2026-11-15T12:35:56.094Z to 2026-11-15T12:35:56.094Z",
   "<root>: 3 tenants in 4 archives, 0 failed"
  ],
  "restores": [
@@ -46,7 +46,7 @@
    }
   },
   {
-   "to": "2026-11-15T10:27:33.268Z",
+   "to": "2026-11-15T12:35:52.491Z",
    "label": "before",
    "status": 0,
    "said": [
@@ -58,22 +58,16 @@
    "answers": {}
   },
   {
-   "to": "2026-11-15T10:27:35.012Z",
+   "to": "2026-11-15T12:35:54.199Z",
    "label": "all three",
    "status": 1,
    "said": [
-    "a: change 4",
-    "b: change 2, from b.a1d079f8c07d44e1",
-    "<out>: 2 tenants restored, 0 passed over, 1 failed",
-    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T10:27:36.921Z"
+    "b: change 2, from b.6cc36d68ac02725e",
+    "<out>: 1 tenants restored, 0 passed over, 2 failed",
+    "a: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T12:35:57.507Z",
+    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T12:35:56.094Z"
    ],
    "answers": {
-    "a": [
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
-     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
-    ],
     "b": [
      "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, its first life\"}]}}",
      "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, its first life\"}]}}",
@@ -83,45 +77,31 @@
    }
   },
   {
-   "to": "2026-11-15T10:27:35.635Z",
+   "to": "2026-11-15T12:35:54.810Z",
    "label": "b gone",
    "status": 1,
    "said": [
-    "a: change 4",
-    "b: gone from the node 2026-11-15T10:27:35.074Z, passed over",
-    "<out>: 1 tenants restored, 1 passed over, 1 failed",
-    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T10:27:36.921Z"
+    "b: gone from the node 2026-11-15T12:35:54.253Z, passed over",
+    "<out>: 0 tenants restored, 1 passed over, 2 failed",
+    "a: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T12:35:57.507Z",
+    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T12:35:56.094Z"
    ],
-   "answers": {
-    "a": [
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
-     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
-    ]
-   }
+   "answers": {}
   },
   {
-   "to": "2026-11-15T10:27:36.255Z",
+   "to": "2026-11-15T12:35:55.433Z",
    "label": "c away",
-   "status": 0,
+   "status": 1,
    "said": [
-    "a: change 4",
-    "b: gone from the node 2026-11-15T10:27:35.074Z, passed over",
-    "c: gone from the node 2026-11-15T10:27:35.694Z, passed over",
-    "<out>: 1 tenants restored, 2 passed over, 0 failed"
+    "b: gone from the node 2026-11-15T12:35:54.253Z, passed over",
+    "c: gone from the node 2026-11-15T12:35:54.873Z, passed over",
+    "<out>: 0 tenants restored, 2 passed over, 1 failed",
+    "a: that moment was let go of (--keep): its archive holds nothing from before 2026-11-15T12:35:57.507Z"
    ],
-   "answers": {
-    "a": [
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
-     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
-     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
-    ]
-   }
+   "answers": {}
   },
   {
-   "to": "2026-11-15T10:27:39.138Z",
+   "to": "2026-11-15T12:35:58.248Z",
    "label": "b back",
    "status": 0,
    "said": [

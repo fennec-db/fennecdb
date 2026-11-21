@@ -90,3 +90,43 @@ get shapes match cx "facade" select req
 get shapes match cx "東" select req
 describe statement on_isd
 get retired order n
+describe edges
+get edges order n
+get edges order f select n, f
+get edges order f desc select n
+get edges where f > 1e300 select n
+get edges where f < -1e300 select n
+get edges where f >= 1.5 order f select n
+get edges select n, v, vh, lv, lf order n
+get edges select max(f) as hi, min(f) as lo, count(*) as c
+call past_range
+describe statement past_range
+describe signed
+get signed order n select n
+get signed order n desc select n, at
+get signed where n < 0 order n select n
+get signed order at select n, at
+get signed where at < "1970-01-01T00:00:00Z" order at select n
+get signed where at >= 0 order at select n
+get signed order j.n select n, j
+get signed where j.n < 0 order j.n select n
+get signed where l has -3 select n
+get signed select n, l, ts, j order n
+get signed select sum(n) as s, min(n) as lo, min(at) as first
+describe tuned
+get tuned match t "fox" select n
+get tuned match t "qui" select n
+get tuned match t "jum" select n
+get tuned match c "東京" select n
+get tuned match c "京" select n
+get tuned match a "cafe" select n
+get tuned match a "café" select n
+get tuned match a "zur" select n
+get tuned match a "naï" select n
+get tuned where h = "fox" select n
+get tuned match h "fox" select n
+get tuned match h "bl" select n
+get tuned match h "wh" select n
+get tuned near v [1, 0, 0, 0] limit 2 select n
+get tuned near q [1, 0, 0, 0] limit 2 select n
+get tuned near v [0.4, 0.6, 0, 0] exact limit 4 select n

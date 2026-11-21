@@ -10,7 +10,13 @@
 // once persisted or flushed, restored and compacted; and answers alike
 // once they are taken out. Node has neither store: tools/compat/web.mjs's
 // stand in, the IndexedDB one holding only the database, version and store
-// the release's page made, so a client naming another finds nothing.
+// the release's page made, so a client naming another finds nothing. And
+// what the release's @fennecdb/cloudflare kept in a Durable Object's
+// storage -- a SQLite-backed object's table of rows, a key-value backed
+// object's values (tools/compat/cloudflare.mjs) -- restored by this tree's
+// module over its own stand-ins for that storage (integrations/cloudflare/
+// fakes.js), answering as the release's did, written into, kept, restored
+// and compacted alike.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,9 +24,14 @@ import { readFile, readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { needs } from './ci-prereq.mjs';
 import { KeyRange, answers, fakeDir, fakeIndexedDB, heldDatabase, sealingKey, statements } from '../tools/compat/web.mjs';
+import { PIECE, loadRows, loadValues } from '../tools/compat/cloudflare.mjs';
+import * as durable from '../integrations/cloudflare/index.js';
+import { Rows, Values } from '../integrations/cloudflare/fakes.js';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
-needs(['web/fennec.wasm', wasm, 'make wasm']);
+// A SQLite-backed object's storage is node:sqlite here, Node 22.13 and later.
+const sqlite = await import('node:sqlite').catch(() => null);
+needs(['web/fennec.wasm', wasm, 'make wasm'], ['node:sqlite', sqlite, 'Node 22.13 or later']);
 const skip = !wasm && 'no web/fennec.wasm (make wasm)';
 
 const SETS = process.env.FENNEC_COMPAT_SETS
@@ -312,3 +323,52 @@ test('a release\'s OPFS file and the copy a stopped rewrite left beside it open 
   }
   assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
 });
+
+/**
+ * Each Durable Object's storage the release's module kept the page's writes
+ * in, as `do-<kind>.json` holds it, made again in this tree's stand-in for
+ * that storage; `null` for a SQLite-backed one where node:sqlite is missing.
+ */
+const STORAGES = {
+  'do-sql': (json) => sqlite && loadRows(new Rows(sqlite.DatabaseSync), json),
+  'do-kv': (json) => loadValues(new Values(), json),
+};
+
+for (const [name, made] of Object.entries(STORAGES)) {
+  test(`a release's Durable Object storage (${name}) restores and answers as its module did`, { skip: skip || (name === 'do-sql' && !sqlite && 'no node:sqlite') }, async () => {
+    const found = [];
+    for (const set of await everySet()) {
+      const storage = made(JSON.parse(await read(set, `${name}.json`)));
+      const restored = async (when) => {
+        const db = await page();
+        assert.equal(await durable.restore(db, storage), true, `${set}/${name}: restored (${when})`);
+        return db;
+      };
+      // As an object opened again restores it, answering as the release's
+      // module did; its writes kept as a flush after the release's rows or
+      // values, then an image of its own once compacted.
+      const db = await restored('as the release left it');
+      found.push(...(await differences(db, set, name, 'restored')));
+      const w = writeAfter(db);
+      found.push(...readBack(db, w, name, 'written'));
+      assert.ok((await durable.persist(db, storage, { piece: PIECE })) > 0, `${set}/${name}: the writes kept nothing`);
+      await durable.release(db);
+      const again = await restored('written');
+      found.push(...readBack(again, w, name, 'written, kept, restored'));
+      again.run('compact');
+      await durable.persist(again, storage, { piece: PIECE });
+      await durable.release(again);
+      const third = await restored('compacted');
+      found.push(...readBack(third, w, name, 'compacted, kept, restored'));
+      takeOut(third, w);
+      found.push(...(await differences(third, set, name, 'written and taken out')));
+      third.run('compact');
+      await durable.persist(third, storage, { piece: PIECE });
+      await durable.release(third);
+      const fourth = await restored('taken out');
+      found.push(...(await differences(fourth, set, name, 'taken out, compacted, kept, restored')));
+      for (const d of [db, again, third, fourth]) d.close();
+    }
+    assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
+  });
+}
