@@ -276,3 +276,130 @@ fn files_are_made_their_owners_alone_and_keep_their_mode() {
     }
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// The directory a child of [`verify_writes_nothing_another_user_reaches`]
+/// is given as its temp directory; unset in the test run itself.
+const TEMP: &str = "FENNEC_TEST_TEMP";
+
+/// `fennec verify` restores an archive's end where no other user of the
+/// machine reaches it, and writes nothing through a name another user put
+/// first in the temp directory. Up to this fix it restored into
+/// `<temp>/fennec-verify-<pid>-<n>.fennec`: another user put that name
+/// first as a link to a `0644` file of theirs, in a directory of theirs,
+/// and the restore followed the link, took the file's mode and renamed the
+/// archive's plaintext over it -- under root's `FENNEC_KEY_FILE`, a sealed
+/// archive's rows -- the cleanup removing the link alone. Here the links
+/// name files of the test's own, `0644`, in a directory of its own. It
+/// runs in a child of its own, alone, whose temp directory (`TMPDIR`) is
+/// one this test made: the name an earlier verify took counted the
+/// process's verifies, so the child's first is the one planted, and no
+/// other test's files are in the directory it lists.
+#[test]
+fn verify_writes_nothing_another_user_reaches() {
+    let Ok(temp) = std::env::var(TEMP) else {
+        let temp = std::env::temp_dir().join(format!("fennec-verify-temp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "modes::verify_writes_nothing_another_user_reaches",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(TEMP, &temp)
+            .env("TMPDIR", &temp)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = bounded(child, Duration::from_secs(300));
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("1 passed"),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_dir_all(&temp).unwrap();
+        return;
+    };
+    let temp = Path::new(&temp);
+    assert_eq!(std::env::temp_dir(), temp, "the child's temp directory");
+    let d = temp.join("work");
+    std::fs::create_dir_all(&d).unwrap();
+
+    // An archive of a database holding a row.
+    let (db, url) = primary(&d.join("p.fennec"));
+    exec(&db, "create collection c (x text)");
+    let arch = d.join("archive");
+    let stop = Arc::new(AtomicBool::new(false));
+    let archiver = {
+        let (stop, arch, url) = (Arc::clone(&stop), arch.clone(), url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            Archive::new(&arch)?.follow(&upstream, &stop, &|_| {})
+        })
+    };
+    appears(&arch, "image-", ".fennec");
+    exec(&db, "put c {x: \"the archive's row\"}");
+    let end = db.read().unwrap().change_seq();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let out = d.join("reached.fennec");
+    while Archive::new(&arch)
+        .and_then(|a| a.restore(&out, Target::End))
+        .ok()
+        .map(|r| r.seq)
+        != Some(end)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the archive did not reach the end"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, Ordering::SeqCst);
+    archiver.join().unwrap().unwrap();
+
+    // Another user's files, as they would be put: `0644`, in a directory
+    // of theirs, and a link at each name a verify restored into.
+    let theirs = d.join("theirs");
+    std::fs::create_dir(&theirs).unwrap();
+    let planted: Vec<(std::path::PathBuf, u64)> = (0..4)
+        .map(|n| {
+            let target = theirs.join(format!("x-{n}.fennec"));
+            std::fs::write(&target, b"theirs").unwrap();
+            chmod(&target, 0o644);
+            let name = format!("fennec-verify-{}-{n}.fennec", std::process::id());
+            std::os::unix::fs::symlink(&target, temp.join(name)).unwrap();
+            let ino = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&target).unwrap());
+            (target, ino)
+        })
+        .collect();
+    let listed = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let (temp_before, theirs_before) = (listed(temp), listed(&theirs));
+
+    let verified = Archive::new(&arch).unwrap().verify().unwrap();
+    assert_eq!(verified.last, end);
+    for (target, ino) in &planted {
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"theirs",
+            "verify wrote over {}, which a link at its name named",
+            target.display()
+        );
+        let m = std::fs::metadata(target).unwrap();
+        assert_eq!(std::os::unix::fs::MetadataExt::ino(&m), *ino);
+        assert_eq!(mode(target), 0o644);
+    }
+    assert_eq!(listed(&theirs), theirs_before, "verify wrote beside them");
+    // What verify wrote went with its directory, and it removed nothing
+    // it did not make.
+    assert_eq!(listed(temp), temp_before, "the temp directory after verify");
+    std::fs::remove_dir_all(&d).unwrap();
+}

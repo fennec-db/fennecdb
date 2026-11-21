@@ -1542,9 +1542,9 @@ impl Archive {
             }
         }
         let last = covered.max(images.last().map_or(0, |i| i.0));
-        let probe = verify_probe();
-        let restored = self.restore(&probe, Target::End);
-        let _ = fs::remove_file(&probe);
+        let probe = Probe::make()?;
+        let restored = self.restore(&probe.0.join("verify.fennec"), Target::End);
+        drop(probe);
         let r = restored?;
         if r.seq != last {
             return Err(corrupt(format!(
@@ -1799,19 +1799,48 @@ fn copied(from: &Path, to: &Path) -> io::Result<File> {
     w.into_inner().map_err(io::IntoInnerError::into_error)
 }
 
-/// Where `verify` restores the archive's end to, a file of its own each
-/// call. Named by the process and the millisecond, two verifies in one
-/// process within a millisecond -- tests side by side, or anything that
-/// checks several archives at once -- restored into the same `.restoring`
-/// file, and one opened the other's: "the restored file is at change 151,
-/// not 15".
-fn verify_probe() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "fennec-verify-{}-{}.fennec",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))
+/// Where `verify` restores the archive's end to: a directory of its own a
+/// call, made new and its owner's alone in the process's temp directory
+/// (`fennec_core::fs::create_dir_new`), a random name refused where
+/// anything is there, and removed whole with what the restore left in it
+/// as it is dropped. It was a file there named by the process and a count,
+/// `fennec-verify-<pid>-<n>.fennec`, which another user of the machine
+/// could put first as a link to a file of theirs: the restore followed it
+/// (`fs::resolved`), took that file's `0644` and renamed the archive's
+/// plaintext over it, the cleanup removing the link alone -- an archive's
+/// rows, unsealed by root's `FENNEC_KEY_FILE`, in another user's file
+/// (G14's review, F5). Named by the count alone before, two verifies in
+/// one process within a millisecond restored into the same `.restoring`
+/// file.
+struct Probe(PathBuf);
+
+impl Probe {
+    fn make() -> io::Result<Probe> {
+        let temp = std::env::temp_dir();
+        // A name taken is another's: tried again under a new one, a few
+        // times, since 64 random bits are not guessed.
+        for _ in 0..8 {
+            let dir = temp.join(format!("fennec-verify-{:016x}", fresh_id()));
+            match fennec_core::fs::create_dir_new(&dir) {
+                Ok(()) => return Ok(Probe(dir)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "no directory of verify's own could be made in {}: every name tried was taken",
+                temp.display()
+            ),
+        ))
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// One image of the database behind `upstream`, taken while it runs, into
@@ -1958,13 +1987,31 @@ mod tests {
         }
     }
 
-    /// A thousand calls fall in a millisecond or two: each still names a
-    /// file no other verify in the process restores into.
+    /// Each verify restores into a directory of its own: a hundred held at
+    /// once are a hundred, each made `0700`, and each removed whole, with
+    /// what was written in it, once let go. A name there already is never
+    /// taken: one made at it is refused rather than used.
+    #[cfg(unix)]
     #[test]
-    fn every_verify_restores_into_a_file_of_its_own() {
-        let probes: std::collections::HashSet<PathBuf> =
-            (0..1000).map(|_| verify_probe()).collect();
-        assert_eq!(probes.len(), 1000);
+    fn every_verify_restores_into_a_directory_of_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let probes: Vec<Probe> = (0..100).map(|_| Probe::make().unwrap()).collect();
+        let dirs: std::collections::HashSet<&PathBuf> = probes.iter().map(|p| &p.0).collect();
+        assert_eq!(dirs.len(), 100);
+        for p in &probes {
+            let mode = fs::metadata(&p.0).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", p.0.display());
+            fs::write(p.0.join("verify.fennec"), b"rows").unwrap();
+        }
+        let gone: Vec<PathBuf> = probes.iter().map(|p| p.0.clone()).collect();
+        drop(probes);
+        assert!(gone.iter().all(|d| !d.exists()), "a probe left behind");
+        let taken = std::env::temp_dir().join(format!("fennec-taken-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&taken);
+        fs::create_dir(&taken).unwrap();
+        let refused = fennec_core::fs::create_dir_new(&taken).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        fs::remove_dir(&taken).unwrap();
     }
 
     /// The archives made in one parent before its sync are covered by it,
