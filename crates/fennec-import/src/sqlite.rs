@@ -22,7 +22,7 @@ use fennec_core::error::{Error, Result};
 use fennec_core::value::{DataType, Value};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
@@ -98,9 +98,16 @@ enum Encoding {
     Utf16Be,
 }
 
-fn decode_text(b: &[u8], enc: Encoding) -> String {
-    match enc {
-        Encoding::Utf8 => String::from_utf8_lossy(b).into_owned(),
+/// A text value's bytes made a `String`, adding to `grown` what it holds
+/// past them: bytes that are not UTF-8 become U+FFFD's three each, and a
+/// UTF-16 text's two-byte units up to three bytes, where valid UTF-8 is
+/// copied as it is ([`Table::row`] counts a row by its record's length).
+fn decode_text(b: &[u8], enc: Encoding, grown: &mut usize) -> String {
+    let s: String = match enc {
+        Encoding::Utf8 => match String::from_utf8_lossy(b) {
+            std::borrow::Cow::Borrowed(s) => return s.to_owned(),
+            std::borrow::Cow::Owned(s) => s,
+        },
         Encoding::Utf16Le | Encoding::Utf16Be => {
             let units = b.as_chunks::<2>().0.iter().map(|c| {
                 if enc == Encoding::Utf16Le {
@@ -113,7 +120,9 @@ fn decode_text(b: &[u8], enc: Encoding) -> String {
                 .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
                 .collect()
         }
-    }
+    };
+    *grown += s.capacity().saturating_sub(b.len());
+    s
 }
 
 // ------------------------------------------------------------------ pager
@@ -140,9 +149,11 @@ struct Pager {
 const MIN_USABLE: usize = 480;
 
 impl Pager {
-    fn open(path: &Path) -> Result<Pager> {
+    /// Opens the file at `real`, the path its side files were looked for
+    /// beside ([`resolved`]), naming it `path`, as it was given.
+    fn open(real: &Path, path: &Path) -> Result<Pager> {
         let mut file =
-            File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+            File::open(real).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
         let mut head = [0u8; 100];
         file.read_exact(&mut head)
             .map_err(|_| Error::Corrupt(format!("{}: not a SQLite file", path.display())))?;
@@ -566,7 +577,9 @@ fn take(bits: &mut [u64], from: usize, to: usize) -> bool {
 /// of fewer where it holds fewer: a row written before an `ALTER TABLE ADD
 /// COLUMN` lacks the columns added after it ([`Table::row`] reads them as
 /// their defaults). Columns past `ncols` are not read, as SQLite reads none.
-fn record(payload: &[u8], enc: Encoding, ncols: usize) -> Result<Vec<Value>> {
+/// A text that decoding made larger than its bytes adds the difference to
+/// `grown` ([`decode_text`]).
+fn record(payload: &[u8], enc: Encoding, ncols: usize, grown: &mut usize) -> Result<Vec<Value>> {
     let mut pos = 0;
     let header_len = varint(payload, &mut pos)? as usize;
     if header_len > payload.len() {
@@ -576,12 +589,18 @@ fn record(payload: &[u8], enc: Encoding, ncols: usize) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(ncols);
     while pos < header_len && out.len() < ncols {
         let serial = varint(payload, &mut pos)?;
-        out.push(value(serial, payload, &mut body, enc)?);
+        out.push(value(serial, payload, &mut body, enc, grown)?);
     }
     Ok(out)
 }
 
-fn value(serial: i64, b: &[u8], pos: &mut usize, enc: Encoding) -> Result<Value> {
+fn value(
+    serial: i64,
+    b: &[u8],
+    pos: &mut usize,
+    enc: Encoding,
+    grown: &mut usize,
+) -> Result<Value> {
     Ok(match serial {
         0 => Value::Null,
         1 => Value::Int(be_int(b, pos, 1)?),
@@ -611,7 +630,7 @@ fn value(serial: i64, b: &[u8], pos: &mut usize, enc: Encoding) -> Result<Value>
             if n % 2 == 0 {
                 Value::Bytes(s.to_vec())
             } else {
-                Value::Text(decode_text(s, enc))
+                Value::Text(decode_text(s, enc, grown))
             }
         }
         n => return Err(corrupt(format!("invalid serial type {n}"))),
@@ -1779,6 +1798,10 @@ struct Table {
     virtuals: Vec<String>,
     /// The rowid alias's place among `stored`.
     rowid_alias: Option<usize>,
+    /// The bytes a record holding `n` columns reads past them, at `n`: the
+    /// defaults of the columns after its `n`th, summed once a table, each
+    /// row lacking them holding its own copy of each.
+    absent: Vec<usize>,
 }
 
 impl Table {
@@ -1800,18 +1823,39 @@ impl Table {
             )));
         }
         let rowid_alias = stored.iter().position(|d| d.rowid_alias);
+        let mut absent = vec![0; stored.len() + 1];
+        for (i, d) in stored.iter().enumerate().rev() {
+            // A copy is as long as its default: a `String`'s and a
+            // `Vec`'s clone are allocated to their length.
+            absent[i] = absent[i + 1]
+                + match &d.absent {
+                    Absent::Value(Value::Text(t)) => t.len(),
+                    Absent::Value(Value::Bytes(b)) => b.len(),
+                    _ => 0,
+                };
+        }
         Ok(Table {
             name: name.to_string(),
             stored,
             virtuals: virtuals.into_iter().map(|d| d.name).collect(),
             rowid_alias,
+            absent,
         })
     }
 
     /// A cell's row: a value a stored column, those the record lacks read
-    /// as their defaults, the rowid alias's the cell's rowid.
-    fn row(&self, cell: &Cell, enc: Encoding) -> Result<Vec<Value>> {
-        let mut values = record(&cell.payload, enc, self.stored.len())?;
+    /// as their defaults, the rowid alias's the cell's rowid. And what the
+    /// row's values hold past their own size, at most, counted once a row
+    /// from what is known before a value is looked at (`Source::row_bytes`):
+    /// its texts and blobs are its record's bytes -- what decoding a text
+    /// that is not UTF-8 made larger added as it was made -- and its
+    /// defaults' copies their sum once a table, at most the `CREATE TABLE`
+    /// text; a number holds nothing past its size.
+    fn row(&self, cell: &Cell, enc: Encoding) -> Result<(Vec<Value>, usize)> {
+        let mut grown = 0;
+        let mut values = record(&cell.payload, enc, self.stored.len(), &mut grown)?;
+        // `record` reads at most a value a stored column.
+        let held = cell.payload.len() + grown + self.absent[values.len()];
         for d in &self.stored[values.len()..] {
             values.push(d.absent.read(&self.name, &d.name, cell.rowid)?);
         }
@@ -1820,7 +1864,7 @@ impl Table {
         if let Some(i) = self.rowid_alias {
             values[i] = Value::Int(cell.rowid);
         }
-        Ok(values)
+        Ok((values, held))
     }
 }
 
@@ -1831,6 +1875,8 @@ pub struct Reader {
     walk: Walk,
     columns: Vec<Column>,
     table: Table,
+    /// What the row read last holds past its values' sizes ([`Table::row`]).
+    held: usize,
 }
 
 impl Reader {
@@ -1843,8 +1889,9 @@ impl Reader {
     /// that have no declared type.
     pub fn open_sampled(path: impl AsRef<Path>, table: &str, sample: usize) -> Result<Reader> {
         let path = path.as_ref();
-        check_side_files(path)?;
-        let mut pager = Pager::open(path)?;
+        let real = resolved(path);
+        check_side_files(&real, path)?;
+        let mut pager = Pager::open(&real, path)?;
         let (name, root, sql) = find_table(&mut pager, table)?;
         let table = Table::new(&name, &sql)?;
         let decls = &table.stored;
@@ -1910,6 +1957,7 @@ impl Reader {
             walk: Walk::new(root),
             columns,
             table,
+            held: 0,
         })
     }
 
@@ -1929,7 +1977,15 @@ impl Source for Reader {
         let Some(cell) = self.walk.next(&mut self.pager)? else {
             return Ok(None);
         };
-        self.table.row(&cell, self.pager.encoding).map(Some)
+        let (values, held) = self.table.row(&cell, self.pager.encoding)?;
+        self.held = held;
+        Ok(Some(values))
+    }
+
+    /// Its record's length and the defaults it lacks, known before a value
+    /// is looked at ([`Table::row`]).
+    fn row_bytes(&self, _row: &[Value]) -> usize {
+        self.held
     }
 
     fn left_out(&self) -> Vec<String> {
@@ -1954,8 +2010,9 @@ impl Source for Reader {
 /// for it explicitly.
 pub fn count_rows(path: impl AsRef<Path>, table: &str) -> Result<u64> {
     let path = path.as_ref();
-    check_side_files(path)?;
-    let mut pager = Pager::open(path)?;
+    let real = resolved(path);
+    check_side_files(&real, path)?;
+    let mut pager = Pager::open(&real, path)?;
     let (_, root, _) = find_table(&mut pager, table)?;
     let mut walk = Walk::new(root);
     let mut n = 0u64;
@@ -1964,6 +2021,21 @@ pub fn count_rows(path: impl AsRef<Path>, table: &str) -> Result<u64> {
         n += 1;
     }
     Ok(n)
+}
+
+/// The path SQLite opens a database by, and keeps its side files beside:
+/// on Unix the file a symbolic link leads to, its VFS resolving the
+/// database's path (`unixFullPathname`); on Windows the path as named, as
+/// its VFS keeps it. Resolved once an import, and the file read is opened
+/// by it ([`Pager::open`]) as its side files are looked for beside it
+/// ([`check_side_files`]): looked for beside the link's target and the
+/// file opened by the link, a link moved between the two had its side
+/// files checked for another file than the one read.
+fn resolved(path: &Path) -> PathBuf {
+    match cfg!(unix) {
+        true => std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        false => path.to_path_buf(),
+    }
 }
 
 /// Refuses a file whose side files hold what it does not: the two SQLite
@@ -1980,19 +2052,16 @@ pub fn count_rows(path: impl AsRef<Path>, table: &str) -> Result<u64> {
 ///   its first read; a journal whose header PERSIST mode zeroed, or one
 ///   whose header was never synced, is not hot.
 ///
-/// They are looked for where SQLite keeps them: on Unix beside the file a
-/// symbolic link leads to, its VFS resolving the database's path
-/// (`unixFullPathname`) -- looked for beside the link, a hot journal
-/// beside the file it leads to was missed and the file read torn; on
-/// Windows beside the path as named, as its VFS keeps them. And each is
-/// looked at before it is opened: one that is no file -- a FIFO, a
-/// device, a directory -- is refused by its kind, where a FIFO named
-/// `-journal` held the import in its open for ever, waiting for a writer.
-fn check_side_files(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    #[cfg(not(unix))]
-    let real = path.to_path_buf();
+/// They are looked for beside `real`, the file the import reads
+/// ([`resolved`]): looked for beside a link, a hot journal beside the file
+/// it leads to was missed and the file read torn. `path` is the file as
+/// the import was given it, which the messages name. And each is looked
+/// at before it is opened: one that is no file -- a FIFO, a device, a
+/// directory -- is refused by its kind, where a FIFO named `-journal` held
+/// the import in its open for ever, waiting for a writer; the journal,
+/// the one opened, is opened so as never to wait, and refused again by
+/// the kind of what was opened ([`side_opened`]).
+fn check_side_files(real: &Path, path: &Path) -> Result<()> {
     let beside = |suffix: &str| {
         real.with_file_name(format!(
             "{}{suffix}",
@@ -2011,24 +2080,29 @@ fn check_side_files(path: &Path) -> Result<()> {
         }
     }
     let journal = beside("-journal");
-    let hot = match side_file(&journal, "rollback journal")? {
+    let what = "rollback journal";
+    let unread = |e: std::io::Error| {
+        Error::Io(format!(
+            "{}: {e}; it is read to tell whether a writer left it hot",
+            journal.display()
+        ))
+    };
+    let hot = match side_file(&journal, what)? {
         Some(m) if m.len() > 0 => {
             let mut first = [0u8; 1];
-            match File::open(&journal).and_then(|mut f| f.read_exact(&mut first)) {
-                Ok(()) => first[0] != 0,
-                // Gone, or emptied, since it was looked at: a writer
-                // committed.
-                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::UnexpectedEof) => {
-                    false
-                }
-                // Unread, it was taken as not hot and the file read as it
-                // stood, which SQLite, unable to read it either, does not.
-                Err(e) => {
-                    return Err(Error::Io(format!(
-                        "{}: {e}; it is read to tell whether a writer left it hot",
-                        journal.display()
-                    )))
-                }
+            match side_opened(&journal, what).map_err(unread)? {
+                Opened::File(mut f) => match f.read_exact(&mut first) {
+                    Ok(()) => first[0] != 0,
+                    // Emptied since it was looked at: a writer committed.
+                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => false,
+                    // Unread, it was taken as not hot and the file read as
+                    // it stood, which SQLite, unable to read it either,
+                    // does not.
+                    Err(e) => return Err(unread(e)),
+                },
+                // Gone since it was looked at: a writer committed.
+                Opened::Gone => false,
+                Opened::Not(refused) => return Err(refused),
             }
         }
         _ => false,
@@ -2053,10 +2127,48 @@ fn side_file(side: &Path, what: &str) -> Result<Option<std::fs::Metadata>> {
     let Ok(m) = std::fs::metadata(side) else {
         return Ok(None);
     };
-    if m.is_file() {
-        return Ok(Some(m));
+    match m.is_file() {
+        true => Ok(Some(m)),
+        false => Err(no_file(side, &m.file_type(), what)),
     }
-    let t = m.file_type();
+}
+
+/// What opening a side file found.
+enum Opened {
+    File(File),
+    /// Gone since it was looked at.
+    Gone,
+    /// No file, put in its place since it was looked at: refused by its
+    /// kind.
+    Not(Error),
+}
+
+/// A side file [`side_file`] found a file, opened to be read: a FIFO put
+/// in its place since -- by whoever writes the directory -- is opened
+/// without waiting for a writer at its other end (`O_NONBLOCK`, which a
+/// file's reads pass over), and what was opened is refused unless it is a
+/// file still (`fstat`, [`File::metadata`]). Opened as `File::open`
+/// opens, a FIFO swapped in between the look and the open held the import
+/// in its open for ever.
+fn side_opened(side: &Path, what: &str) -> std::io::Result<Opened> {
+    let mut how = std::fs::OpenOptions::new();
+    how.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut how, sys::NONBLOCK);
+    let f = match how.open(side) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Opened::Gone),
+        Err(e) => return Err(e),
+    };
+    let m = f.metadata()?;
+    Ok(match m.is_file() {
+        true => Opened::File(f),
+        false => Opened::Not(no_file(side, &m.file_type(), what)),
+    })
+}
+
+/// The refusal of a side file that is no file, naming its kind.
+fn no_file(side: &Path, t: &std::fs::FileType, what: &str) -> Error {
     #[cfg(unix)]
     let kind = {
         use std::os::unix::fs::FileTypeExt;
@@ -2074,12 +2186,37 @@ fn side_file(side: &Path, what: &str) -> Result<Option<std::fs::Metadata>> {
     };
     #[cfg(not(unix))]
     let kind = if t.is_dir() { "a directory" } else { "no file" };
-    Err(Error::Query(format!(
+    Error::Query(format!(
         "{} is {kind}, not a file, where SQLite keeps the database's {what}: the import \
          does not open it; move it away, or import a copy of the database from a \
          directory of its own",
         side.display()
-    )))
+    ))
+}
+
+#[cfg(unix)]
+mod sys {
+    /// `open`'s `O_NONBLOCK`: a FIFO is opened without waiting for a
+    /// writer. Each target's own number, read from its libc as
+    /// fennec-server's `user::sys::AS_FOUND` is (Linux's is the same on
+    /// both processors), and none where it was not read: there the look
+    /// before the open stands alone, as it did before this.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub const NONBLOCK: i32 = 0o4000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub const NONBLOCK: i32 = 0x4;
+    #[cfg(not(any(
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    pub const NONBLOCK: i32 = 0;
 }
 
 /// Finds the table in `sqlite_master`: its name as the file has it, its
@@ -2090,7 +2227,7 @@ fn find_table(pager: &mut Pager, table: &str) -> Result<(String, u32, String)> {
     let mut tables = Vec::new();
     while let Some(cell) = walk.next(pager)? {
         // sqlite_master: (type, name, tbl_name, rootpage, sql)
-        let mut r = record(&cell.payload, pager.encoding, 5)?;
+        let mut r = record(&cell.payload, pager.encoding, 5, &mut 0)?;
         r.resize(5, Value::Null);
         let kind = r[0].as_text().unwrap_or_default();
         if kind != "table" {
@@ -2138,7 +2275,7 @@ fn sample_types(pager: &mut Pager, root: u32, table: &Table, limit: usize) -> Re
     let mut n = 0;
     while n < limit {
         let Some(cell) = walk.next(pager)? else { break };
-        let values = table.row(&cell, pager.encoding)?;
+        let (values, _) = table.row(&cell, pager.encoding)?;
         for (s, v) in seen.iter_mut().zip(&values) {
             *s = s.join(Seen::of(v));
         }
@@ -2369,6 +2506,97 @@ mod tests {
             p.payload(&mut Reached::default(), &page, 8, 3).unwrap(),
             [0; 3]
         );
+    }
+
+    /// A row's count, taken once from what is known before a value is
+    /// looked at -- its record's length, what decoding made a text grow
+    /// by, the defaults it lacks summed once a table -- is never less than
+    /// what its values hold past their sizes, counted one by one: valid
+    /// UTF-8 copied as it is, bytes that are not UTF-8 three bytes each,
+    /// UTF-16 units of the BMP's upper part three bytes each, defaults
+    /// copied to their length.
+    #[test]
+    fn a_rows_count_from_its_record_holds_its_values() {
+        let table = Table::new(
+            "t",
+            "CREATE TABLE t(a TEXT, b BLOB, c INTEGER, d TEXT DEFAULT 'abcdef', \
+             e BLOB DEFAULT x'0102030405', f DEFAULT 7, g TEXT DEFAULT 'xyz')",
+        )
+        .unwrap();
+        assert_eq!(table.absent, [14, 14, 14, 14, 8, 3, 3, 0]);
+        // A record of `a`, `b` and `c`: the text's bytes, the blob's, an
+        // 8-bit integer.
+        let record = |text: &[u8]| {
+            let mut header = vec![4, 13 + 2 * text.len() as u8, 12 + 2 * 3, 1];
+            header.extend_from_slice(text);
+            header.extend_from_slice(&[9, 8, 7, 42]);
+            header
+        };
+        let held = |enc: Encoding, text: &[u8]| {
+            let cell = Cell {
+                rowid: 1,
+                payload: record(text),
+            };
+            let (row, held) = table.row(&cell, enc).unwrap();
+            assert_eq!(row.len(), 7);
+            (crate::load::values_bytes(&row), held, cell.payload.len())
+        };
+        // Valid UTF-8: the text and the blob are the record's bytes, the
+        // defaults their own.
+        let (values, count, record_len) = held(Encoding::Utf8, b"hello");
+        assert_eq!(values, 5 + 3 + 14);
+        assert_eq!(count, record_len + 14);
+        // Bytes that are not UTF-8: each U+FFFD's three.
+        let (values, count, _) = held(Encoding::Utf8, &[0xff; 20]);
+        assert!(values >= 60 + 3 + 14 && count >= values, "{values} {count}");
+        // UTF-16: two bytes a unit, three of UTF-8 for U+0800 and up, and a
+        // lone surrogate U+FFFD.
+        let units: Vec<u8> = [0x4e2d_u16, 0xd800, 0x0041, 0xffff, 0xdc00]
+            .iter()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let (values, count, _) = held(Encoding::Utf16Le, &units);
+        assert!(values >= 13 + 3 + 14 && count >= values, "{values} {count}");
+    }
+
+    /// The journal is opened without waiting on a FIFO swapped into its
+    /// place after it was looked at, and refused by what the open found.
+    /// Opened as `File::open` opens, the open waited for a writer at the
+    /// FIFO's other end; the bound here turns such a wait into a failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_side_file_swapped_for_a_fifo_is_refused_not_waited_on() {
+        let dir = std::env::temp_dir().join(format!("fennec-side-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("db.sqlite-journal");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|s| s.success()) {
+            assert!(
+                std::env::var_os("CI").is_none_or(|v| v.is_empty()),
+                "mkfifo failed under CI: the FIFO test would test nothing"
+            );
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = fifo.clone();
+        let opener = std::thread::spawn(move || {
+            let _ = tx.send(match side_opened(&at, "rollback journal") {
+                Ok(Opened::Not(e)) => Ok(e.to_string()),
+                Ok(Opened::File(_)) => Err("opened as a file".to_string()),
+                Ok(Opened::Gone) => Err("gone".to_string()),
+                Err(e) => Err(e.to_string()),
+            });
+        });
+        let Ok(answer) = rx.recv_timeout(std::time::Duration::from_secs(60)) else {
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            let _ = opener.join();
+            panic!("the open waited on the FIFO {}", fifo.display());
+        };
+        opener.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = answer.unwrap();
+        assert!(e.contains("db.sqlite-journal is a FIFO, not a file"), "{e}");
     }
 
     /// A name or a default of the file's is shown with its control

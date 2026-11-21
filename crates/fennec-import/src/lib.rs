@@ -26,6 +26,16 @@ pub mod map;
 pub mod pg;
 pub mod sqlite;
 
+/// The unit tests' bytes counted a thread at a time, as the integration
+/// tests' are: `--follow`'s stand-in streams are held to a bound by what
+/// the follower allocates (`follow`'s tests).
+#[cfg(test)]
+#[path = "../tests/held.rs"]
+mod held;
+#[cfg(test)]
+#[global_allocator]
+static COUNTING: held::Counting = held::Counting;
+
 use fennec_core::error::Result;
 use fennec_core::query::Expr;
 use fennec_core::schema::IndexKind;
@@ -116,6 +126,16 @@ pub trait Source {
     fn left_out(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// The bytes `row`, the row `next_row` returned last, holds past its
+    /// values' own `size_of`, never fewer but for the allocator's rounding:
+    /// what `load::run` holds a batch to ([`BATCH_BYTES`]). The default
+    /// counts the values one by one; a source that knows it from what it
+    /// read says so at a row's cost -- the SQLite reader its record's
+    /// length and the defaults of the columns the record lacks.
+    fn row_bytes(&self, row: &[Value]) -> usize {
+        load::values_bytes(row)
+    }
 }
 
 /// Where the document's `id` comes from.
@@ -161,9 +181,13 @@ pub struct Options {
 /// per-document cost, while peak memory grows linearly.
 pub const DEFAULT_BATCH: usize = 2_000;
 
-/// The most a batch holds of the rows it puts, in bytes, each value
-/// counted as its field holds it (`load::run`): a batch is put once it holds `--batch` rows or this
-/// many bytes, whichever comes first. A row holds a value for each column
+/// The most a batch holds of the rows it puts, in bytes, but the row that
+/// reached it: a batch is put once it holds `--batch` rows or this many
+/// bytes, whichever comes first (`load::run`), a row counted once, from
+/// sizes known before its values are looked at -- its fields' pairs and
+/// names once a plan, what its source read ([`Source::row_bytes`], a SQLite
+/// row its record's length and the defaults it lacks), and a number its
+/// field makes text, as it is made. A row holds a value for each column
 /// its source declares and a SQLite row a copy of each default its record
 /// lacks, whatever its bytes in the source: rows bounded by their count
 /// alone, 2 000 rows of three bytes each under a table of 87 376 columns
@@ -173,10 +197,14 @@ pub const DEFAULT_BATCH: usize = 2_000;
 /// engine holds again as its documents, and as their frames twice until
 /// the block lands -- in its record and in the store, each less than the
 /// batch -- beside the frames the store holds since its file was opened,
-/// up to `HANDOVER_AT` (16 MB). So an import holds under five times this
-/// beside the row it reads, whatever its source declares. Rows under 8
-/// KiB each -- 2 000 of them -- never reach it, so `--batch` alone
-/// decides for them, as before.
+/// up to `HANDOVER_AT` (16 MB). So an import holds about five times this
+/// and its largest row at most, whatever its source declares. A SQLite row
+/// is at most about twice the file's length as it is read: its payload,
+/// no longer than the file, and its values -- the record's texts and
+/// blobs, and the defaults it lacks, no longer than the `CREATE TABLE`
+/// text -- more where a text is not UTF-8, each such byte U+FFFD's three.
+/// Rows under 8 KiB each -- 2 000 of them -- never reach it, so `--batch`
+/// alone decides for them, as before.
 pub const BATCH_BYTES: usize = 16 << 20;
 
 impl Options {

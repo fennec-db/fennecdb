@@ -26,7 +26,7 @@
 use crate::load;
 use crate::map::{self, Plan, Target};
 use crate::pg::{self, Kind, Query, Reader, Url, VectorOids};
-use crate::{Column, Options, Summary};
+use crate::{Column, Options, Summary, BATCH_BYTES};
 use fennec_core::error::{Error, Result};
 use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
@@ -1019,6 +1019,14 @@ struct Mirror<'a> {
     /// Columns already reported as ignored, so each is reported once.
     ignored: Vec<String>,
     ops: Vec<Op>,
+    /// What the puts among `ops` hold, counted as the copy counts a batch
+    /// (`load::run`): written at `--batch` changes or at [`BATCH_BYTES`],
+    /// whichever comes first, where a transaction of large rows was held
+    /// whole up to `--batch` of them, and twice over as it was written.
+    held: usize,
+    /// A put's pairs and names, the same for every row of the plan
+    /// (`load::fields_bytes`).
+    fields: usize,
     registry: Registry,
     /// A connection for reading back a row whose unchanged values the
     /// collection does not hold; opened on first need.
@@ -1045,6 +1053,8 @@ impl<'a> Mirror<'a> {
             layout: None,
             ignored: Vec::new(),
             ops: Vec::new(),
+            held: 0,
+            fields: load::fields_bytes(&source.plan),
             registry: Registry::with_builtins(),
             reader: None,
             rows: 0,
@@ -1135,7 +1145,7 @@ impl<'a> Mirror<'a> {
             }
             _ => return Ok(0),
         }
-        if self.ops.len() >= self.opts.batch {
+        if self.ops.len() >= self.opts.batch || self.held >= BATCH_BYTES {
             self.flush(db)?;
         }
         Ok(1)
@@ -1181,7 +1191,17 @@ impl<'a> Mirror<'a> {
             return Ok(()); // gone from the source too; its delete follows
         };
         self.rows += 1;
-        let doc = load::document(&self.source.plan, &self.types, values, self.rows)?;
+        // A change's cells are text a `jsonb`, an array or a vector may
+        // make more of: its values are counted one by one, as a PostgreSQL
+        // copy's are.
+        let mut bytes = self.fields + load::values_bytes(&values);
+        let doc = load::built(
+            &self.source.plan,
+            &self.types,
+            values,
+            self.rows,
+            &mut bytes,
+        )?;
         let keep = match &self.opts.filter {
             None => true,
             Some(f) => {
@@ -1193,8 +1213,12 @@ impl<'a> Mirror<'a> {
                 load::keep(f, &doc, &ctx, self.rows)?
             }
         };
-        self.ops
-            .push(if keep { Op::Put(doc) } else { Op::Delete(id) });
+        if keep {
+            self.held += bytes;
+            self.ops.push(Op::Put(doc));
+        } else {
+            self.ops.push(Op::Delete(id));
+        }
         Ok(())
     }
 
@@ -1318,22 +1342,23 @@ impl<'a> Mirror<'a> {
     }
 
     /// Applies the pending writes in their order: runs of puts as one `put`,
-    /// runs of deletes as one `del ... where id in [...]`.
+    /// runs of deletes as one `del ... where id in [...]`. Each document is
+    /// moved into its statement, where a copy of each was made and the
+    /// pending ones held beside the copies until every statement had run.
     fn flush(&mut self, db: &RwLock<Database>) -> Result<()> {
         if self.ops.is_empty() {
             return Ok(());
         }
-        let ops = std::mem::take(&mut self.ops);
+        self.held = 0;
+        let mut ops = std::mem::take(&mut self.ops).into_iter().peekable();
         let collection = &self.opts.into;
         let mut g = write(db);
-        let mut i = 0;
-        while i < ops.len() {
-            let stmt = match &ops[i] {
-                Op::Put(_) => {
-                    let mut docs = Vec::new();
-                    while let Some(Op::Put(doc)) = ops.get(i) {
-                        docs.push(doc.clone());
-                        i += 1;
+        while let Some(op) = ops.next() {
+            let stmt = match op {
+                Op::Put(doc) => {
+                    let mut docs = vec![doc];
+                    while let Some(Op::Put(doc)) = ops.next_if(|o| matches!(o, Op::Put(_))) {
+                        docs.push(doc);
                     }
                     Statement::Put {
                         collection: collection.clone(),
@@ -1346,11 +1371,10 @@ impl<'a> Mirror<'a> {
                         pick: None,
                     }
                 }
-                Op::Delete(_) => {
-                    let mut ids = Vec::new();
-                    while let Some(Op::Delete(id)) = ops.get(i) {
-                        ids.push(Expr::Lit(Value::Int(*id as i64)));
-                        i += 1;
+                Op::Delete(id) => {
+                    let mut ids = vec![Expr::Lit(Value::Int(id as i64))];
+                    while let Some(Op::Delete(id)) = ops.next_if(|o| matches!(o, Op::Delete(_))) {
+                        ids.push(Expr::Lit(Value::Int(id as i64)));
                     }
                     Statement::Delete {
                         collection: collection.clone(),
@@ -1359,15 +1383,12 @@ impl<'a> Mirror<'a> {
                         pick: None,
                     }
                 }
-                Op::Truncate => {
-                    i += 1;
-                    Statement::Delete {
-                        collection: collection.clone(),
-                        filter: None,
-                        require: None,
-                        pick: None,
-                    }
-                }
+                Op::Truncate => Statement::Delete {
+                    collection: collection.clone(),
+                    filter: None,
+                    require: None,
+                    pick: None,
+                },
             };
             // A mirror's rows are its source's, derived ones among them:
             // a statement bound to the collection's writes would make them
@@ -2130,6 +2151,71 @@ mod tests {
             !events.iter().any(|e| e.starts_with("SlotHeld")),
             "{events:?}"
         );
+    }
+
+    /// A follower holds the writes it has not made to `BATCH_BYTES`, as a
+    /// copy holds a batch, whatever `--batch` says: one transaction of a
+    /// row of 4 MiB and 2 000 of 28 KiB, some 60 MiB, streamed by the
+    /// stand-in into a file, is written a batch at a time, the follower's
+    /// thread holding under five times `BATCH_BYTES` and its largest row
+    /// -- counted by the test binary's allocator (`tests/held.rs`), never
+    /// timed: 97 MB, where the bound is 105. Written at 2 000 changes
+    /// alone, each document copied into its statement beside the pending
+    /// ones, the follower held 377 MB.
+    #[test]
+    fn a_follower_holds_its_writes_by_their_bytes_not_their_count() {
+        let large = 4 << 20;
+        let mut changes = vec![vec![b'B'], relation(b'd', &COLS)];
+        changes.push(insert(&[Some("1"), Some(&"l".repeat(large)), None, None]));
+        let small = "s".repeat(28 << 10);
+        for id in 2..=2_001 {
+            changes.push(insert(&[Some(&id.to_string()), Some(&small), None, None]));
+        }
+        let mut commit = vec![b'C', 0];
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&0i64.to_be_bytes());
+        changes.push(commit);
+        drop(small);
+        let w = walsender(changes, Answer::Releases);
+        let dir = std::env::temp_dir().join(format!("fennec-follow-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut source, opts, _) = fixture(None);
+        source.url = w.url.clone();
+        let mut file = fennec_core::fs::open(dir.join("f.fennec")).unwrap();
+        file.execute(&Statement::CreateCollection {
+            schema: source.plan.schema.clone(),
+            if_not_exists: false,
+        })
+        .unwrap();
+        let db = RwLock::new(file);
+        let stop = AtomicBool::new(false);
+        let mut backoff = FIRST_BACKOFF;
+        let follow = Follow::named_after("docs");
+        let (ended, held) = crate::held::peak(|| {
+            stream(
+                &source,
+                &db,
+                &opts,
+                &follow,
+                &stop,
+                &AtomicBool::new(false),
+                &mut backoff,
+                &mut |e| {
+                    if matches!(e, Event::Confirmed { .. }) {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                },
+            )
+        });
+        assert!(ended.is_ok());
+        assert_eq!(count(&db), 2_001);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!("a follower's large transaction: held {held} bytes at once");
+        let bound = 5 * (BATCH_BYTES + large);
+        assert!(held < bound, "the follower held {held} bytes at once");
     }
 
     /// A follower that fails at what it read returns its error before it

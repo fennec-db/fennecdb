@@ -887,7 +887,11 @@ fn an_import_holds_a_batch_by_its_bytes_not_its_rows() {
 /// A row lacking a column whose default the importer does not compute --
 /// `CURRENT_TIMESTAMP`, an expression -- is refused naming the table, the
 /// column and the default, where it was read as `NULL`. SQLite's own
-/// `ADD COLUMN` takes constants alone, so only a file made otherwise has one.
+/// `ADD COLUMN` takes such a default only into a table holding no row, so
+/// only a file made otherwise has a row lacking it. A constant it takes
+/// into a table holding rows, and the importer refuses -- a text's numeric
+/// prefix, `CAST('12abc' AS INTEGER)` or `-'5 apples'` -- is
+/// `a_constant_default_read_by_sqlites_formatting_is_refused_where_a_row_needs_it`'s.
 #[test]
 fn a_default_the_importer_does_not_compute_is_refused_where_a_row_needs_it() {
     let row = leaf(&[cell(3, 1, &[2, 1, 7], None)]);
