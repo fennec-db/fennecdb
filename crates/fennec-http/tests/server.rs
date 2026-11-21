@@ -1627,12 +1627,33 @@ fn trickled(port: u16, sent: &[u8], trickled: Vec<u8>, every: Duration) -> (Stri
 }
 
 /// The slot of a ceiling of one given back: a request on a connection of
-/// its own answered 200, each refused one (503) asked again, 30 s at most.
+/// its own answered 200 and the connection's end read, each refused one
+/// (503) asked again, 30 s at most. The server's end is the event: a
+/// connection's thread gives its slot back before it closes the socket
+/// (`serve_connection`), so the next connection finds the slot free. One
+/// the client ended first held the slot until its thread had read that
+/// end, and a connection opened at once was refused 503 whenever it came
+/// first: 82 times in 2 000 under `docker run --cpus=3` beside three busy
+/// loops, and 87 runs of `a_trickled_body_is_cut` in 200 failed, its
+/// trickle answered 503 or its paced body meeting the refusal's close two
+/// seconds on (`accept::LINGER`), a broken pipe. A 503 is still asked
+/// again: a cut connection's end is its write side shut before its thread
+/// lets the slot go (`Conn::end_refused`).
 fn served_again(port: u16) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match Conn::open(port).ask("GET", "/collections", "") {
-            Ok((200, _)) => return,
+        let asked = (|| {
+            let mut s = TcpStream::connect(("127.0.0.1", port))?;
+            s.set_read_timeout(Some(ANSWER_WITHIN))?;
+            s.write_all(
+                b"GET /collections HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut answer = String::new();
+            s.read_to_string(&mut answer)?;
+            Ok::<_, io::Error>(answer)
+        })();
+        match asked {
+            Ok(answer) if answer.starts_with("HTTP/1.1 200") => return,
             other => {
                 assert!(
                     Instant::now() < deadline,

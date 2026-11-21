@@ -27,6 +27,14 @@
 //! Beside the count, the program tallies what its loop asks of the
 //! allocator (`Counting`): the calls, and the bytes they ask for, printed
 //! as a `heap:` line the gate's driver reads.
+//!
+//! It is also the client of the gate's I/O workloads (`IO_WORKLOADS`,
+//! `--list-io`): requests to a real `fennec-server` that the driver runs
+//! under `strace -f`, counting the server's fsyncs, renames and bytes
+//! written to files, never this program's.
+//!
+//!     gate --list-io
+//!     gate io-setup io-put 127.0.0.1:8080; gate io io-put 127.0.0.1:8080
 
 use fennec_core::prelude::*;
 use fennec_http::access::{Access, CheckPlugin};
@@ -34,6 +42,8 @@ use fennec_http::http::{Method, Request};
 use fennec_http::Config;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
@@ -79,6 +89,18 @@ fn main() {
         for (name, ops, _) in WORKLOADS {
             println!("{name} {ops}");
         }
+        return;
+    }
+    // Apart from `--list`, which a base's checker before the I/O gate reads
+    // whole and would count under callgrind.
+    if arg == "--list-io" {
+        for (name, requests, _, _) in IO_WORKLOADS {
+            println!("{name} {requests}");
+        }
+        return;
+    }
+    if arg == "io-setup" || arg == "io" {
+        io_main(&arg);
         return;
     }
     let Some(&(name, ops, setup)) = WORKLOADS.iter().find(|w| w.0 == arg) else {
@@ -1124,4 +1146,216 @@ fn sync_apply(dir: &Path, ops: usize) -> Box<dyn FnMut(usize)> {
         sync.bytes(&mut db, 1, &events[i]);
         black_box(sync.actions());
     })
+}
+
+// ------------------------------------------------------------------ io
+
+/// The I/O gate's workloads (docs/design/benchmarks.md#the-gate): requests
+/// to a real `fennec-server` under `--sync always`, which
+/// `tools/perf_gate.py io` runs under `strace -f`, counting the fsyncs,
+/// renames and bytes written to files of the server alone. Each its name,
+/// the requests its run sends -- each answered before the next, one
+/// writer -- its setup and its run. `io-setup` makes the data over one
+/// connection and `io` sends the run's requests over the next: the driver
+/// counts from the server taking that second connection to its taking a
+/// third, its own, once the run is answered. Nothing here is drawn or read
+/// off a clock -- the ids, values and texts are fixed, and so is the
+/// `Host`, not the port -- so a build's counts are the same run after run.
+const IO_WORKLOADS: &[(&str, usize, IoPhase, IoPhase)] = &[
+    ("io-put", 500, io_collection, io_put),
+    ("io-batch", 1, io_collection, io_batch),
+    ("io-spill", 1, io_collection, io_spill),
+    ("io-compact", 1, io_half_dead, io_compact),
+];
+
+/// A phase of an I/O workload: its requests, over the one connection.
+type IoPhase = fn(&mut Client);
+
+/// `gate io-setup|io WORKLOAD ADDRESS`: a phase of an I/O workload against
+/// the server at ADDRESS, and a line of what it sent, which the driver
+/// reads: the requests answered, the rows they wrote and the bytes sent.
+fn io_main(phase: &str) {
+    let mut args = std::env::args().skip(2);
+    let (Some(name), Some(addr)) = (args.next(), args.next()) else {
+        eprintln!("usage: gate io-setup|io WORKLOAD ADDRESS");
+        std::process::exit(2);
+    };
+    let Some(&(_, requests, setup, run)) = IO_WORKLOADS.iter().find(|w| w.0 == name) else {
+        eprintln!("no I/O workload {name}: gate --list-io");
+        std::process::exit(2);
+    };
+    let mut client = Client::connect(&addr);
+    if phase == "io-setup" {
+        setup(&mut client);
+    } else {
+        run(&mut client);
+        assert_eq!(
+            client.answered, requests,
+            "{name} sends {requests} requests"
+        );
+    }
+    println!(
+        "{phase}: {name} answered={} rows={} sent={}",
+        client.answered, client.rows, client.sent
+    );
+}
+
+/// One connection to the server, a request in flight at a time, and what
+/// went over it: std's socket alone, so the program builds against any
+/// base's crates.
+struct Client {
+    stream: TcpStream,
+    answers: BufReader<TcpStream>,
+    answered: usize,
+    rows: u64,
+    sent: u64,
+}
+
+impl Client {
+    fn connect(addr: &str) -> Client {
+        let stream = TcpStream::connect(addr).unwrap_or_else(|e| panic!("{addr}: {e}"));
+        // Each request goes in one write; Nagle's wait for the answer
+        // before a second segment would only slow the run.
+        stream.set_nodelay(true).unwrap();
+        // A server that never answers fails the run rather than hold it.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(300)))
+            .unwrap();
+        let answers = BufReader::new(stream.try_clone().unwrap());
+        Client {
+            stream,
+            answers,
+            answered: 0,
+            rows: 0,
+            sent: 0,
+        }
+    }
+
+    /// `POST path` with `body`, writing `rows` rows, its answer read and
+    /// held to a 2xx. The `Host` is the name, not the port the system
+    /// picked, so the bytes sent are the same every run.
+    fn post(&mut self, path: &str, body: &str, rows: u64) {
+        let mut req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        req.extend_from_slice(body.as_bytes());
+        self.stream.write_all(&req).unwrap();
+        self.sent += req.len() as u64;
+        let (status, answer) = self.answer();
+        assert!(
+            (200..300).contains(&status),
+            "POST {path}: {status} {}",
+            String::from_utf8_lossy(&answer[..answer.len().min(2_000)])
+        );
+        self.answered += 1;
+        self.rows += rows;
+    }
+
+    /// The next answer's status and body, by its `Content-Length`.
+    fn answer(&mut self) -> (u16, Vec<u8>) {
+        let mut line = String::new();
+        self.answers.read_line(&mut line).unwrap();
+        let status = (line.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no status line: {line:?}"));
+        let mut length = None;
+        loop {
+            let mut header = String::new();
+            self.answers.read_line(&mut header).unwrap();
+            let header = header.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = header.split_once(':') {
+                if k.eq_ignore_ascii_case("content-length") {
+                    length = v.trim().parse::<usize>().ok();
+                }
+            }
+        }
+        let n = length.unwrap_or_else(|| panic!("an answer without a Content-Length: {line:?}"));
+        let mut body = vec![0; n];
+        self.answers.read_exact(&mut body).unwrap();
+        (status, body)
+    }
+
+    fn query(&mut self, text: &str, rows: u64) {
+        let mut body = String::from("{\"query\":");
+        fennec_core::json::escape_into(&mut body, text);
+        body.push('}');
+        self.post("/query", &body, rows);
+    }
+}
+
+/// Row `id`'s text, `len` bytes: its id, then filler. Digits and letters,
+/// which JSON writes as they are.
+fn io_text(id: usize, len: usize) -> String {
+    let mut text = format!("{id:06} ");
+    while text.len() < len {
+        text.push_str("fennec ");
+    }
+    text.truncate(len);
+    text
+}
+
+/// A `/batch` line, or a `/query` body: `put t` of row `id`, its `n` and a
+/// text of `len` bytes, as parameters.
+fn io_put_line(id: usize, n: usize, len: usize) -> String {
+    format!(
+        r#"{{"query":"put t {{id: $1, n: $2, body: $3}}","params":[{id},{n},"{}"]}}"#,
+        io_text(id, len)
+    )
+}
+
+/// A `/batch` of a put for each of `ids`, each of a text of `len` bytes.
+fn io_batch_of(client: &mut Client, ids: std::ops::RangeInclusive<usize>, n: usize, len: usize) {
+    let rows = ids.clone().count() as u64;
+    let lines: Vec<String> = ids.map(|id| io_put_line(id, n, len)).collect();
+    client.post("/batch", &lines.join("\n"), rows);
+}
+
+fn io_collection(client: &mut Client) {
+    client.query("create collection t (n int, body text)", 0);
+}
+
+/// 500 puts of a row of a 530-byte text, each answered -- durable -- before
+/// the next: an fsync each, of the sync log, whose 256 KB of entries fill
+/// some 450 puts in -- the file fsynced in its place and a generation of
+/// the log begun -- so a change to the log's room moves the counts either
+/// way. Each put waits for its fsync, most of a run's time: 1 000 puts of
+/// 200-byte rows paid twice the fsyncs and never filled the log.
+fn io_put(client: &mut Client) {
+    for id in 1..=500 {
+        client.post("/query", &io_put_line(id, id, 530), 1);
+    }
+}
+
+/// A `/batch` of 1 000 puts of a row of a 16-byte text: one block of some
+/// 24 KB, under the 64 KB a sync log's entry takes.
+fn io_batch(client: &mut Client) {
+    io_batch_of(client, 1..=1_000, 0, 16);
+}
+
+/// A `/batch` of 2 000 rows of a 9 000-byte text, some 18 MB: one block,
+/// which spills into the file past 16 MB before it lands. Rows this long
+/// keep the statements to parse and answer few, and the run short: the
+/// spill's I/O is the block's bytes, however many rows hold them.
+fn io_spill(client: &mut Client) {
+    io_batch_of(client, 1..=2_000, 0, 9_000);
+}
+
+/// 10 000 rows of a 200-byte text written, then each written again: a
+/// file half of which is dead.
+fn io_half_dead(client: &mut Client) {
+    io_collection(client);
+    io_batch_of(client, 1..=10_000, 0, 200);
+    io_batch_of(client, 1..=10_000, 1, 200);
+}
+
+/// The half-dead file compacted: its live half written into a new file,
+/// renamed over it.
+fn io_compact(client: &mut Client) {
+    client.query("compact", 0);
 }

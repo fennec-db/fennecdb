@@ -239,9 +239,11 @@ in place while the node did not hold it — a restore, a hand, an older
 binary making it again — carries none, and so does a standby's copy of a
 tenant. <b>Remove <code>&lt;tenant&gt;.instance</code> when you replace a
 tenant's file by hand.</b> Where the node reads no birth time — every Linux
-build of fennecdb, and file systems keeping none — the identity is bound to
-the file's device and inode, and a file put in place may be given the
-inode of the one it replaced; every way the node and <code>fennec restore</code> or
+release binary of fennecdb, and file systems keeping none — or the node
+that wrote the sidecar read none, the identity is bound to the file's
+device and inode, so a node moved between a release's Linux binary and a
+build of your own keeps its tenants' identities and hook secrets; a file
+put in place may then be given the inode of the one it replaced; every way the node and <code>fennec restore</code> or
 <code>fennec backup --force</code> remove or replace a file removes it
 first. On Windows it is bound to the file's volume and its id there too,
 as NTFS gives a file renamed into the place the creation time of the one it

@@ -49,7 +49,9 @@ slot; no id, never.
 **[A tenant's hook secrets are its file's, relayed by the router and kept
 by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**
 `<t>.hooks` is bound to its file as `.instance` is (`tenant_hooks::Store`,
-`fennec_http::instance`): put away, synced, before every create, install,
+`fennec_http::instance`), its birth time held only where the node that
+wrote it and the one reading it both read one (`instance::same`: a Linux
+release binary reads none): put away, synced, before every create, install,
 follow, delete, reclaim and restore (`Tenants::put_away`,
 `put_away_beside`), never adopted by another file -- an open puts away one
 naming another than it opened, and an event verified against a set no
@@ -105,8 +107,14 @@ client (`CF-Connecting-IP`) in `Fennec-Client`, an HMAC under `ENTRY_TOKEN` a
 router believes only with `--entry-token` and within 60 s (`audit::entry`),
 and drops from all it forwards (`forwarded_headers`); a router refuses an
 entry token empty or equal to another it holds, at the start and as a node
-is added (`set_node`). Every router answer carries `Fennec-Shard: 1`; a request that
-may have reached one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
+is added (`set_node`). A home is named, and a tenant not placed told of,
+to a caller the router vouches for alone (`vouches_for`: the entry's mark,
+a relay, its `--token`), anyone else's request going to a node in the
+tenant's place (`stand_in`), which asks the token first and opens no
+file, the tenant named past `~` (`tenants::STAND_IN`)
+([router.md](../../docs/design/router.md#tenants-it-does-not-place)). Every
+router answer carries `Fennec-Shard: 1`; a request that may have reached
+one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
 -- a tenant's hook event among them (`hooked`) -- or, any request, after a
 guessed region's router's 503 marked
 `Fennec-Unsent`, which ran nowhere.
@@ -145,7 +153,12 @@ client sent -- a relaying router's kept, under its mark alone
 at the router from a client's headers, which a rebound page sets as it
 likes. Without `--token` the router is an open server, held to
 fennec-http's rule, a forward without `--http-cors` to its `Host` alone,
-the node judging its `Origin`.
+the node judging its `Origin`. Listening past loopback, it forwards nothing
+to a node asking no token (`open_node`, 403) but under `--insecure`, nor
+to one not known to ask one (503), a node from before asked its
+`/_whoami`, one ask out a node at a time that no request waits for
+(`ask_now`, 503 meanwhile), and marks every forward by its listener's class (`mark_of`), a relayed or
+entry-named one as past loopback, for the node to hold the same line.
 
 **[The router looks at a pooled connection first, and resends only what
 cannot have run or may run twice.](../../docs/design/router.md#pooled-connections)**

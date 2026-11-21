@@ -827,6 +827,57 @@ record kind a binary before refuses and a replica is sent. The change cost
 aarch64-apple-darwin release): the put-away beside a restored file and a
 delete's refusal came to what the once-said log of no birth time left.
 
+**A birth time is held where both sides name one.** A sidecar's binding is
+what its writer read, and a node holds it to what it reads now: a Linux
+release binary, musl, writes and reads every birth time as 0, where a
+glibc build, macOS and Windows read one. Compared as written, a node moved
+from one to the other -- a release's Linux binary and a build of its
+owner's, either way -- met every tenant's file under a binding naming
+another file: each identity was lost, a file a router left reported and
+never taken back, an old primary back from a failover followed by none;
+and each `<t>.hooks` was put away, its secrets with it, which no router
+keeps ([named-statements.md](named-statements.md#where-the-secret-lives)).
+`compat.yml`'s first run on main found it: f2, a 0.2.0 musl node's tenant
+opened by this tree's glibc build, its hooks answering 401 until every
+secret was set again. 0.2.0 has it between its own musl and glibc builds:
+the birth time was bound in #454, `<t>.hooks` in #507, both first
+released in 0.2.0. So every comparison of two bindings -- the identity's
+(`carried`, `held`, `closing`) and the hook set's (`Store::read`,
+`opened`, `settle`, `rebind`) -- is `instance::same`: the same device and
+inode, and the same birth time where both name one; where either names
+none, the device and inode alone, the inode not 0. What that gives up is
+the birth time's check where one side has none, the check every Linux
+release binary already makes of every sidecar it reads: device and inode,
+the sidecar put away before its file goes (above). One written and read
+where both name a birth time is held to it as before, and a close or a
+rebind finding the same file leaves the sidecar as written, so the binary
+that wrote it still reads it. A glibc node so keeps a 0.2.0 sidecar's
+birth time of 0 until a write of its own rewrites it -- a hook's `PUT`, a
+compact's rebind -- and until then that tenant has the device-and-inode
+check alone. Left: a sidecar this tree writes with a
+birth time -- a `PUT` of a hook, a compact's rebind, a stamp -- is another
+file to 0.2.0's musl binary, which compares as written, after a downgrade.
+The tests: `a_binding_naming_no_birth_time_names_its_file_to_a_node_reading_one`
+(both ways) and fennec-http's
+`a_set_a_linux_0_2_0_node_saved_with_no_birth_time_is_read_by_a_node_reading_one`,
+a sidecar and an identity laid out as 0.2.0's writers lay them out.
+Rejected: *0 compared as written*, the loss above for a file that is the
+tenant's; *a sidecar naming no birth time held to its own mtime*, a file
+born after the sidecar was last written being another, which a node
+reading no birth time cannot ask and a copy keeping times or a `touch`
+moves; *the birth time written into the sidecar as a node first meets the
+file*, which makes 0.2.0 put away, after a downgrade, a set it wrote;
+*birth times read on musl* (`statx` asked directly), for now: with `same`
+an upgrade between two musl releases keeps every set, but 0.2.0 compares
+as written, so after a downgrade to it any set a later version wrote with
+a birth time is put away -- every musl node's, where today only a glibc
+build's. A raw `statx` system call on musl, its birth time read whatever
+std asks, is a possible follow-up. Until then this tree's own Linux
+release binaries are musl too: they write and read every birth time as 0,
+and the guard the birth time gives against a reused inode has never been
+on in a shipped Linux binary -- device and inode, the sidecar put away
+before its file goes (above), are what a Linux release holds.
+
 An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
 carries the sidecar's identity only where the sidecar names that binding,

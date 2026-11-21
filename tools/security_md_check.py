@@ -74,9 +74,10 @@ PRIMITIVES = {
     "HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "pub fn hmac_sha256("),
     "PBKDF2-HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "pub fn pbkdf2_sha256("),
     "ChaCha20-Poly1305": ("crates/fennec-http/src/crypto.rs", "pub fn seal_in_place("),
+    "HChaCha20": ("crates/fennec-http/src/crypto.rs", "pub fn hchacha20("),
     "RSA PKCS#1 v1.5 verification": ("crates/fennec-http/src/crypto.rs", "pub struct RsaKey"),
     "ECDSA P-256 verification": ("crates/fennec-http/src/crypto/p256.rs", "pub fn verify_sha256("),
-    "SCRAM-SHA-256": ("crates/fennec-wire/src/client.rs", "fn scram(&mut self"),
+    "SCRAM-SHA-256": ("crates/fennec-wire/src/client.rs", "    fn scram("),
 }
 # A file's code before its test module.
 TESTS = re.compile(r"^#\[cfg\(test\)\]\s*\n\s*(?:pub\s+)?mod\b", re.M)

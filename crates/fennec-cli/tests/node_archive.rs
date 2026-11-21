@@ -23,6 +23,14 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
+/// When the node said the tenant archived, plain, in `dir` was gone.
+fn gone(dir: &std::path::Path) -> Option<u64> {
+    if !dir.is_dir() {
+        return None;
+    }
+    fennec_http::node_archive::gone_at(&Archive::new(dir).unwrap()).unwrap()
+}
+
 /// `fennec`, on Windows in a process group of its own: Ctrl+Break, its
 /// SIGTERM there, goes to a group ([`ask_to_stop`]).
 fn fennec_in_its_group() -> Command {
@@ -259,7 +267,7 @@ fn a_node_restored_from_its_archive_holds_every_archived_write() {
         });
     }
     until("the archive was not told `doomed` is gone", || {
-        fennec_http::node_archive::gone_at(&root.join("doomed")).is_some()
+        gone(&root.join("doomed")).is_some()
     });
     // Interrupted, the archiver syncs and ends.
     assert!(ask_to_stop(&archiver));
@@ -405,4 +413,46 @@ fn every_tenant_restores_to_a_moment() {
         "3",
     ]);
     assert!(!ok && said.contains("restored to a moment"), "{said}");
+}
+
+/// A tenant's line restored or verified as one database's -- `fennec
+/// restore <root>/<tenant>` -- says whose it is: only `--tenants` holds a
+/// line to its directory's name, so one copied where another database's
+/// archive was would otherwise restore without a word.
+#[test]
+fn a_tenants_line_restored_alone_says_whose_it_is() {
+    let d = scratch("whose");
+    let key_file = d.join("archive.key");
+    std::fs::write(&key_file, "ab".repeat(32)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let key = fennec_http::seal::Key::from_hex(&"ab".repeat(32)).unwrap();
+    let line = d.join("root").join("acme");
+    let mut db = Database::new();
+    for sql in [
+        "create collection notes (title text)",
+        "put notes {title: \"a\"}",
+    ] {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    Archive::of_tenant(&line, Some(key), "acme")
+        .unwrap()
+        .add_image(db.change_seq(), &db.snapshot())
+        .unwrap();
+    let (line, out) = (line.to_str().unwrap(), d.join("acme.fennec"));
+    let (k, out) = (key_file.to_str().unwrap(), out.to_str().unwrap());
+    for args in [
+        &["restore", line, out, "--key-file", k][..],
+        &["verify", line, "--key-file", k][..],
+    ] {
+        let (ok, said) = fennec(args);
+        assert!(
+            ok && said.contains("sealed as tenant `acme`'s archive"),
+            "{args:?}: {said}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(d);
 }

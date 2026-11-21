@@ -1,14 +1,14 @@
 {
   "Linux": {
     "rust_ignored": {
-      "count": 27,
-      "reason": "18 tests need a live PostgreSQL (fennec-import's pg.rs and follow.rs, fennec-server's follow.rs): `make test` ignores them and CI's `postgres (import and --follow)` job runs them (`make import-test`), failing unless all 18 passed; and 3 are exhaustive f32/f64 sweeps too slow for a push (json.rs, num.rs, run by hand); `make test` runs fennec-core's lib three times, so the 3 sweeps count 3 times: 18 + 3 + 3 + 3"
+      "count": 29,
+      "reason": "18 tests need a live PostgreSQL (fennec-import's pg.rs and follow.rs, fennec-server's follow.rs): `make test` ignores them and CI's `postgres (import and --follow)` job runs them (`make import-test`), failing unless all 18 passed; 3 are exhaustive f32/f64 sweeps too slow for a push (json.rs, num.rs, run by hand); and 2 are measurements read in a release build, run by hand (fennec-http's archive.rs `upgrade_image_cost`, seal.rs `seal_cost`); `make test` runs fennec-core's lib three times, so the 3 sweeps count 3 times: 18 + 3 + 3 + 3 + 2"
     }
   },
   "macOS": {
     "rust_ignored": {
-      "count": 27,
-      "reason": "the same 27 as Linux: 18 tests need a live PostgreSQL (run by the Linux `postgres` job), 3 sweeps (counted in three of make test's four cargo runs) are run by hand"
+      "count": 29,
+      "reason": "the same 29 as Linux: 18 tests need a live PostgreSQL (run by the Linux `postgres` job), 3 sweeps (counted in three of make test's four cargo runs) and 2 release-build measurements (fennec-http's `upgrade_image_cost`, `seal_cost`) are run by hand"
     }
   }
 }

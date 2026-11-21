@@ -203,7 +203,7 @@ A proposal holds no invariant until it is built, and is listed apart:
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
 157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
-158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+158. [A pull request is held to its base in instructions and heap bytes an op, and in I/O to the call](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
 159. [A seed goes in parts, read a page at a time](http.md#seeds-in-parts) (added after the move, under *The HTTP server*)
 160. [A seed's parts wait in the replica's file and land in one block](native-and-sync.md#seeds-in-parts) (added after the move, under *The native library and sync*)
 161. [A seed in parts lands in one task](js-client.md#seeds-in-parts) (added after the move, under *The JS client and Cloudflare*)

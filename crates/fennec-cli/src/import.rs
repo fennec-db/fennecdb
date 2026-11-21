@@ -16,15 +16,23 @@ usage: fennec import <source> --table <name> [options]
 source
   file.sqlite                          a SQLite database file
   postgres://user[:password]@host[:port]/database[?sslmode=..&sslrootcert=..]
-                                       TLS as libpq's sslmode: disable, prefer
-                                       (the default), require, verify-ca or
-                                       verify-full; sslrootcert, a CA PEM file
-                                       (else ~/.postgresql/root.crt if there).
-                                       prefer and require encrypt but check
-                                       nothing of the server (require: unless
-                                       a CA file is there), so anyone in the
-                                       path can stand in for it: across a
-                                       network, use verify-full
+                                       TLS as libpq's sslmode: disable, prefer,
+                                       require, verify-ca or verify-full;
+                                       sslrootcert, a CA PEM file (else
+                                       ~/.postgresql/root.crt if there). The
+                                       default is verify-full for a host off
+                                       this machine (Mozilla's CAs or the
+                                       file's) and prefer on it. prefer and
+                                       require check nothing of the server
+                                       (require: unless a CA file is there),
+                                       so anyone in the path can stand in for
+                                       it. Holding a password, it signs in by
+                                       SCRAM alone, bound to TLS where the
+                                       server offers it: require_auth= and
+                                       channel_binding= as libpq's; a sign-in
+                                       is held to connect_timeout= (30 s).
+                                       PGPASSWORD keeps the password out of
+                                       the process list
 
 options
   -t, --table <name>      source table (required)
@@ -41,7 +49,8 @@ options
   --source-where <SQL>    postgres: applies the filter on the server, so the
                           rows never stream. It is SQL, not FennecQL.
   --limit <N>             at most N rows
-  --batch <N>             put batch size (default 2000)
+  --batch <N>             rows a put takes at most (default 2000); a batch
+                          is put sooner once its rows hold 16 MiB
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
   -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be
@@ -187,7 +196,7 @@ pub fn main(args: &[String]) -> Code {
         return match run_follow(&source, &table, &target, &opts, f) {
             Ok(()) => Code::Ok,
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", said(&e));
                 Code::Failed
             }
         };
@@ -213,10 +222,20 @@ pub fn main(args: &[String]) -> Code {
             Code::Ok
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", said(&e));
             Code::Failed
         }
     }
+}
+
+/// An error, a warning or a name for the terminal: it may carry a source's
+/// words -- PostgreSQL's, or whoever's answers in its place, a column's
+/// name, a SQLite file's column or type -- so its control characters are
+/// escaped, an escape sequence never reaching the terminal, and it is cut
+/// at 4 KiB. Every line `fennec import` prints of a source's goes through
+/// it: the plan's warnings, and `--dry-run`'s fields, types and id.
+fn said(e: &impl std::fmt::Display) -> String {
+    pg::peer_text(e.to_string().as_bytes(), 4096)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,6 +271,7 @@ fn run(
             "source   {}@{}:{}/{} -> {table}",
             url.user, url.host, url.port, url.database
         );
+        println!("tls      {}", url.tls_said());
         if count {
             total = Some(pg::count_rows(&url, &query)?);
         }
@@ -272,7 +292,10 @@ fn run(
     };
 
     let columns = src.columns()?;
-    let plan = map::plan(&columns, opts)?;
+    let mut plan = map::plan(&columns, opts)?;
+    // What the source left out -- a SQLite table's VIRTUAL generated
+    // columns -- is a warning line of the plan and of the import.
+    plan.warnings.extend(src.left_out());
 
     if dry_run {
         print_plan(&plan, &columns, target, total.or_else(|| src.row_count()));
@@ -281,7 +304,7 @@ fn run(
 
     println!("target   {target} -> {}", opts.into);
     for w in &plan.warnings {
-        println!("warning  {w}");
+        println!("warning  {}", said(w));
     }
 
     // An import that stops halfway leaves the collection in the file; since
@@ -344,6 +367,7 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
         "source   {}@{}:{}/{} -> {table}",
         url.user, url.host, url.port, url.database
     );
+    println!("tls      {}", url.tls_said());
     println!("target   {target} -> {}", opts.into);
     // A file this run made and never wrote a copy into goes again on an
     // error, as the one-shot import's does; one with a copy is never removed.
@@ -408,7 +432,7 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
                     say(open, format!("skipped  {} rows (--where)", s.skipped));
                 }
                 for w in &s.warnings {
-                    say(open, format!("warning  {w}"));
+                    say(open, format!("warning  {}", said(w)));
                 }
             }
             Event::Streaming => say(
@@ -440,10 +464,11 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
                     "warning  column `{c}` has no field in the collection; its values are not kept"
                 ),
             ),
-            Event::Reconnecting { error, wait } => {
-                say(open, format!("stream   {error}; again in {wait:.1?}"))
-            }
-            Event::SlotHeld(why) => say(open, format!("warning  {why}")),
+            Event::Reconnecting { error, wait } => say(
+                open,
+                format!("stream   {}; again in {wait:.1?}", said(&error)),
+            ),
+            Event::SlotHeld(why) => say(open, format!("warning  {}", said(&why))),
         }
     };
     let result = follow::run(
@@ -497,14 +522,11 @@ fn print_plan(
 ) {
     println!("target   {target} -> {}\n", plan.schema.name);
     println!("create collection {} (", plan.schema.name);
-    let width = plan
-        .schema
-        .fields
-        .iter()
-        .map(|f| f.name.len())
-        .max()
-        .unwrap_or(0);
-    for f in &plan.schema.fields {
+    // A field's name is its column's, the source's to choose: shown
+    // escaped, and aligned as shown.
+    let names: Vec<String> = plan.schema.fields.iter().map(|f| said(&f.name)).collect();
+    let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    for (f, name) in plan.schema.fields.iter().zip(&names) {
         // Show which source column the field comes from.
         let src = plan
             .targets
@@ -514,9 +536,10 @@ fn print_plan(
             .map(|(_, c)| c.source_type.as_str())
             .unwrap_or("");
         println!(
-            "  {:<width$}  {:<14} <- {src}",
-            f.name,
+            "  {:<width$}  {:<14} <- {}",
+            name,
             f.ty.name(),
+            said(&src),
             width = width
         );
     }
@@ -527,7 +550,7 @@ fn print_plan(
         .zip(columns)
         .find(|(t, _)| **t == map::Target::Id)
     {
-        println!("  id  <- {} ({})", c.name, c.source_type);
+        println!("  id  <- {} ({})", said(&c.name), said(&c.source_type));
     }
     for (field, kind) in &plan.indexes {
         println!(
@@ -538,7 +561,7 @@ fn print_plan(
     }
     println!();
     for w in &plan.warnings {
-        println!("warning  {w}");
+        println!("warning  {}", said(w));
     }
     match rows {
         Some(n) => println!("{n} rows will be read; nothing was written (--dry-run)"),

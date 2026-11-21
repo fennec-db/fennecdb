@@ -7,7 +7,10 @@
 //!
 //! **Bound to its file, as `.instance` is.** The sidecar's first line names
 //! the file it was written for -- its device, inode and birth time
-//! ([`crate::instance::binding`]) -- and every way of fennec's that makes,
+//! ([`crate::instance::binding`]), the birth time held only where the node
+//! that wrote it and the one reading it both read one
+//! ([`crate::instance::same`]: 0.2.0's Linux binary, musl, reads none) --
+//! and every way of fennec's that makes,
 //! removes or replaces a tenant's file puts it away first, synced: a
 //! create, an install, a follow, a delete, a reclaim, `fennec restore`,
 //! `backup --force` and `unseal` ([`Store::put_away`], [`put_away_beside`]).
@@ -340,7 +343,7 @@ impl Store {
         };
         let bound = (dev, ino, born);
         match instance::binding(&self.file(name)) {
-            Ok(now) if now == bound => {}
+            Ok(now) if instance::same(bound, now) => {}
             Ok(_) => return Err(Unread::Bound("name another file than the tenant's")),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Unread::Bound("lie beside no file of the tenant"))
@@ -499,7 +502,7 @@ impl Store {
             let Some(e) = map.get_mut(name) else {
                 return;
             };
-            if Some(e.bound) == at {
+            if at.is_some_and(|at| instance::same(e.bound, at)) {
                 e.held = open;
                 return;
             }
@@ -517,7 +520,7 @@ impl Store {
             return;
         };
         let mine = match open {
-            0 => instance::binding(&self.file(name)).ok() == Some(bound),
+            0 => (instance::binding(&self.file(name))).is_ok_and(|now| instance::same(bound, now)),
             open => held == open,
         };
         if !mine {
@@ -555,7 +558,7 @@ impl Store {
         let Ok(now) = instance::binding(&self.file(name)) else {
             return;
         };
-        if bound == now {
+        if instance::same(bound, now) {
             return;
         }
         let text = Self::text(now, set.version, &exported(&set));

@@ -638,11 +638,28 @@ fn probed() -> std::io::Result<String> {
     clone.set_read_timeout(Some(Duration::from_millis(200)))?;
     let mut said = Vec::new();
     for what in ["a read timeout of 200 ms", "non-blocking"] {
+        // From here on a failure ends the looks with what was found so
+        // far said, never dropping it for an error.
         if what == "non-blocking" {
-            clone.set_read_timeout(None)?;
-            clone.set_nonblocking(true)?;
+            if let Err(e) = clone
+                .set_read_timeout(None)
+                .and_then(|()| clone.set_nonblocking(true))
+            {
+                said.push(format!(
+                    "{what} could not be set through the try_clone: {e}"
+                ));
+                break;
+            }
         }
-        let mut late = peer.try_clone()?;
+        let mut late = match peer.try_clone() {
+            Ok(late) => late,
+            Err(e) => {
+                said.push(format!(
+                    "{what} not looked at: the peer's clone failed: {e}"
+                ));
+                break;
+            }
+        };
         let sender = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(3));
             let _ = late.write_all(b"x");
@@ -664,11 +681,19 @@ fn probed() -> std::io::Result<String> {
         ));
         let _ = sender.join();
         if bounded {
-            // The byte sent meanwhile, taken off before the next look.
-            clone.set_nonblocking(false)?;
-            clone.set_read_timeout(Some(Duration::from_secs(10)))?;
-            (&s).read_exact(&mut [0u8; 1])?;
-            clone.set_read_timeout(Some(Duration::from_millis(200)))?;
+            // The byte sent meanwhile, taken off before the next look: best
+            // effort, the answer above said already. After a timed-out read
+            // Winsock calls the socket indeterminate, and a failure here
+            // ends the looks: the next would read the byte left over, not wait.
+            let cleaned = clone
+                .set_nonblocking(false)
+                .and_then(|()| clone.set_read_timeout(Some(Duration::from_secs(10))))
+                .and_then(|()| (&s).read_exact(&mut [0u8; 1]))
+                .and_then(|()| clone.set_read_timeout(Some(Duration::from_millis(200))));
+            if let Err(e) = cleaned {
+                said.push(format!("no look after it: its clean-up failed ({e})"));
+                break;
+            }
         }
     }
     Ok(format!("probe: {}", said.join("; ")))

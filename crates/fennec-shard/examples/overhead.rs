@@ -59,6 +59,10 @@ fn leased(tag: &str) -> (String, std::path::PathBuf) {
         sync_on_write: true,
         addr: "127.0.0.1:0".into(),
         admin_token: Some("adm".into()),
+        // It asks no token, and `regions` sends it what another region's
+        // router relayed -- the network's, which a node asking none answers
+        // only under `--insecure`.
+        insecure: true,
         ..fennec_http::Config::default()
     };
     let server = fennec_http::Server::with_tenants(Arc::new(tenants), cfg);
@@ -145,6 +149,10 @@ fn started(tag: &str, follows: Option<&str>, sync: bool) -> (String, std::path::
         addr: "127.0.0.1:0".into(),
         admin_token: Some("adm".into()),
         max_body: 1 << 30,
+        // It asks no token, and `entry` sends it requests the global entry
+        // named the client of -- the network's, which a node asking none
+        // answers only under `--insecure`.
+        insecure: true,
         ..fennec_http::Config::default()
     };
     let server = fennec_http::Server::with_tenants(tenants, cfg);
