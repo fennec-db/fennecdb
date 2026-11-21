@@ -938,8 +938,13 @@ its frames chained, its head naming its role, archive, tenant and first
 change), and a `fennec restore` or `fennec verify` from 0.2.0 or earlier
 refuses such a file (`not a sealed file`, `<image>: not sealed, where the
 archive is`). The files sealed before still open in the new release, and a
-segment an older archiver began is closed: the next write begins a version
-3 segment after it. So `fennec` is upgraded on every machine that restores
+segment an older archiver began is closed: before the next write the
+archiver seals an image of the archive's end as version 3 -- read from the
+archive as the hourly image is, once a line, a node's tenant at its first
+write after the upgrade -- and the write begins a version 3 segment after
+it. An archive whose end does not restore stops `fennec archive` (a node's
+archiver passes over that tenant) naming why: what `fennec verify` refuses
+in it is put right first. So `fennec` is upgraded on every machine that restores
 or verifies -- an operator's, the weekly restore's -- with step 1, before
 any archiver is restarted on the new release. The older files still open
 under their key, bound to nothing a restore holds them to, and whoever
@@ -947,7 +952,13 @@ holds two of them can build a third from their frames: to be rid of that,
 make a new key (`fennec key`), point every archiver and backup at it, and
 begin a new archive under it, keeping the old key to read the older one
 (Archives and restores; the site's replication page, *How archives and
-backups are sealed*).
+backups are sealed*). A file sealed before the upgrade that `verify` or a
+restore refuses as standing at or past the archive's first file of
+version 3 (`<file>: an image of change N, sealed before version 3, at or
+past its image of change N taken at <ms>, the first file this archive
+holds of version 3: no archiver puts it there, so it is not this
+archive's`) was put there by no archiver: move it out of the archive's
+directory, and the archive is read without it.
 
 **A tenant's `github` hook set with `key delivery` is kept, its events
 refused.** From the release that refuses `key delivery`, a set a node kept

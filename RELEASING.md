@@ -627,10 +627,17 @@ tenant and first change), which a `fennec restore` or `fennec verify` from
 archive is`), and a build of main from before it by its number (`sealed
 as version 3, which this binary does not open (it opens 1 and 2): a later
 fennecdb's`): its notes say, under their upgrade heading, to upgrade
-`fennec` wherever an archive is restored or verified before any archiver,
-and that files sealed before stay open under their key -- splices of them
-with it, and any of them read where it is put -- until a new key (`fennec
-key`) begins a new archive. A tool reading sealed files itself reads
+`fennec` wherever an archive is restored or verified before any archiver;
+that an upgraded archiver seals an image of each line's end as version 3
+before the line's next write -- read from the archive as the hourly image
+is, once a line -- and stops naming an end that does not restore; that
+files sealed before stay open under their key -- splices of them with it,
+and any of them read where it is put -- until a new key (`fennec key`)
+begins a new archive; and that one `verify` or a restore refuses as
+standing at or past a line's first file of version 3 (`... sealed before
+version 3, at or past ...: no archiver puts it there`) was put there by no
+archiver, and is moved out of the archive's directory, the archive read
+without it. A tool reading sealed files itself reads
 version 3 as `docs/design/replication.md#sealed-archives` lays it out. The
 same notes say
 that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its

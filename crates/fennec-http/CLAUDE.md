@@ -77,7 +77,9 @@ length checked, never cast, a longer batch going out in frames of whole
 records; a key file others can read is warned of (`seal::open_key`), never
 refused. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
 older segment gone on in by none, an older image or segment read only
-before a line's first of version 3 (`Archive::older`); only a key that
+before a line's first of version 3, an image of its end an upgraded
+archiver seals before writing on (`Archive::older`,
+`seal_before_version`); only a key that
 sealed none is free of their splices: the docs say to change keys. A
 later version is refused by its number, and what a tag covers changes
 only with the magic's version byte.

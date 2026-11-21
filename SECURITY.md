@@ -297,11 +297,21 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   frame's place and whether it is the last, so a frame of another such file
   under the same key, at the same place, opens in it; neither says what it
   is, so one of any archive or tenant under the key reads where it is put
-  -- but past the first file of a line sealed now, where an older image or
-  segment is refused. Before that file (the line's history, the images and
-  segments from before its upgrade), and anywhere in a line holding no file
-  sealed now, or whose files sealed now were deleted, one of another
-  archive or tenant reads as the line's own. Such files still open, and
+  -- but past a line's first file sealed now, where an older image or
+  segment is refused by name: no archiver puts one there, so it is moved
+  out of the archive's directory, and the archive is read without it.
+  That first file is an image of the line's end, which an upgraded
+  archiver seals before it writes on, so a restore past the upgrade starts
+  from it or a later image; where a line's first file sealed now is a
+  segment, no older image is read at all. Before that image (the images
+  and segments from before the upgrade, which a restore to a moment before
+  it reads), and anywhere in a line holding no file sealed now (one no
+  write reached since the upgrade, or whose files sealed now were deleted),
+  one of another archive or tenant reads as the line's own. A line's
+  history sealed so reads anywhere, in place of one sealed now too: read
+  by the archiver going on and by `fennec verify` alone, never by a
+  restore, all it decides is whether the archiver takes a primary's hello
+  as leading from the archive. Such files still open, and
   nothing is sealed so any more: an archive one began goes on in files
   sealed now, each under its own key -- made from the key so that nothing
   an older file's bytes give away makes one -- its frames chained and its

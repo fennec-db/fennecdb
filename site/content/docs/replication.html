@@ -770,14 +770,25 @@ it is mapped and read where it lies, which encryption would take away —
 encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 
 <p>Files sealed by 0.2.0 and earlier still open, and an archive they began
-goes on: its next write begins a segment sealed as files are now, after
-the older one. The older files say nothing of what they are — their frames
-are bound to their places alone — so a frame of another such file sealed
-with the same key could be put in one unnoticed, and an older file of any
-archive sealed with that key reads wherever it is put: in an archive
-sealed as files are now from some file on, an older image or segment
-after that file is refused by name, but one before it, or in an archive
-holding nothing sealed now, reads as the archive's own. Because the older
+goes on: before its next write the upgraded archiver seals an image of the
+archive's end as files are now — read from the archive, as the hourly
+image is, once (a node's tenant at its first write after the upgrade) —
+and the write begins a segment sealed so after the older one. The older
+files say nothing of what they are — their frames are bound to their
+places alone — so a frame of another such file sealed with the same key
+could be put in one unnoticed, and an older file of any archive sealed
+with that key reads wherever it is put: in an archive sealed as files are
+now from that image on, an older image or segment after it is refused by
+name, and a restore past the upgrade starts from that image or a later
+one; one before it — read by a restore to a moment before the upgrade —
+or in an archive holding nothing sealed now, as a tenant's line no write
+reached since the upgrade, reads as the archive's own. No archiver puts
+an older file where it is refused, so <code>fennec verify</code> or a
+restore that refuses one (<code>image-…: an image of change 7, sealed
+before version 3, at or past its image of change 7 taken at …, the first
+file this archive holds of version 3: no archiver puts it there, so it is
+not this archive's</code>) names the way out: move that file out of the
+archive's directory, and the archive is read without it. Because the older
 files still open, that stays true of every key that ever sealed one,
 beside an archive or a backup sealed now. Pruning the older files does not
 end it, and neither does restoring a backup and sealing it again with the

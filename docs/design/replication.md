@@ -967,8 +967,9 @@ every release from 0.1.7 to 0.2.0) open as they did (`tests/sealed-v1/` and
 held by `older_sealed_archives_still_open`). Nothing is sealed in either
 any more, and a segment an older archiver began is gone on in by none: the
 archiver cuts its tail, durably, and its next write begins a version 3
-segment after it -- frames of two versions in one file would open as
-neither, and going on in an older one sealed writes bound to nothing. Their
+segment after it, and after an image of version 3 of the line's end
+(below) -- frames of two versions in one file would open as neither, and
+going on in an older one sealed writes bound to nothing. Their
 files bind nothing a reader holds them to, so the binding holds only for a
 key that never sealed one: whoever holds version 1 files under a key builds
 others from their frames, and a version 1 or 2 file of any archive under
@@ -983,15 +984,73 @@ change, and xeno's segment named before acme's first image with its writes
 running on past it, each restored as acme's at 4a834627 (at changes 6 and
 5, `older_files_put_past_a_lines_newer_ones_are_refused`); each is refused
 now, and so is a presence sealed in version 1 or 2, which no archiver
-wrote. What remains: an older file standing before a line's first of
-version 3 -- its history, its images and segments before it, which an
-older file of another line can be put among -- and every file of a line
-with none of version 3, or whose version 3 files were deleted, which
-reads as an older whole line put back does. An upgrade that left an older
-segment holding writes past a version 3 image -- a primary behind its
-archive at the first hello after the upgrade, sending an image of an
-earlier change -- has that segment refused, by name, and its archive is
-read once the segment is moved out. Neither pruning
+wrote.
+
+That first file is an image: an archiver going on in a line an older one
+sealed -- or a line of no file of version 3 -- seals an image of version 3
+of the line's end before its first segment of version 3
+(`Archive::seal_before_version`), assembled from the line's files as the
+hourly round takes one and timed after every image the line holds:
+one database's archiver as it goes on, a node's at a tenant's first write
+after it, so a node's idle tenants pay nothing. Begun with a segment, as
+version 3 was first made, the line's first file of version 3 left before
+it, in the archive's order, an image of the change before that segment
+taken at any time: an older image of that change -- another tenant's or
+another database's under the key -- copied in under a later time was the
+base of every restore past the upgrade until the first round's image, an
+hour on by default, which then sealed it in (1.0's second review of
+version 3; at 9865040b a tenant's restore to the end held another
+database's notes for 6 of its 8, and with such an image of the change
+before it for 5 of its 8, `an_older_image_put_in_after_an_upgrade_is_no_restores_base`).
+Now such an image of the end's change stands at or past the upgrade's
+image, and is refused; one of an earlier change stands before it, and a
+restore past the upgrade starts from it or a later image. Where a line's
+first file of version 3 is a segment -- that image let go of by `prune`,
+which lets go of every image before it first, or a line with no image --
+an older image is refused wherever it stands: put in before that segment
+it was the base of a restore to a moment the line no longer held, which
+was refused, that segment's writes read on it (at 9865040b a restore to
+the change after it held another database's notes for 6 of its 7,
+`an_older_image_is_read_only_before_an_image_of_version_3`). A line's
+first segment of version 3 that a crash left holding no write, the
+image's name lost with it, is removed as the archiver goes on, and the
+image sealed then (`an_upgraded_line_goes_on_from_an_image_of_its_end`);
+an end that does not restore is refused as the line's damage, naming
+what to put right, before anything of version 3 is written: one
+database's archiver stops on it, a node's passes over that tenant
+(`an_upgraded_line_whose_end_does_not_restore_is_refused_as_damaged`).
+The image is one assembly a line, once: what the first round would have
+taken of it within the hour. A line this version's first builds upgraded
+-- its first file of version 3 a segment; no release and no build of main
+wrote one -- reads none of its older images: restores from its first image
+of version 3 on, and its archiver, go on; a `verify`, a restore before
+that image and, until it holds one, its round refuse each older image by
+name, until they are moved out.
+
+No upgrade puts an older file where it is refused. The review read one
+as able to: a primary behind its archive sending an image of an earlier
+change at the first hello after the upgrade, leaving an older segment
+holding writes past a version 3 image. A hello's image of a change before
+the archive's end leads from no history the archive is on, whatever its
+lineage (`History::continues`), so it is not taken (`Took::Diverged`) --
+one database's archiver stops, a node's moves the line aside -- before
+anything is written (`a_hello_behind_an_older_line_leaves_it_as_it_was`).
+So a refusal names the file and the way out: `<file>: an image of change
+7, sealed before version 3, at or past its image of change 7 taken at
+<ms>, the first file this archive holds of version 3: no archiver puts it
+there, so it is not this archive's. Move it out of the archive's
+directory, and the archive is read without it`.
+
+What remains: an older file standing before a line's first of version 3
+-- its images and segments before it, which an older file of another line
+can be put among, read by a restore to a moment before the upgrade -- and
+every file of a line with none of version 3 -- one no write reached since
+its upgrade, or whose version 3 files were deleted -- which reads as an
+older whole line put back does. A line's history sealed in version 1 or 2
+reads wherever it is, in place of one of version 3 too: it has no place in
+the order, and is read by the archiver going on and by `verify` alone,
+never a restore, so all it decides is whether a primary's hello is taken
+as leading from the archive. Neither pruning
 the older files nor restoring a backup and sealing it again under the same
 key ends that -- they are wherever they were copied -- so the way out is a
 new key (`fennec key`) sealing everything from then on and a new archive
