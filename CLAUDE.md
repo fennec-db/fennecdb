@@ -363,7 +363,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), a request read in time the router's clients and fennec-tls's reads (`conn::Paced`, `read_by`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access and connections aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -389,15 +389,10 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A text's lists are read as written at once from its second request.
-- A body is held to the ceiling its head earns.
-- A chunked body grows as it comes, held to the ceiling
 - A seed goes in parts, read a page at a time.
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
 - An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag.
-- A connection no thread can be made for is answered 503.
-- A request is read in time, and an answer written in time.
-- `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
 - The OpenAPI document is held to the routes.
 - A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
@@ -407,12 +402,26 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A write wakes the held writes reading what it wrote, a row going to the group ranking it first
 - One held request looks for every group, and a group finding nothing looks among the rows written since
 
+*Durability*
+- A node syncs each tenant on a thread of its own.
+
 ### `crates/fennec-http/src/mcp/CLAUDE.md`
 
 Covers `crates/fennec-http/src/mcp/`.
 
 *The HTTP server*
 - An agent's MCP tool is a statement, held to the token as `/query` is.
+
+### `crates/fennec-http/src/conn/CLAUDE.md`
+
+Covers `crates/fennec-http/src/conn.rs` and `src/conn/`; its rules bind the accept loops (`accept.rs`), a body's framing (`http.rs`), a connection's loop (`lib.rs`), the router's clients and fennec-tls's reads (`conn::Paced`, `read_by`) too.
+
+*The HTTP server*
+- A body is held to the ceiling its head earns.
+- A chunked body grows as it comes, held to the ceiling
+- A connection no thread can be made for is answered 503.
+- A request is read in time, and an answer written in time.
+- `--tls-cert` and `--tls-key` make a listener HTTPS alone
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
