@@ -1016,7 +1016,7 @@ None gives a process a block disk it keeps.</p>
 <tr><td>Azure Container Apps, Container Instances, App Service</td><td>The persistent volume is Azure Files, SMB or NFS. The rest is ephemeral.</td></tr>
 <tr><td>DigitalOcean App Platform</td><td>No volumes; the local file system is lost at a deploy.</td></tr>
 <tr><td>Heroku</td><td>Each dyno's file system is discarded when it stops or restarts.</td></tr>
-<tr><td>Vercel, Netlify, Deno Deploy, Azure Functions</td><td>Functions and static hosting: no disk of their own, and a function's memory goes with its instance.</td></tr>
+<tr><td>Vercel, Netlify, Deno Deploy, Azure Functions</td><td>Functions and static hosting: no disk of their own, and a function's memory goes with its instance. Vercel's Drives, since October 2026, mount only into a Vercel Sandbox, one read-write mount at a time, and its Functions, OCI images too, run on an ephemeral disk with no volume or Drive, scaled down after 5 idle minutes.</td></tr>
 </tbody>
 </table>
 </div>
