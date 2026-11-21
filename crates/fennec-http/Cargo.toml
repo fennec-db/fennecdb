@@ -90,3 +90,8 @@ path = "tests/scheduled_counts.rs"
 [[test]]
 name = "hook_counts"
 path = "tests/hook_counts.rs"
+
+# Apart: its allocator counts the process's own bytes.
+[[test]]
+name = "message_peak"
+path = "tests/message_peak.rs"

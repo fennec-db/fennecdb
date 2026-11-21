@@ -786,7 +786,8 @@ impl<R: BufRead> Receiver<R> {
                 NodeMessage::Gone(name, when)
             }
             b'K' => NodeMessage::Alive,
-            b'E' => NodeMessage::End(String::from_utf8_lossy(&body).into_owned()),
+            // Into a log line: cut and escaped, as a primary's are.
+            b'E' => NodeMessage::End(replication::peer_words(&body)),
             _ => return Err(bad()),
         })
     }

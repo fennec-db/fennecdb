@@ -174,6 +174,16 @@ fn a_count_of_writes_past_its_message() {
 /// before a byte of it came, which Linux refuses and a refused allocation
 /// aborts the node, every tenant with it, its supervisor's restart
 /// following the same stream.
+///
+/// Linux alone is where this tells, and CI's test job runs it there: its
+/// overcommit refuses an allocation past memory and swap, where macOS maps
+/// a terabyte of address space lazily -- its 47 bits hold 128 of them --
+/// and touches only the pages a read fills, so on macOS the node read the
+/// mebibyte, met the stream's end and lived, the base too. What holds a
+/// body to what came on every platform is fennec-http's unit test
+/// `a_message_is_held_as_it_comes_not_as_it_was_announced`, which counts
+/// the bytes a read is asked to fill, and `tests/message_peak.rs`, which
+/// counts the allocator's.
 #[test]
 fn a_terabyte_announced() {
     held_against("terabyte", 2, None, |_, mut s| {
@@ -215,7 +225,10 @@ fn a_status_line_without_an_end() {
 
 /// A primary that goes silent in the middle of a message, the follower
 /// blocked reading it: the promotion's halt cuts the read, and nothing
-/// waits out the silence.
+/// waits out the silence. On Unix the cut ends a read already waiting and
+/// one begun after it alike, so this holds the cut, not `Watched`, which
+/// fennec-http's `a_halt_a_read_in_a_message_missed_ends_at_the_next_byte`
+/// holds on every platform.
 #[test]
 fn a_primary_silent_in_the_middle_of_a_message() {
     let (tx, written) = mpsc::channel();

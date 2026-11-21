@@ -67,7 +67,7 @@ pub static TARGETS: &[Target] = &[
     },
     Target {
         name: "stream",
-        about: "a primary's answer as a replica, an archiver and a backup read it (fennec_http::replication: read_head, read_message, Receiver::receive) and a node's stream of every tenant as its archiver reads it (node_archive), read whole or a few bytes at a time",
+        about: "a primary's answer as a replica, an archiver and a backup read it (fennec_http::replication: read_head, read_message, Receiver::receive), an image it promised adopted by a copy mapped as a server's (loaded, Database::adopt: repoint, rebind), and a node's stream of every tenant as its archiver reads it (node_archive), read whole or a few bytes at a time",
         max_len: 64 << 10,
         smoke: 120_000,
         seeds: stream_seeds,
@@ -1009,8 +1009,39 @@ fn stream(data: &[u8]) {
 }
 
 fn answer<R: BufRead>(r: &mut R, node: bool) {
-    let _ = match node {
-        true => fennec_http::node_archive::read_answer(r),
-        false => fennec_http::replication::read_answer(r),
-    };
+    if node {
+        let _ = fennec_http::node_archive::read_answer(r);
+        return;
+    }
+    // A copy as a server's is: mapped, its file a sink's that hands the
+    // rewritten bytes back as the mapping -- so an image the follower's
+    // path accepts is adopted as a replica adopts one, its stores pointed
+    // at the bytes (`repoint`'s walk) and its statements bound (`rebind`).
+    let mut copy = Database::with_sink(Box::new(Remapped(None)));
+    copy.set_clock(Some(CLOCK));
+    let empty: fennec_core::store::Base = std::sync::Arc::new(Database::new().snapshot());
+    if copy.load_mapped(empty).is_err() {
+        return;
+    }
+    let (_, _) = fennec_http::replication::read_answer(r, Some(&mut copy));
+    read_all(&copy);
+}
+
+/// A file's sink in memory: a rewrite's bytes kept, and handed back as the
+/// file mapped, as a file's sink hands back its mapping after one.
+struct Remapped(Option<fennec_core::store::Base>);
+
+impl fennec_core::engine::Sink for Remapped {
+    fn append(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+        Ok(())
+    }
+
+    fn rewrite(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+        self.0 = Some(std::sync::Arc::new(bytes.to_vec()));
+        Ok(())
+    }
+
+    fn remapped(&mut self) -> Option<fennec_core::store::Base> {
+        self.0.take()
+    }
 }
