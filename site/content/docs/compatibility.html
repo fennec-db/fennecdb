@@ -63,6 +63,11 @@ as a break:</p>
     digits and <code>connect_timeout=0</code> are refused
     (<a href="import.html#tls">TLS</a>,
     <a href="import.html#signing-in">Signing in</a>).</li>
+  <li><b>An <code>Idempotency-Key</code> a server kept.</b> Keys are kept in
+    a new form, and those a v0.2.0 server or node kept are not looked up: a
+    keyed write sent before the upgrade and again after it runs again,
+    where v0.2.0 answered what it kept
+    (<a href="http.html#idempotency">Retrying a write</a>).</li>
 </ul>
 
 <h2>Upgrading</h2>
