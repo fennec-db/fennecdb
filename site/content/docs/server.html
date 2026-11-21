@@ -278,6 +278,26 @@ of the schema and each admin request (<a href="/docs/monitoring#audit">The
 audit log</a>).</p>
 </details>
 
+<p id="file-modes">On Linux and macOS every file the server and
+<code>fennec</code> make is readable and writable by their user alone (mode
+<code>0600</code>), whatever the umask, and a directory they make is
+<code>0700</code>: the database and its sync log and lock, a node's tenants and
+their records, archives, backups, restores and the audit log. Another user of
+the machine reads none of the rows, secrets or refused requests they hold. A
+file that is there keeps the mode it has, through every compaction, checkpoint
+and <code>restore --force</code> over it, so to let a backup group read the
+database, set its mode once:</p>
+
+<pre data-lang="bash">chgrp backup data.fennec &amp;&amp; chmod 640 data.fennec</pre>
+
+<p>A sync log or lock made beside a database takes that database's mode. A
+directory the server writes new files into -- an archive, a node's
+<code>--dir</code> -- gives each new file to its owner alone: a reader there
+runs as the server's user. Up to 0.2.0 files took the umask's mode, usually
+<code>0644</code>, readable by every user; a file made then keeps it until you
+change it (<code>chmod 600 data.fennec</code>). On Windows a file takes its
+folder's access list, as it always did.</p>
+
 <h2 id="tls">HTTPS</h2>
 
 <p>Give the server a certificate chain and its private key and it serves HTTPS

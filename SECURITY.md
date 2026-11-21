@@ -290,6 +290,22 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   leaves out shared file mappings. Only an archive or a backup can be sealed
   (`--key-file`), never the file a server serves: the disk's own encryption
   covers that one, and swap and core dumps are the host's to protect.
+- **On a shared machine, the files are their user's: other users read none,
+  that user and root read all.** On Linux and macOS every file
+  `fennec-server` and `fennec` make -- a database, its sync log and lock, a
+  node's tenants and their records, an archive, a backup, a restore, the
+  audit log -- is made mode `0600` by the call that makes it, whatever the
+  umask, and a directory they make `0700`
+  ([crates/fennec-core/src/fs.rs](crates/fennec-core/src/fs.rs)); up to 0.2.0
+  each took the umask's mode, usually readable by every user. Not defended:
+  anything running as the server's user or as root; a file made by 0.2.0 or
+  before, or given a wider mode by its operator, which keeps that mode -- a
+  file replaced keeps the mode of the one it replaces; a copy made elsewhere
+  with other modes; and what the process list shows, a password in
+  `--follow`'s connection string among it
+  ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
+  file takes its folder's access list, and a key or a tenant's hook secrets
+  are made their user's alone.
 - **What the process holds is resident,** with no buffer pool of its own to
   evict from: the indexes, and the documents too under `--no-mmap`, since a
   mapped file's pages are the system's to keep or drop. A `--dir` node does

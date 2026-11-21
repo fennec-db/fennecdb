@@ -20,6 +20,10 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
   <li><b>Opened on first use, closed when idle</b>
     (<code>--idle-close</code>, 300 s by default).</li>
   <li><b>Unknown tenants are 404.</b> A request never creates one.</li>
+  <li><b>Its files are its user's alone</b> on Linux and macOS: the directory
+    made <code>0700</code>, each tenant's file, lock and records
+    <code>0600</code>, whatever the umask; a file there keeps the mode it has
+    (<a href="/docs/server#file-modes">Files on a shared machine</a>).</li>
   <li><b><code>/_admin/</code></b> is how the router drives the node; it needs
     <code>--admin-token</code>.</li>
   <li><b>A user's token is bound to its tenant.</b> A JSON Web Token reaches
