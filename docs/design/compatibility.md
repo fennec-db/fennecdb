@@ -38,6 +38,12 @@ A feature whose first use moves the file format -- it writes a new kind or tag -
 - Measured numbers, benchmarks and their harnesses, `examples/`.
 - 0.x: it promises nothing, and a 0.x client has no compatibility with a 1.x server.
 
+## What a 1.x refuses that v0.2.0 took
+
+Changes made on purpose before 1.0, each where 0.x promised nothing, so that 1.x need not break anything to make them:
+
+- **Another user of the machine reads none of the files fennecdb makes** (G14's review). Up to v0.2.0 every file the server and `fennec` made -- a database, its sync log and lock, a node's tenants and records, an archive, a backup, a restore, the audit log -- took the umask's mode, usually `0644`; now each is made `0600` and each directory `0700` by the call that makes it ([durability.md](durability.md#files-modes)). A second user that read the database file by its default mode -- a backup job, an exporter run as another user -- must be given access once (`chgrp` and `chmod 640`), which every compaction, checkpoint and `restore --force` keeps. A file made before keeps its mode: nothing is narrowed under an operator.
+
 ## Upgrade order
 
 Replicas before primaries, and files go one way. `deploy/RUNBOOK.md`'s *Upgrading with no downtime* is the long form: archivers, then routers, then every node holding a replica or standby, then primaries.

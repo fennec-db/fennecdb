@@ -297,6 +297,85 @@ kept to the exit to `close_log` and a durability run after it
 asked, each finding the log after the stop; fennec-core's and
 fennec-http's tests pass on Linux, where every file keeps one.
 
+## Files' modes
+
+**Every file is made its owner's alone, and a file there keeps its mode.**
+On a Unix the call that makes a file gives it mode `0600` whatever the
+umask (`fs::private`, an `OpenOptions` with the mode), and one that makes a
+directory `0700` (`fs::create_dir_private`). Up to 0.2.0 each was the
+umask's -- `0644` under the usual 022, `0666` under 000 -- and every user
+of the machine read a node's tenants (their rows and the server's `_`
+collections), a tenant's records, archives, backups, a restore or an
+unseal, and the audit log's refused requests (G14's review). The attacker
+is another user of the same machine, without the server's user or root.
+
+What makes them, by crate: fennec-core's `FileSink::create` (the database,
+which every server, replica, tenant, router directory, shell, import and
+app open), `rewrite_with`'s `.compacting` (a checkpoint, a compact under the
+lock, a replica's image, a restore's checkpoint), `SideFile::create`'s
+`.beside` (a compact or an index built beside the database, the
+auto-compact), `SyncLog::open`; fennec-abi's `lock::take` (`<file>.lock`);
+fennec-http's `audit::open`, `instance::write` (`<t>.instance`),
+`tenants.rs`' `.follows`, `.quota` and an install's `.importing`,
+`Tenants::new`'s directory, `tenant_hooks` (`<t>.hooks`, already `0600`),
+`schedule::hint::write`, the archive's directory, images, `began`,
+segments and a restore's `.restoring` (`copied`, `assemble`), `backup`'s and
+`unseal`'s `.tmp`, a node archive's root, records and restored directory;
+fennec-cli's `.save` and `fennec key` (already `0600`, made with
+`create_new`). Not data: `fennec types`' TypeScript, written with the
+umask's mode as source code is. The browser's OPFS file is no Unix file;
+the module has no `std-fs` and makes none.
+
+Never a `chmod` after the make: between the two, another user's `open`
+gets a descriptor that reads everything written after. A side file an
+earlier process left wider -- a crash under 0.2.0 -- is removed and made
+anew (`fs::create_private`), since truncated in place it kept its mode and
+any descriptor on it.
+
+**A file there keeps its mode, through every replacement.** An operator's
+`chgrp backup` and `chmod 640` for a backup job must survive a compact, so a
+side file renamed over a file takes that file's permission bits before the
+rename (`fs::mode_like`): `swap_in` for a checkpoint, a compact under the
+lock or beside it and a replica's image, `Archive::restore`, `backup` and
+`unseal` into a file, `.save`, a tenant's records and `<t>.hooks`, the
+hint. A small record takes it as it is made (`fs::create_like`), before a
+byte is written; an image as long as a database just before its rename.
+The set-id bits are not copied, and nothing is chowned: owner and group are
+the rename's. A file 0.2.0 made `0644` is opened as it is and keeps
+`0644` -- fennecdb narrows nothing under an operator -- which the server
+page and SECURITY.md say, with the `chmod` that closes it.
+
+**A sidecar takes its database's mode.** The sync log is removed at every
+clean close and rewrite and made again at the next sync, so a mode set on it
+once would not last; made, it takes the mode of the file whose bytes it
+holds (`SyncLog::open`, from the open file), so whoever an operator let
+read the database reads its log, which a `--read-only` open and `fennec
+verify` apply after a power loss. `<file>.lock` made beside a database
+there takes its mode too (`lock::take`, when the file is new and empty),
+so whoever may write the database may open its lock; one made first --
+before its database -- is `0600`, as the database then is. A lock is never
+removed, so a mode set on it lasts.
+
+On Windows a file takes its directory's access list and these change
+nothing (`private` compiles to the plain open, `mode_like` to nothing);
+a secret's file is `owner_only`'s DACL ([windows.md](windows.md)).
+
+Measured: only a file's making changes. `private` is a flag on the open
+that makes the file; `mode_like` a `stat` and a `chmod` a replacement, a
+compact's or a checkpoint's against an image's writing; the lock's
+`mode_like` runs only for a lock file made, and the log's only for a log
+made. No request opens a file, and the perf gate's `file-open` makes
+none; its `file-compact` makes a side file an op, two system calls more.
+fennec-core's `files_are_made_their_owners_alone_and_keep_their_mode`,
+fennec-abi's `a_lock_file_is_made_its_owners_alone_or_as_its_database`,
+fennec-http's `tests/modes.rs` and fennec-cli's
+`what_the_program_makes_is_its_owners_alone_and_keeps_its_mode` run under
+a umask of 022 and 000, each set by `sh` for a child that runs the one
+test, since the umask is the process's and the tests beside it on cargo's
+threads make files too; each first asserts that a plain create takes the
+umask, then every path above, and a file made `0640` written, checkpointed,
+compacted, compacted beside, restored over, backed up and unsealed over.
+
 ## A power cut
 
 **Answered on CI, on Linux too.** `linux-power-cut.yml` is [Windows' power cut](windows.md#the-power-cut)'s counterpart, for what Linux alone does: a durable write there fsyncs [the sync log](#the-sync-log) beside the file and not the file, and the next open puts back what the file lost from it (`synclog::recover`). `tests/synclog.rs` stands in for a crash inside one process -- the process forgotten, the file cut back to the log's start by hand -- and the Windows rig cuts a system that keeps no log, so until this rig no power cut, a kernel's page cache and a disk's lost with it, had reached that path. Four guests a run, a matrix entry each: one file under `--sync always` on ext4, the same on XFS, one file under `--sync 250` -- the default -- on ext4, held to what that promises (below), and a `--dir` node of two tenants under `--sync always` on ext4, followed by a standby on the runner (below). It runs by hand (`workflow_dispatch`), weekly, and on a push to main touching the durability code -- the paths Windows' runs on, the rig's own files among them, the server's syncer (`fennec-server`'s `durability.rs`), what a primary sends its replicas once an fsync covered it (`replication.rs`) and what `/_changes` hands a consumer as on disk (`cdc.rs`), which the `--sync 250` guest's check reads its syncs from -- never on a pull request, and is not a required check. A release needs its last run green (RELEASING.md).
