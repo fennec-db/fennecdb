@@ -157,9 +157,16 @@ pub fn scheme(tls: Option<&Tls>) -> &'static str {
     }
 }
 
-/// A connection's TLS session, and a `dup` of its socket for what is asked
-/// of the socket while the session is borrowed: its options, its address,
-/// and the router's `poll` of a held request's client.
+/// A connection's TLS session, and a handle of its socket for what is
+/// asked of the socket while the session is borrowed: its options, its
+/// address, and the router's `poll` of a held request's client. The
+/// session's own handle, shared ([`fennec_tls::TlsStream::socket`]), never
+/// a `dup`: on Windows a `dup` is a socket handle of its own, whose read and
+/// write timeouts bound its own calls alone, and every timeout set through
+/// it -- the idle timeout, a request's time in a silence, `--write-timeout`,
+/// a stream's -- left the session's reads and writes with none: a request
+/// silent past its time was answered when its bytes came, and an idle
+/// connection was held for good (docs/design/http.md#slow-clients).
 ///
 /// Its end sends `close_notify` ([`Drop`]), so that a client reading a
 /// stream to its end -- SSE, a replica's, a node's answer with no length
@@ -173,7 +180,7 @@ pub fn scheme(tls: Option<&Tls>) -> &'static str {
 #[cfg(feature = "tls")]
 pub struct Secured {
     tls: RefCell<fennec_tls::TlsStream>,
-    sock: TcpStream,
+    sock: Arc<TcpStream>,
     /// No `close_notify` at the end: a write failed or the caller cut the
     /// connection, or its end sent one already ([`Conn::end_refused`]).
     quiet: Cell<bool>,
@@ -404,6 +411,9 @@ impl Conn {
         // which rustls would answer with an alert its client prints as a
         // garbled answer.
         let mut first = [0u8; 1];
+        // The client's address, for a failure's line: taken before the
+        // handshake, which takes the socket.
+        let from = stream.peer_addr().ok();
         let looked = stream
             .set_read_timeout(Some(tls.handshake.max(Duration::from_millis(1))))
             .and_then(|()| stream.peek(&mut first));
@@ -412,33 +422,26 @@ impl Conn {
             Ok(1) if first[0].is_ascii_uppercase() => {
                 failed(
                     Failed::PlainHttp,
-                    &stream,
+                    from,
                     &"a plain HTTP request, answered 400",
                 );
                 plain_refused(stream);
                 return None;
             }
             Ok(1) => {
-                failed(
-                    Failed::Protocol,
-                    &stream,
-                    &"its first byte is no TLS record's",
-                );
+                failed(Failed::Protocol, from, &"its first byte is no TLS record's");
                 return None;
             }
             Ok(_) => {
-                failed(Failed::Closed, &stream, &"it ended before its first byte");
+                failed(Failed::Closed, from, &"it ended before its first byte");
                 return None;
             }
             Err(e) => {
-                failed(failure_of(&e), &stream, &e);
+                failed(failure_of(&e), from, &e);
                 return None;
             }
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        // A `dup` refused -- no descriptor left -- is the process's
-        // failure, not the client's handshake's: not counted among them.
-        let sock = stream.try_clone().ok()?;
         let tls = match tls.server.accept_within(stream, left) {
             Ok(t) => t,
             Err(e) => {
@@ -447,10 +450,13 @@ impl Conn {
                     fennec_tls::Error::Alert(_) => Failed::Alert,
                     _ => Failed::Protocol,
                 };
-                failed(why, &sock, &e);
+                failed(why, from, &e);
                 return None;
             }
         };
+        // The session's own handle: what is set through it bounds the
+        // session's reads and writes ([`Secured`]).
+        let sock = tls.socket();
         open::note(&sock);
         Some(Conn::Tls(Box::new(Secured {
             tls: RefCell::new(tls),
@@ -460,7 +466,9 @@ impl Conn {
     }
 
     /// The socket beneath: for a `poll`, an option or an address, never
-    /// for reading or writing past a TLS session.
+    /// for reading or writing past a TLS session. Over TLS the session's
+    /// own handle, so an option set through it bounds the session's reads
+    /// and writes ([`Secured`]).
     #[inline]
     pub fn socket(&self) -> &TcpStream {
         match self {
@@ -600,11 +608,13 @@ impl Conn {
             Conn::Plain(s) => crate::accept::end_refused(s),
             #[cfg(feature = "tls")]
             Conn::Tls(t) => {
-                let sock = t.sock.try_clone();
+                let sock = Arc::clone(&t.sock);
                 let closed = t.tls.borrow_mut().close().is_ok();
                 t.quiet.set(true);
                 drop(t);
-                if let (true, Ok(sock)) = (closed, sock) {
+                // The session gone, this is the socket's last handle: the
+                // socket itself, read off as a plain refusal's is.
+                if let (true, Ok(sock)) = (closed, Arc::try_unwrap(sock)) {
                     crate::accept::end_refused(sock);
                 }
             }
@@ -1035,7 +1045,7 @@ fn failure_of(e: &io::Error) -> Failed {
 #[cfg(feature = "tls")]
 #[cold]
 #[inline(never)]
-fn failed(why: Failed, sock: &TcpStream, what: &dyn std::fmt::Display) {
+fn failed(why: Failed, from: Option<SocketAddr>, what: &dyn std::fmt::Display) {
     FAILED[why as usize].fetch_add(1, Ordering::Relaxed);
     let due = {
         let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
@@ -1048,9 +1058,7 @@ fn failed(why: Failed, sock: &TcpStream, what: &dyn std::fmt::Display) {
     };
     if due {
         let reason = FAILURES[why as usize].1;
-        let from = sock
-            .peer_addr()
-            .map_or_else(|_| "?".into(), |a| a.to_string());
+        let from = from.map_or_else(|| "?".into(), |a| a.to_string());
         crate::log!(
             "a TLS handshake from {from} failed ({reason}): {what} (said a minute apart at \
              most; /_metrics counts each by reason)"

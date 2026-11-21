@@ -428,8 +428,8 @@ scheme says so; <code>http://</code> works as it did.</p>
 <table>
 <thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
 <tbody>
-<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most the writes answered in the last 250 ms plus the sync's own time. Measured over ten power cuts of a Linux guest (ext4), in two runs: each cut lost 54 to 794 acknowledged writes, none answered more than 316 ms before it, and what was kept was always a prefix of the writes.</td></tr>
-<tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk.</td></tr>
+<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most the writes answered in the last 250 ms plus the sync's own time. Measured over ten power cuts of a Linux guest (ext4), in two runs: each cut lost 54 to 794 acknowledged writes, none answered more than 316 ms before it, and what was kept was always a prefix of the writes. A <code>--dir</code> node syncs each tenant on a thread of its own, so a tenant's window is a file's whatever its other tenants' syncs take: with four tenants, five cuts lost 7 to 141 writes a tenant, none answered more than 162 ms before its cut.</td></tr>
+<tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk. Held over power cuts of Linux guests on ext4, in each of its data modes (<code>ordered</code>, <code>writeback</code>, <code>journal</code>), and on XFS: every acknowledged write was there after every cut, the disk's lost cache included.</td></tr>
 <tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
 </tbody>
 </table>
@@ -776,6 +776,11 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The image's command is <code>--http 0.0.0.0:8080 --file
 /data/data.fennec --sync 250</code>.</p>
 
+<p>A name without a tag pulls <code>latest</code>, the newest published
+release: it moves once a release is published, never to a release candidate
+or back to an older version. Name <code>:{{version}}</code> where a deploy
+must not change under you.</p>
+
 <ul>
   <li><b>Set a token of 32 bytes or more.</b> Without one, or with a shorter
     one, it refuses to listen beyond localhost, which a container's
@@ -794,7 +799,7 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>8.19 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>8.29 MB</b> on
 amd64, that binary's bytes as CI measures them on every change, and smaller on
 arm64 — since no target is written in, both come out of the same file.
 <code>make docker</code> builds it, and

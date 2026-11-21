@@ -114,7 +114,9 @@ In scope, and worth reporting:
 
 Where each surface's rules are kept, and held by tests: the HTTP server,
 replication and webhooks in
-[`crates/fennec-http/CLAUDE.md`](crates/fennec-http/CLAUDE.md), the MCP
+[`crates/fennec-http/CLAUDE.md`](crates/fennec-http/CLAUDE.md), a
+connection's time, ceiling and TLS in
+[`crates/fennec-http/src/conn/CLAUDE.md`](crates/fennec-http/src/conn/CLAUDE.md), the MCP
 endpoint in
 [`crates/fennec-http/src/mcp/CLAUDE.md`](crates/fennec-http/src/mcp/CLAUDE.md), tokens,
 policies and tenant binding in

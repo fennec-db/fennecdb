@@ -33,8 +33,9 @@ Below the newest whole claim (`survey`) records are read unchecked
 record after it claims past it, else cut, said (`cut_on_open`), a segment
 by its own claims: `judge_after` frames on, scans only past an unframed
 head, bounded; a record past the end is cut unjudged (Windows:
-`cut_and_open`), a frame past its record refused. A follower without
-`sums=1` gets none (`plain_records`).
+`cut_and_open`), a frame past its record refused, a record whole by its
+sum that does not read refused by name, never cut (`whole_head`,
+`checked_claim`). A follower without `sums=1` gets none (`plain_records`).
 Unchecked, zeros to the end are cut only from a head after a nonzero byte
 or the image's end (`zero_tail`); a torn image refused, an unknown kind
 names its byte; the file only grows; a looking tool opens
@@ -60,8 +61,8 @@ log first, durably (`fs::forget_sync_log`), and syncs the directory after
 directory). [Every file is made `0600`, a directory `0700`, by the call
 that makes it](../../docs/design/durability.md#files-modes)
 (`fs::private`), never a `chmod` after; a log or lock made takes its
-database's mode. A clean close removes it once the
-file is synced, and begins none after: what exits holding a database it
+database's mode. A clean close removes the log once
+the file is synced, and begins none after: what exits holding a database it
 never drops -- a server's shutdown -- asks for it (`Database::close_log`),
 and a sink around a file's passes it on.
 

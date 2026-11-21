@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, a body's ceiling, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room), [crates/fennec-http/src/conn/CLAUDE.md](../../crates/fennec-http/src/conn/CLAUDE.md) (a connection's, moved there for the same reason, beside `conn.rs` and `conn/`) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, a body's ceiling, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -2091,9 +2091,11 @@ a `BufReader` and writes its answers, both before over a `TcpStream` and a
 `Conn`, read and written through `&Conn` as std reads and writes a
 `&TcpStream`: `Conn::Plain` is the socket itself, `Conn::Tls` the session
 in a `RefCell` -- every read and write is the connection's own thread's and
-none nests in another -- beside a `dup` of the socket for what is asked of
-it while the session may be borrowed: its options, its address, and the
-router's `poll` of a held request's client. `sse`, `replication` and
+none nests in another -- beside a handle of the socket for what is asked
+of it while the session may be borrowed: its options, its address, and the
+router's `poll` of a held request's client. The session's own handle,
+shared: a `dup`'s timeouts are its own on Windows ([Slow
+clients](#slow-clients)). `sse`, `replication` and
 `node_stream` take `&mut &Conn` where they took `&mut TcpStream`, their
 bodies unchanged. The node's archive stream writes non-blocking and marks
 itself held where a write would block (`Sender::held`,
@@ -2334,6 +2336,64 @@ record is not whole in its time has had no byte read: its connection ends
 with nothing written, as a silence before a request's first byte does;
 one cut later is 408. Where the idle timeout is nearer than the request's
 deadline, a record is whole within it, earning nothing: a silence's bound.
+
+*One handle, never two.* A TLS connection's timeouts and modes are set on
+the handle its session reads and writes through: `Conn::Tls` keeps the
+session's own socket (`fennec_tls::TlsStream::socket`, one
+`Arc<TcpStream>`), never a `dup`, so nothing rests on what two handles of
+one socket share. On Unix a `dup` shares the open file description and the
+socket, timeouts and `O_NONBLOCK` alike. On Windows std's `try_clone` is
+`WSADuplicateSocketW` and `WSASocketW`, a `SOCKET` of its own, and the
+`SO_RCVTIMEO` that bounds a blocking `recv` held that handle's calls
+alone, whatever the `WSADuplicateSocket` page says of state held in common
+-- the request-time test below says so, and `clone_probe` is there to name
+it -- and `SO_SNDTIMEO`, its sending twin, is taken to be so too. The first
+version made a `dup` before the handshake and set every timeout through it,
+while the handshake set and cleared its own on the session's handle: on
+Windows a session's reads and writes ran under no timeout once it was done. An idle TLS connection was
+held until its client left; a request silent past its time was answered
+when its bytes came (`a_requests_time_over_tls_runs_from_its_first_records_first_part`
+answered 200 at 7.5 s on `windows (http)`, three runs of three, where 408
+was owed at 5 s); `--write-timeout` and a stream's write timeout bounded none
+of the session's writes; and where Windows keeps the non-blocking mode a
+handle's too -- which `clone_probe`, below, says -- neither did the node's
+archive stream's (`write_or_hold`) nor the one a connection's end sends its
+`close_notify` under. `read_by`'s own timeouts, set on the session's handle,
+held: the trickle tests passed there. The dialing side set its options
+through the session's socket already (`dial::Stream::socket`,
+`TlsStream::get_ref`). A follower's halt shuts its socket down from another
+thread through a duplicate: a shutdown is the socket's, not a handle's
+option, and on Windows it ends a read already waiting, not one begun after
+it, which is why the follower looks at its flag
+([replication.md](replication.md#replication)); the router's cut shuts the
+session's own descriptor, on Unix alone. The one shutdown's `SD_RECEIVE` and
+`CancelIoEx` (`end_all`, `conn/windows.rs`) act on the socket and its file
+object, which a duplicate shares -- they ended a read through the other
+handle -- and act on the one handle now. A setter needs no borrow of the
+session's `RefCell`: the handle is beside it, so a setter run while a read
+or a write holds the session -- `write_or_hold`'s blocking flush sets the
+mode so -- is no panic. Rejected: each option set on both handles, the
+session's reached through the `RefCell`, a borrow at every setter; and a
+`ManuallyDrop` view of the session's raw handle, unsafe and per platform
+where an `Arc` is neither. A TLS connection has one descriptor where it had
+two, and one `getpeername` before its handshake, for a failure's line,
+where it had a `dup` and its `close`; a request's path makes the calls it
+made. Tests: `tests/tls.rs`'s
+`a_silence_over_tls_ends_the_connection_at_the_idle_timeout` (after a
+handshake and between requests: ended by the server, never by the client's
+own 30 s), `an_unread_answer_over_tls_is_let_go_at_the_write_timeout` (as
+`an_unread_answer_frees_its_slot` over TLS: the one slot served again) and
+the request's time above, each failure saying what `clone_probe` found --
+on a loopback pair, whether a read timeout and the non-blocking mode set
+through a `try_clone` bound a read through the original -- and the timing
+test the process's `fennec_client_timeouts_total` too, so a red run names
+the platform's fact; `tests/dials.rs`'s
+`a_dialed_connections_timeouts_bound_its_session` (a dial's read and write
+timeouts against a server sending and reading nothing); fennec-tls's
+`what_is_set_through_the_socket_bounds_the_session` (Linux's and macOS's
+test jobs: no Windows job runs fennec-tls's own). On macOS, where a `dup`
+shares both, each passes before the change and after; Windows is told by
+CI's `windows (http)`, which runs fennec-http's.
 
 *Counted.* `fennec_client_timeouts_total{reason}`, the router's
 `fennec_router_client_timeouts_total`, counts each connection so ended by

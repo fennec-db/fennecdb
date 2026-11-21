@@ -129,6 +129,72 @@ fn a_handshake_never_answered_is_a_timeout_at_the_dial_s_bound() {
     drop(l);
 }
 
+/// What a dial over TLS sets on its connection bounds the session: a read
+/// timeout its reads, a write timeout its writes -- set through
+/// `Stream::socket`, the session's own handle, as a replica's stream, an
+/// archiver's and the router's forwards set theirs. The server takes the
+/// handshake, then neither sends nor reads, ending only once told or at
+/// 20 s: a read or a write nothing bounded ends there, not in a timeout.
+#[test]
+fn a_dialed_connections_timeouts_bound_its_session() {
+    fn timed_out(e: &std::io::Error) -> bool {
+        matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+    }
+    trust_test_ca();
+    let server = fennec_tls::Server::from_pem_files(
+        &certs().join("server.pem"),
+        &certs().join("server.key"),
+    )
+    .unwrap();
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (done, wait) = mpsc::channel::<()>();
+    let held = std::thread::spawn(move || {
+        let (sock, _) = l.accept().unwrap();
+        let _s = server.accept_within(sock, Duration::from_secs(10));
+        let _ = wait.recv_timeout(Duration::from_secs(20));
+    });
+    let addr = format!("https://127.0.0.1:{port}");
+    let mut s = dial::connect(&addr, Duration::from_secs(10)).unwrap();
+    let within = Duration::from_millis(300);
+
+    s.set_read_timeout(Some(within)).unwrap();
+    let started = Instant::now();
+    let read = s.read(&mut [0u8; 16]);
+    let took = started.elapsed();
+    assert!(
+        matches!(&read, Err(e) if timed_out(e)),
+        "{read:?} after {took:?}; {}",
+        crate::tls::clone_probe()
+    );
+    // A timeout's wait, Windows' clock ticks of 15.6 ms aside: not a
+    // non-blocking read's at once.
+    assert!(took >= within - Duration::from_millis(50), "{took:?}");
+
+    // Mebibytes the server reads none of, until a write takes nothing for
+    // the timeout: the sockets hold some, never 256 MiB.
+    s.set_write_timeout(Some(within)).unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let mut sent = 0usize;
+    let wrote = loop {
+        if let Err(e) = s.write_all(&chunk).and_then(|()| s.flush()) {
+            break e;
+        }
+        sent += chunk.len();
+        assert!(
+            sent < 256 << 20,
+            "{sent} bytes taken by a server reading none"
+        );
+    };
+    assert!(
+        timed_out(&wrote),
+        "{wrote} after {sent} bytes; {}",
+        crate::tls::clone_probe()
+    );
+    done.send(()).unwrap();
+    held.join().unwrap();
+}
+
 /// A replica follows a primary serving HTTPS: its stream over TLS, the
 /// primary's writes arriving as over plain HTTP, and its halt -- the socket
 /// beneath the session shut -- ends the stream at once.

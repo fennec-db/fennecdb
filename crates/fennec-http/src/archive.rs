@@ -2360,6 +2360,32 @@ mod tests {
         }
     }
 
+    /// A segment's last record naming a collection no create gives, whole
+    /// by its sum, is no crash's leaving: a reader takes it as the record
+    /// it is -- a restore refuses it as it applies it, as an open refuses
+    /// it -- where read through `record_at`, which refuses the id, it was
+    /// judged as a record of no sum and cut as a power cut's hole (the fuzz
+    /// fix's second review; a version before took it). Its sum failing, it
+    /// is damage as any record's is, and nothing after it, cut.
+    #[test]
+    fn a_record_naming_a_collection_no_create_gives_is_taken_whole_and_cut_torn() {
+        let time = 1_762_000_000_000u64.to_le_bytes();
+        let mut seg = LOG_MAGIC.to_vec();
+        seg.extend_from_slice(&time);
+        seg.extend_from_slice(&fennec_core::engine::record(3, 1, b"a write"));
+        let at = seg.len();
+        seg.extend_from_slice(&time);
+        seg.extend_from_slice(&fennec_core::engine::record(3, u32::MAX, b""));
+        for damage in [Damage::Judge, Damage::Cut] {
+            let (list, end) = entries(&seg, damage).unwrap();
+            assert_eq!((list.len(), end), (2, seg.len()));
+            let mut torn = seg.clone();
+            *torn.last_mut().unwrap() ^= 1;
+            let (list, end) = entries(&torn, damage).unwrap();
+            assert_eq!((list.len(), end), (1, at));
+        }
+    }
+
     /// The times of every write the archive holds, in order.
     fn times(a: &Archive) -> Vec<u64> {
         let mut out = Vec::new();
