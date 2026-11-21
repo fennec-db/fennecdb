@@ -18,14 +18,22 @@ release:
   a stage of the file's own -- so a tag moved under it changes no build;
 - every script that runs a rust image -- a shell script, a Makefile, a
   workflow, a Python script -- names it so too, outside its comments: the
-  Kotlin harnesses' `docker run` built with the image's newest 1.x.
+  Kotlin harnesses' `docker run` built with the image's newest 1.x;
+- every toolchain a script names to rustup -- `RUSTUP_TOOLCHAIN` in a
+  workflow's env or before a command, `rustup toolchain install`, `rustup
+  install`, `rustup default` -- is the file's release, or a nightly pinned
+  to a date (the fuzzer's, the sanitizers'): perf-holdout.yml names its
+  release three times, and the bump to 1.100.0 first left them at 1.99.1.
+  A name the check cannot read -- a variable, the base's own toolchain in
+  the perf gate -- is the script's to answer for.
 
     python3 tools/toolchain_check.py            # exit 1, naming each difference
     python3 tools/toolchain_check.py --release  # the release, for scripts
 
-A bump changes rust-toolchain.toml and every rust image's tag and digest in
-one pull request (docker buildx imagetools inspect rust:X.Y.Z-alpine, and
--slim-bookworm for the Kotlin harnesses): docs/design/crates.md#toolchain."""
+A bump changes rust-toolchain.toml, every rust image's tag and digest and
+every toolchain a workflow names in one pull request (docker buildx
+imagetools inspect rust:X.Y.Z-alpine, -slim-bookworm for the Kotlin
+harnesses, -bookworm for the stress test): docs/design/crates.md#toolchain."""
 
 import pathlib
 import re
@@ -52,6 +60,16 @@ RUST_REF = re.compile(r"(?<![\w./-])(?:(?:index\.)?(?:docker\.io/)?library/)?rus
 # What runs an image, beside the Dockerfiles; the check and its tests name
 # images that are refused on purpose.
 SCRIPTS = (".sh", ".py", ".ps1", ".mk", ".yml", ".yaml")
+# A toolchain named to rustup: by RUSTUP_TOOLCHAIN (a workflow's `env:`, a
+# shell's assignment, a Python mapping's key), or as the operands of
+# `rustup toolchain install`, `rustup install` and `rustup default` up to
+# their first flag.
+TOOLCHAIN_ENV = re.compile(r"\bRUSTUP_TOOLCHAIN[\"']?\]?\s*[:=]\s*([^\s,;)}]+)")
+RUSTUP_CMD = re.compile(r"\brustup\s+(toolchain\s+install|install|default)\b([^;&|#]*)")
+# What reads as a toolchain's name: a release, a channel, a nightly; a host
+# after it (`1.100.0-x86_64-unknown-linux-gnu`) is the same release.
+TOOLCHAIN = re.compile(r"(\d+\.\d+(?:\.\d+)?|stable|beta|nightly(?:-\d{4}-\d{2}-\d{2})?)(?:-|$)")
+DATED = re.compile(r"nightly-\d{4}-\d{2}-\d{2}")
 OWN = {"tools/toolchain_check.py", "tools/test_toolchain_check.py"}
 
 
@@ -130,6 +148,32 @@ def script_problems(path, text, want):
     return out
 
 
+def toolchain_problems(path, text, want):
+    """Each toolchain script `path` names to rustup, outside its comments,
+    that is neither release `want` nor a nightly pinned to a date."""
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        # A comment is a whole line, or what follows a `#` after a space.
+        line = re.split(r"\s#", line, maxsplit=1)[0]
+        if line.lstrip().startswith("#"):
+            continue
+        named = [("RUSTUP_TOOLCHAIN", m.group(1)) for m in TOOLCHAIN_ENV.finditer(line)]
+        for m in RUSTUP_CMD.finditer(line):
+            for word in m.group(2).split():
+                if word.startswith("-"):
+                    break
+                named.append(("rustup " + " ".join(m.group(1).split()), word))
+        for how, word in named:
+            name = word.strip("'\"")
+            found = TOOLCHAIN.match(name)
+            # A variable or an expression names what the check cannot read.
+            if not found or DATED.fullmatch(found.group(1)) or found.group(1) == want:
+                continue
+            out.append(f"{path}:{n}: {how} names {name}: rust-toolchain.toml names {want}, the "
+                       "release every build is made with -- a nightly only pinned to a date")
+    return out
+
+
 def listed():
     """The repository's files, by git; none without it."""
     try:
@@ -174,9 +218,11 @@ def main(argv):
         except (OSError, UnicodeDecodeError):
             continue
         found += script_problems(path, text, want)
+        found += toolchain_problems(path, text, want)
     if found:
         sys.exit("\n".join(found))
-    print(f"ok  rust-toolchain.toml: {want}, and every image's and script's rust {want}, by digest")
+    print(f"ok  rust-toolchain.toml: {want}, every image's and script's rust {want}, by digest, "
+          f"and every toolchain a script names to rustup {want}")
 
 
 if __name__ == "__main__":

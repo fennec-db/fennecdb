@@ -906,21 +906,35 @@ The compiler is part of what a release ships, and it moves only by a pull
 request of its own ([docs/design/crates.md](docs/design/crates.md#toolchain)).
 `rust-toolchain.toml` names an exact release, never `stable`, which moved
 under main's CI on 2026-11-12 with no change of ours: 1.100.0's Unicode
-tables failed fennec-core's case tests on every pull request. A bump is
-deliberate, not each stable release -- one taken for what it brings, a fix,
-a lint, a measured speed or size -- and its pull request changes nothing
-else but what the new compiler needs:
+tables failed fennec-core's case tests on every pull request. Each stable
+release is taken, one pull request a bump, which changes nothing else but
+what the new compiler needs -- and none in the two weeks before a release
+tag, so that the compiler a release ships has run main's CI for two weeks
+first:
 
 1. `rust-toolchain.toml`'s `channel`, the `FROM rust:` of `Dockerfile` and
-   `deploy/Dockerfile` and the Kotlin harnesses' image
-   (`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`),
-   each tag with the index digest `docker buildx imagetools inspect
-   rust:X.Y.Z-alpine` (`-slim-bookworm`) names; `python3
-   tools/toolchain_check.py` passes.
+   `deploy/Dockerfile`, the Kotlin harnesses' image
+   (`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`)
+   and the stress test's (`tools/stress-test.sh`), each tag with the index
+   digest `docker buildx imagetools inspect rust:X.Y.Z-alpine`
+   (`-slim-bookworm`, `-bookworm`) names, and every toolchain a workflow
+   names to rustup (`perf-holdout.yml`'s `RUSTUP_TOOLCHAIN` and `rustup
+   toolchain install`); `python3 tools/toolchain_check.py` passes, naming
+   each it finds by file and line.
 2. What the compiler breaks, fixed in the same pull request -- a lint, a
    table held to the standard library's (fennec-core's case tables) --
    never a test held back.
-3. In its body, against main:
+3. Where it moves the standard library's Unicode (`char::UNICODE_VERSION`),
+   `case::tests::the_unicode_version_is_the_one_the_answers_are_of` fails
+   by name, its message listing what follows the version: `case.rs`'s
+   tables, `tests/nocase.rs`'s `NEWER`, `tools/fold/gen.py` and the fmt
+   job's Unicode cache, every code point's answers diffed under both
+   compilers, [docs/design/compatibility.md](docs/design/compatibility.md#unicode)
+   and the notes. Its answers move, so the bump ships in a minor release,
+   never a patch, whose notes name every assigned code point whose
+   `upper()`, `lower()`, fold or word-hood moved; one taking a code point
+   out of the letters or digits is not taken in 1.x.
+4. In its body, against main:
    - `make wasm-sizes`, before and after: what each feature adds to the
      module and what leaving it out saves;
    - the size report: CI's size job measures the module against the base,
