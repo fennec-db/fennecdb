@@ -772,8 +772,20 @@ encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 <p>Files sealed by 0.2.0 and earlier still open, and an archive they began
 goes on: before its next write the upgraded archiver seals an image of the
 archive's end as files are now — read from the archive, as the hourly
-image is, once (a node's tenant at its first write after the upgrade) —
-and the write begins a segment sealed so after the older one. The older
+image is, once; a node's archiver seals each tenant's as it starts, beside
+its stream — and the write begins a segment sealed so after the older one.
+That image is a one-time lag: the archiver spends about 9 seconds a
+gigabyte of database on it, one database's archiver before it takes the
+primary's next write — the primary waits for its stream at most a second,
+on one durable write, and answers the writes after without it until it
+catches up. An archive whose end does not restore stops <code>fennec
+archive</code> (a node's archiver passes over that tenant), naming why and
+the ways out: put right what <code>fennec verify</code> refuses in it, or
+begin a new line and keep the old one for restores to earlier moments —
+archive into a new directory, or, for a node's tenant, stop the archiver
+and move the tenant's directory aside as
+<code>&lt;root&gt;/&lt;tenant&gt;.&lt;any name&gt;</code>, and the archiver
+begins the new line with the node's image. The older
 files say nothing of what they are — their frames are bound to their
 places alone — so a frame of another such file sealed with the same key
 could be put in one unnoticed, and an older file of any archive sealed
@@ -781,8 +793,10 @@ with that key reads wherever it is put: in an archive sealed as files are
 now from that image on, an older image or segment after it is refused by
 name, and a restore past the upgrade starts from that image or a later
 one; one before it — read by a restore to a moment before the upgrade —
-or in an archive holding nothing sealed now, as a tenant's line no write
-reached since the upgrade, reads as the archive's own. No archiver puts
+or in an archive holding nothing sealed now, as a tenant's line moved
+aside before the upgrade, reads as the archive's own; an older image put
+in before the upgraded archiver seals that image, standing after the
+archive's own last one, is what that image is made from. No archiver puts
 an older file where it is refused, so <code>fennec verify</code> or a
 restore that refuses one (<code>image-…: an image of change 7, sealed
 before version 3, at or past its image of change 7 taken at …, the first

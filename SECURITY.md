@@ -301,13 +301,20 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   segment is refused by name: no archiver puts one there, so it is moved
   out of the archive's directory, and the archive is read without it.
   That first file is an image of the line's end, which an upgraded
-  archiver seals before it writes on, so a restore past the upgrade starts
-  from it or a later image; where a line's first file sealed now is a
-  segment, no older image is read at all. Before that image (the images
-  and segments from before the upgrade, which a restore to a moment before
-  it reads), and anywhere in a line holding no file sealed now (one no
-  write reached since the upgrade, or whose files sealed now were deleted),
-  one of another archive or tenant reads as the line's own. A line's
+  archiver seals before it writes on (a node's archiver, each tenant's as
+  it starts), so a restore past the upgrade starts from it or a later
+  image; where a line's first file sealed now is a segment, no older image
+  is read at all. Before that image (the images and segments from before
+  the upgrade, which a restore to a moment before it reads), and anywhere
+  in a line holding no file sealed now (a line a node's archiver moved
+  aside before the upgrade, which takes no write, or one whose files
+  sealed now were deleted), one of another archive or tenant reads as the
+  line's own. Put in before the upgraded archiver seals that image -- no
+  archiver running, or its start not at the line yet -- an older image
+  standing after the line's own last one (of a later change up to the
+  line's end, or of its change taken later), or a segment running on past
+  the line's end, is what the image is assembled from: its rows are sealed
+  into it, and every restore past the upgrade holds them. A line's
   history sealed so reads anywhere, in place of one sealed now too: read
   by the archiver going on and by `fennec verify` alone, never by a
   restore, all it decides is whether the archiver takes a primary's hello

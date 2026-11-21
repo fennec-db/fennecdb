@@ -629,8 +629,11 @@ as version 3, which this binary does not open (it opens 1 and 2): a later
 fennecdb's`): its notes say, under their upgrade heading, to upgrade
 `fennec` wherever an archive is restored or verified before any archiver;
 that an upgraded archiver seals an image of each line's end as version 3
-before the line's next write -- read from the archive as the hourly image
-is, once a line -- and stops naming an end that does not restore; that
+before the line's next write (a node's archiver, each line's as it starts)
+-- read from the archive as the hourly image is, once a line, a one-time
+lag of about 9 s a GB of database (deploy/RUNBOOK.md says what a
+primary sees) -- and stops naming an end that does not restore and the
+ways out of it; that
 files sealed before stay open under their key -- splices of them with it,
 and any of them read where it is put -- until a new key (`fennec key`)
 begins a new archive; and that one `verify` or a restore refuses as

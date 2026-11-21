@@ -991,8 +991,22 @@ sealed -- or a line of no file of version 3 -- seals an image of version 3
 of the line's end before its first segment of version 3
 (`Archive::seal_before_version`), assembled from the line's files as the
 hourly round takes one and timed after every image the line holds:
-one database's archiver as it goes on, a node's at a tenant's first write
-after it, so a node's idle tenants pay nothing. Begun with a segment, as
+one database's archiver as it goes on, a node's for each tenant as it
+starts, on the thread beside its stream (`NodeArchive::seal_ends`,
+`Archive::seal_end`), or at the tenant's first write where that comes
+before the tenant's turn, a write meanwhile waiting for the image being
+sealed beside rather than assembling a second (`Archive::sealing`).
+Sealed at a tenant's first write, as the second round of this review
+made it, a line no write reached after the upgrade held no file of
+version 3, and an older image put in meanwhile -- of its end's change
+under a later time, or of a later change -- was what that image was at
+last assembled from, its rows sealed in and read by every restore past it
+(1.0's third review of version 3; at 0abe1d44 the idle line of
+`an_idle_lines_upgrade_image_is_sealed_as_the_archiver_starts` held no
+image of version 3 20 s after its archiver started). A line moved
+aside is not sealed: it takes no write, and a restore to a moment reads
+it only before the line after it began, where an image timed at the
+upgrade is never the base. Begun with a segment, as
 version 3 was first made, the line's first file of version 3 left before
 it, in the archive's order, an image of the change before that segment
 taken at any time: an older image of that change -- another tenant's or
@@ -1014,18 +1028,51 @@ the change after it held another database's notes for 6 of its 7,
 `an_older_image_is_read_only_before_an_image_of_version_3`). A line's
 first segment of version 3 that a crash left holding no write, the
 image's name lost with it, is removed as the archiver goes on, and the
-image sealed then (`an_upgraded_line_goes_on_from_an_image_of_its_end`);
-an end that does not restore is refused as the line's damage, naming
-what to put right, before anything of version 3 is written: one
+image sealed then (`an_upgraded_line_goes_on_from_an_image_of_its_end`).
+Where a file of version 3 stands is noted once it is in place
+(`Archive::landed`, after an image's rename and a segment's create), never
+as it is bound: noted so, an image whose write then failed -- a full disk,
+on Windows a scanner holding its side file -- left the line taken for one
+whose first file of version 3 was that image, so the archiver going on on
+the same archive, as `follow` does, sealed none and began the line with a
+segment, and after a restart every older image was refused and no restore
+past the upgrade had a base (1.0's third review; at 0abe1d44
+`an_upgrades_image_that_failed_to_write_is_sealed_as_the_archiver_goes_on`'s
+restore to the end was refused: `<image>: an image of change 1, sealed
+before version 3, where the first file this archive holds of version 3 is
+its segment beginning at change 5, and an older image is read only before
+an image of version 3`). The id an archive's first sealed file is made
+with is kept as it is made, written or not, rather than the identity
+cleared on a failed write: the round beside the stream binds files of the
+same line, and one bound under the id before the failure and landed after
+a rescan had made another would leave two archives' files in one
+directory, which every read refuses. An end that does not restore is
+refused as the line's damage before anything of version 3 is written,
+naming the ways out: put right what `fennec verify` refuses in it, or
+begin a new line, keeping this one for restores to earlier moments -- one
+database's by archiving into a new directory, a node's tenant's by moving
+its directory aside as `<tenant>.<any name>`, the archiver stopped, after
+which the archiver begins the new line with the node's image. One
 database's archiver stops on it, a node's passes over that tenant
-(`an_upgraded_line_whose_end_does_not_restore_is_refused_as_damaged`).
-The image is one assembly a line, once: what the first round would have
-taken of it within the hour. A line this version's first builds upgraded
--- its first file of version 3 a segment; no release and no build of main
-wrote one -- reads none of its older images: restores from its first image
-of version 3 on, and its archiver, go on; a `verify`, a restore before
-that image and, until it holds one, its round refuse each older image by
-name, until they are moved out.
+(`an_upgraded_line_whose_end_does_not_restore_is_refused_as_damaged`). The
+image is one assembly a line, once: what the first round would have taken
+of it within the hour, about 9 s a GB of database
+(`archive::tests::upgrade_image_cost`, by hand in a release build: a line
+of 262 144 notes, a sixteenth of them in a segment after its older image,
+its image of 266.6 MB assembled, opened, imaged and sealed in 2.06 to 2.38
+s over three rounds, 7.7 to 8.9 s a GB, on an 8-core arm64 Mac at a load
+of 2.5 to 2.7). One database's archiver spends it on its stream, before it
+takes the next write: its primary fills the stream's socket meanwhile,
+then waits for it at most `SENT_WAIT` on one durable write, marks it
+lagging and answers the writes after without it until it catches up, and a
+send held up past `SILENCE` ends the stream, which the archiver makes
+again from its end. A node's spends it beside its stream, where the stream
+waits only for a tenant written before the pass reaches it. A line this
+version's first builds upgraded -- its first file of version 3 a segment;
+no release and no build of main wrote one -- reads none of its older
+images: restores from its first image of version 3 on, and its archiver,
+go on; a `verify`, a restore before that image and, until it holds one,
+its round refuse each older image by name, until they are moved out.
 
 No upgrade puts an older file where it is refused. The review read one
 as able to: a primary behind its archive sending an image of an earlier
@@ -1043,10 +1090,11 @@ directory, and the archive is read without it`.
 
 What remains: an older file standing before a line's first of version 3
 -- its images and segments before it, which an older file of another line
-can be put among, read by a restore to a moment before the upgrade -- and
-every file of a line with none of version 3 -- one no write reached since
-its upgrade, or whose version 3 files were deleted -- which reads as an
-older whole line put back does. A line's history sealed in version 1 or 2
+can be put among, read by a restore to a moment before the upgrade, and
+those put in before the upgraded archiver sealed that image, from which it
+was assembled -- and every file of a line with none of version 3 -- a line
+a node's archiver moved aside before its upgrade, or one whose version 3
+files were deleted -- which reads as an older whole line put back does. A line's history sealed in version 1 or 2
 reads wherever it is, in place of one of version 3 too: it has no place in
 the order, and is read by the archiver going on and by `verify` alone,
 never a restore, so all it decides is whether a primary's hello is taken

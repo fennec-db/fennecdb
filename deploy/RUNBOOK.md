@@ -940,12 +940,27 @@ refuses such a file (`not a sealed file`, `<image>: not sealed, where the
 archive is`). The files sealed before still open in the new release, and a
 segment an older archiver began is closed: before the next write the
 archiver seals an image of the archive's end as version 3 -- read from the
-archive as the hourly image is, once a line, a node's tenant at its first
-write after the upgrade -- and the write begins a version 3 segment after
-it. An archive whose end does not restore stops `fennec archive` (a node's
-archiver passes over that tenant) naming why: what `fennec verify` refuses
-in it is put right first. So `fennec` is upgraded on every machine that restores
-or verifies -- an operator's, the weekly restore's -- with step 1, before
+archive as the hourly image is, once a line; a node's archiver seals each
+tenant's as it starts, on the thread beside its stream, and a tenant
+written before its turn at that write -- and the write begins a version 3
+segment after it. That image is a one-time lag of the archiver's: about
+9 s a GB of database (2.1 to 2.4 s for a 267 MB image on an 8-core arm64
+Mac), which `fennec archive` of one database spends on its stream before
+it takes the primary's next write. Its primary meanwhile fills the stream's socket and
+then waits for it at most `SENT_WAIT` (1 s), once, on one durable write,
+marks the stream lagging and answers the writes after without it until it
+catches up; a send held up past `SILENCE` (10 s) ends the stream, which the
+archiver makes again and goes on from its end. A node's archiver
+assembles beside its stream, so its stream lags only for a tenant written
+before the pass reaches it, by that tenant's assembly. An archive whose
+end does not restore stops `fennec archive` (a node's archiver passes over
+that tenant) naming why and the ways out: put right what `fennec verify`
+refuses in it, or begin a new line and keep the old one for restores to
+earlier moments -- `fennec archive` into a new directory, or, for a node's
+tenant, with the archiver stopped, its directory moved aside as
+`<root>/<tenant>.<any name>` beside it, and the archiver begins the new
+line with the node's image. So `fennec` is upgraded on every machine that
+restores or verifies -- an operator's, the weekly restore's -- with step 1, before
 any archiver is restarted on the new release. The older files still open
 under their key, bound to nothing a restore holds them to, and whoever
 holds two of them can build a third from their frames: to be rid of that,
