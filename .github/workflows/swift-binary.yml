@@ -5,21 +5,31 @@ run-name: Swift binary for v${{ inputs.version }}
 # SwiftPM fetches the package by its tag, and Package.swift at that tag has
 # to name the zip by URL and checksum already: the zip cannot be built
 # after the tag and its checksum still be in it. So this builds the zip from
-# main, keeps it as this run's artifact, and opens a pull request writing
-# its checksum into Package.swift (integrations/swift/set-binary.sh). Once
-# that is merged, the merge is tagged, and release.yml attaches this very
-# zip -- found by its run, held to the checksum the tag's manifest names.
+# main (from release/X.Y for a patch), keeps it as this run's artifact, and
+# opens a pull request writing its checksum into Package.swift
+# (integrations/swift/set-binary.sh). Once that is merged, the merge is
+# tagged, and release.yml attaches this very zip -- found by its run, held
+# to the checksum the tag's manifest names.
 # RELEASING.md has the order.
+#
+# The build and the pull request are two jobs: the build runs the crates'
+# build scripts, SwiftPM and the tests with a token that reads alone and a
+# checkout keeping none, and hands the zips and the checksum to the job that
+# holds the writes, which builds nothing (tools/workflow_check.py) and
+# attests the three files as this run's build, from the branch and commit
+# it ran at: release.yml attaches them and does not attest them again
+# (docs/design/integrations.md#provenance). The version, typed by whoever
+# starts the run, reaches each job as VERSION, through `env:`, held to a
+# version's form before anything uses it, never spliced into a script.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version about to be tagged, X.Y.Z (make version has written it)'
+        description: 'The version about to be tagged, X.Y.Z or X.Y.Z-rc.N (make version has written it); run on main for an X.Y.0, on release/X.Y for a patch'
         required: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,15 +38,35 @@ jobs:
   build:
     name: XCFramework for v${{ inputs.version }}
     runs-on: macos-latest
+    outputs:
+      checksum: ${{ steps.sum.outputs.checksum }}
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      # The one branch tools/release-verify.sh takes this run's attestation
+      # from: main for an X.Y.0 and its candidates, release/X.Y for a patch
+      # and its. Held here, before the build, as well as where it attests.
+      - name: The version is a release's, and the run is on its branch
+        run: |
+          re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
+          core=${VERSION%%-*}
+          if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi
+          if [ "$GITHUB_REF_TYPE" != branch ] || [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::v$VERSION's XCFramework is built on $want, the one branch RELEASING.md's step 6 takes its attestation from (main for an X.Y.0 and its candidates, release/X.Y for a patch): gh workflow run swift-binary.yml --ref $want -f version=$VERSION"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: The version is the workspace's
         run: |
           set -eu
           have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "$have" != "${{ inputs.version }}" ]; then
-            echo "::error::Cargo.toml says $have: run make version V=${{ inputs.version }} first"
+          if [ "$have" != "$VERSION" ]; then
+            echo "::error::Cargo.toml says $have: run make version V=$VERSION first"
             exit 1
           fi
 
@@ -70,7 +100,7 @@ jobs:
           integrations/swift/test-strict.sh
           integrations/swift/test-ios.sh
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcframework-v${{ inputs.version }}
           path: |
@@ -80,14 +110,73 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: The zip's checksum, for the pull request
+        id: sum
+        run: echo "checksum=$(cat integrations/swift/build/FennecFFI.xcframework.zip.checksum)" >> "$GITHUB_OUTPUT"
+
+  # The pull request writing that checksum into Package.swift, from the
+  # commit the build was made from (this run's). The checksum reaches the
+  # script in the environment, never spliced into it, and set-binary.sh
+  # takes 64 hex digits alone; the checkout keeps its token for the push.
+  # Before it, the three files the build kept are attested as this run's
+  # build: the statement names this workflow, the branch the run is on and
+  # its commit, which the build checked out (`--source-ref
+  # refs/heads/main`, or `release/1.N`, verifies them; RELEASING.md, step
+  # 6).
+  pull-request:
+    name: pull request for v${{ inputs.version }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ inputs.version }}
+      BASE: ${{ github.ref_name }}
+      REF_TYPE: ${{ github.ref_type }}
+    steps:
+      # A run started on a tag has no branch to merge into, and its files
+      # would be attested as built at the tag; one on another branch than
+      # its version's would be attested where step 6 does not look (main
+      # for an X.Y.0 and its candidates, release/X.Y for a patch): it stops
+      # before either.
+      - name: The version is a release's, and the run is on its branch
+        run: |
+          re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
+          core=${VERSION%%-*}
+          if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi
+          if [ "$REF_TYPE" != branch ] || [ "$BASE" != "$want" ]; then
+            echo "::error::v$VERSION's XCFramework is built on $want, the one branch RELEASING.md's step 6 takes its attestation from (main for an X.Y.0 and its candidates, release/X.Y for a patch): gh workflow run swift-binary.yml --ref $want -f version=$VERSION"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: xcframework-v${{ inputs.version }}
+          path: ${{ runner.temp }}/xcframework
+
+      - name: Attest the XCFramework's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/xcframework/*
+
+      # Against the branch the run was started on, which both jobs checked
+      # out: main for an X.Y.0, release/X.Y for a patch (RELEASING.md, A
+      # release, step 2), whose Package.swift is that branch's. The branch's name reaches gh in the environment, never
+      # spliced into the script.
       - name: Open the pull request naming its checksum
         env:
           GH_TOKEN: ${{ github.token }}
+          SUM: ${{ needs.build.outputs.checksum }}
         run: |
           set -eu
-          v="${{ inputs.version }}"
-          sum=$(cat integrations/swift/build/FennecFFI.xcframework.zip.checksum)
-          integrations/swift/set-binary.sh "$v" "$sum"
+          v="$VERSION"
+          integrations/swift/set-binary.sh "$v" "$SUM"
           branch="swift-binary-v$v"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -95,6 +184,6 @@ jobs:
           git commit -am "Package.swift: the XCFramework of v$v" \
             -m "Built by run ${{ github.run_id }}, which keeps the zip; release.yml attaches it to v$v."
           git push -f origin "$branch"
-          gh pr create --head "$branch" --title "Package.swift: the XCFramework of v$v" \
+          gh pr create --base "$BASE" --head "$branch" --title "Package.swift: the XCFramework of v$v" \
             --body "The checksum of the zip run ${{ github.run_id }} built. Merge, then tag the merge v$v (RELEASING.md)." \
             || echo "::notice::the branch $branch is pushed; open its pull request by hand where Actions may not"

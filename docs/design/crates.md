@@ -1,6 +1,6 @@
 # The crates
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The crates*: zero dependencies, limits that error rather than truncate, and the build profiles. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The crates*: zero dependencies, limits that error rather than truncate and the build profiles -- and the toolchain's, which [tools/CLAUDE.md](../../tools/CLAUDE.md) keeps under that title (moved there to make room). Each section below but the last is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Zero dependencies
 
@@ -272,6 +272,8 @@ fennecdb is alpha, with no file of a user's to keep
 of vectors past the range that a version before made -- v0.2.0's check
 held none below the list, and took SQL's `vector(1000000001)[]`, `fennec
 import --cast e=[vector<1000000001>]` and `Schema::new`'s `[vector<0>]`.
+So is a field declaring a point under 64 lists, a type of 65 levels that
+v0.2.0 took ([how deep a value nests](#how-deep-a-value-nests)).
 An alter refuses only the field it changes: every field it holds was read
 within the ranges.
 
@@ -500,14 +502,25 @@ so such a record is refused where something reads it or past it: a read,
 an index's build, a vector index linked at the open -- which reads each
 document's vector past the fields before it, and refuses the open.
 
-*What it refuses that a version before opened.* Two kinds of file, both
+*What it refuses that a version before opened.* Three kinds of file, all
 pathological. A field declared `[[json]]`, which a version before took
 (`[json]` alone was refused), holds a json value of up to 64 levels inside
 its two lists, 66 in all: a row whose value nests past 64 so is refused
-where it is read. And a field whose type nests more than 64 lists, which
+where it is read. A field whose type nests more than 64 lists, which
 no version bounded: its schema's type is read past the limit
-(`decode_type`), and the file is refused at the open. No write makes
-either now (`Schema::new`), and no test file of the repository's holds one.
+(`decode_type`), and the file is refused at the open. And a field
+declaring a point under 64 lists, a type of 65 levels, which v0.2.0 took
+(it bounded no type's depth): the point is a level of the type as it is
+of the value it reads as, and the file is refused at the open alike --
+read, as the fuzz fix's second review found, the schema opened and every
+row's point was refused at each read. No write makes any of them now
+(`Schema::new`), and no test file of the repository's holds one
+(`a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied`).
+The 1.x contract names all three, a schema's number past its range beside
+them, as the exceptions to "1.x opens every file written from v0.2.0 on",
+with what each still answers and the advice the first 1.x release's notes
+give ([compatibility.md](compatibility.md#what-1x-does-not-read-of-020s-files));
+`compat.yml` has 0.2.0's own server write the first two (a3, a3b).
 
 *A point is a level, as its type is.* A point's bytes (`TAG_GEO`) read as
 the list `[lon, lat]`, which `DataType::depth` counts as a level, but the
@@ -516,9 +529,14 @@ deep, whose own bytes written back were refused -- the `codec` target's
 finding, CI's `fuzz-smoke` red from the day the fuzzer landed. The point
 is a function of its own now (`codec::decode_point`, `#[inline(never)]`,
 as a list's and an object's read is, `decode_at` handing the depth on
-untested) refused past the limit, and the skip tests it in its arm. A
-write puts a point only as a field's whole value, a level down, so no file
-a write made reads otherwise. A sparse vector's dimension and the steps
+untested) refused past the limit, and the skip tests it in its arm; a
+file's schema is refused a point under 64 lists (`decode_type`), as
+`Schema::new` refuses one. No file a write made reads otherwise: a write
+puts a point's bytes only as a `geo` field's whole value
+(`encode_value_as`; a `[geo]` field's points go as the lists of two
+floats they read as), and every field's type counts the point as a level
+(`DataType::depth`), so no value of a type `Schema::new` took nests past
+64. A sparse vector's dimension and the steps
 between its indexes are `u32`s, read whole or refused
 (`codec::get_within`): `as u32` read a dimension of 2^32 + 16 as 16.
 
@@ -596,3 +614,80 @@ built for size made the binary 129 KB larger (`make size-report BIN=fennec`).
 Both binaries hold 72 KB of the standard library's backtrace symbolizer
 (`gimli`, `addr2line`, `rustc_demangle`, `object`), which only a nightly
 `build-std` leaves out.
+
+## Toolchain
+
+**The compiler CI tests with is the one that ships.** `rust-toolchain.toml`
+names an exact release, X.Y.Z, and the wasm32 target. rustup reads it in
+every checkout -- a developer's, each CI job's, each release job's -- so CI,
+a release's binaries and its image are built by one compiler, and a new one
+comes in only by a pull request of its own.
+
+The file named `stable` until 1.100.0 came out on 2026-11-12, after main's
+last CI run had built with 1.99.1 (`rustc 1.99.1 (58cf8f9c3 2026-10-13)`).
+From the next pull request on, CI built with 1.100.0, whose Unicode tables
+are not the ones fennec-core's case fold is held to
+(`case::tests::the_tables_are_the_standard_library_s` and
+`the_unlike_runs_are_the_standard_library_s`), and the macOS test job
+failed on every pull request with no change of ours. A release tagged that day would have built its binaries with a
+compiler no CI run of its commit had used, and its image with whichever
+release `rust:alpine` named that day: the Dockerfiles removed
+`rust-toolchain.toml` from their build, since with `stable` no pin was lost
+and the wasm32 target made rustup download a toolchain of its own.
+
+The images build on the rust image of the file's release, by its index
+digest (`FROM rust:1.99.1-alpine@sha256:...`, amd64 and arm64 alike), and
+keep the file: the image's own toolchain is the one it names, so rustup
+takes it and adds only the wasm32 target, in a layer of its own --
+`rustup toolchain install --no-self-update --profile minimal` after
+`COPY rust-toolchain.toml` and before the sources. That is 99 MB of the
+build stage and none of the image, which is `scratch` and the binary; added
+at the build's first cargo call instead, it was downloaded again at every
+build whose sources changed, and without the minimal profile a release the
+image lacks would bring its docs, clippy and rustfmt. Every other FROM of
+the two images (`Dockerfile`, `deploy/Dockerfile`) names a digest too, the
+tag beside it saying which (`alpine:3.24.4`, `python:3.13.18-slim-trixie`),
+so a tag moved under it changes no build; what `apk` and `apt-get` install
+is still that day's. The Kotlin harnesses' containers
+(`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`)
+run the rust image of the same release, by digest, and take its own
+toolchain by name (`RUSTUP_TOOLCHAIN`): it is the file's release, and under
+the file rustup added the wasm32 target at every run.
+
+`tools/toolchain_check.py`, in CI's fmt job, holds all of it: the channel
+is X.Y.Z -- not `stable`, `beta`, a nightly, nor X.Y, which follows its
+newest patch; every rust image a Dockerfile or a script names (a shell
+script, a Makefile, a workflow, a Python script, outside comments) is
+`rust:X.Y.Z-...@sha256:...` of that release; no Dockerfile removes the file
+or sets `RUSTUP_TOOLCHAIN`; every FROM of the two images names a digest,
+but `scratch` and a stage of the file's own. `release.yml`'s `binaries` job
+holds each entry's `rustc -V` to the file's release and, on Linux, to the
+`rustc -V` that resolves in the Dockerfile's rust image over the tag's tree,
+as the image job's build stage resolves it: a difference stops the release
+before its draft, whose notes open with the compiler. The size job's summary
+names the compiler each side was built by (`size_report.py`, the base by its
+own toolchain file), and `site/build.py` names the one beside the sizes it
+holds.
+
+A bump is deliberate, not each stable release: a release taken for what it
+brings, in a pull request of its own that carries in its body `make
+wasm-sizes`, the size report, `make instr-compare` and `make float-test`
+([RELEASING.md](../../RELEASING.md#a-toolchain-bump) lists how). What a
+compiler can move here is what fennec-core does for itself: it writes and
+reads numbers with its own code (`num.rs`, `json.rs`), held to the standard
+library's `{}` by three `#[ignore]`d tests over every `f32`, 10^8 random
+`f64`s and every `f32` read back through an `f64` -- minutes of every core,
+too long for every pull request: `float-tests.yml` runs them weekly, by
+hand, and on a pull request changing `rust-toolchain.toml`, `num.rs` or
+`json.rs`, so a bump's own pull request runs them. Its case fold and
+Unicode tables are held to the standard library's by plain tests, which a
+bump meets in its own CI.
+
+Rejected: following `stable` and fixing what a release breaks once it has
+landed -- main went red on every pull request with no change, and a
+release could ship a compiler no CI run of its commit used; setting
+`RUSTUP_TOOLCHAIN` in a Dockerfile to the image's own toolchain, which
+leaves the file out of the image's build and two places naming the release
+with nothing holding them alike; `X.Y`, which rustup follows to its newest
+patch, moving as `stable` does if less often; a nightly, which only a
+scheduled or sanitizer job takes, pinned to a date.

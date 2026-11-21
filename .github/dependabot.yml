@@ -1,18 +1,31 @@
 version: 2
 updates:
-  # The shipped crates take no external crates at all, so there is nothing to
-  # update there. The action versions in .github/workflows are the real moving
-  # parts -- they are the only third-party code in this repository's CI.
+  # The actions the workflows run: code from outside the repository that
+  # runs with its tokens and secrets. Each `uses:` is pinned to a commit,
+  # with the tag it was taken from in a comment (`@<sha> # v7.0.1`), since a
+  # tag can be moved and a commit cannot; tools/workflow_check.py refuses
+  # any other form. This keeps the pins current: it moves a pin to a newer
+  # release's commit and rewrites the comment with it, which it does only
+  # where the comment names the pinned commit's most specific tag -- so the
+  # comment says v7.0.1, not v7. Minor and patch releases come together in
+  # one pull request a month; a major comes alone, its changes to be read.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
     commit-message:
       prefix: ''
+    groups:
+      actions:
+        update-types: [minor, patch]
 
-  # fennec-bench is the one crate allowed external dependencies (rusqlite,
-  # postgres). It is `publish = false` and never enters a product build, so
-  # these are grouped into a single PR rather than raised one at a time.
+  # Two crates take crates from outside the workspace (tools/deps_check.py):
+  # fennec-bench (rusqlite, postgres, ...), `publish = false` and never in a
+  # product build, and fennec-tls (rustls, ring, webpki-roots, and rcgen to
+  # test with), which fennec-server and the shell ship behind their `tls`
+  # feature. Grouped into a single PR rather than raised one at a time; one
+  # that moves fennec-tls's tree fails deps_check until its TLS_TREE is
+  # written again, once what came in has been read.
   - package-ecosystem: cargo
     directory: /
     schedule:
