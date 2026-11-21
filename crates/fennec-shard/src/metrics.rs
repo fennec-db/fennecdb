@@ -414,7 +414,7 @@ pub fn counters(out: &mut Text) {
     out.family(
         "fennec_router_promotions_total",
         "counter",
-        "Copies of tenants promoted by a failover, by whether the copy was connected to its primary as its promotion began: not_connected is one promoted where its stream had left it -- a primary that died ends its standby's stream with it, so read the router's line for the tenant, which gives how long before the copy last heard from its primary and how far behind it was -- and unknown a node too old to say. What a copy promoted was not sent is lost.",
+        "Copies of tenants promoted by a failover, by whether the copy was connected to its primary as its promotion began -- connected until a read of its stream fails: a primary's process killed ends the stream with it, its machine lost or cut off only after 10 s of silence -- and unknown a node too old to say. Read the router's line for the tenant, which gives how long before the copy last heard from its primary and how far behind it was, and says what it was not sent is lost unless it was connected, nothing behind and heard from within two keep-alives (4 s). What a copy promoted was not sent is lost.",
     );
     for (i, copy) in ["connected", "not_connected", "unknown"].iter().enumerate() {
         out.sample(

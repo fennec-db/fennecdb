@@ -4751,12 +4751,12 @@
      },
      "connected": {
       "type": "boolean",
-      "description": "Connected to its primary as the promotion began: its primary gone, its stream has ended with it."
+      "description": "Connected to its primary as the promotion began: true until a read of its stream fails, at once where its primary's process was killed, 10 s on where its machine was lost or cut off. last_contact_ms past two keep-alives says it was hearing nothing."
      },
      "behind": {
       "type": "integer",
       "minimum": 0,
-      "description": "Writes on its primary's disk, as its primary last said, it had not applied."
+      "description": "Writes on its primary's disk, as its primary last said -- every 2 s, behind or caught up -- it had not applied."
      },
      "last_contact_ms": {
       "type": "integer",
