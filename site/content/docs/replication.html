@@ -232,8 +232,18 @@ wrote past the fork.</p>
 
 <h2>What a failover loses</h2>
 
-<p>With <code>--sync always</code> on the primary, no acknowledged write was
-lost in ten failovers. With the default <code>--sync 250</code>, a failover
+<p>With <code>--sync always</code> on the primary, a failover loses no write
+the replica was sent, and in ten failovers of a replica keeping up no
+acknowledged write was lost. A replica not connected, or behind, when its
+primary is lost is promoted where it stands, without what it was not sent —
+a write waits a second at most for a stream that keeps up and not at all for
+one behind or reconnecting — so watch <code>connected</code> and
+<code>behind</code> in <code>/_replication/status</code> and
+<code>fennec_replica_connected</code>, <code>fennec_replica_behind</code> in
+<code>/_metrics</code> (<a href="monitoring.html">Monitoring</a>), and over a
+network others can reach follow <code>https://</code>: on a plain-HTTP hop,
+whoever can reach it can cut the stream. With the default <code>--sync
+250</code>, a failover
 loses up to the last 250 ms of writes.</p>
 
 <p>A power cut was measured on the primary, with no failover after it: no
@@ -283,7 +293,9 @@ was sent was lost: none of these ten failovers caught one, while a node of
 the SaaS example killed under eight writers lost one in 3 of 60 runs, and
 none in 120 since. A stream that has not sent a write within a second is
 not waited for until it catches up again, so a stalled replica costs the
-writes one wait. A machine that dies takes its sockets with it: this holds
+writes one wait, and a replica reconnecting none: writes answered meanwhile
+are on no replica, and a failover then loses them. The ten failovers above
+promoted a replica that was keeping up. A machine that dies takes its sockets with it: this holds
 for a process killed, not for a power loss. No failover left the replica
 holding a write the client had not been answered for.</p>
 </details>

@@ -139,7 +139,8 @@ Seven parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec
 (`codec`), a `.fennec` file's open, mapped as a server opens it, with a
 replica's apply (`image`), a SQLite file (`sqlite`), and a primary's
-stream as a replica, an archiver and a backup read it (`stream`), under
+stream as a replica, an archiver and a backup read it, an image it sends
+adopted as a replica adopts one (`stream`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
 reader, the framing of a sealed file and of an archive, JWT and JWKS

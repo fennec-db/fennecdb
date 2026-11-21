@@ -43,8 +43,11 @@ export PATH="/path/to/the/clone/target/release:$PATH"</pre>
     directory of tenant files, <code>--admin-token</code> is what the router
     drives it with, <code>--replication-token</code> is the one the nodes share
     for copying tenants from one to another, and <code>--sync always</code> puts
-    every write on disk before it is answered, so that a failover loses
-    none.</p>
+    every write on disk before it is answered, so that a failover loses none
+    the standby was sent. A standby not connected, or behind, when its node
+    is lost is promoted where it stands, without what it was not sent
+    (<a href="sharding-failover.html#watching-a-standby">watching a
+    standby</a>).</p>
 <pre data-lang="bash" data-label="terminal 1">fennec-server --dir n1 --http 127.0.0.1:8081 --admin-token a1 \
     --replication-token r1 --sync always</pre>
 <pre data-lang="text" data-label="prints">serving tenants from: n1  (0 on disk)

@@ -429,9 +429,35 @@ panic that may have left it part way ([replication.md](replication.md#replicatio
 where its primary was of another lineage, the copy deleting itself; and at
 a halt, which a promotion forks after and a release closes the tenant or
 starts the follower again behind (`reopen_streams`). A copy whose follower
-runs but is behind -- its primary slow, or its images refused -- is
-promoted as far as it got, the trade a failover makes, which its status's
-`behind` and `fennec_replica_behind` show; the router asks no position. And a repair gives no
+runs but is behind -- its primary slow, or its images refused -- or is not
+connected -- reconnecting, its primary unreachable from it, or a stand-in
+on a plain-HTTP hop cutting its stream at will -- is promoted where it
+stands, the trade a failover makes; the router asks no position. So
+`--sync always` loses no write the copy was sent, and nothing more is
+promised: a durable write waits a `SENT_WAIT` at most for the streams
+keeping up and none for one lagging, reconnecting or failed, and what such
+a copy was not sent is lost with its primary, a write the primary answered
+among it (G14's review, area D, second round: the site said a failover
+under `--sync always` lost none, from 0.1.5 on). It is seen before it
+matters: a copy's status names `connected`, `behind` and
+`last_contact_ms`, and a node counts its copies a failover may promote --
+a standby's and a tenant's replica of its own, never a read replica's --
+not connected and the most writes one is behind (`fennec_copies_disconnected`,
+`fennec_copies_behind`, `Tenants::stats`' `Copies`, never by tenant),
+which the kit's `FennecTenantCopiesDisconnected` (two minutes) and
+`FennecTenantCopiesBehind` (more than 1 000 writes for five) alert on,
+with promtool's tests in `deploy/alerts/fennecdb.rules.test.yml` and a
+RUNBOOK section of their own ("A copy not following"). And it is seen as
+it happens: the admin's promotion answers what its copy knew as the
+promotion began and its follower stopped (`replication::Heard`, by the
+status's names, `Follower::promote_heard`, `Tenants::promote_heard`), the
+router's failover logs them in its line for the tenant (`promote_on`) and
+counts the copy by them, `fennec_router_promotions_total{copy="connected"
+| "not_connected" | "unknown"}` (unknown: a node before the fields). A
+node killed ends its copies' streams with it, so its failover counts them
+not connected too; `last_contact_ms` against when the node stopped
+answering tells a copy cut off long before from one its node's end cut
+off, which a router could judge against a lease's lapse -- not done. And a repair gives no
 tenant a copy while its primary does not answer its `GET /_admin/tenants`
 -- one that ran between a node's death and its lapse attached a copy
 following nothing, which the failover promoted and the node's return wiped

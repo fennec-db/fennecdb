@@ -86,7 +86,18 @@ a socket's bytes reach the replica after the process is killed, though
 not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
 (0.14 before the wait) and at most 283 ms under `--sync 250`, durable
 writes 254 a second against 246; ten failovers under `always` lost no
-acknowledged write. An archive (`fennec archive`,
+acknowledged write, each promoting a replica that kept up. That is the
+promise and all of it: none the replica was sent. A replica lagging,
+reconnecting or failed is waited for not at all, and a promotion asks no
+position, so one not connected, or behind, as its primary is lost is
+promoted where it stands, without the writes its primary answered
+meanwhile -- and on a plain-HTTP hop whoever can reach it can cut the
+stream and hold it there. It is watched (`connected`, `behind` and
+`last_contact_ms` in a replica's status, `fennec_replica_*` and a node's
+`fennec_copies_*` in `/_metrics`, the kit's alerts on each) and a
+tenant's promotion says what its copy knew ([tenants.md](tenants.md),
+`replication::Heard`); the site said a failover under `--sync always`
+lost none, from 0.1.5, until the review's second round (G14, area D). An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
@@ -232,9 +243,23 @@ after each -- in fennec-server's.
   On macOS the terabyte was mapped lazily and its read refused (EINVAL);
   the unit test's reader was asked to fill 1 099 511 627 776 bytes for 3
   MiB sent. Now a body is first given `FIRST` (2 MiB and 16 bytes) at the
-  most and doubles, to its length and no further (`reserve_exact`), as
-  its bytes fill it: twice what came at the most, and a message cut short
-  says so with its length. A stream's writes in one message where no
+  most and doubles, to its length and no further, as its bytes fill it,
+  and a message cut short says so with its length. Each allocation is
+  asked with `try_reserve_exact`, a refusal an error naming the kind, the
+  length and the bytes asked for (`grown`): with `reserve_exact` a refused
+  one still aborted a node, `fennec archive` or `fennec backup` once a
+  peer sent enough bytes (the review's second round). A growth holds the
+  bytes that came and the buffer twice as long the allocator moves them
+  into -- three times what came at the most -- and a message read whole
+  has held twice its length at the most, not the "twice what came" this
+  first said: measured by an allocator counting the reading thread's
+  bytes, a growth counted as the move it may be (`tests/message_peak.rs`,
+  a binary of its own), an image of 40 MiB held 72 MiB at the most, 1.80
+  times it; one a byte past `FIRST` doubled twice, 2.00 times; and a
+  terabyte announced with 3 MiB sent, refused as cut short, 6 MiB, three
+  times the `FIRST` that had come as it grew. The follower's image then
+  takes the record saying it follows, one more growth of the image's
+  length (`loaded`). A stream's writes in one message where no
   record goes alone -- `MESSAGE` of records and a time for each, fewer
   bytes than its record -- are under `FIRST`, so a steady stream's message
   is still one zeroed allocation of its length and one `read_exact`, the
@@ -311,13 +336,58 @@ after each -- in fennec-server's.
   of the tenant and the node's shutdown, which wait for the slot a release
   holds as it halts. `tests/primaries.rs` in fennec-server holds a primary
   gone silent in the middle of a message, the follower blocked reading it:
-  its promotion answers at once.
+  its promotion answers at once. That passes without `Watched` on Unix,
+  where the cut ends the read; `replication::tests::a_halt_a_read_in_a_message_missed_ends_at_the_next_byte`
+  holds `Watched` itself on every platform: a halt come after the look
+  between messages and its cut missed -- the flag alone, as Windows' cut is
+  to a read begun after it -- a primary sending a byte every 20 ms, and the
+  thread's end waited for `SILENCE`; with `Watched`'s look taken out it
+  read on and the test failed at its bound (the review's second round, run
+  so before the look went back).
+- *A halt is looked at past the socket's reads too* (`Follower::halted`):
+  as an image has arrived, and once it is loaded, before `Changing`. The
+  bound above held an image's `check_records`, `load` and adoption whole --
+  minutes for many gigabytes -- for a promotion, a release under the
+  tenant's slot, every `get` behind it and the node's shutdown. Walked away
+  from, the copy holds what it held and follows on from there once
+  started again. What a halt can still wait for is an adoption begun: the
+  image written over the copy's file and synced, a write of the image's
+  length, then the copy's memory pointed at it; or one message landing
+  and its fsync. `a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`
+  has the halt come at each look (a test's seam, `halt_at`, which sets the
+  flag at that look and is compiled into tests alone), the thread ending
+  with the copy at change 0 and no image taken; with either look taken
+  out, the follower took the image and the test failed.
+- *A peer's words reach a log line and the status's `error` cut and
+  escaped* (`peer_words`): the first 200 characters, as Rust writes a
+  string -- a newline `\n`, an escape character `\u{1b}`, a quote `\"` --
+  and the bytes there were where that is not all. An `E` message's text
+  (a mebibyte, any bytes) and a refusal's body (64 KiB) went in as they
+  came, while the status line was cut to 80: whoever answers at a
+  primary's address, or stands on a plain-HTTP hop before it, wrote lines
+  of its own into the log and a mebibyte into it and the status at every
+  reconnect. One helper at every place a peer's bytes reach either -- a
+  primary's `E` (`decode`), a node's (`node_archive`), a refusal's body
+  (`answered`: a follower's, an archiver's, a backup's, a node archiver's)
+  and a status line (`read_head`); `a_peers_words_are_cut_and_escaped`
+  holds each with a mebibyte holding a newline, an escape and quotes. A
+  router's own log of a node's answers is not a stream's, and is not
+  changed here.
 
 The stream's framing is a parser of untrusted bytes, fuzzed as one: the
 `stream` target ([conventions.md](conventions.md#fuzzing)) hands
 `read_answer` -- the head, each message held to its bound, decoded -- a
 replica's stream and a node's, whole or a few bytes a read, its seeds a
-primary's answer, a node's, a refusal and the two findings above.
+primary's answer, a node's, a refusal and the two findings above. An
+image its hello promised, accepted as the follower accepts one (`loaded`,
+the follower's own path: its records' sums, the record saying it follows,
+the load, the change its hello said), is adopted by a copy mapped as a
+server's -- its sink an in-memory one that hands the rewritten bytes back
+as the mapping -- so `Database::adopt`'s `repoint` walks the image's
+records and `rebind` binds its statements, which no target reached before
+(the review's second round, where it was suspected and not settled), and
+every collection of the copy is read after (`an_answers_image_is_adopted_by_a_mapped_copy`
+holds the path to the adoption). The seeds' answer holds such an image.
 
 ## A write's time
 
