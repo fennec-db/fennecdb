@@ -9533,17 +9533,14 @@ impl Database {
                 }
                 // Past the payload's end nothing is skipped: a field added
                 // after the document was written reads as `null`.
+                // A dropped place is passed as any value: a test here for
+                // its `null` (`codec::skip_passing`) cost every other
+                // collection's page of 100 rows 150 to 518 instructions,
+                // held across the rows or asked of the collection, where a
+                // page passing one pays 47 a row without it
+                // (docs/design/storage.md#dropped-places).
                 while at < want {
-                    // A collection holding a dropped place passes its
-                    // `null` by its byte (`codec::skip_passing`): asked
-                    // only where a place is passed, which a `get` of every
-                    // field of any other collection never does. Asked of a
-                    // bool held across the rows, it cost such a page 1.5
-                    // instructions a row.
-                    match c.schema.dropped.is_empty() {
-                        true => crate::codec::skip_field(doc, &mut pos)?,
-                        false => crate::codec::skip_passing(doc, &mut pos)?,
-                    }
+                    crate::codec::skip_field(doc, &mut pos)?;
                     at += 1;
                 }
                 at += 1;

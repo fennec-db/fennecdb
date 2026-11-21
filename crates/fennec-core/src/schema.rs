@@ -1243,41 +1243,8 @@ impl Schema {
     /// passed over and a field the payload ends before -- one added after
     /// it was written -- `null`.
     pub fn read_doc(&self, id: crate::value::DocId, buf: &[u8]) -> Result<crate::value::Document> {
-        self.read_payload(id, buf).map(|(doc, _)| doc)
-    }
-
-    /// [`Self::read_doc`] of a payload a write made under this schema --
-    /// a primary's, which a copy applies -- refused unless it holds a value
-    /// at every place up to its last field and none past it, as every
-    /// write of every release since dropped places came (0.1.7) encodes
-    /// one ([`crate::store::Store::encode_doc`]). One that does not was
-    /// written by other places than the copy holds: a compact of 0.2.0 or
-    /// before took a dropped field's out of one side's documents and told
-    /// the other nothing, and read on, every field after the place would
-    /// be the next one's value. Only a document stored before an `add
-    /// field` ends early, and no write sends one.
-    pub fn read_written(
-        &self,
-        id: crate::value::DocId,
-        buf: &[u8],
-    ) -> Result<crate::value::Document> {
-        let (doc, whole) = self.read_payload(id, buf)?;
-        match whole {
-            true => Ok(doc),
-            false => Err(places_moved(&self.name)),
-        }
-    }
-
-    /// [`Self::read_doc`], and whether the payload held a value at every
-    /// place up to the last field and ended there.
-    fn read_payload(
-        &self,
-        id: crate::value::DocId,
-        buf: &[u8],
-    ) -> Result<(crate::value::Document, bool)> {
         let mut fields = Vec::with_capacity(self.fields.len());
         let (mut pos, mut at) = (0, 0);
-        let mut short = false;
         for (i, f) in self.fields.iter().enumerate() {
             let want = self.place(i);
             // Only dropped places are passed here, each field read in
@@ -1289,16 +1256,50 @@ impl Schema {
             }
             let v = match pos < buf.len() {
                 true => decode_value(buf, &mut pos)?,
-                false => {
-                    short = true;
-                    crate::value::Value::Null
-                }
+                false => crate::value::Value::Null,
             };
             at += 1;
             fields.push((f.name.clone(), v));
         }
-        let whole = !short && pos == buf.len();
-        Ok((crate::value::Document { id, fields }, whole))
+        Ok(crate::value::Document { id, fields })
+    }
+
+    /// [`Self::read_doc`] of a payload a write made under this schema --
+    /// a primary's, which a copy applies -- refused unless it holds a value
+    /// at every place up to its last field and none past it, as every
+    /// write of every release since dropped places came (0.1.7) encodes
+    /// one ([`crate::store::Store::encode_doc`]). One that does not was
+    /// written by other places than the copy holds: a compact of 0.2.0 or
+    /// before took a dropped field's out of one side's documents and told
+    /// the other nothing, and read on, every field after the place would
+    /// be the next one's value. Only a document stored before an `add
+    /// field` ends early, and no write sends one. A loop of its own rather
+    /// than `read_doc` telling it where the payload ended: that was 9
+    /// instructions more on every document every read decodes.
+    pub fn read_written(
+        &self,
+        id: crate::value::DocId,
+        buf: &[u8],
+    ) -> Result<crate::value::Document> {
+        let mut fields = Vec::with_capacity(self.fields.len());
+        let (mut pos, mut at) = (0, 0);
+        for (i, f) in self.fields.iter().enumerate() {
+            let want = self.place(i);
+            while at < want {
+                skip_passing(buf, &mut pos)?;
+                at += 1;
+            }
+            if pos >= buf.len() {
+                return Err(places_moved(&self.name));
+            }
+            let v = decode_value(buf, &mut pos)?;
+            at += 1;
+            fields.push((f.name.clone(), v));
+        }
+        match pos == buf.len() {
+            true => Ok(crate::value::Document { id, fields }),
+            false => Err(places_moved(&self.name)),
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {
