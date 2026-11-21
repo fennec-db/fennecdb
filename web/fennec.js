@@ -80,6 +80,8 @@ let met;
  * (`Fennec`'s static block): what lands a sync's seed in parts as one.
  */
 let block;
+/** Whether a database's module stopped (`Fennec`'s static block). */
+let stoppedOf;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -135,6 +137,7 @@ function guarded(exports) {
   const failed = (e) => {
     if (e instanceof TypeError) return e;
     trap = e;
+    halted.add(out);
     return stopped();
   };
   const ok = () => {
@@ -151,6 +154,9 @@ function guarded(exports) {
   }
   return out;
 }
+
+/** The guarded exports whose module stopped (`guarded`): no close enters it. */
+const halted = new WeakSet();
 
 /** A guard (`guarded`) by its export's arity: `GUARDS[n](f, ok, failed)` passes `n` arguments on. */
 const GUARDS = [
@@ -266,6 +272,7 @@ export class Fennec {
       f.#handle = f.#wasm.fennec_open();
     };
     met = (f) => f.#wasm.fennec_wide?.();
+    stoppedOf = (f) => halted.has(f.#wasm);
     block = (f, op) => {
       const out = JSON.parse(f.#readString(f.#wasm.fennec_block(f.#handle, op)));
       if (out.kind === 'error') throw new FennecError(out.message);
@@ -905,10 +912,19 @@ export class Fennec {
     return this.#take(ptr, length);
   }
 
+  /**
+   * Lets the database go, and its file (`openFile`) as the file's `close`
+   * does. After a trap it enters the module no more and throws nothing:
+   * thrown, it kept the file's name from the open the error asks for.
+   */
   close() {
     closed.add(this);
     this.#lives?.clear();
-    this.#wasm.fennec_close(this.#handle);
+    try {
+      kept.get(this)?.close();
+    } finally {
+      if (!halted.has(this.#wasm)) this.#wasm.fennec_close(this.#handle);
+    }
   }
 }
 
@@ -1509,13 +1525,16 @@ function refused(name, e) {
  * Chrome puts off 2 s for a busy one (web/browser/).
  */
 const HELD_MS = 3000;
-/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
+/** The files this worker keeps, by directory (`null`: the origin's) and name: the `FennecFile` keeping each. */
 const holding = new Map();
+/** `openFile`'s look at a name this worker keeps (`FennecFile`'s static block). */
+let here;
 
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
   #fennec; #main; #aside; #name; #size; #image; #where;
   #failed = null;
+  #closed = false;
 
   constructor(fennec, name, main, aside, size, image, where) {
     this.#fennec = fennec;
@@ -1525,8 +1544,22 @@ class FennecFile {
     this.#size = size;
     this.#image = image;
     this.#where = where;
-    if (!holding.has(where)) holding.set(where, new Set());
-    holding.get(where).add(name);
+    if (!holding.has(where)) holding.set(where, new Map());
+    holding.get(where).set(name, this);
+  }
+
+  static {
+    // Refused while its database runs; let go of once its module stopped,
+    // of which nothing runs again: whether it was.
+    here = (where, name) => {
+      const holder = holding.get(where)?.get(name);
+      if (!holder) return false;
+      if (!stoppedOf(holder.#fennec)) {
+        throw new FennecError(`${name} is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first`);
+      }
+      holder.close();
+      return true;
+    };
   }
 
   /** The file's name in its directory. */
@@ -1572,22 +1605,24 @@ class FennecFile {
   }
 
   /**
-   * Flushes and lets the file go: the database is kept in it no longer.
-   * The file is let go of whatever throws: after the module stopped (a
-   * trap) the flush and the journal's call each throw, and handles left
-   * open refused the reopen the error asks for (`openFile` in the same
-   * worker: "open elsewhere").
+   * Flushes and lets the file go, whatever throws: the database is kept in
+   * it no longer; a second call does nothing. After a trap nothing enters
+   * the module and nothing is thrown, the handles closed with nothing
+   * written: left open, they refused the open the error asks for, as
+   * "open elsewhere".
    */
   close() {
+    if (this.#closed) return;
+    this.#closed = true;
     try {
-      this.flush();
+      if (!stoppedOf(this.#fennec)) this.flush();
     } finally {
       kept.delete(this.#fennec);
       const names = holding.get(this.#where);
-      names?.delete(this.#name);
+      if (names?.get(this.#name) === this) names.delete(this.#name);
       if (names?.size === 0) holding.delete(this.#where);
       try {
-        this.#fennec.journal(false);
+        if (!stoppedOf(this.#fennec)) this.#fennec.journal(false);
       } finally {
         try {
           this.#main.close();
@@ -1612,10 +1647,10 @@ class FennecFile {
 
 /**
  * Synchronous access to `name` in `dir`, created if absent; held
- * elsewhere, asked for again for `HELD_MS` -- held by this worker
- * (`ours`), refused at once.
+ * elsewhere, asked for again for `HELD_MS`, and kept by a database of this
+ * worker (`mine`), refused at once or taken.
  */
-async function syncAccess(dir, name, ours) {
+async function syncAccess(dir, name, mine) {
   const fh = await dir.getFileHandle(name, { create: true });
   if (typeof fh.createSyncAccessHandle !== 'function') {
     throw new FennecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
@@ -1628,12 +1663,23 @@ async function syncAccess(dir, name, ours) {
       // Safari names a held file InvalidStateError, where the standard
       // (and Chrome and Firefox) say NoModificationAllowedError.
       if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
-      if (ours || Date.now() >= until) {
+      // Its handles let go of now: asked again at once.
+      if (mine()) continue;
+      if (Date.now() >= until) {
         throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
       }
       // Nothing tells when a handle is let go: asked again.
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+}
+
+/** `f()` on the way out of an error, which what it throws never takes the place of. */
+function quietly(f) {
+  try {
+    f();
+  } catch {
+    // The error on its way out says why.
   }
 }
 
@@ -1644,19 +1690,23 @@ async function syncAccess(dir, name, ours) {
  */
 function loads(fennec, bytes) {
   const trial = sibling(fennec);
+  let took;
   try {
     trial.load(bytes);
-    return true;
+    took = true;
   } catch (e) {
     // Refused for collation data: they loaded, and the text needs it.
-    if (e.collation) return true;
+    if (e.collation) took = true;
     // No room, a module that stopped: the copy is no less a database, and
     // a false here empties it.
-    if (e instanceof FennecError && e.message === NOT_AN_IMAGE) return false;
-    throw e;
-  } finally {
-    trial.close();
+    else if (e instanceof FennecError && e.message === NOT_AN_IMAGE) took = false;
+    else {
+      quietly(() => trial.close());
+      throw e;
+    }
   }
+  trial.close();
+  return took;
 }
 
 /**
@@ -1688,7 +1738,9 @@ function copyLoads(fennec, copy, name) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it. A file held elsewhere is waited for 3 s first.
+ * corrupt it. A file held elsewhere is waited for 3 s first; one another
+ * database of this worker keeps is refused at once, or taken from it,
+ * nothing written, once its module stopped (a trap).
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`
@@ -1707,15 +1759,18 @@ async function openFileNow(fennec, name, opts) {
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
   if (!dir) throw new FennecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
   const where = opts.dir ?? null;
-  const ours = holding.get(where)?.has(name) ?? false;
-  const main = await syncAccess(dir, name, ours);
+  // Asked only once a handle is refused: a database of this worker that
+  // keeps the file holds both handles until its file's close, and a handle
+  // granted is no file anyone holds.
+  const mine = () => here(where, name);
+  const main = await syncAccess(dir, name, mine);
   let aside = null;
   // Closed while the file was asked for, its handles are let go of below,
   // and closed while collation data was fetched or the schema checked: the
   // load called the file corrupt, the check the handle not found.
   const live = () => alive(fennec, 'openFile');
   try {
-    aside = await syncAccess(dir, `${name}~`, ours);
+    aside = await syncAccess(dir, `${name}~`, mine);
     live();
     const beside = aside.getSize();
     if (beside > 0) {
@@ -1758,7 +1813,7 @@ async function openFileNow(fennec, name, opts) {
     try {
       await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').finally(live);
     } catch (e) {
-      file.close();
+      quietly(() => file.close());
       throw e;
     }
     return file;

@@ -419,8 +419,10 @@ elsewhere is waited for 3 s first. A page loaded again finds its file in the
 hands of the worker of the page before until that worker has ended — at
 once when it was idle, but Chrome stops a busy worker only 2 s after its
 page is gone, and a page reloaded in the middle of a statement was refused
-for those 2 s. A second <code>openFile</code> of a file the same worker
-holds is refused at once.</p>
+for those 2 s. A file another database of the same worker keeps is refused
+at once, naming it (<code>notes.fennec is kept by another database of this
+worker</code>): close that database, or its file, first. Closing a database
+lets go of its file too, as the file's own <code>close()</code> does.</p>
 
 <p>A <code>compact</code>, and writes appended past half the image (and past
 64 KB), put a new image in the file. It is written into a copy beside the
@@ -457,7 +459,11 @@ opened again (<code>Fennec.open</code>, then <code>openFile</code> or
 <code>restore</code>). The file holds every write <code>run</code> answered
 before; the writes of the statement that stopped are not in it, though the
 module may have landed them, since neither its answer nor the flush after
-it came. <code>persist</code>'s keys hold what its last call stored.</p>
+it came. <code>persist</code>'s keys hold what its last call stored.
+<code>openFile</code> of the same name, in the same worker, takes the file
+from the database that stopped, writing nothing into it, so nothing needs
+closing first; <code>close()</code> on that database, or on its file,
+throws nothing, enters the module no more and lets the file go.</p>
 
 <p><code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, wherever a page runs: the image once, then only the writes since

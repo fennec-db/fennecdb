@@ -90,7 +90,7 @@ behind `std-fs`; the indexes are `vector`, `text`, `highlight`, `fuzzy`,
 `sparse`, `sorted`, `composite`, `geo`, `hll` and `maps`, and `off` stands
 in for one a build is made without.
 
-The browser client is `web/fennec.js` -- WASM glue (~683 lines),
+The browser client is `web/fennec.js` -- WASM glue (~693 lines),
 persistence and the sync layer -- re-exporting the query builder
 (`web/builder.js`) and the HTTP client (`web/http.js`), dependency-free ES
 modules; `web/fennec.d.ts`

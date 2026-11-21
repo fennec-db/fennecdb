@@ -192,6 +192,33 @@ loaded stores the database whole as it left it; after one refused before
 the load (a wrong `cryptoKey`, a chunk that does not unseal, an IndexedDB
 error) a chunk, the record standing.
 
+A module that traps -- `boxed`'s abort where it has no memory left to
+answer in, a bound it checks -- is left where it stopped, so every later
+call on any database of its instance throws one `FennecError` saying to
+open the database again (`guarded`), and the instance is marked stopped
+(`halted`). What the error asks for works with nothing called first:
+`openFile` of a name a database of this worker keeps (`holding`, by name,
+the `FennecFile` keeping it) takes it from a database whose module
+stopped -- its handles closed, nothing flushed or written, since what the
+trap kept from the file never reaches it -- and refuses it at once, naming
+this worker, from one that runs on. Before, the name stayed held until
+the file's own `close()`, which nothing said to call, and the open was
+refused as "open elsewhere (another worker or tab)"; and `Fennec.close()`
+called `fennec_close`, threw "the module stopped" and let go of nothing.
+A close is total after a trap: `Fennec.close()` marks the database closed
+and lets its file go, both handles, entering the module no more and
+throwing nothing, and so does `FennecFile.close()`, which a second call
+makes do nothing. Closing a live database lets its file go too, flushed,
+as the file's `close()` does. A close met on the way out of a failure --
+`loads`' trial of a copy beside the file, `openFile`'s schema check --
+never takes the place of the error that brought it there: the copy's
+refusal names the room it lacked, and a schema refusal its differences
+(`web/fennec.file.test.js`). The Cloudflare example's `#retire` closes
+the database it lets go of after `release`: thrown there, the retiring
+promise rejected, and every call queued on it with "the module stopped";
+it now restores, and they run on the database restored from storage
+(`integrations/cloudflare/example.test.js`).
+
 ### In real browsers
 
 `web/fennec.persist.test.js` and `web/fennec.file.test.js` hold these calls
@@ -232,7 +259,8 @@ What it found, fixed with it:
   stops a busy worker only 2 s after its page is gone, its sync access
   handles open till then, and `openFile` was refused as open elsewhere for
   1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
-  it refuses, a file this worker itself holds refused at once (`holding`).
+  it refuses, a file another database of this worker keeps refused at once,
+  naming it (`holding`, `here`), or taken from it once its module stopped.
   Firefox and Safari end the worker at once: the file opens 50 to 85 ms
   after the reload in Firefox, about 60 ms in Safari 27.
 - Safari names a held file `InvalidStateError`, where the standard, Chrome

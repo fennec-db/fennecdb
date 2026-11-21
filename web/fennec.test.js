@@ -3282,7 +3282,8 @@ test('a run that cannot hand over its parameters frees the text it wrote', { ski
 // leaves the instance as it stopped, the statement landed and neither
 // answered nor flushed. Every later call, on every database of the module,
 // throws one error saying to open the database again, rather than answer
-// from that state or trap again with "unreachable".
+// from that state or trap again with "unreachable" -- but `close`, which
+// enters it no more and throws nothing (web/fennec.file.test.js).
 test('after the module traps every call says to open the database again', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec, FennecError } = await import('./fennec.js');
   let trap = false;
@@ -3299,9 +3300,11 @@ test('after the module traps every call says to open the database again', { skip
   const stopped = (e) => e instanceof FennecError && e.message === 'the module stopped (unreachable): nothing more runs on its databases; open the database again';
   assert.throws(() => db.run('put c {n: 1}'), (e) => stopped(e) && e.cause instanceof WebAssembly.RuntimeError);
   trap = false;
-  const calls = [() => db.run('get c'), () => db.changeSeq, () => db.snapshot(), () => db.load(new Uint8Array(8)), () => db.stats(), () => db.close()];
+  const calls = [() => db.run('get c'), () => db.changeSeq, () => db.snapshot(), () => db.load(new Uint8Array(8)), () => db.stats()];
   for (const call of calls) assert.throws(call, stopped, String(call));
   await assert.rejects(db.batch(['get c']), stopped);
+  db.close();
+  assert.throws(() => db.run('get c'), stopped);
 });
 
 // Each export's guard takes its arguments by name, as many as the export

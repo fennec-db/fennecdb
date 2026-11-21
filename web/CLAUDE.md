@@ -71,7 +71,12 @@ emptied the database. `web/fennec.persist.test.js`,
 `web/fennec.file.test.js` and `web/browser/` hold all seven. A change to
 these calls or to `idb` runs `web/browser/` in Chrome, Firefox and Safari
 before it lands -- every pull request's run has `browsers (safari)` --
-and `make file-bench` in Chrome and Firefox against main's.
+and `make file-bench` in Chrome and Firefox against main's. After a trap
+a close enters the module no more and throws nothing, its file let go of,
+and `openFile` takes a name another database of this worker keeps from
+one whose module stopped (`here`), refusing it from one that runs on
+([js-client.md](../docs/design/js-client.md#persistence-in-the-page),
+`web/fennec.file.test.js`).
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a

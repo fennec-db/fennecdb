@@ -354,7 +354,7 @@ test('one keeper a file and a database: the rest are refused', { skip }, async (
   await assert.rejects(openFile(db, 'j.fennec', { dir }), /already kept/);
   await assert.rejects(persist(db, 'k'), /kept in a file/);
   assert.throws(() => db.load(db.snapshot()), /kept in a file/);
-  await assert.rejects(openFile(await open(), 'i.fennec', { dir }), /open elsewhere/);
+  await assert.rejects(openFile(await open(), 'i.fennec', { dir }), /i\.fennec is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first/);
 
   db.run('create collection docs (title text)');
   file.close();
@@ -526,28 +526,50 @@ async function openWrapped(wrap) {
   }
 }
 
-// After a trap every call into the module throws, the flush of `close` and
-// its journal's call among them: the handles were let go of after both,
-// and stayed open -- the reopen the error asks for, in the same worker,
-// refused as "open elsewhere".
-test('a file is let go of when the module stopped, and opens again', { skip }, async () => {
-  const dir = fakeDir();
-  let trap = false;
-  const db = await openWrapped((x) => {
-    const query = (...a) => {
+/** `x` as `openWrapped` takes it, the export `name` replaced by `f` of the same arity. */
+const swapped = (x, name, f) => ({ ...x, [name]: Object.defineProperty(f, 'length', { value: x[name].length }) });
+
+/**
+ * A module whose next `run` traps once `trap.on` is set -- the statement
+ * landed, as `boxed`'s abort leaves it -- as `openWrapped` takes it.
+ */
+function trapping() {
+  const trap = { on: false };
+  trap.wrap = (x) =>
+    swapped(x, 'fennec_query', (...a) => {
       const out = x.fennec_query(...a);
-      if (trap) throw new WebAssembly.RuntimeError('unreachable');
+      if (trap.on) throw new WebAssembly.RuntimeError('unreachable');
       return out;
-    };
-    return { ...x, fennec_query: Object.defineProperty(query, 'length', { value: x.fennec_query.length }) };
-  });
-  const file = await openFile(db, 't.fennec', { dir });
+    });
+  return trap;
+}
+
+const stopped = (e) => e instanceof FennecError && e.message === 'the module stopped (unreachable): nothing more runs on its databases; open the database again';
+
+/** The bytes of `name` and of the copy beside it, as they stand. */
+const held = (dir, name) => [dir.bytes(name).slice(), dir.bytes(`${name}~`).slice()];
+
+/** A database kept in `name` holding one row, `a`, whose module then trapped on a second. */
+async function trapped(dir, name) {
+  const trap = trapping();
+  const db = await openWrapped(trap.wrap);
+  const file = await openFile(db, name, { dir });
   db.run('create collection docs (title text)');
   db.run('put docs {title: "a"}');
-  trap = true;
-  const stopped = (e) => e instanceof FennecError && e.message === 'the module stopped (unreachable): nothing more runs on its databases; open the database again';
+  trap.on = true;
   assert.throws(() => db.run('put docs {title: "b"}'), stopped);
-  assert.throws(() => file.close(), stopped);
+  return { db, file };
+}
+
+// After a trap nothing enters the module again, and a close that did --
+// its flush, its journal's call -- threw "the module stopped" in the
+// place of letting the file go: handles left open refused the reopen the
+// error asks for, in the same worker, as "open elsewhere".
+test('a file is let go of when the module stopped, and opens again', { skip }, async () => {
+  const dir = fakeDir();
+  const { file } = await trapped(dir, 't.fennec');
+  const before = held(dir, 't.fennec');
+  file.close();
   assert.equal(dir.files.get('t.fennec').open, false, 'the file let go of');
   assert.equal(dir.files.get('t.fennec~').open, false, 'the copy beside it let go of');
   // Opened again in this worker, as the error says: what was flushed
@@ -555,6 +577,117 @@ test('a file is let go of when the module stopped, and opens again', { skip }, a
   const again = await open();
   await openFile(again, 't.fennec', { dir });
   assert.deepEqual(titles(again), ['a']);
+  assert.deepEqual(held(dir, 't.fennec'), before, 'nothing written over');
+});
+
+// What the error and the page say after a trap -- the database opened
+// again, then its file -- with no close of the file first: the name was
+// held by the database that stopped, and the open was refused at once as
+// "open elsewhere (another worker or tab)".
+test('after a trap the file opens again in the same worker with no close first', { skip }, async () => {
+  const dir = fakeDir();
+  const { db, file } = await trapped(dir, 'r.fennec');
+  const before = held(dir, 'r.fennec');
+  const again = await open();
+  const kept = await openFile(again, 'r.fennec', { dir });
+  assert.deepEqual(titles(again), ['a'], 'what was flushed before the trap');
+  assert.deepEqual(held(dir, 'r.fennec'), before, 'nothing written over');
+  // The stopped database's own closes, made late, let go of nothing the
+  // new one holds.
+  file.close();
+  db.close();
+  again.run('put docs {title: "c"}');
+  assert.ok(dir.bytes('r.fennec').length > before[0].length, 'the new database writes its file');
+  kept.close();
+  const { db: last } = await reopen(dir, 'r.fennec');
+  assert.deepEqual(titles(last), ['a', 'c']);
+});
+
+// `close` after a trap threw "the module stopped" and kept the name: the
+// file it kept, and both of its handles, held.
+test('a database whose module stopped closes, letting its file go', { skip }, async () => {
+  const dir = fakeDir();
+  const { db } = await trapped(dir, 'd.fennec');
+  const before = held(dir, 'd.fennec');
+  db.close();
+  assert.equal(dir.files.get('d.fennec').open, false, 'the file let go of');
+  assert.equal(dir.files.get('d.fennec~').open, false, 'the copy beside it let go of');
+  assert.deepEqual(held(dir, 'd.fennec'), before, 'nothing written over');
+  const again = await open();
+  await openFile(again, 'd.fennec', { dir });
+  assert.deepEqual(titles(again), ['a']);
+});
+
+// A name kept by a database of this worker that is still running is not
+// "open elsewhere (another worker or tab)": the refusal says where.
+test('a file another database of this worker keeps is refused, naming it', { skip }, async () => {
+  const dir = fakeDir();
+  const a = await open();
+  const kept = await openFile(a, 'h.fennec', { dir });
+  a.run('create collection docs (title text)');
+  a.run('put docs {title: "a"}');
+  const before = held(dir, 'h.fennec');
+  await assert.rejects(
+    openFile(await open(), 'h.fennec', { dir }),
+    (e) =>
+      e instanceof FennecError &&
+      e.message === 'h.fennec is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first',
+  );
+  assert.deepEqual(held(dir, 'h.fennec'), before, 'nothing written over');
+  a.run('put docs {title: "b"}');
+  assert.ok(dir.bytes('h.fennec').length > before[0].length, 'the first still writes its file');
+  kept.close();
+});
+
+// A close met on the way out of a failed open -- its flush trapping here
+// -- threw in the place of the refusal that brought it there: the
+// schema's differences were never told.
+test("a schema refused at openFile is the error, whatever the file's close throws", { skip }, async () => {
+  const dir = fakeDir();
+  const v1 = await open();
+  const file = await openFile(v1, 's.fennec', { dir });
+  v1.run('create collection notes (title text required)');
+  v1.run('put notes {title: "a"}');
+  file.close();
+  const before = held(dir, 's.fennec');
+  const db = await openWrapped((x) =>
+    swapped(x, 'fennec_drain', () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    }),
+  );
+  await assert.rejects(
+    openFile(db, 's.fennec', { dir, schema: 'create collection notes (name text)' }),
+    (e) => e instanceof FennecError && /`notes.title` is in the database and not in the code/.test(e.message) && e.refusals?.length > 0,
+  );
+  assert.equal(dir.files.get('s.fennec').open, false, 'the file let go of');
+  assert.equal(dir.files.get('s.fennec~').open, false, 'the copy beside it let go of');
+  assert.deepEqual(held(dir, 's.fennec'), before, 'nothing written over');
+});
+
+// The trial of a copy beside the file closes its database whatever the
+// load did; a close that trapped after a load refused for want of room
+// put "the module stopped" where the room was named.
+test("a copy that cannot be tried is named for why, whatever the trial's close throws", { skip }, async () => {
+  const dir = fakeDir();
+  const before = await open();
+  before.run('create collection docs (title text)');
+  dir.put('k.fennec', before.snapshot());
+  before.run('put docs {title: "b"}');
+  const copy = before.snapshot();
+  dir.put('k.fennec~', copy);
+  const db = await openWrapped((x) => ({
+    ...swapped(x, 'fennec_close', () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    }),
+    fennec_alloc: (len) => (len === copy.length ? 0 : x.fennec_alloc(len)),
+  }));
+  await assert.rejects(
+    openFile(db, 'k.fennec', { dir }),
+    (e) => e instanceof FennecError && e.message.startsWith(`k.fennec~, the copy a rewrite of k.fennec left beside it, could not be tried (no room for an image of ${copy.length} bytes): `),
+  );
+  assert.deepEqual(dir.bytes('k.fennec~'), copy, 'the copy kept');
+  assert.equal(dir.files.get('k.fennec').open, false);
+  assert.equal(dir.files.get('k.fennec~').open, false);
 });
 
 // The copy beside the file may be the one whole database left: one the
