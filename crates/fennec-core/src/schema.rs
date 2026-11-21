@@ -700,6 +700,20 @@ pub fn composite_part(ty: &DataType) -> bool {
     *ty == DataType::Bool || crate::sorted::orderable(ty)
 }
 
+/// Refuses a field whose type nests past the levels a value read back may
+/// ([`crate::codec::MAX_DEPTH`], `DataType::depth`): `Schema::new`'s test
+/// and a create's ([`Schema::readable`]), one copy of its message.
+fn nests_within(f: &Field) -> Result<()> {
+    if f.ty.depth() > crate::codec::MAX_DEPTH {
+        return Err(Error::Type(format!(
+            "`{}`: a type nests at most {} levels, a list one and a point one",
+            f.name,
+            crate::codec::MAX_DEPTH
+        )));
+    }
+    Ok(())
+}
+
 /// Refuses a second `@ttl` among `fields`: a row expires by one time, and
 /// the sweep walks one index for it.
 pub fn one_expiry<'a>(collection: &str, fields: impl Iterator<Item = &'a Field>) -> Result<()> {
@@ -884,13 +898,7 @@ impl Schema {
                     f.name
                 )));
             }
-            if f.ty.depth() > crate::codec::MAX_DEPTH {
-                return Err(Error::Type(format!(
-                    "`{}`: a type nests at most {} levels, a list one and a point one",
-                    f.name,
-                    crate::codec::MAX_DEPTH
-                )));
-            }
+            nests_within(f)?;
             #[cfg(not(target_arch = "wasm32"))]
             let again = !seen.insert(f.name.as_str());
             #[cfg(target_arch = "wasm32")]
@@ -934,6 +942,31 @@ impl Schema {
             dropped: Vec::new(),
             composites: Vec::new(),
         })
+    }
+
+    /// Holds each field to what an open or a read of the file refuses: a
+    /// type nesting past what a value read back may ([`nests_within`]), and
+    /// its index's rule ([`IndexKind::check`]) -- a number past its range
+    /// (`out_of_range`, the test the open reads a schema with) and,
+    /// natively, a beam a 32-bit reader refuses. What `Schema::new` asks of
+    /// every field, asked again by a create of whatever schema it is handed
+    /// (`Database::create_collection`), the one place every collection is
+    /// made. A schema's fields are public, so one built in code past
+    /// `Schema::new` was written as handed -- 64 lists around a point, a
+    /// `vector<0>` -- and the file refused at its next open. So are its
+    /// indexes over several fields, each held to [`Self::check_composite`]
+    /// -- whose 2 to 8 parts `Schema::decode` holds a file's to -- its
+    /// answer that one over the same fields is there aside: that is the
+    /// index itself.
+    pub(crate) fn readable(&self) -> Result<()> {
+        for f in &self.fields {
+            nests_within(f)?;
+            f.index.check(&f.name, &f.ty)?;
+        }
+        for c in &self.composites {
+            self.check_composite(c)?;
+        }
+        Ok(())
     }
 
     /// The type of what a composite's part `key` reads: a field's, or

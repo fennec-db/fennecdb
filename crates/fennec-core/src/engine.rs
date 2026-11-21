@@ -7239,7 +7239,14 @@ impl Database {
                 // it is looked at: a big record's bytes, vectors' above all,
                 // read as heads by chance, and looking past one for a whole
                 // record refused a tear 1.2 MB into 2 MB of `vector<64>`.
-            } else if checked {
+            } else if checked
+                || (bytes[at] & CHECKED != 0
+                    && known(bytes[at])
+                    && matches!(
+                        framed_at(bytes, at),
+                        Ok(Some((_, end))) if zero_tail(bytes, end, end)
+                    ))
+            {
                 // In a file this version wrote to, a head no record reads
                 // from -- zeros with a byte after them, stale bytes -- is
                 // judged as a record failing its sum is, by whether a whole
@@ -7251,6 +7258,26 @@ impl Database {
                 // version before refused it. One of a kind this version
                 // knows whose sum fails is a record failing its sum, judged
                 // from its end, as a version before framed it.
+                //
+                // So too in a file whose records so far carry no sum -- the
+                // magic alone, the magic and the counter, or one a version
+                // before checksums wrote -- for a checked head of a kind
+                // this version knows that frames, which the walk stopped at
+                // for the collection it names, where it is the file's tail:
+                // its frame ends the file, or zeros run from its end to the
+                // file's (`zero_tail` from where its length says it ends).
+                // A version before read it as the file's first checked
+                // record and judged it by its sum, cutting it torn; refused
+                // by name, such a file a crash's stale bytes left did not
+                // open (the fuzz fix's third review). Anywhere else it is
+                // refused by name, whatever its sum: nothing in such a file
+                // tells a crash's tail from damage, and judged, one in the
+                // middle of an old file was cut with every plain record
+                // after it, as a version before cut it (the third review's
+                // check). So is a checked head whose varint does not read,
+                // or of a kind this version does not know whatever its sum
+                // -- a later version's, refused by its number -- as every
+                // version refused it there.
                 let head = whole_head(bytes, at);
                 if let (Some((_, _, true)), Some(e)) = (head, walk.refused) {
                     return Err(e);
@@ -10442,6 +10469,11 @@ impl Database {
             }
             return Err(Error::Exists(format!("collection `{}`", schema.name)));
         }
+        // Whoever built it: no read refuses what a write took. A schema
+        // whose fields were pushed past `Schema::new` was written as handed,
+        // and the file refused at its next open, a replica's apply too
+        // (the fuzz fix's third review).
+        schema.readable()?;
         // Every id below the last `u32`, which an open refuses
         // (`unmade_collection`): reached only from a file naming an id near
         // it, where `+= 1` overflowed, or wrapped to 0 in a release build.

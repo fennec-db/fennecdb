@@ -463,8 +463,10 @@ in 491 and 2 801 mapped, 866 read.
 *Cut, or refused.* Past D, damage -- a record failing its sum, or a head no
 record reads from: zeros, stale bytes, a record of no sum after checked
 ones, a counter's head anywhere but the front, a head naming a collection
-no create gives (`u32::MAX` on, `whole_record`, whose length fits) whose
-record fails its sum -- is judged by what follows it (`judge_after`). A whole record after it, by its sum, whose claim is
+no create gives (`u32::MAX` on, `whole_record`, whose length fits), a
+plain one (`0a ff ff ff ff 0f 05`, a newline read as a kind) as well as a
+checked one whose record fails its sum -- is judged by what follows it
+(`judge_after`). A whole record after it, by its sum, whose claim is
 past the damage says an fsync covered the damaged bytes before that
 record was appended: they were on the disk and changed since, and the
 open is refused, naming both ("the record at 1234 fails its checksum, and
@@ -512,8 +514,11 @@ past that the open is refused ("what follows it could not be judged"), as a
 version before refused any head it could not frame, and never for a tear
 at the end, which is never looked past. A head of a kind this version does
 not know whose record is whole by its sum is a later version's, refused as
-before ("unknown record kind 15 at 1234"), and so is one naming a
-collection no create gives whole by its sum ("a record names collection
+before ("unknown record kind 143 at 1234": the message prints the byte,
+here a checked record's of kind 15 with a one-byte claim -- a wider claim
+prints another byte, 175 for two -- where a plain head of kind 15 reads
+"unknown record kind 15"), and so is one naming a collection no create
+gives whole by its sum ("a record names collection
 4294967295, an id no create gives"): a crash leaves bytes no sum holds,
 so a whole record that does not read is damage refused by name, never
 cut (`whole_head`, which sums a head of any kind naming any collection).
@@ -525,9 +530,32 @@ it, and what the cut takes counts it, as a version before counted it
 (`records_from`). An archive's reader sums one the same way
 (`checked_claim`): read as a record of no sum, it was cut from its
 segment as a power cut's hole, where a version before took it and a
-restore refused it as it applied it. A file with no record carrying a
-sum -- one a version before wrote -- keeps the old rule: a record cut short
-at the end or zeros from a head (`zero_tail`, above) cut, any other stop
+restore refused it as it applied it. In a file whose records so far
+carry no sum -- the magic alone, the magic and the counter, or one a
+version before checksums wrote -- a checked head of a kind this version
+knows naming such a collection is judged as it is past checked records,
+by its sum, where it is the file's tail: its frame ends the file, or
+zeros run from its end to the file's (`zero_tail` from where its length
+says it ends). A version before read it as the file's first checked
+record and cut it torn where its sum failed. Until the fuzz fix's third
+review the load judged a stopped walk only once a record had carried a
+sum, and refused such a file by the collection the head names, where a
+crash's stale bytes start at a record's head on a block's boundary
+(`a_torn_tail_naming_an_unmade_collection_is_cut_in_a_file_of_no_sums`).
+Whole by its sum it is refused by name, and so is one anywhere else,
+plain records after it, whatever its sum, the file left as it is:
+nothing in such a file says where a crash's tail begins, and judged,
+it would be cut with every plain record after it. A version before cut
+it so, and so did the third review's first fix, which judged such a
+head wherever it framed; its check found it, and the decision taken is
+to refuse it there, as the fuzz fix's walk did before that review. A
+checked head whose varint does not read is refused, as every version
+refused it there, and so is one of a kind this version does not know,
+whatever its sum ("unknown record kind 143 at 1234" at the end of such
+a file, its sum failing): a later version's kind is refused by its
+number, a decision taken too, for the same reason. Otherwise a file
+with no record carrying a sum keeps the old rule: a record cut short at
+the end or zeros from a head (`zero_tail`, above) cut, any other stop
 refused, a counter's head past the front among them, which read as one
 moved the image's end.
 

@@ -194,7 +194,9 @@ test a file's schema is read with (`schema::out_of_range`, *A file's schema
 is held to the same ranges*, below), in the browser module too; and,
 natively, a beam built in code to `u32::MAX`, past which a 32-bit reader of
 the file -- a page replicating it, the native library on a 32-bit device --
-refuses the schema (`codec::get_usize`). SQL's `with (m = ..)` holds `m` to
+refuses the schema (`codec::get_usize`). A create asks `IndexKind::check`
+again of every field of whatever schema it is handed (`Schema::readable`),
+so a schema whose fields were pushed past `Schema::new` meets it too. SQL's `with (m = ..)` holds `m` to
 pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
 dimension or a parameter a file's schema holds is read whole or the file
 refused (`codec::get_usize`, through `get_within` at the target's width,
@@ -240,9 +242,18 @@ too), to 1 to `MAX_DIM`, and its `@hnsw`'s `m` to 2 to `MAX_M`, the
 ranges `Parser::int_in` reads them in, and refuses the record as damage
 naming the field and the range (`schema::out_of_range`: "`v`: @hnsw's
 `m` is 2 to 32767, not 1099511627776"), in the browser module too. The
-test is the one `IndexKind::check` asks of every schema a write makes, so
-no open refuses what a write took. With a test each, the check held a
-field's own vector alone: SQL's `create table t (e vector(1000000001)[])`
+test is the one `IndexKind::check` asks of every schema a write makes,
+and a create asks again of whatever schema it is handed
+(`Schema::readable`), so no open refuses what a write took. An index
+over several fields is read so too, 2 to 8 parts or the record refused
+(`Schema::decode`; the fuzzer's `image` target found one of none), the
+bound `check_composite` holds every one a statement or a declaration
+makes to (`add_composite`), and a create asks it again of each the
+schema it is handed holds, its answer that one over the same fields is
+there aside, the index itself: one of one part pushed into a schema in
+code was written and the file refused at its next open, until the fuzz
+fix's third review's check. With a test
+each, the check held a field's own vector alone: SQL's `create table t (e vector(1000000001)[])`
 and `Schema::new`'s `[vector<0>]` were taken and written, and at the next
 open the file was refused as damage, by every replica and every page
 replicating it -- a server's file one DDL statement from not opening at its
@@ -515,8 +526,17 @@ declaring a point under 64 lists, a type of 65 levels, which v0.2.0 took
 (it bounded no type's depth): the point is a level of the type as it is
 of the value it reads as, and the file is refused at the open alike --
 read, as the fuzz fix's second review found, the schema opened and every
-row's point was refused at each read. No write makes any of them now
-(`Schema::new`), and no test file of the repository's holds one
+row's point was refused at each read. No write makes any of them now:
+`Schema::new` refuses each type -- every statement's, FennecQL's and SQL's,
+a declared schema's, an import's and an `alter`'s added field go through
+it -- and a create holds whatever schema it is handed to the same tests
+(`Schema::readable`: the depth `Schema::new` holds a type to, and
+`IndexKind::check`, whose `schema::out_of_range` is the test the open
+reads a schema with), at the one place every collection is made. A
+schema's fields are public, and until the fuzz fix's third review a
+create took one built in code past `Schema::new` as handed and wrote it,
+the file refused at its next open; the damage tests now make such a
+file's record by hand. No test file of the repository's holds one
 (`a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied`).
 The 1.x contract names all three, a schema's number past its range beside
 them, as the exceptions to "1.x opens every file written from v0.2.0 on",

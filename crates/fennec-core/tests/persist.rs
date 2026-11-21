@@ -1092,6 +1092,120 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
     cleanup(dir, path);
 }
 
+/// A checked record of a kind this version knows naming collection
+/// `u32::MAX`, its sum failing, at the end of a file whose records so far
+/// carry no sum -- the magic and the counter alone, an empty database's
+/// image, or a file a version before checksums wrote -- is a torn tail and
+/// cut, as after checked records, and so is one zeros follow to the end: a
+/// version before read it as the file's first checked record, judged it
+/// by its sum and cut it. The walk refuses such a head by the collection
+/// it names, and the load judged what stopped its walk only once a record
+/// had carried a sum, so it refused the open by name ("a record names
+/// collection 4294967295") where a crash's stale bytes start at a record's
+/// head on a block's boundary (the fuzz fix's third review). Whole by its
+/// sum it is no crash's leaving, and is refused by name as before; so is
+/// one in the middle of such a file, plain records after it, whatever its
+/// sum, nothing cut: nothing there tells a crash's tail from damage, and
+/// judged, it was cut with every record after it, as a version before cut
+/// it (the third review's check). A checked head of a kind this version
+/// does not know is refused by its number at the end of such a file, its
+/// sum failing or not, as every version refused it there: a later
+/// version's kind (a decision taken).
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_torn_tail_naming_an_unmade_collection_is_cut_in_a_file_of_no_sums() {
+    let (dir, path) = tmp_path("stale-no-sums");
+    // A file a version before checksums wrote, and what a write after it
+    // appended: plain records to follow a head in its middle.
+    let (old, after) = {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "one"}"#);
+        run(&mut db, r#"put t {a: "two"}"#);
+        let file = without_sums(&written(&mut db, &path));
+        run(&mut db, r#"put t {a: "three"}"#);
+        let more = without_sums(&written(&mut db, &path));
+        drop(db);
+        assert!(more.len() > file.len() && more.starts_with(&file));
+        let after = more[file.len()..].to_vec();
+        (file, after)
+    };
+    let says = "a record names collection 4294967295, an id no create gives";
+    let review = b"\x83\xff\xff\xff\xff\x0f\x05hello".to_vec();
+    let failing = |x: usize| {
+        let mut r = fennec_core::engine::record_claiming(3, u32::MAX, b"", x as u64, x as u64);
+        *r.last_mut().unwrap() ^= 1;
+        r
+    };
+    let zeroed = |r: &[u8]| [r, &[0u8; 9][..]].concat();
+    // The magic, then the counter's head: a base of 0, an image of no bytes.
+    let mut empty = old[..8].to_vec();
+    empty.push(6);
+    empty.extend_from_slice(&[0; 16]);
+    for (good, rows) in [(empty, None), (old.clone(), Some(vec![1, 2]))] {
+        let x = good.len();
+        let torn = failing(x);
+        // (a), (b): at the file's end, or zeros after it to the end.
+        for tail in [review.clone(), torn.clone(), zeroed(&review), zeroed(&torn)] {
+            let mut bad = good.clone();
+            bad.extend_from_slice(&tail);
+            for way in ["mapped", "in-memory", "read-only"] {
+                let open = |p: &std::path::Path| match way {
+                    "mapped" => fennec_core::fs::open(p),
+                    "in-memory" => fennec_core::fs::open_in_memory(p),
+                    _ => fennec_core::fs::open_read_only(p),
+                };
+                let what = format!("{x} bytes, then {tail:?}, {way}");
+                std::fs::write(&path, &bad).unwrap();
+                let mut db = open(&path).unwrap_or_else(|e| panic!("{what}: {e}"));
+                match &rows {
+                    Some(rows) => assert_eq!(&ids(&mut db, "t"), rows, "{what}"),
+                    None => assert!(db.collection_names().is_empty(), "{what}"),
+                }
+                let cut = db.cut_on_open().map(|c| (c.at, c.records));
+                assert_eq!(cut, Some((x as u64, 1)), "{what}");
+                drop(db);
+                if way == "read-only" {
+                    assert_eq!(std::fs::read(&path).unwrap(), bad, "{what}");
+                    continue;
+                }
+                // Cut, and opened again as it was before the tail.
+                assert_eq!(std::fs::read(&path).unwrap(), good, "{what}");
+                let db = open(&path).unwrap_or_else(|e| panic!("{what}, again: {e}"));
+                assert_eq!(db.cut_on_open(), None, "{what}, again");
+            }
+        }
+        // (c) Whole by its sum: refused by name.
+        let mut bad = good.clone();
+        bad.extend_from_slice(&fennec_core::engine::record_claiming(
+            3,
+            u32::MAX,
+            b"",
+            x as u64,
+            x as u64,
+        ));
+        refused_every_way(&path, &bad, says);
+        // (d) A kind this version does not know, 15 with a one-byte claim:
+        // refused by the byte it starts with, its sum failing or holding.
+        let unknown = fennec_core::engine::record_claiming(15, 0, b"", x as u64, x as u64);
+        assert_eq!(unknown[0], 143);
+        let mut torn = unknown.clone();
+        *torn.last_mut().unwrap() ^= 1;
+        for tail in [torn, unknown] {
+            let mut bad = good.clone();
+            bad.extend_from_slice(&tail);
+            refused_every_way(&path, &bad, &format!("unknown record kind 143 at {x}"));
+        }
+    }
+    // (e) In the middle of the old file, a plain record after it: refused
+    // by name whatever its sum, the file left as it was.
+    for head in [review, failing(old.len())] {
+        let bad = [&old[..], &head[..], &after[..]].concat();
+        refused_every_way(&path, &bad, says);
+    }
+    cleanup(dir, path);
+}
+
 /// A torn tail is cut before a byte of its documents is read. What the
 /// fuzz fix refuses in a document an open reads -- a point 64 lists down
 /// (`codec::decode_point`, met skipping the fields before a vector), a
