@@ -1775,8 +1775,12 @@ the token once only the shared one dropped it). The bucket copy is
 archive takes nothing from the bucket, whose lifecycle rule expires what
 `--keep` let go of) with `--local-no-check-updated` -- rclone refused a
 segment growing as it read it, so a busy tenant's newest segment never
-reached the bucket, every run failing in the test -- and `--fast-list`;
-it refuses a first copy from an archive it has not copied before (the
+reached the bucket, every run failing in the test -- and `--fast-list`,
+of the files the archiver's group may read: fennecdb makes every file 0600
+whatever the archiver's `UMask`, so each run first gives the group read of
+the archive as root (`ExecStartPre=+chmod -R g+rX`), and lists what the
+group then reads (`--files-from-raw`), since a busy tenant's 64 MB segment
+made between that step and rclone's listing failed the run; it refuses a first copy from an archive it has not copied before (the
 directory's filesystem and inode, noted in its state directory) where the
 bucket holds a file the disk does not, since a rebuilt machine's new
 archive rewrote the bucket's `history`, `began` and `presence` within the

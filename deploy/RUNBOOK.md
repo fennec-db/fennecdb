@@ -989,7 +989,12 @@ is in the archive once its node's stream has sent it -- under load the
 stream may be behind its node (Known gaps) -- and in the bucket after the
 next `fennec-archive-sync` run that succeeds: the timer starts one every
 five minutes, so a write is there five minutes and a run's length after
-the archive took it, while runs succeed. One that fails is retried at the
+the archive took it, while runs succeed. The archiver makes each file 0600
+whatever its `UMask`, as fennecdb makes every file, so each run first gives
+the archiver's group read of the archive, as root (the unit's
+`ExecStartPre=`), and copies what that group may then read: a segment or
+image made after that step waits for the next run, five minutes on. One
+that fails is retried at the
 next tick, and `FennecArchiveSyncStale` fires once no run has succeeded for
 half an hour. Each success is written into node_exporter's textfile
 collector, `/var/lib/prometheus/node-exporter`, which the `fennec-sync` user
