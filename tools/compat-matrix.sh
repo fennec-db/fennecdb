@@ -1438,7 +1438,11 @@ case_e() {
 # `key delivery` refuses to start on the release, exit 2, naming the line;
 # a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
 # events answered 409 until it is set again with `key body`, its statements
-# not armed, and the node says so as it starts.
+# not armed, and the node says so as it starts. On Linux the old node is
+# musl, its sidecar naming the tenant's file with no birth time, and the new
+# a glibc build reading one: f2 holds the set as the tenant's across the two
+# (docs/design/tenants.md, a birth time held where both sides name one),
+# which the first run on main found put away, every event of it 401.
 GH_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef
 
 # event URL BODY DELIVERY: a push GitHub signed; "<body> <status>".
