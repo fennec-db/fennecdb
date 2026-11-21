@@ -4945,6 +4945,17 @@ impl Router {
             body.as_bytes(),
         ) {
             Ok((200, body)) => {
+                // What the copy knew of its primary as it was promoted: a
+                // failover promotes it where it stands, and what it was not
+                // sent is lost -- logged for the tenant, and a copy promoted
+                // not connected counted.
+                let heard = copy_heard(&body);
+                metrics::promoted(heard.0);
+                let of = from.as_ref().map_or("", |(name, _)| name.as_str());
+                fennec_http::log!(
+                    "failover of `{of}`: `{tenant}` promoted on `{to}`, {}",
+                    heard_words(heard)
+                );
                 self.quota_after_failover(tenant, to);
                 self.hooks_after_failover(tenant, to);
                 let left = from.as_ref().map(|(name, _)| name.as_str());
@@ -6291,6 +6302,52 @@ impl Router {
         dir.note_placed(tenant, to, instance)?;
         dir.place_promoted(tenant, to, said("history").as_deref(), from)
     }
+}
+
+/// What a promoted copy knew of its primary, as its node's answer says it
+/// (`fennec_http::replication::Heard`): whether it was connected, how many
+/// writes behind its primary's disk and how long before it last heard from
+/// it, -1 for never. `None` each where the node does not say: one older
+/// than the fields.
+type Heard = (Option<bool>, Option<i64>, Option<i64>);
+
+fn copy_heard(answer: &[u8]) -> Heard {
+    let fields = fields_of(answer);
+    let at = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let int = |key: &str| match at(key) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let connected = match at("connected") {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    (connected, int("behind"), int("last_contact_ms"))
+}
+
+/// A promoted copy's [`Heard`] in a log line's words.
+fn heard_words((connected, behind, contact): Heard) -> String {
+    let Some(connected) = connected else {
+        return "its node too old to say what the copy knew of its primary".into();
+    };
+    let heard = match contact {
+        Some(ms) if ms >= 0 => format!("last heard from it {ms} ms before"),
+        _ => "never heard from it since it opened".into(),
+    };
+    format!(
+        "its copy {} its primary, {} writes behind it as it last said, {heard}{}",
+        if connected {
+            "connected to"
+        } else {
+            "not connected to"
+        },
+        behind.unwrap_or(0),
+        if connected && behind == Some(0) {
+            ""
+        } else {
+            ": what it was not sent is lost"
+        }
+    )
 }
 
 /// The lineage a node's answer names (`"lineage": "<8 hex>"`): the one it

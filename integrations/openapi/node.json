@@ -1677,7 +1677,7 @@
     },
     "responses": {
      "200": {
-      "description": "Done",
+      "description": "Promoted where it stood",
       "headers": {
        "X-Request-Id": {
         "$ref": "#/components/headers/RequestId"
@@ -1686,7 +1686,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "$ref": "#/components/schemas/Promoted"
         }
        }
       }
@@ -4729,6 +4729,39 @@
      "force": {
       "type": "boolean",
       "description": "Promote it whatever it holds."
+     }
+    }
+   },
+   "Promoted": {
+    "type": "object",
+    "description": "The copy promoted, and what it knew of its primary as it was: a failover promotes it where it stands, and what it was not sent -- a write its primary answered among it -- is lost. lineage and instance besides, each null where it has none.",
+    "properties": {
+     "promoted": {
+      "type": "string",
+      "description": "The tenant."
+     },
+     "seq": {
+      "type": "integer",
+      "description": "The change its history forked at."
+     },
+     "history": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "The history it took writes on."
+     },
+     "connected": {
+      "type": "boolean",
+      "description": "Connected to its primary as the promotion began: its primary gone, its stream has ended with it."
+     },
+     "behind": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Writes on its primary's disk, as its primary last said, it had not applied."
+     },
+     "last_contact_ms": {
+      "type": "integer",
+      "minimum": -1,
+      "description": "How long before the promotion its primary was last heard from, a keep-alive every 2 s included; -1, not since the copy was opened."
      }
     }
    },

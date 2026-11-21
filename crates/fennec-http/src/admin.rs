@@ -275,19 +275,24 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // held to, or forces it ([`expected`]).
         (Method::Post, ["tenants", t, "promote"]) => superseded(tenants, req)
             .and_then(|_| expected(&req.body))
-            .and_then(|want| tenants.promote_as(t, &want))
-            .map(|(seq, id)| {
+            .and_then(|want| tenants.promote_heard(t, &want))
+            .map(|(seq, id, heard)| {
                 // Its lineage, which the router records: another file of
                 // the tenant, promoted by force, is of one of its own.
                 let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
                 // The identity the promotion gave it, which the router
                 // records ([`Tenants::promote_as`]).
                 let instance = instance::json(tenants.instance(t));
+                // What the copy knew of its primary: a failover promotes it
+                // where it stands, and what it was not sent -- a write its
+                // primary answered among it -- is lost. The router logs it
+                // and counts a copy promoted not connected.
+                let heard = heard.json();
                 Response::json(
                     200,
                     format!(
                         "{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\",\
-                         \"lineage\":{lineage},\"instance\":{instance}}}"
+                         \"lineage\":{lineage},\"instance\":{instance}{heard}}}"
                     ),
                 )
             }),

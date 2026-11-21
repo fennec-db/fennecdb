@@ -779,6 +779,23 @@ fn render(source: Source) -> String {
                 &[],
                 crate::tenants::copies_refused(),
             );
+            // The copies a failover may promote, never by tenant: one that
+            // is not connected, or behind, is promoted where it stands, and
+            // what it was not sent is lost (`replication::Heard`). What the
+            // kit's alerts read for a node's copies, as fennec_replica_*
+            // for a file's replica.
+            out.family(
+                "fennec_copies_disconnected",
+                "gauge",
+                "Copies of tenants here a failover may promote that are not connected to their primary now: one promoted so loses what it was not sent.",
+            );
+            out.sample("fennec_copies_disconnected", &[], s.copies.disconnected);
+            out.family(
+                "fennec_copies_behind",
+                "gauge",
+                "The most writes on its primary's disk, as its primary last said, any copy here a failover may promote has not applied.",
+            );
+            out.sample("fennec_copies_behind", &[], s.copies.behind);
             unlinked(&mut out, s.unlinked);
             if let Some(n) = s.node_streams {
                 out.family(

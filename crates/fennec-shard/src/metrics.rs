@@ -108,6 +108,9 @@ static UNREACHABLE: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 static MOVES: [AtomicU64; 2] = [ZERO; 2];
 /// Automatic failovers `[every tenant promoted, some not]`.
 static FAILOVERS: [AtomicU64; 2] = [ZERO; 2];
+/// Copies promoted, by whether the copy was connected to its primary as
+/// its promotion began: `[connected, not_connected, unknown]`.
+static PROMOTIONS: [AtomicU64; 3] = [ZERO; 3];
 static MOVE_TIMES: Timings = Timings::new(&MOVE_BUCKETS);
 /// Queries across tenants (`POST /_shard/query`), by [`Fanned`].
 static FANOUTS: [AtomicU64; 4] = [ZERO; 4];
@@ -286,6 +289,17 @@ pub fn failed_over(done: bool) {
     FAILOVERS[!done as usize].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Counts a copy promoted, by whether its node said it was connected to
+/// its primary as the promotion began (`None`: a node too old to say).
+pub fn promoted(connected: Option<bool>) {
+    let i = match connected {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => 2,
+    };
+    PROMOTIONS[i].fetch_add(1, Ordering::Relaxed);
+}
+
 /// A client connection, counted open for as long as this lives.
 pub struct Connection(());
 
@@ -395,6 +409,18 @@ pub fn counters(out: &mut Text) {
             "fennec_router_auto_failovers_total",
             &[("outcome", outcome)],
             FAILOVERS[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
+        "fennec_router_promotions_total",
+        "counter",
+        "Copies of tenants promoted by a failover, by whether the copy was connected to its primary as its promotion began: not_connected is one promoted where its stream had left it -- a primary that died ends its standby's stream with it, so read the router's line for the tenant, which gives how long before the copy last heard from its primary and how far behind it was -- and unknown a node too old to say. What a copy promoted was not sent is lost.",
+    );
+    for (i, copy) in ["connected", "not_connected", "unknown"].iter().enumerate() {
+        out.sample(
+            "fennec_router_promotions_total",
+            &[("copy", copy)],
+            PROMOTIONS[i].load(Ordering::Relaxed),
         );
     }
     out.family(

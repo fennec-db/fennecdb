@@ -682,6 +682,27 @@ fn a_tenants_copy_is_promoted_by_the_admin_alone() {
     let put = query(primary.port, "acme", "put c {x: 2}");
     assert_eq!(put.status, 200, "{}", put.body);
     holds(&copy, 2);
+
+    // Promoted by its admin, it says what it knew of its primary, as its
+    // status names it: connected, nothing behind, heard from a moment ago.
+    // A router's failover logs it and counts a copy promoted not connected.
+    let promoted = admin(copy.port, "POST", "/_admin/tenants/acme/promote", "");
+    assert_eq!(promoted.status, 200, "{}", promoted.body);
+    let fields = fennec_core::json::parse_object(&promoted.body).unwrap();
+    let field = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(
+        field("connected"),
+        Some(Value::Bool(true)),
+        "{}",
+        promoted.body
+    );
+    assert_eq!(field("behind"), Some(Value::Int(0)), "{}", promoted.body);
+    let heard = match field("last_contact_ms") {
+        Some(Value::Int(ms)) => ms,
+        _ => panic!("no last_contact_ms: {}", promoted.body),
+    };
+    // A keep-alive every 2 s: well within a test's wait.
+    assert!((0..30_000).contains(&heard), "{}", promoted.body);
 }
 
 /// A tenant's copy whose image's adoption panicked is failed in words, and
@@ -695,6 +716,7 @@ fn a_tenants_copy_failed_by_a_panic_holds_nothing_up() {
     let n = node("adopt-tenant");
     tenant(n.port);
     let (image, seq) = image();
+    let again = image.clone();
     let (go_tx, go) = mpsc::channel::<()>();
     let go = Mutex::new(go);
     let (url, connections) = stand_in(move |_, mut s| {
@@ -749,6 +771,27 @@ fn a_tenants_copy_failed_by_a_panic_holds_nothing_up() {
     );
     assert_eq!(promoted.status, 500, "{}", promoted.body);
     assert!(promoted.body.contains("panic"), "{}", promoted.body);
+
+    // A release under the tenant's slot: made to follow another primary,
+    // the failed copy is closed -- its follower halted, which ended -- and
+    // opened again from its file, which takes that primary's image; then
+    // deleted, halting the new follower. Neither waits on the thread the
+    // panic ended, each answered within the call's bound.
+    let (url, others) = stand_in(move |_, mut s| {
+        let mut out = ANSWER.to_vec();
+        out.extend_from_slice(&hello(true, seq));
+        out.extend_from_slice(&message(b'I', &again));
+        let _ = s.write_all(&out);
+        std::thread::sleep(WITHIN);
+    });
+    let from = format!(r#"{{"from":"{url}"}}"#);
+    let followed = admin(n.port, "POST", "/_admin/tenants/acme/follow", &from);
+    assert_eq!(followed.status, 200, "{}", followed.body);
+    connection(&others, 0, "the reopened copy's follower");
+    holds(&n, 2);
+    let deleted = admin(n.port, "DELETE", "/_admin/tenants/acme", "");
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    tenant(n.port);
 
     let (tx, rx) = mpsc::channel();
     let tenants = Arc::clone(&n.tenants);
