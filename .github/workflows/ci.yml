@@ -364,10 +364,12 @@ jobs:
 
       # The long runs' scripts held to their own promises with toys and
       # no Docker (ycsb/env-check.sh's `env_self_test`): interrupted, each
-      # stops the measurement `caffeinate` runs, not only `caffeinate`;
-      # the soak leaves the volumes it said to keep, and its guard stops a
-      # soak that printed nothing. Under dash, as `sh` is here; a few
-      # seconds each.
+      # stops the measurement `caffeinate` runs, not only `caffeinate`,
+      # and interrupted in a docker call that never ends -- its own
+      # shell's, its guard's -- leaves nothing it started running; the
+      # soak leaves the volumes it said to keep, and its guard stops a
+      # soak that printed nothing. Under dash, as `sh` is here; each
+      # bounds its own waits.
       - name: The soak's and the larger-than-memory run's scripts, interrupted
         run: |
           sh crates/fennec-bench/ycsb/run-soak.sh --self-test

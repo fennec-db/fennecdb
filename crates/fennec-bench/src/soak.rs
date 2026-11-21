@@ -47,7 +47,7 @@ use super::http;
 use super::register::{Counters, Kills, Registers, W};
 use super::{
     append_values, base_digests, digest, insert_text, json_rows, metric_sum, record_values, Cgroup,
-    Hist, Rng, Scrambled, FIELDS, LOAD_BATCH, SEED,
+    Hist, Rng, Scrambled, ALPINE, FIELDS, LOAD_BATCH, SEED,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -535,7 +535,7 @@ impl Kit {
         }
         let vols = self.volumes();
         say(format!(
-            "KEPT the volumes {} past the run ({why}): `docker run --rm -v {}:/data alpine ls -l /data` lists the primary's, `docker volume rm {}` removes them",
+            "KEPT the volumes {} past the run ({why}): `docker run --rm --pull never -v {}:/data {ALPINE} ls -l /data` lists the primary's, `docker volume rm {}` removes them",
             vols.join(", "),
             vols[0],
             vols.join(" ")
@@ -654,7 +654,7 @@ impl Kit {
                 &format!("{}:/tools:ro", self.tools),
                 "-v",
                 &format!("{volume}:/data"),
-                "alpine",
+                ALPINE,
                 "sh",
                 "-c",
                 script,
@@ -695,7 +695,7 @@ impl Kit {
                 // Reading another user's `/proc/<pid>/root` is a ptrace's right.
                 "--cap-add",
                 "SYS_PTRACE",
-                "alpine",
+                ALPINE,
                 "sh",
                 "-c",
                 &script,
@@ -1135,13 +1135,25 @@ struct Checker {
     base: Cell<(u64, [u64; FIELDS])>,
     /// The writes a read after a kill showed gone (`Registers::gone`),
     /// each counted once; how many since the minute's line took them, and
-    /// the largest gap among them between the answer and its kill, in ms.
+    /// the largest gap among them between the answer and its kill, in ms
+    /// rounded up (`ms_up`).
     gone_seen: HashSet<(u64, u8, u64)>,
     lost_writes: u64,
     lost_ms_max: Option<i64>,
     /// Backups whose restored file held a record no write left.
     restored_bad: HashSet<u64>,
     backups_differ: u64,
+}
+
+/// A gap in ns as whole ms, rounded up: the loss bound is held in ns, so a
+/// gap a fraction of a ms past it reads past it -- 650.4 ms as 651, never
+/// as the 650 that would say the run supports a bound it broke.
+fn ms_up(ns: i64) -> i64 {
+    match ns > 0 {
+        true => (ns + 999_999) / 1_000_000,
+        // Toward zero, which is up for a gap below it.
+        false => ns / 1_000_000,
+    }
 }
 
 impl Checker {
@@ -1211,7 +1223,7 @@ impl Checker {
         let mut past: Option<i64> = None;
         if gone {
             for (gap, certain, ws) in self.regs.gone(key, f, s, e, d) {
-                let ms = gap / 1_000_000;
+                let ms = ms_up(gap);
                 if self.gone_seen.insert((key, f, ws)) {
                     self.lost_writes += 1;
                     self.lost_ms_max = Some(self.lost_ms_max.map_or(ms, |m| m.max(ms)));
@@ -2947,6 +2959,52 @@ enum Job {
     Fence(mpsc::Sender<()>),
 }
 
+/// Every side job asked before now waited for -- by a kill before it lands,
+/// and by the end before it reads every key back -- `within` at the most:
+/// one that hangs is named (`doing`, what the side thread was doing) and
+/// ends the run, never waited on forever, as is a side thread that ended
+/// before its queue did (its panic above). `what` is the waiter.
+fn fence(jobs: &mpsc::Sender<Job>, doing: &Mutex<String>, within: Duration, what: &str) {
+    let (done, wait) = mpsc::channel();
+    let _ = jobs.send(Job::Fence(done));
+    let t = Instant::now();
+    match wait.recv_timeout(within) {
+        Ok(()) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Copied out first: a panic holding the lock would poison it.
+            let job = doing.lock().unwrap().clone();
+            panic!(
+                "{what} waited {:.0} s for the side job, {job}, which did not end",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{what} found the side jobs' thread ended (its panic is above)")
+        }
+    }
+}
+
+/// A backup's verdict from its parts -- taken, restored and verified, the
+/// restored file's change number (`seq`) against the primary's at the
+/// backup's start (`seq0`), its records read back -- as whether it counts
+/// and whether it is stale. An empty or stale archive restores and
+/// verifies as well as a whole one: only the change number tells them
+/// apart, and a number not read proves nothing, so the backup counts only
+/// where both were read and the restored one is at least the primary's.
+fn backup_held(
+    backed: bool,
+    restored: bool,
+    seq0: Option<u64>,
+    seq: Option<u64>,
+    sampled: usize,
+) -> (bool, bool) {
+    let fresh = matches!((seq0, seq), (Some(a), Some(b)) if b >= a);
+    (
+        backed && restored && fresh && sampled > 0,
+        restored && !fresh,
+    )
+}
+
 /// What the side thread needs of the run.
 struct Side {
     sh: Arc<Shared>,
@@ -3041,8 +3099,7 @@ impl Side {
             false => (None, 0),
         };
         me.inflight.store(u64::MAX, Ordering::SeqCst);
-        let fresh = matches!((seq0, seq), (Some(a), Some(b)) if b >= a);
-        let ok = backed && restored && fresh && sampled > 0;
+        let (ok, stale) = backup_held(backed, restored, seq0, seq, sampled);
         say(format!(
             "backup {id} {}, restored and verified {}, its change {} against the primary's {} at its start, {sampled} records read from it; {:.0} s",
             if backed { "taken" } else { "FAILED" },
@@ -3063,7 +3120,7 @@ impl Side {
         } else {
             say(out);
             self.doings.backup_failed.fetch_add(1, Ordering::Relaxed);
-            if restored && !fresh {
+            if stale {
                 self.doings.backup_stale.fetch_add(1, Ordering::Relaxed);
             }
             kit.keep_data(&format!(
@@ -3550,7 +3607,7 @@ impl Sampler {
                 &format!("--pid=container:{}", kit.server()),
                 "--cap-add",
                 "SYS_PTRACE",
-                "alpine",
+                ALPINE,
                 "sh",
                 "-c",
                 script,
@@ -4243,19 +4300,13 @@ fn run(o: &Opts) {
                     });
                 }
                 Doing::Kill { in_compact } => {
-                    // One at a time: a kill waits for what is queued, for
-                    // `WAIT_MAX` at the most -- a side job that hangs is
-                    // named, never waited on forever.
-                    let (done, wait) = mpsc::channel();
-                    let _ = jobs.send(Job::Fence(done));
-                    let t = Instant::now();
-                    if wait.recv_timeout(WAIT_MAX).is_err() {
-                        panic!(
-                            "the kill due at minute {m} waited {:.0} s for the side job, {}, which did not end",
-                            t.elapsed().as_secs_f64(),
-                            sh.doing.lock().unwrap()
-                        );
-                    }
+                    // One at a time: a kill waits for what is queued.
+                    fence(
+                        &jobs,
+                        &sh.doing,
+                        WAIT_MAX,
+                        &format!("the kill due at minute {m}"),
+                    );
                     say(format!(
                         "the kill due at minute {m}{}: announced",
                         if in_compact { ", in a compact" } else { "" }
@@ -4338,8 +4389,17 @@ fn run(o: &Opts) {
     for h in handles {
         h.join().unwrap();
     }
+    // The side jobs still queued -- a backup is minutes -- waited for as a
+    // kill waits for them: bounded and named. The join after it is the
+    // thread's end once its queue is closed.
+    say(format!(
+        "the load stopped; the side jobs still queued next, {} s at the most",
+        WAIT_MAX.as_secs()
+    ));
+    fence(&jobs, &sh.doing, WAIT_MAX, "the end");
     drop(jobs);
     side.join().unwrap();
+    say("the side jobs ended; every read held next, then every key read back".into());
     for s in &sh.slots {
         checker.take(std::mem::take(&mut *s.log.lock().unwrap()));
     }
@@ -4388,7 +4448,14 @@ fn run(o: &Opts) {
             t.elapsed().as_secs_f64()
         ));
     }
+    // A line before each verify and after it: the two, each bounded at
+    // `WAIT_MAX`, would outlast the guard's ten minutes between two lines.
     let verify = |volume: &str, file: &str| {
+        say(format!(
+            "{file} verified next, {} s at the most",
+            WAIT_MAX.as_secs()
+        ));
+        let t = Instant::now();
         let (ok, out) = bench.fennec(
             &format!("{}-verify", bench.name),
             volume,
@@ -4398,6 +4465,15 @@ fn run(o: &Opts) {
         if !ok {
             say(out);
         }
+        say(format!(
+            "{file} {} in {:.0} s",
+            if ok {
+                "verified clean"
+            } else {
+                "FAILED its verify"
+            },
+            t.elapsed().as_secs_f64()
+        ));
         ok
     };
     let primary_ok = verify(&bench.volume("data"), "soak.fennec");
@@ -4988,12 +5064,28 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     let mut grew = Vec::new();
     let mut most = 0.0f64;
     let mut judged_lives = 0;
+    // Each life's looks: quiet, settled, and those the server's own
+    // compactions took (no compact of the run's in the minute) -- what a
+    // life too few looks were left in says.
+    let mut looks = Vec::new();
     for (life, xs) in &lives {
         let quiet: Vec<f64> = settled(xs)
             .iter()
             .filter(|(_, m)| quiet_look(m, false))
             .filter_map(|(_, m)| get(m, "rss_anon"))
             .collect();
+        let own = settled(xs)
+            .iter()
+            .filter(|(_, m)| {
+                let g = |k: &str| get(m, k).unwrap_or(0.0);
+                !quiet_look(m, false) && g("compact") == 0.0 && g("compact_ops") == 0.0
+            })
+            .count();
+        looks.push(format!(
+            "life {life} {} of {} ({own} in the server's own)",
+            quiet.len(),
+            settled(xs).len()
+        ));
         if quiet.len() < 10 {
             continue;
         }
@@ -5008,14 +5100,28 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     v.push((
         CRITERIA[5],
         judged_lives > 0 && grew.is_empty(),
-        format!(
-            "{judged_lives} lives of ten quiet looks or more, the most {:+.1}% from the median of the first five to the last five's{}",
-            most * 100.0,
-            match grew.is_empty() {
-                true => String::new(),
-                false => format!("; lives {}", list(&grew)),
-            }
-        ),
+        match judged_lives {
+            // Not a leak and not a pass: the run's data left nothing to
+            // judge -- under the run's memory the server compacts on its
+            // own, and a life whose minutes are mostly compactions has no
+            // ten quiet looks. Said so, each life's looks beside it.
+            0 => format!(
+                "NOT JUDGED, too few quiet looks: no life of the primary had ten from its fifth line, its other looks in a compaction -- quiet of settled: {}",
+                match looks.is_empty() {
+                    true => "no line names its life".to_string(),
+                    false => looks.join(", "),
+                }
+            ),
+            _ => format!(
+                "{judged_lives} of {} lives of ten quiet looks or more, the most {:+.1}% from the median of the first five to the last five's{}",
+                lives.len(),
+                most * 100.0,
+                match grew.is_empty() {
+                    true => String::new(),
+                    false => format!("; lives {}", list(&grew)),
+                }
+            ),
+        },
     ));
     // The replica is never killed: the median of its first five quiet
     // looks from minute 60 against the median of every five after.
@@ -5295,6 +5401,29 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     ] {
         if (exact && have != want) || have < want {
             short.push(format!("{what} {have} of {want}"));
+        }
+    }
+    // A kill meant to land in a compact must find one writing its file
+    // (its side file left behind: `kill_compacting`, on the line after the
+    // kill's minute). A compact request the restart cut (`compact_killed`)
+    // alone does not say so: a compact that ended just before the kill
+    // landed leaves its request cut all the same.
+    if let Some(s) = settings {
+        for m in 1..n {
+            let due = schedule(
+                m,
+                n,
+                s.kill_every,
+                s.kill_in_compact_every,
+                s.compact_every,
+                s.backup_every,
+                s.backup_at,
+            );
+            if due.contains(&Doing::Kill { in_compact: true })
+                && line(m + 1).and_then(|x| get(x, "kill_compacting")) != Some(1.0)
+            {
+                short.push(format!("the kill at minute {m} found no compact writing"));
+            }
         }
     }
     v.push((
@@ -6279,6 +6408,15 @@ mod tests {
                 vec![CRITERIA[14]],
             ),
             (
+                "a kill in a compact that found none writing, its request cut all the same",
+                Box::new(|m, x| {
+                    if m == 91 {
+                        x.insert("kill_compacting", 0.0);
+                    }
+                }),
+                vec![CRITERIA[14]],
+            ),
+            (
                 "a stale backup",
                 Box::new(|m, x| {
                     if m == 51 {
@@ -6908,7 +7046,7 @@ mod tests {
         );
         // Answered 1 000 ms before it and gone: past the bound, a mismatch
         // that says by how much.
-        let mut c = Checker::new(100, kills, 60_000 * ms, 1_000 * ms, &[]);
+        let mut c = Checker::new(100, kills.clone(), 60_000 * ms, 1_000 * ms, &[]);
         c.take(vec![write(7, 3, 42, 3_900 * ms, 4_000 * ms, None)]);
         c.take(vec![row(7, 10_000 * ms, 10_100 * ms, base_digests(7))]);
         c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
@@ -6918,6 +7056,38 @@ mod tests {
             "{}",
             c.examples[0]
         );
+        // A fraction of a ms past the bound is past it, and reads so: the
+        // gap rounded up, never down to the bound itself -- which the
+        // report would have read as a run supporting it.
+        let mut c = Checker::new(100, kills.clone(), 60_000 * ms, 1_000 * ms, &[]);
+        let answered = 5_000 * ms - 650 * ms - 400_000;
+        c.take(vec![write(7, 3, 42, 4_000 * ms, answered, None)]);
+        c.take(vec![row(7, 10_000 * ms, 10_100 * ms, base_digests(7))]);
+        c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
+        assert_eq!((c.mismatches, c.lost_ms_max), (1, Some(651)));
+        assert!(
+            c.examples[0].contains("answered 651 ms before a kill is gone, past the 650 ms"),
+            "{}",
+            c.examples[0]
+        );
+        // At the bound exactly: within it, and 650.
+        let mut c = Checker::new(100, kills, 60_000 * ms, 1_000 * ms, &[]);
+        c.take(vec![write(7, 3, 42, 4_000 * ms, 4_350 * ms, None)]);
+        c.take(vec![row(7, 10_000 * ms, 10_100 * ms, base_digests(7))]);
+        c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
+        assert_eq!((c.mismatches, c.lost_ms_max), (0, Some(650)));
+        let n = judge(
+            &synthetic(480, &|m, x| {
+                if m == 31 {
+                    x.insert("lost_writes", 1.0);
+                    x.insert("lost_ms_max", 651.0);
+                }
+            }),
+            None,
+        )[0]
+        .notes
+        .join("\n");
+        assert!(n.contains("651 ms before it, past the bound"), "{n}");
     }
 
     #[test]
@@ -6971,6 +7141,112 @@ mod tests {
         ]);
         c.hold(100, 100, 100, &[]);
         assert_eq!((c.mismatches, c.backups_differ), (2, 1));
+    }
+
+    #[test]
+    fn a_fence_ends_the_run_naming_the_side_job_it_waited_for() {
+        let doing = Mutex::new("the compact asked at minute 40".to_string());
+        let panicked = |f: &dyn Fn()| -> String {
+            let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_err();
+            e.downcast::<String>().map(|s| *s).unwrap_or_default()
+        };
+        // A side thread that answers: the fence returns.
+        let (jobs, rx) = mpsc::channel::<Job>();
+        let side = std::thread::spawn(move || {
+            for job in rx {
+                if let Job::Fence(done) = job {
+                    let _ = done.send(());
+                }
+            }
+        });
+        fence(&jobs, &doing, Duration::from_secs(60), "the end");
+        drop(jobs);
+        side.join().unwrap();
+        // One whose job does not end: the waiter and the job named, within
+        // the bound.
+        let (jobs, rx) = mpsc::channel::<Job>();
+        let t = Instant::now();
+        let said = panicked(&|| fence(&jobs, &doing, Duration::from_millis(50), "the end"));
+        assert!(t.elapsed() < Duration::from_secs(30));
+        assert!(
+            said.starts_with(
+                "the end waited 0 s for the side job, the compact asked at minute 40,"
+            ),
+            "{said}"
+        );
+        drop(rx);
+        // A side thread that ended before its queue: said so, never waited
+        // on.
+        let said = panicked(&|| fence(&jobs, &doing, Duration::from_secs(60), "the end"));
+        assert!(said.contains("the side jobs' thread ended"), "{said}");
+    }
+
+    #[test]
+    fn a_backup_counts_only_where_its_restored_change_is_the_primarys_at_its_start() {
+        let (taken, restored) = (true, true);
+        // At or past the primary's change when the backup began: counted.
+        for seq in [100, 250] {
+            assert_eq!(
+                backup_held(taken, restored, Some(100), Some(seq), 1_000),
+                (true, false)
+            );
+        }
+        // Behind it -- a stale archive, an empty one -- or either number
+        // unread: restored and verified all the same, stale and failed.
+        for (seq0, seq) in [
+            (Some(100), Some(99)),
+            (Some(100), Some(0)),
+            (None, Some(100)),
+            (Some(100), None),
+        ] {
+            assert_eq!(
+                backup_held(taken, restored, seq0, seq, 1_000),
+                (false, true),
+                "{seq0:?} {seq:?}"
+            );
+        }
+        // Not restored: failed, and no question of stale; nothing read
+        // back from it: failed.
+        assert_eq!(
+            backup_held(taken, false, Some(100), None, 0),
+            (false, false)
+        );
+        assert_eq!(
+            backup_held(taken, restored, Some(100), Some(100), 0),
+            (false, false)
+        );
+        assert_eq!(
+            backup_held(false, restored, Some(100), Some(100), 1_000),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn a_primary_whose_lives_are_mostly_compactions_is_not_judged_and_says_so() {
+        // The server's own compactions in two minutes of three: no life
+        // keeps ten quiet looks from its fifth line.
+        let text = synthetic(480, &|m, x| {
+            if m > 0 && m < u64::MAX && m % 3 != 0 {
+                x.insert("auto_compacts", 1.0);
+            }
+        });
+        let j = judge(&text, None);
+        let (_, pass, said) = &j[0].verdicts[5];
+        assert!(!pass);
+        assert!(
+            said.starts_with("NOT JUDGED, too few quiet looks: no life of the primary had ten"),
+            "{said}"
+        );
+        assert!(said.contains("life 0 "), "{said}");
+        assert!(said.contains("in the server's own)"), "{said}");
+        // A run with them judged says how many of how many.
+        let j = judge(&synthetic(480, &|_, _| {}), None);
+        let (_, pass, said) = &j[0].verdicts[5];
+        assert!(pass, "{said}");
+        assert!(
+            said.starts_with("16 of 16 lives of ten quiet looks"),
+            "{said}"
+        );
     }
 
     #[test]

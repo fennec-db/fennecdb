@@ -56,6 +56,10 @@ set -eu
 cd "$(dirname "$0")/../../.."
 ENV_PREFIX=p6
 . crates/fennec-bench/ycsb/env-check.sh
+# Until the run's own cleanup takes over: what a bounded docker call was
+# in, stopped, however the script ends (the pre-flight's build among them).
+trap env_end EXIT
+trap 'exit 130' INT TERM
 
 case ${1:-} in
 --self-test)
@@ -174,6 +178,7 @@ cleanup() {
     env_within 120 "docker rm" docker rm -f "$NAME-build" "$NAME-df" >/dev/null 2>&1
     env_within 60 "docker volume rm" docker volume rm -f "$NAME-tools" >/dev/null 2>&1
     rm -f "$KEPT"
+    env_end
     return 0
 }
 trap cleanup EXIT

@@ -110,6 +110,14 @@ const FIELDS: usize = 10;
 const FIELD_LEN: usize = 100;
 const SEED: u64 = 0x5943_5342; // "YCSB"
 const LOAD_BATCH: usize = 1_000;
+/// The image every container beside a measured one runs in -- the looks, the
+/// verifies, the backups, the sampler, `df` -- by its digest, as the
+/// Dockerfile names the rust image: every `docker run` takes `--pull
+/// never`, and a tag can move. `ycsb/env-check.sh` names the same
+/// (`ENV_ALPINE`, which `--preflight` checks is here; a test holds the two
+/// to one digest).
+const ALPINE: &str =
+    "alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf";
 #[cfg(feature = "rivals")]
 const PG_URL: &str = "host=127.0.0.1 port=55433 user=postgres password=fennec dbname=ycsb";
 #[cfg(feature = "rivals")]
@@ -628,7 +636,7 @@ fn container_cgroup(container: &str) -> Option<Cgroup> {
         ])
         .args(["--name", &format!("{container}-look")])
         // Reading another user's `/proc/<pid>/root` is a ptrace's right.
-        .args(["--cap-add", "SYS_PTRACE", "alpine", "sh", "-c"])
+        .args(["--cap-add", "SYS_PTRACE", ALPINE, "sh", "-c"])
         .arg(
             "cd /proc/1/root/sys/fs/cgroup && cat memory.stat && \
              echo current $(cat memory.current) && echo limit $(cat memory.max) && \
@@ -662,7 +670,7 @@ impl Watch {
             ])
             .args(["--name", &name])
             // Reading another user's `/proc/<pid>/root` is a ptrace's right.
-            .args(["--cap-add", "SYS_PTRACE", "alpine", "sh", "-c", CGROUP_LOOK])
+            .args(["--cap-add", "SYS_PTRACE", ALPINE, "sh", "-c", CGROUP_LOOK])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -726,7 +734,7 @@ fn container_memory(name: &str) -> Option<u64> {
             &format!("--pid=container:{name}"),
         ])
         // Reading another user's `/proc/<pid>/root` is a ptrace's right.
-        .args(["--cap-add", "SYS_PTRACE", "alpine"])
+        .args(["--cap-add", "SYS_PTRACE", ALPINE])
         .args(["cat", "/proc/1/root/sys/fs/cgroup/memory.stat"])
         .output()
         .ok()?;
@@ -1375,7 +1383,7 @@ impl System for Server {
                         "-v",
                         &format!("{}:/data", self.volume()),
                     ])
-                    .args(["alpine", "du", "-b", "/data/ycsb.fennec"])
+                    .args([ALPINE, "du", "-b", "/data/ycsb.fennec"])
                     .output()
                     .ok()?;
                 String::from_utf8_lossy(&out.stdout)
@@ -4543,6 +4551,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The image beside the measured containers is one, by one digest:
+    /// ycsb's, the scripts' (`ENV_ALPINE`, which `--preflight` checks is
+    /// here), and no container of theirs by a tag.
+    #[test]
+    fn ycsb_and_the_scripts_run_one_alpine_by_its_digest() {
+        let digest = ALPINE.strip_prefix("alpine@sha256:").unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        let env = include_str!("../../ycsb/env-check.sh");
+        assert!(env.contains(&format!("\nENV_ALPINE={ALPINE}\n")));
+        for (name, text) in [
+            ("env-check.sh", env),
+            ("run-soak.sh", include_str!("../../ycsb/run-soak.sh")),
+            (
+                "run-larger-than-memory.sh",
+                include_str!("../../ycsb/run-larger-than-memory.sh"),
+            ),
+        ] {
+            for l in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                assert!(!l.contains(" alpine "), "{name}: {l}");
+            }
+        }
+    }
 
     fn read(key: u64, s: u64, e: u64, fields: [u64; FIELDS]) -> Entry {
         Entry::read(key, s, e, vec![(key, fields)])

@@ -238,8 +238,9 @@ written `env_failed 1`: the environment's failure, counted in the report's
 What a run needs is looked at before its first command, and nothing is
 pulled while it runs (`--preflight`, `env_preflight`, both scripts): the
 rust image the Dockerfile names, by its digest -- a tag can move -- which
-the Linux tools build in; `alpine`, which the looks, verifies, backups and
-`df` run in; rustup's toolchain and the targets rust-toolchain.toml names,
+the Linux tools build in; `alpine`, by its digest too (`ENV_ALPINE` in the
+scripts, `ALPINE` in `ycsb`, a test holding them to one), which the looks,
+verifies, backups and `df` run in; rustup's toolchain and the targets rust-toolchain.toml names,
 which a cargo in the tree would fetch; cargo's registry index, which the
 tools' build reads offline; and `fennecdb-ycsb` built from the tree with no
 network (`docker build --network=none`), which holds Docker's build cache to
@@ -252,8 +253,18 @@ Every container, volume and network a run makes carries its process id
 the step's own children before the step -- `caffeinate -i` runs the
 measurement as its child and passes no signal on, so stopping it alone left
 `ycsb` running, writing lines and removing containers by a shared name --
-and `--self-test` holds it to that with toys and no Docker
-(`env_self_test`), in CI's clippy job.
+and whatever a bounded docker call was in when the run was stopped: each
+call (`env_within`) writes the pids of its command and the watch beside
+it into the shell's own directory until it has waited for both, and the
+cleanup stops them by those pids wherever the call was made -- the
+guard's run in its own shell, held still (`SIGSTOP`) while its children
+are stopped, its `df` read into a file rather than through a pipeline
+whose subshell would go on to its next call; a watch looks once a second,
+so a stopped one leaves no long `sleep`. `--self-test` holds it to that
+with toys and no Docker (`env_self_test`), in CI's clippy job: interrupted
+under `caffeinate`, and in a docker call that never ends -- its own
+shell's before a step, its guard's during one -- every process under the
+script then is gone within 30 s.
 
 In process, the verify logs are the measured process's own memory, under
 the limit: `--verify-max` (half the limit, from the script) ends a cell's
@@ -319,7 +330,15 @@ merely regular: reads do not go back. Once a read answered `v`, a read
 that began after it ended may answer another value only from a write that
 can be ordered after the first read -- one that ended after it began, or
 one never answered -- until a kill, which may take back what the first saw.
-So two reads during one write cannot answer the new value and then the
+A kill is between two reads where the server may have died after the
+first began and before the second ended: it dies somewhere in the kill's
+window, from when `docker kill` was sent (it lands a moment later; a death
+is held as a kill from the last look before it, a minute back) to when the
+server answered again. So a kill sent by the second read's end lets go of
+a first read begun before the server was back -- one begun after the kill
+was sent saw the process the kill then took, and with it a write the kill
+may take; holding it to the kill's send alone failed a right server
+whose hot key a read touched in that moment. So two reads during one write cannot answer the new value and then the
 old, and after two overlapping writes -- the hot keys' everyday -- the reads
 cannot flip between their values: the first that settles on one holds the
 rest to it. The checker holds the reads in the order they ended, and keeps
@@ -362,8 +381,10 @@ every write of `d` it could have answered ended -- had it landed, the
 register could not hold `d` -- and the server had not answered again since
 the kill when it was answered (`Registers::gone`). Each such write is
 counted once (`lost_writes`) with how long before its kill it was answered
-(`lost_ms_max`, the minute's largest), as the rig's `WINDOW` line names its
-first lost write; one past the bound is a mismatch, whose words say by how
+(`lost_ms_max`, the minute's largest, in whole ms rounded up: a gap a
+fraction of a ms past the bound, held in ns, reads past it, never as the
+bound the report would say the run supports), as the rig's `WINDOW` line
+names its first lost write; one past the bound is a mismatch, whose words say by how
 much. And each kill's line says whether a compact was writing at it (its
 side file, `<file>.beside`, left behind: `kill_compacting`) and whether the
 primary's main thread -- its syncer -- was in an fsync then, and for how
@@ -440,7 +461,10 @@ dead, and refuses a second compact while one writes its file beside the
 database (`engine/maintenance.rs`): such a refusal is counted apart
 (`compact_busy`), never failed -- the file was being compacted -- and the
 compact a kill is to land in is asked again until it is taken; a kill must
-cut one (`compact_killed` at least the kills in a compact). The server's
+cut one (`compact_killed` at least the kills in a compact), and find it
+writing: its side file left at the kill (`kill_compacting` on the line
+after each kill the schedule puts in a compact) -- a compact that ended
+just before the kill leaves its request cut all the same. The server's
 own compactions are read from its `fennec_auto_compactions_total`, the
 minute's count on its line (`auto_compacts`, `r_auto_compacts` for the
 replica), and whether one was writing at the minute's look from its side
@@ -452,7 +476,10 @@ passed over -- and at the end every key, every counter and every session.
 Every wait the run can block on is bounded and named: a docker call (two
 minutes unless its own is longer), a kill's wait for the side job before
 it and for its compact to be under way, a server's answer after its start
-(`WAIT_MAX`, 540 s) -- under the ten minutes the script's guard gives a
+(`WAIT_MAX`, 540 s), and the end's wait for the side jobs still queued,
+the same fence a kill's is -- with a line before each wait that could
+outlast the guard with another, the end's two verifies among them -- under
+the ten minutes the script's guard gives a
 soak whose progress file (`--progress`) gained no line (`ENV_SILENT`):
 the guard stops it as hung and the script marks the run
 (`<sync>:<fraction>:hung`), which fails the report's dead-man. A soak that
@@ -531,7 +558,12 @@ line to the median of its last five, and the replica's, never killed, from
 the median of its first five quiet looks from minute 60 to the median of
 every five after -- a quiet look being none in a minute a compact ran or
 was writing at the look (`begin_beside` clones each store), so that one
-look in a compaction never decides; threads and descriptors less the
+look in a compaction never decides. A life with fewer than ten quiet looks
+is not judged, and a run none of whose lives has ten -- the server's own
+compactions taking most minutes, which depends on the data and the memory
+-- fails the line as "NOT JUDGED, too few quiet looks", each life's quiet
+and settled looks and those the server's own compactions took beside it,
+never as a leak; threads and descriptors less the
 connections open within 2 of their run's median, for both, and the
 primary's within 2 from the median of a life's first five looks to its last
 five -- a leak of a few a life never leaves a run-wide band; no error -- a

@@ -26,7 +26,8 @@
 #                      reason in ENV_MARKER.hung
 #
 # The host's free disk is `df` here; Docker's VM's is a container's `df` on
-# the run's data volume (alpine, which must be local: nothing is pulled),
+# the run's data volume (alpine by its digest, which must be local: nothing
+# is pulled),
 # on the VM's own disk, which fills on its own: its disk image has a size
 # of its own, and a volume removed gives its space back to the Mac only
 # when Docker Desktop trims the image.
@@ -36,6 +37,9 @@
 # a step still prints. `env_preflight` says what a run needs before its
 # first command; `env_self_test` holds a script's trap and guard to their
 # promises with toys.
+#
+# A script that sources this ends with `env_end` on every exit (its trap):
+# what a bounded call it was in started is stopped, and ENV_DIR removed.
 
 ENV_LOAD_WAIT=${ENV_LOAD_WAIT:-900}
 ENV_EVERY=${ENV_EVERY:-30}
@@ -44,31 +48,83 @@ ENV_SILENT=${ENV_SILENT:-600}
 ENV_WHY=
 # The guard beside a step (`guarded`), which the cleanup stops.
 env_guard_pid=
+# The image the looks, verifies, backups, sampler and `df` run in, by its
+# digest as the Dockerfile names the rust image: nothing is pulled, and a
+# tag can move. ycsb names the same (`ALPINE` in src/bin/ycsb.rs, a test
+# holding the two to one digest); `--preflight` checks it is here.
+ENV_ALPINE=alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+# The shell's own directory: what each bounded call started (`env_within`)
+# and a `df`'s answer (ENV_DF, the guard's apart).
+ENV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-env.XXXXXX")
+ENV_DF=$ENV_DIR/df
 
 # env_within SECS WHAT CMD...: CMD, stopped after SECS with WHAT named on
 # stderr; CMD's status (143 when it was stopped). No `timeout` on a Mac.
+#
+# What it starts -- CMD and the watch beside it -- is written to ENV_DIR
+# until it has waited for both, so that the cleanup and env_stop_guard stop
+# them by pid wherever the call was made: in the script's shell, in the
+# guard's, or in a subshell of either, whose variables they never see. The
+# watch looks once a second rather than sleeping SECS in one go: a watch
+# stopped leaves at most a second's `sleep`, which ends on its own, where
+# one stopped in its SECS left that sleep running for up to half an hour.
 env_within() {
     ew_secs=$1 ew_what=$2
     shift 2
     "$@" &
     ew_pid=$!
     (
-        # The shell's word on its sleep stopped is no one's business.
-        exec 3>&2 2>/dev/null
-        sleep "$ew_secs"
-        if kill -TERM "$ew_pid"; then
-            echo "$ew_what: no end within $ew_secs s, stopped" >&3
-        fi
+        # The shell's word on its sleep stopped is no one's business; and
+        # no stdout of the caller's: a `$(env_within ...)` reads until
+        # every holder of its pipe is gone, and a watch's sleep left
+        # behind held it -- for 120 s, when the watch slept SECS whole.
+        exec 3>&2 2>/dev/null >/dev/null
+        ew_n=0
+        while kill -0 "$ew_pid"; do
+            if [ "$ew_n" -ge "$ew_secs" ]; then
+                if kill -TERM "$ew_pid"; then
+                    echo "$ew_what: no end within $ew_secs s, stopped" >&3
+                fi
+                exit 0
+            fi
+            sleep 1
+            ew_n=$((ew_n + 1))
+        done
     ) &
     ew_watch=$!
+    echo "$ew_pid $ew_watch" 2>/dev/null >"$ENV_DIR/within.$ew_pid" || true
     ew_s=0
     wait "$ew_pid" || ew_s=$?
-    # The watch and its sleep, which would outlive it; the watch's status
-    # is its stop's, never the command's (and never `set -e`'s to act on).
+    # The watch's status is its stop's, never the command's (and never
+    # `set -e`'s to act on); its second's sleep first, where it can be.
     pkill -P "$ew_watch" 2>/dev/null || true
     kill "$ew_watch" 2>/dev/null || true
     wait "$ew_watch" 2>/dev/null || true
+    rm -f "$ENV_DIR/within.$ew_pid"
     return "$ew_s"
+}
+
+# What env_within started and has not waited for, wherever it was called,
+# stopped by pid: the cleanup's first, before calls of its own, and
+# env_stop_guard's, after the guard.
+env_stop_within() {
+    for ew_file in "$ENV_DIR"/within.*; do
+        [ -f "$ew_file" ] || continue
+        # shellcheck disable=SC2046 # the pids, a word each
+        kill -TERM $(cat "$ew_file") 2>/dev/null || true
+        rm -f "$ew_file"
+    done
+    return 0
+}
+
+# The end of a shell that sourced this: what a bounded call left, stopped,
+# and ENV_DIR removed. Every trap's last word.
+env_end() {
+    env_stop_within
+    case $ENV_DIR in
+    */ycsb-env.*) rm -rf "$ENV_DIR" ;;
+    esac
+    return 0
 }
 
 # The step running in the background (`child`), stopped: its children
@@ -98,16 +154,26 @@ env_host_free() {
     df -kP . | awk 'NR == 2 {print $4}'
 }
 
-# KB free on Docker's VM's disk, as a container sees it on VOLUME -- or on
-# its own root, on the same disk, where the volume is not made yet: a
-# mount would make it.
+# KB free on Docker's VM's disk in ENV_VM_FREE, as a container sees it on
+# VOLUME -- or on its own root, on the same disk, where the volume is not
+# made yet: a mount would make it. Each call in the caller's own shell,
+# none in a pipeline's or a command substitution's: a stop of the guard
+# reaches what its own shell started, where a subshell of it, stopped
+# around, went on to its next call.
 env_vm_free() {
+    ENV_VM_FREE=
     if [ -n "${1:-}" ] && env_within 60 "docker volume inspect" docker volume inspect "$1" >/dev/null 2>&1; then
         env_within 120 "Docker's df on $1" \
-            docker run --rm --pull never --name "$ENV_PREFIX-df" -v "$1":/v:ro alpine df -kP /v
+            docker run --rm --pull never --name "$ENV_PREFIX-df" -v "$1":/v:ro "$ENV_ALPINE" df -kP /v \
+            >"$ENV_DF" 2>/dev/null || true
     else
-        env_within 120 "Docker's df" docker run --rm --pull never --name "$ENV_PREFIX-df" alpine df -kP /
-    fi 2>/dev/null | awk 'NR == 2 {print $4}'
+        env_within 120 "Docker's df" \
+            docker run --rm --pull never --name "$ENV_PREFIX-df" "$ENV_ALPINE" df -kP / \
+            >"$ENV_DF" 2>/dev/null || true
+    fi
+    ENV_VM_FREE=$(awk 'NR == 2 {print $4}' "$ENV_DF" 2>/dev/null) || ENV_VM_FREE=
+    rm -f "$ENV_DF"
+    return 0
 }
 
 # env_disk NEED_KB [VOLUME]: whether the host and Docker's VM each have
@@ -119,7 +185,8 @@ env_disk() {
         ENV_WHY="the host's disk has ${h:-an unread number of} KB free, under the $1 KB the step needs"
         return 1
     fi
-    v=$(env_vm_free "${2:-}")
+    env_vm_free "${2:-}"
+    v=$ENV_VM_FREE
     if [ -z "$v" ] || [ "$v" -lt "$1" ]; then
         ENV_WHY="Docker's VM's disk has ${v:-an unread number of} KB free, under the $1 KB the step needs"
         return 1
@@ -171,6 +238,8 @@ env_guard() {
     # files; its stderr is the shell's word on a sleep it was stopped in.
     set +e
     exec 2>/dev/null
+    # Its `df` answers in a file of its own beside the script shell's.
+    ENV_DF=$ENV_DIR/df.guard
     pid=$1
     ticks=0
     said=-1
@@ -242,14 +311,20 @@ guarded() {
 }
 
 # The guard stopped and waited for: the cleanup's, and each step's end --
-# its children too, a `sleep` or a bounded docker call it was in.
+# its children too, a `sleep` or a bounded docker call it was in, the
+# call's command and watch by the pids it wrote (`env_stop_within`). The
+# guard is held still while its children are stopped: let run, it could
+# start its next call between the two.
 env_stop_guard() {
     if [ -n "$env_guard_pid" ]; then
-        pkill -P "$env_guard_pid" 2>/dev/null || true
-        kill "$env_guard_pid" 2>/dev/null || true
+        kill -STOP "$env_guard_pid" 2>/dev/null || true
+        pkill -TERM -P "$env_guard_pid" 2>/dev/null || true
+        kill -TERM "$env_guard_pid" 2>/dev/null || true
+        kill -CONT "$env_guard_pid" 2>/dev/null || true
         wait "$env_guard_pid" 2>/dev/null || true
         env_guard_pid=
     fi
+    env_stop_within
     env_within 60 "docker rm" docker rm -f "$ENV_PREFIX-df" >/dev/null 2>&1 || true
     return 0
 }
@@ -262,7 +337,8 @@ env_stop_guard() {
 #
 #   the rust image the Dockerfile names, by its digest (the tag alone can
 #     move), which ycsb/linux-tools.sh builds the Linux tools in;
-#   alpine, which the looks, verifies, backups and df run in;
+#   alpine by its digest (ENV_ALPINE), which the looks, verifies, backups
+#     and df run in;
 #   rustup's toolchain rust-toolchain.toml names, with its targets: a
 #     cargo in this tree installs a missing one from the network;
 #   cargo's registry index, which the tools' build reads offline;
@@ -290,8 +366,9 @@ env_preflight() {
     pf "$pf_s" "the image ${rust:-the Dockerfile names}, by its digest" \
         "docker pull $rust, where the network may be used"
     pf_s=0
-    env_within 60 "docker image inspect" docker image inspect alpine:latest >/dev/null 2>&1 || pf_s=1
-    pf "$pf_s" "the image alpine:latest" "docker pull alpine:latest"
+    env_within 60 "docker image inspect" docker image inspect "$ENV_ALPINE" >/dev/null 2>&1 || pf_s=1
+    pf "$pf_s" "the image $ENV_ALPINE, by its digest" \
+        "docker pull $ENV_ALPINE, where the network may be used"
     rustup=rustup
     command -v rustup >/dev/null 2>&1 || rustup=$HOME/.cargo/bin/rustup
     channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
@@ -323,6 +400,8 @@ env_preflight() {
 # stopped, its pid in DIR/toy.pid -- what a trap that stops `caffeinate`
 # alone leaves running -- and a line to its --progress file unless
 # TOY_SILENT is set; it lists its --kept file's first volume, `<name>-data`.
+# The toy docker's `df` never ends while DIR/hang-df is there, its pid in
+# DIR/hung.pid.
 env_toys() {
     mkdir -p "$1/bin" "$1/cargo/registry/index"
     cat >"$1/bin/docker" <<'TOY'
@@ -333,7 +412,15 @@ info) echo 68719476736 ;;
 volume) [ "$2" = inspect ] && exit 1 ;;
 run)
     case "$*" in
-    *" df -kP "*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda1 100000000 0 100000000 0%% /\n' ;;
+    *" df -kP "*)
+        # A call that never ends while DIR/hang-df is there -- a daemon
+        # that stopped answering -- its pid where the test reads it.
+        if [ -f "$TOY_DIR/hang-df" ]; then
+            echo $$ >"$TOY_DIR/hung.pid"
+            exec sleep 600
+        fi
+        printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda1 100000000 0 100000000 0%% /\n'
+        ;;
     esac
     ;;
 inspect)
@@ -392,12 +479,12 @@ TOY
 }
 
 # env_toy_run DIR SCRIPT ARGS...: SCRIPT run in the background over the
-# toys in DIR, small enough for any disk and under any load; its pid in
-# `toy_run`.
+# toys in DIR, small enough for any disk and under any load, its files in
+# DIR too; its pid in `toy_run`.
 env_toy_run() {
     tr_dir=$1
     shift
-    TOY_DIR=$tr_dir PATH="$tr_dir/bin:$PATH" CARGO_HOME="$tr_dir/cargo" \
+    TOY_DIR=$tr_dir TMPDIR=$tr_dir PATH="$tr_dir/bin:$PATH" CARGO_HOME="$tr_dir/cargo" \
         YCSB="$tr_dir/bin/ycsb" CARGO=true LINUX_TOOLS=true \
         QUIET_LOAD=100000 RECORDS=4000 MEMORY=1m RUNS=1 GAP=0 FRACTIONS="50 80" \
         OUT="$tr_dir/out.tsv" VERIFY="$tr_dir/verify.tsv" RUN=toy \
@@ -428,8 +515,11 @@ env_toy_wait() {
 # measurement itself, not only its parent; where SOAK is not empty, it
 # leaves the volumes the soak said to keep and removes its others, and a
 # soak that prints nothing is stopped by the guard after ENV_SILENT seconds
-# and marked hung. Every toy is stopped however the test ends. 0 when each
-# held.
+# and marked hung. Interrupted in a bounded docker call that never ends --
+# its own shell's, before a step, and its guard's, while one runs --
+# nothing it started is left running 30 s after: the call's command and
+# watch, the guard, the step. Every toy is stopped however the test ends.
+# 0 when each held.
 env_self_test() {
     st_script=$1
     st_silent=$2
@@ -439,7 +529,8 @@ env_self_test() {
     st_dir=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-self-test.XXXXXX")
     st_bad=0
     # shellcheck disable=SC2064
-    trap "env_toy_stop '$st_dir'" EXIT INT TERM
+    trap "env_toy_stop '$st_dir'; env_end" EXIT
+    trap 'exit 130' INT TERM
     env_toys "$st_dir"
     st() {
         if [ "$1" = 0 ]; then
@@ -479,7 +570,27 @@ env_self_test() {
         grep -q ':hung hung 1' "$st_dir/ycsb.log" || st_s=1
         st "$st_s" "a step silent for ENV_SILENT s stopped by the guard and marked hung"
     fi
+    # Interrupted in its own shell's docker call, looking at the disks
+    # before its first step.
+    rm -f "$st_dir/toy.pid" "$st_dir/toy.out" "$st_dir/hung.pid"
+    : >"$st_dir/hang-df"
+    env_toy_run "$st_dir" "$st_script" "$@"
+    st_s=0
+    env_toy_wait 60 "the script's own docker call" test -s "$st_dir/hung.pid" || st_s=1
+    env_toy_left || st_s=1
+    st "$st_s" "interrupted in a docker call of its own, nothing it started left running"
+    # Interrupted while its guard is in one, a step running.
+    rm -f "$st_dir/toy.pid" "$st_dir/toy.out" "$st_dir/hung.pid" "$st_dir/hang-df"
+    ENV_EVERY=2 env_toy_run "$st_dir" "$st_script" "$@"
+    st_s=0
+    env_toy_wait 60 "the toy's first line" test -s "$st_dir/toy.out" || st_s=1
+    : >"$st_dir/hang-df"
+    env_toy_wait 30 "the guard's docker call" test -s "$st_dir/hung.pid" || st_s=1
+    env_toy_left || st_s=1
+    st "$st_s" "interrupted while its guard was in a docker call, nothing it started left running"
+    rm -f "$st_dir/toy.pid" "$st_dir/hung.pid" "$st_dir/hang-df"
     env_toy_stop "$st_dir"
+    env_end
     trap - EXIT INT TERM
     [ "$st_bad" = 0 ] && echo "self-test: every promise held" || echo "self-test: FAILED, its log in the run's output above"
     return "$st_bad"
@@ -489,8 +600,54 @@ env_toy_gone() {
     [ -z "$1" ] || ! kill -0 "$1" 2>/dev/null
 }
 
-# Whatever the test started, stopped -- the script and its toy loop -- and
-# its directory removed, after printing the toy run's log where one failed.
+# Whether PID runs: a zombie, ended and not yet waited for, does not.
+env_toy_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    case $(ps -o stat= -p "$1" 2>/dev/null) in
+    Z*) return 1 ;;
+    esac
+    return 0
+}
+
+env_toy_all_gone() {
+    for ag_p in "$@"; do
+        env_toy_alive "$ag_p" && return 1
+    done
+    return 0
+}
+
+# env_tree PID: PID and every process under it, a pid a line.
+env_tree() {
+    echo "$1"
+    for et_c in $(pgrep -P "$1" 2>/dev/null); do
+        env_tree "$et_c"
+    done
+}
+
+# env_toy_left: the toy run interrupted as `kill <its pid>` does, and every
+# process under it then -- its step, its guard, a docker call and the watch
+# beside it -- gone within 30 s; 1 where one was not, each such one named
+# and stopped (`st_tree` holds them for the trap meanwhile).
+env_toy_left() {
+    st_tree=$(env_tree "$toy_run")
+    kill -TERM "$toy_run" 2>/dev/null
+    tl_s=0
+    # shellcheck disable=SC2086 # the pids, a word each
+    env_toy_wait 30 "the interrupted run's end" env_toy_all_gone $st_tree || tl_s=1
+    for tl_p in $st_tree; do
+        if env_toy_alive "$tl_p"; then
+            echo "self-test: left running: $(ps -o pid=,command= -p "$tl_p" 2>/dev/null)" >&2
+            kill -KILL "$tl_p" 2>/dev/null
+        fi
+    done
+    wait "$toy_run" 2>/dev/null
+    st_tree=
+    return "$tl_s"
+}
+
+# Whatever the test started, stopped -- the script, its toy loop, a toy
+# docker call that hangs, an interrupted run's processes -- and its
+# directory removed, after printing the toy run's log where one failed.
 env_toy_stop() {
     if [ -n "${toy_run:-}" ]; then
         kill -TERM "$toy_run" 2>/dev/null
@@ -498,6 +655,12 @@ env_toy_stop() {
     if [ -s "$1/toy.pid" ]; then
         kill -TERM "$(cat "$1/toy.pid")" 2>/dev/null
     fi
+    if [ -s "$1/hung.pid" ]; then
+        kill -TERM "$(cat "$1/hung.pid")" 2>/dev/null
+    fi
+    for ts_p in ${st_tree:-}; do
+        kill -KILL "$ts_p" 2>/dev/null
+    done
     if [ "${st_bad:-0}" != 0 ] && [ -f "$1/run.log" ]; then
         sed 's/^/  | /' "$1/run.log"
     fi

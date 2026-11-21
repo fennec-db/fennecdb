@@ -59,6 +59,10 @@ set -eu
 cd "$(dirname "$0")/../../.."
 ENV_PREFIX=p51
 . crates/fennec-bench/ycsb/env-check.sh
+# Until the run's own cleanup takes over: what a bounded docker call was
+# in, stopped, however the script ends (the pre-flight's build among them).
+trap env_end EXIT
+trap 'exit 130' INT TERM
 case ${1:-} in
 --self-test)
     env_self_test crates/fennec-bench/ycsb/run-larger-than-memory.sh ''
@@ -154,6 +158,7 @@ cleanup() {
         "$P-engine" "$P-build" "$P-df" >/dev/null 2>&1
     env_within 120 "docker volume rm" docker volume rm -f "$P-data" "$P-engine-data" "$P-tools" >/dev/null 2>&1
     [ -n "$gate" ] && [ -d "$gate" ] && rm -rf "$gate"
+    env_end
     return 0
 }
 trap cleanup EXIT
@@ -251,7 +256,7 @@ while [ "$r" -le "$RUNS" ]; do
         -e TMPDIR=/work -e FENNEC_BENCH_COMMIT -e FENNEC_BENCH_MACHINE \
         -v "$P-tools":/tools:ro -v "$P-engine-data":/work \
         -v "$outdir":/out -v "$verifydir":/verify -v "$gate":/gate \
-        alpine /tools/ycsb --systems fennec $args --run-id "$id" \
+        "$ENV_ALPINE" /tools/ycsb --systems fennec $args --run-id "$id" \
         --out "/out/$(basename "$OUT")" --verify "/verify/$(basename "$VERIFY")" \
         --verify-max "$vmax" --gate /gate $probe || true
     [ -s "$gate/refused" ] && refused

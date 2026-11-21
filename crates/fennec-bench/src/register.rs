@@ -25,7 +25,9 @@
 //! do not go back. Once a read has answered `v`, a read that began after it
 //! ended may answer another value only from a write that can come after
 //! that read -- one that ended after it began, or one never answered --
-//! until a kill, which may take back what the first read saw. So two reads
+//! until a kill, which may take back what the first read saw: one sent
+//! before the later read ended, the server not yet back when the first
+//! began (it dies somewhere in that window). So two reads
 //! during one write cannot answer its new value and then the old one, and
 //! after two overlapping writes the reads cannot flip between their values:
 //! the first read that settles on one holds every later read to it.
@@ -288,11 +290,20 @@ impl Registers {
 
     /// Whether a read over `[s, e]` may answer `d` after the reads kept of
     /// the register: where one ended before it began and answered another
-    /// value, with no kill since that one began, `d` must come from a write
-    /// that can be ordered after that read -- ended after it began, or never
+    /// value, with no kill between them, `d` must come from a write that
+    /// can be ordered after that read -- ended after it began, or never
     /// answered, which may land at any time from its start. A value the
     /// register held before its kept writes cannot: those writes ended
     /// before any read still kept began (`settle`).
+    ///
+    /// A kill is between two reads where the server may have died after
+    /// the first began and before the second ended: it dies somewhere in
+    /// the kill's window, from when the kill was sent -- `docker kill` takes
+    /// a moment to land, and a death is held as a kill from the last look
+    /// before it -- to when the server answered again. So a kill sent by
+    /// the second read's end lets go of a read begun before the server was
+    /// back, one begun after the kill was sent among them: that read may
+    /// have seen a write the kill then took.
     fn after_reads(&self, key: u64, f: u8, s: u64, e: u64, d: u64) -> bool {
         let Some(pins) = self.pins.get(&(key, f)) else {
             return true;
@@ -300,7 +311,9 @@ impl Registers {
         let kills = &self.kills.at;
         let floor = pins
             .iter()
-            .filter(|p| p.e < s && p.d != d && !kills.iter().any(|&(k, _)| k > p.s && k <= e))
+            .filter(|p| {
+                p.e < s && p.d != d && !kills.iter().any(|&(k, back)| k <= e && p.s <= back)
+            })
             .map(|p| p.s)
             .max();
         let Some(floor) = floor else {
@@ -693,6 +706,34 @@ mod tests {
             ],
         },
         Case {
+            name: "a read begun after the kill was sent, before the server died",
+            loss: 1_000,
+            kills: &[(5_500, 9_000)],
+            writes: &[(0, 100, 200, 41, false), (0, 5_000, 5_100, 42, false)],
+            reads: &[
+                // `docker kill` lands a moment after it is sent: this read
+                // still reached the server the kill then took 42 from...
+                (0, 5_600, 5_700, 42, 7, true),
+                // ...so one begun before the server was back, and one
+                // after, may answer the older value...
+                (0, 8_900, 9_100, 41, 7, true),
+                (0, 10_000, 10_100, 41, 7, true),
+                // ...and a read begun after it came back holds the rest.
+                (0, 10_200, 10_300, 42, 7, false),
+            ],
+        },
+        Case {
+            name: "a death, held as a kill from the last look before it",
+            loss: 1_000,
+            kills: &[(2_000, 9_000)],
+            writes: &[(0, 100, 200, 41, false), (0, 5_000, 5_100, 42, false)],
+            reads: &[
+                (0, 5_200, 5_300, 42, 7, true),
+                (0, 10_000, 10_100, 41, 7, true),
+                (0, 10_200, 10_300, 42, 7, false),
+            ],
+        },
+        Case {
             name: "a write not answered may land late, and then it stays",
             loss: 0,
             kills: &[],
@@ -705,31 +746,38 @@ mod tests {
         },
     ];
 
-    fn history(c: &Case, settle_margin: Option<u64>) {
+    /// The reads of a history its verdicts are wrong on, each said.
+    fn history(c: &Case, settle_margin: Option<u64>) -> Vec<String> {
         let mut r = with_writes(c);
         let mut reads = c.reads.to_vec();
         reads.sort_by_key(|x| x.2);
+        let mut wrong = Vec::new();
         for &(f, s, e, d, base, allowed) in &reads {
             if let Some(margin) = settle_margin {
                 r.settle(s.saturating_sub(margin), |_, _| base);
             }
-            assert_eq!(
-                r.read(1, f, s, e, d, base),
-                allowed,
-                "{}: a read over [{s}, {e}] answering {d}",
-                c.name
-            );
+            if r.read(1, f, s, e, d, base) != allowed {
+                wrong.push(format!(
+                    "{}: a read over [{s}, {e}] answering {d} {}",
+                    c.name,
+                    if allowed { "refused" } else { "allowed" }
+                ));
+            }
         }
+        wrong
     }
 
     #[test]
     fn a_register_is_atomic_its_reads_never_going_back() {
+        // Every history's wrong verdicts, not only the first.
+        let mut wrong = Vec::new();
         for c in HISTORIES {
-            history(c, None);
+            wrong.extend(history(c, None));
             // The soak settles a minute and the loss behind its reads, far
             // past a read's span.
-            history(c, Some(c.loss + 10_000));
+            wrong.extend(history(c, Some(c.loss + 10_000)));
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         // Two overlapping writes settled into the values that could be
         // last: the reads still settle on one of them.
         let mut r = Registers::default();
