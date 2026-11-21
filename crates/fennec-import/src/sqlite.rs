@@ -1846,11 +1846,11 @@ impl Table {
     /// A cell's row: a value a stored column, those the record lacks read
     /// as their defaults, the rowid alias's the cell's rowid. And what the
     /// row's values hold past their own size, at most, counted once a row
-    /// from what is known before a value is looked at (`Source::row_bytes`):
-    /// its texts and blobs are its record's bytes -- what decoding a text
-    /// that is not UTF-8 made larger added as it was made -- and its
-    /// defaults' copies their sum once a table, at most the `CREATE TABLE`
-    /// text; a number holds nothing past its size.
+    /// from what is known before a value is looked at
+    /// (`Source::next_counted`): its texts and blobs are its record's bytes
+    /// -- what decoding a text that is not UTF-8 made larger added as it
+    /// was made -- and its defaults' copies their sum once a table, at most
+    /// the `CREATE TABLE` text; a number holds nothing past its size.
     fn row(&self, cell: &Cell, enc: Encoding) -> Result<(Vec<Value>, usize)> {
         let mut grown = 0;
         let mut values = record(&cell.payload, enc, self.stored.len(), &mut grown)?;
@@ -1875,8 +1875,6 @@ pub struct Reader {
     walk: Walk,
     columns: Vec<Column>,
     table: Table,
-    /// What the row read last holds past its values' sizes ([`Table::row`]).
-    held: usize,
 }
 
 impl Reader {
@@ -1957,7 +1955,6 @@ impl Reader {
             walk: Walk::new(root),
             columns,
             table,
-            held: 0,
         })
     }
 
@@ -1974,18 +1971,16 @@ impl Source for Reader {
     }
 
     fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
+        Ok(self.next_counted()?.map(|(values, _)| values))
+    }
+
+    /// The row and its record's length and the defaults it lacks, known
+    /// before a value is looked at ([`Table::row`]).
+    fn next_counted(&mut self) -> Result<Option<(Vec<Value>, usize)>> {
         let Some(cell) = self.walk.next(&mut self.pager)? else {
             return Ok(None);
         };
-        let (values, held) = self.table.row(&cell, self.pager.encoding)?;
-        self.held = held;
-        Ok(Some(values))
-    }
-
-    /// Its record's length and the defaults it lacks, known before a value
-    /// is looked at ([`Table::row`]).
-    fn row_bytes(&self, _row: &[Value]) -> usize {
-        self.held
+        self.table.row(&cell, self.pager.encoding).map(Some)
     }
 
     fn left_out(&self) -> Vec<String> {

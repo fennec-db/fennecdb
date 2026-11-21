@@ -78,7 +78,7 @@ fn load(
     // What the batch's rows hold: put at `opts.batch` rows or at
     // `BATCH_BYTES`, whichever comes first. A row's bytes are counted once,
     // from sizes known before its values are looked at: its fields' pairs
-    // and names, once a plan, and what its source read (`row_bytes`), with
+    // and names, once a plan, and what its source read (`next_counted`), with
     // what `adapt` makes of a number as text added where it makes it. A
     // row holds nothing past its count but the allocator's rounding -- a
     // SQLite row's texts and blobs are its record's bytes, or what decoding
@@ -89,12 +89,12 @@ fn load(
     // than a value's.
     let mut held: usize = 0;
     let fields = fields_bytes(&plan);
-    while let Some(values) = src.next_row()? {
+    while let Some((values, read)) = src.next_counted()? {
         if opts.limit.is_some_and(|n| rows >= n) {
             break;
         }
         seen += 1;
-        let mut bytes = fields + src.row_bytes(&values);
+        let mut bytes = fields + read;
         let doc = built(&plan, &types, values, seen, &mut bytes)?;
         if let Some(f) = &opts.filter {
             if !keep(f, &doc, &ctx, seen)? {
@@ -213,9 +213,9 @@ pub(crate) fn fields_bytes(plan: &Plan) -> usize {
 }
 
 /// The bytes a row's values hold past their own `size_of`, counted value
-/// by value: [`Source::row_bytes`](crate::Source::row_bytes)'s default, a
-/// PostgreSQL row's and a change's of `--follow`, whose cells' text a
-/// `jsonb`, an array or a vector may make more of.
+/// by value: [`Source::next_counted`](crate::Source::next_counted)'s
+/// default, a PostgreSQL row's and a change's of `--follow`, whose cells'
+/// text a `jsonb`, an array or a vector may make more of.
 pub(crate) fn values_bytes(values: &[Value]) -> usize {
     values.iter().map(value_bytes).sum()
 }
@@ -540,7 +540,10 @@ mod tests {
             Value::List(vec![Value::Text("ab".into()), Value::Int(1)]),
             Value::Float(-5e-324),
         ];
-        let read = Rows::new(columns.to_vec(), Vec::new()).row_bytes(&row);
+        let (row, read) = Rows::new(columns.to_vec(), vec![row])
+            .next_counted()
+            .unwrap()
+            .unwrap();
         let list = 2 * std::mem::size_of::<Value>() + 2;
         assert_eq!(read, 100 + list);
         let mut grown = 0;

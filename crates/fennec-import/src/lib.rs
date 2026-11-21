@@ -127,14 +127,19 @@ pub trait Source {
         Vec::new()
     }
 
-    /// The bytes `row`, the row `next_row` returned last, holds past its
-    /// values' own `size_of`, never fewer but for the allocator's rounding:
-    /// what `load::run` holds a batch to ([`BATCH_BYTES`]). The default
-    /// counts the values one by one; a source that knows it from what it
-    /// read says so at a row's cost -- the SQLite reader its record's
-    /// length and the defaults of the columns the record lacks.
-    fn row_bytes(&self, row: &[Value]) -> usize {
-        load::values_bytes(row)
+    /// [`Source::next_row`], and the bytes the row holds past its values'
+    /// own `size_of`, never fewer but for the allocator's rounding: what
+    /// `load::run` holds a batch to ([`BATCH_BYTES`]). The default counts
+    /// the values one by one; a source that knows it from what it read
+    /// says so at a row's cost -- the SQLite reader its record's length and
+    /// the defaults of the columns the record lacks. One call a row, the
+    /// count with it: asked for apart, it was a second call through the
+    /// trait object a row, and the reader's store and load of it.
+    fn next_counted(&mut self) -> Result<Option<(Vec<Value>, usize)>> {
+        Ok(self.next_row()?.map(|row| {
+            let n = load::values_bytes(&row);
+            (row, n)
+        }))
     }
 }
 
@@ -185,9 +190,9 @@ pub const DEFAULT_BATCH: usize = 2_000;
 /// reached it: a batch is put once it holds `--batch` rows or this many
 /// bytes, whichever comes first (`load::run`), a row counted once, from
 /// sizes known before its values are looked at -- its fields' pairs and
-/// names once a plan, what its source read ([`Source::row_bytes`], a SQLite
-/// row its record's length and the defaults it lacks), and a number its
-/// field makes text, as it is made. A row holds a value for each column
+/// names once a plan, what its source read ([`Source::next_counted`], a
+/// SQLite row its record's length and the defaults it lacks), and a number
+/// its field makes text, as it is made. A row holds a value for each column
 /// its source declares and a SQLite row a copy of each default its record
 /// lacks, whatever its bytes in the source: rows bounded by their count
 /// alone, 2 000 rows of three bytes each under a table of 87 376 columns
