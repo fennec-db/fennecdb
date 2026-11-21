@@ -17166,7 +17166,9 @@ struct Filter<'q> {
     /// `null` passed by its byte. Read in line, each dropped place a row
     /// passed was a call into the skip, 44 instructions of a 440-instruction
     /// row of a scan by one field past one; a test in line telling the two
-    /// apart would be paid by every row of every other collection.
+    /// apart would be paid by every row of every other collection. Always
+    /// empty in the browser module, which holds one copy of the reader.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     passing: Vec<usize>,
     /// Where the paths' values begin in `vals`: past the fields'.
     paths_at: usize,
