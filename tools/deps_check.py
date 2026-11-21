@@ -4,7 +4,8 @@
 docs/design/crates.md#zero-dependencies. Every crate of the workspace but
 fennec-tls and fennec-bench names only crates of the workspace, as a
 dependency of any kind (normal, build or dev). fennec-tls names rustls and
-webpki-roots, and rcgen to test with, and nothing else: TLS is the one door,
+webpki-roots, ring -- rustls's own, for a channel binding's digests -- and
+rcgen to test with, and nothing else: TLS is the one door,
 and nothing else comes in by it. What comes in by it is pinned whole, every
 crate of its tree by name and version (TLS_TREE), so a rustls feature turned
 on or a version moved is a review, never a silent addition. A crate taking
@@ -25,7 +26,7 @@ import sys
 # What each exempt crate may name; None, anything (a measurement harness,
 # `publish = false`).
 EXEMPT = {
-    "fennec-tls": {"rustls", "webpki-roots", "rcgen"},
+    "fennec-tls": {"rustls", "ring", "webpki-roots", "rcgen"},
     "fennec-bench": None,
 }
 # Never fennec-tls, nor anything from outside the workspace, by any path.
@@ -34,9 +35,9 @@ CLOSED = ("fennec-core", "fennec-ql", "fennec-abi", "fennec-wasm", "fennec-ffi")
 # fennec-tls's whole tree, normal and build edges, as Cargo.lock resolves it
 # for the targets the binaries ship for (TLS_TARGETS), the union of what every
 # target takes but TLS_ARM_WINDOWS (a target's tree is held to it apart, below).
-# The Windows zips' take the same less libc. Its Cargo.toml names two crates;
-# these are what they bring, and a rustls feature turned on (aws-lc-rs,
-# brotli), a default moved or a `cargo update` changes them without a line of
+# The Windows zips' take the same less libc. Its Cargo.toml names three crates
+# (ring is rustls's own, named for its digests); these are what they bring,
+# and a rustls feature turned on (aws-lc-rs, brotli), a default moved or a `cargo update` changes them without a line of
 # any Cargo.toml changing. A difference fails the check: read what came in or
 # moved (what it is, who publishes it, its build.rs), then write the list
 # again. A build script here that the image's Linux builds run is one

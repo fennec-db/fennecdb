@@ -38,13 +38,15 @@
 #   b1-b4  archives: the old `fennec archive`'s, plain and sealed (version 1),
 #       verified and restored by the new `fennec`, to the end and to a moment;
 #       the new archiver's, plain, read by the old `fennec`, and sealed
-#       (version 2), refused by it in RELEASING.md's words;
+#       (version 3), refused by it in RELEASING.md's words;
 #   c1-c3  the old `fennec backup`, plain and sealed, opened by the new
 #       server; a file the old server wrote, opened and written by the new,
 #       then verified, typed and opened by the old; the new backup opened, or
 #       refused in words, by the old;
 #   d1-d2  an old router over new nodes and a new router over old nodes: a
 #       tenant created, written, copied to its replica, moved and deleted;
+#       the new nodes under the old router, asking no token, run
+#       `--insecure` (`insecure_under`), as g1's;
 #   e   a rolling upgrade under durable writes: a router and two `--dir`
 #       nodes, one the other's standby, all of the release, upgraded in
 #       RELEASING.md's and deploy/RUNBOOK.md's order -- the router, the
@@ -1019,13 +1021,13 @@ case_b() {
         differs b3 "the new archiver's plain archive, read by the old \`fennec\`: $why"
     fi
 
-    # b4: the new archiver's sealed archive is version 2, which the old
+    # b4: the new archiver's sealed archive is version 3, which the old
     # `fennec` refuses as RELEASING.md says ("not a sealed file", "not sealed,
     # where the archive is"), writing nothing; the new reads it. Words that
     # name no version: 0.2.0 knew of no other.
     why=
     v=$(sealed_version "$(first_image "$C/new-sealed")")
-    [ "$v" = 2 ] || why="its image is no version 2 sealed file (version '$v')"
+    [ "$v" = 3 ] || why="its image is no version 3 sealed file (version '$v')"
     local verify_said= restore_said=
     if [ -z "$why" ]; then
         if "$OLD/fennec" verify "$C/new-sealed" --key-file "$C/new.key" >"$C/b4-verify.log" 2>&1; then
@@ -1051,7 +1053,7 @@ case_b() {
         state_holds "$want" "$OPENED" || why="the new restore of it: $(first_difference "$want" "$OPENED")"
     fi
     if [ -z "$why" ]; then
-        held b4 "the new archiver's sealed archive (version 2) refused by the old \`fennec\` as promised, in words naming no version -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
+        held b4 "the new archiver's sealed archive (version 3) refused by the old \`fennec\` as promised, in words naming no version -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
     else
         differs b4 "the new archiver's sealed archive: $why"
     fi
@@ -1125,7 +1127,7 @@ case_c() {
     fi
 
     # c3: the new `fennec backup`, plain, opened by the old server; sealed
-    # (version 2), refused by the old `fennec restore` in RELEASING.md's words.
+    # (version 3), refused by the old `fennec restore` in RELEASING.md's words.
     why=
     server new-primary "$NEW" --file "$C/n.fennec" --http-token t --replication-token r
     local NN=$ADDR
@@ -1141,7 +1143,7 @@ case_c() {
     opened c3-open "$OLD" "$C/new-backup.fennec"
     state_holds "$OPENED" "$want" || why="its plain backup, opened by the old server: $(first_difference "$want" "$OPENED")"
     v=$(sealed_version "$C/new-backup.sealed")
-    [ -n "$why" ] || [ "$v" = 2 ] || why="its sealed backup is no version 2 file (version '$v')"
+    [ -n "$why" ] || [ "$v" = 3 ] || why="its sealed backup is no version 3 file (version '$v')"
     local said_=
     if [ -z "$why" ]; then
         if "$OLD/fennec" restore "$C/new-backup.sealed" "$C/c3-old.fennec" --key-file "$C/new.key" \
@@ -1155,7 +1157,7 @@ case_c() {
         said_=$(grep -m1 'not a sealed file' "$C/c3-restore.log" | bare || true)
     fi
     if [ -z "$why" ]; then
-        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 2), refused by the old restore as promised, in words naming no version: \"$said_\", no file written"
+        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 3), refused by the old restore as promised, in words naming no version: \"$said_\", no file written"
     else
         differs c3 "the new \`fennec backup\`: $why"
     fi
@@ -1166,13 +1168,24 @@ case_c() {
 # The address node N said it listens on.
 node_at() { cat "$C/$1.addr"; }
 
+# insecure_under ROUTER_BIN NODE_BIN: `--insecure` where the router is the
+# old release's and the nodes this tree's. They ask no data token, and such
+# a node refuses what a router from before forwards it, from loopback too
+# -- its one mark is the one a router listening past loopback sends -- unless
+# it runs `--insecure`: what the upgrade order, routers first, never meets.
+insecure_under() {
+    if [ "$1" = "$OLD" ] && [ "$2" = "$NEW" ]; then echo --insecure; fi
+}
+
 # router_case NAME ROUTER_BIN NODE_BIN: a tenant created by ROUTER_BIN's
 # router on NODE_BIN's nodes, written, copied to its replica, moved and
 # deleted, each step working or refused in words.
 router_case() {
-    local name=$1 rbin=$2 nbin=$3 n code
+    local name=$1 rbin=$2 nbin=$3 n code insecure
+    insecure=$(insecure_under "$rbin" "$nbin")
     for n in n1 n2 n3; do
-        server "$n" "$nbin" --dir "$C/$n" --admin-token "a$n" --replication-token r --sync always
+        server "$n" "$nbin" --dir "$C/$n" --admin-token "a$n" --replication-token r --sync always \
+            ${insecure:+"$insecure"}
         echo "$ADDR" >"$C/$n.addr"
     done
     router router "$rbin" --directory "$C/router.fennec" --token root --replicas
@@ -1438,7 +1451,11 @@ case_e() {
 # `key delivery` refuses to start on the release, exit 2, naming the line;
 # a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
 # events answered 409 until it is set again with `key body`, its statements
-# not armed, and the node says so as it starts.
+# not armed, and the node says so as it starts. On Linux the old node is
+# musl, its sidecar naming the tenant's file with no birth time, and the new
+# a glibc build reading one: f2 holds the set as the tenant's across the two
+# (docs/design/tenants.md, a birth time held where both sides name one),
+# which the first run on main found put away, every event of it 401.
 GH_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef
 
 # event URL BODY DELIVERY: a push GitHub signed; "<body> <status>".
@@ -1534,9 +1551,10 @@ case_f() {
 # https_case NAME ROUTER_BIN NODE_BIN: a node serving HTTPS, recorded at its
 # https:// address by a router of the other release, which dials it over TLS.
 https_case() {
-    local name=$1 rbin=$2 nbin=$3 certs=$ROOT/crates/fennec-http/tests/certs port code
+    local name=$1 rbin=$2 nbin=$3 certs=$ROOT/crates/fennec-http/tests/certs port code insecure
+    insecure=$(insecure_under "$rbin" "$nbin")
     spawn "$C/node.log" "$nbin/fennec-server" --dir "$C/node" --http 127.0.0.1:0 --admin-token atls \
-        --tls-cert "$certs/server.pem" --tls-key "$certs/server.key"
+        --tls-cert "$certs/server.pem" --tls-key "$certs/server.key" ${insecure:+"$insecure"}
     local np=$SPAWNED
     for _ in $(seq 1 600); do
         grep -q 'listening on: https://' "$C/node.log" && break

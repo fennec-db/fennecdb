@@ -23,6 +23,12 @@ workspace = true
 [dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1.0.11"
+# rustls's own ring, named for its digests alone: a channel binding
+# (`server_end_point`, RFC 5929) hashes the server's certificate by the hash
+# its signature uses, SHA-384 and SHA-512 among them, which rustls does not
+# hand out. The crate and version rustls takes, with no feature it does not
+# turn on already: the tree is what it was (tools/deps_check.py's TLS_TREE).
+ring = { version = "0.17.14", default-features = false }
 
 [dev-dependencies]
 # A private CA and the certificates it signs, made as a test runs: here

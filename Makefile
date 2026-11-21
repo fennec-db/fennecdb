@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
@@ -393,6 +393,20 @@ endif
 perf-gate:
 	python3 tools/perf_gate.py run --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
 	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),5) \
+	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
+
+## The I/O half of the gate, which CI's `perf (instructions)` job also
+## judges: this tree's fennec-server and BASE's (origin/main), built in
+## perf-gate's trees and target directories (KEEP=1 there leaves them),
+## each sent the I/O workloads of crates/fennec-http/examples/gate.rs by
+## this tree's program under `strace -f` -- the server's fsyncs, renames
+## and bytes written to files, RUNS (3) times a side -- and any count
+## that is not the base's fails unless the pull request adds a
+## PERF_ACCEPTED entry naming it. HEAD=<ref> and TARGET as perf-gate.
+## Linux with strace: on macOS, in Docker (docs/design/benchmarks.md#the-gate)
+perf-gate-io:
+	python3 tools/perf_gate.py io --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),3) \
 	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
 
 ## This tree's build against BASE's (origin/main) in instructions an op, on

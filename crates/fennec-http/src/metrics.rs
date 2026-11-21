@@ -519,9 +519,13 @@ pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
             .flatten()
             .any(|t| ct_eq(g.as_bytes(), t.as_bytes()))
     });
-    // Open, a scrape verifies nothing, whatever it carries.
+    // Open, a scrape verifies nothing, whatever it carries. A token held to
+    // one the server keeps and refused is a guess at it, whatever a JWT's
+    // check before it said (`full`): counted as a token's.
     if taken {
         crate::audit::verified();
+    } else if given.is_some() && tokens.iter().any(Option::is_some) {
+        crate::audit::refused_as(crate::audit::Kind::Token);
     }
     open || taken
 }

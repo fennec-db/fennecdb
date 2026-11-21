@@ -2000,6 +2000,39 @@ mod tests {
         assert!(h.verify("github", &gh, i64::MAX / 2).is_ok());
     }
 
+    /// The window is the tolerance either side of the server's clock, its
+    /// ends inside it: a millisecond past either end is stale, each end
+    /// itself is taken. And an event taken anywhere in it meets its key
+    /// for as long as any node a failover moves the hook to could take it
+    /// again -- twice the tolerance, and the clocks' [`SKEW_MS`] between
+    /// them -- which the shortest `keep` holds for the longest tolerance:
+    /// were the floor or the ceiling moved so it did not, the bound's own
+    /// term would decide, and a `keep` it refuses is one that decides.
+    #[test]
+    fn the_window_ends_at_the_tolerance_and_a_key_outlives_it() {
+        let h = all();
+        let sig = format!("t={STRIPE_T},v1={STRIPE_V1}");
+        let hour = MAX_TOLERANCE_MS;
+        for now in [at(STRIPE_T) + hour, at(STRIPE_T) - hour] {
+            assert!(h.verify("stripe", &stripe_req(&sig), now).is_ok(), "{now}");
+        }
+        for now in [at(STRIPE_T) + hour + 1, at(STRIPE_T) - hour - 1] {
+            assert_eq!(
+                h.verify("stripe", &stripe_req(&sig), now).err(),
+                Some(Check::Stale),
+                "{now}"
+            );
+        }
+        const { assert!(MIN_KEEP_MS > 2 * MAX_TOLERANCE_MS + SKEW_MS) };
+        hooks(&format!(
+            "h stripe file:{STRIPE_SECRET} keep 1d tolerance 1h\n"
+        ));
+        assert!(refused_at(&format!(
+            "h stripe file:{STRIPE_SECRET} keep 23h tolerance 1h\n"
+        ))
+        .contains("a `keep` is 1d at least, and past twice the tolerance and 1m"));
+    }
+
     /// Two secrets: an event signed by either taken, by neither refused.
     #[test]
     fn either_of_two_secrets_verifies() {

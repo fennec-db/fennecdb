@@ -76,15 +76,21 @@ fn node_plain(tag: &str) -> Node {
 
 /// A node; `leased`, taking writes only under its router's lease.
 fn node_leased(tag: &str, leased: bool) -> Node {
-    node_of(tag, leased, None)
+    node_of(tag, leased, None, false)
+}
+
+/// A node asking no token that answers what another region's router
+/// relayed (`--insecure`): such a request is the network's.
+fn node_relayed_to(tag: &str) -> Node {
+    node_of(tag, false, None, true)
 }
 
 /// A node whose tenants follow the node at `upstream`: its pair's standby.
 fn node_standby(tag: &str, upstream: &str) -> Node {
-    node_of(tag, false, Some(upstream.to_string()))
+    node_of(tag, false, Some(upstream.to_string()), false)
 }
 
-fn node_of(tag: &str, leased: bool, upstream: Option<String>) -> Node {
+fn node_of(tag: &str, leased: bool, upstream: Option<String>, insecure: bool) -> Node {
     let dir = std::env::temp_dir().join(format!("fennec-rr-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -101,6 +107,7 @@ fn node_of(tag: &str, leased: bool, upstream: Option<String>) -> Node {
         addr: "127.0.0.1:0".into(),
         admin_token: Some(format!("adm-{tag}")),
         sync_on_write: true,
+        insecure,
         ..fennec_http::Config::default()
     };
     let tenants = Arc::new(tenants);
@@ -1475,7 +1482,7 @@ fn regions_keeping_their_own_directory_place_and_repoint_their_read_replicas() {
     let tag = "regional";
     let files = files(tag);
     let names = ["eu1", "eu2", "us1", "us2"];
-    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let nodes = names.map(|n| node_relayed_to(&format!("{tag}-{n}")));
     let global = global_router(&files.0.join("global.fennec"), None, "eu");
     let us = region_router(
         "us",

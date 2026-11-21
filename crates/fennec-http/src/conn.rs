@@ -136,9 +136,10 @@ fn warn_if_open(key: &str) {
 
 /// Who besides its owner a key file of `mode`, owned by `uid`, is open
 /// to, by PostgreSQL's rule for its own key: no one, or its group where
-/// root owns it and the group may only read it.
-#[cfg(any(test, all(feature = "tls", unix)))]
-fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
+/// root owns it and the group may only read it. A seal's key file is held
+/// to the same rule (`seal::open_key`).
+#[cfg(any(test, unix))]
+pub(crate) fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
     if mode & 0o007 != 0 {
         Some("every user")
     } else if mode & 0o070 != 0 && !(uid == 0 && mode & 0o070 == 0o040) {
@@ -1164,5 +1165,52 @@ mod tests {
         assert_eq!(open_to(0o100660, 0), Some("its group"));
         assert_eq!(open_to(0o100644, 0), Some("every user"));
         assert_eq!(open_to(0o100444, 1000), Some("every user"));
+    }
+
+    /// Over TLS a connection's socket is its session's own handle, so what
+    /// is set through it -- the idle timeout, `--write-timeout`, a mode --
+    /// bounds the session's reads and writes. A `dup` in its place passes
+    /// every timing test on Linux and macOS, where both handles share one
+    /// file description, and bounded none of the session's reads on Windows
+    /// (docs/design/http.md#slow-clients): the handles' numbers tell it on
+    /// every platform.
+    #[cfg(all(feature = "tls", any(unix, windows)))]
+    #[test]
+    fn a_tls_connections_socket_is_its_sessions_own_handle() {
+        use super::sock::AsRawFd;
+        use super::{Conn, Tls};
+        use std::net::{TcpListener, TcpStream};
+        use std::path::Path;
+        use std::time::Duration;
+
+        let certs = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/certs");
+        let tls =
+            Tls::from_pem_files(&certs.join("server.pem"), &certs.join("server.key")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ca = certs.join("ca.pem");
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let _s = fennec_tls::Client::trusting_pem_file(&ca)
+                .unwrap()
+                .alpn(&[b"http/1.1"])
+                .dial(s, "localhost")
+                .unwrap();
+            // Held open until the server's side was looked at.
+            let _ = wait.recv_timeout(Duration::from_secs(30));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let conn = Conn::open(stream, Some(&tls)).expect("a handshake done");
+        let Conn::Tls(t) = &conn else {
+            panic!("a connection over TLS opened plain")
+        };
+        assert_eq!(
+            conn.socket().as_raw_fd(),
+            t.tls.borrow().get_ref().as_raw_fd()
+        );
+        done.send(()).unwrap();
+        client.join().unwrap();
     }
 }

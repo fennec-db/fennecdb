@@ -21,6 +21,12 @@ fennec-wire.workspace = true
 # `--where` and `--index` are read by FennecQL's own parser (`args`).
 fennec-ql.workspace = true
 
+[dev-dependencies]
+# A name of the tests' own, resolved to a stand-in on this machine
+# (`dial::stand_in`): a host off this machine, whose keepalives the
+# follower does not take as the server's.
+fennec-http.workspace = true
+
 [features]
 default = ["tls"]
 # TLS to PostgreSQL (`sslmode`), fennec-wire's: rustls and ring
