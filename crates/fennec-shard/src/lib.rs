@@ -1875,7 +1875,10 @@ impl Router {
     /// its address: made again where its admin token is another.
     fn marked(&self, n: &Node) -> Arc<Marked> {
         let mut marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(m) = marks.get(&n.addr).filter(|m| m.token == n.token) {
+        if let Some(m) = marks
+            .get(&n.addr)
+            .filter(|m| ct_eq(m.token.as_bytes(), n.token.as_bytes()))
+        {
             return Arc::clone(m);
         }
         let m = Arc::new(Marked::new(&n.token));
