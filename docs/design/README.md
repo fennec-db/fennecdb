@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate -- how deep a value read off the bytes nests, a SQLite file's lengths -- the build profiles and the pinned toolchain
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, a block as one record, and the model every write and index is held to
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, a node's tenants each synced on a thread of its own, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
@@ -217,3 +217,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 169. [A value read off the bytes nests no deeper than JSON's limit](crates.md#how-deep-a-value-nests) (added after the move, under *Storage*)
 170. [A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once](crates.md#a-sqlite-files-lengths) (added after the move, under *Imports*)
 171. [The Flutter plugin ships each platform's library once, and no symbolic link](integrations.md#flutter-plugin) (added after the move, under *Integrations and deploy*)
+172. [A node syncs each tenant on a thread of its own](durability.md#a-nodes-syncs) (added after the move, under *Durability*)
