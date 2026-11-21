@@ -823,6 +823,14 @@ read, 297.29 M -> 294.39 M (-1.0%). What the copy costs is the gap
 between those savings: nothing a run tells from its spread for 4 KiB,
 about 2.2 M instructions for 16 MiB and 2.1 M for the 6.5 MB read whole --
 and the bytes it holds, in memory of its own rather than the page cache.
+A file with nothing past its image, mapped whole since its point is its
+length, reads none: a `.save` of 100 000 rows of 1 KB in one collection
+with no index, 102 475 488 bytes, read its data record into memory and
+now reads nothing -- 70.70 M -> 16.18 M instructions (-77%), the
+footprint the open added 103.4 MB -> 1.3 MB, the process's peak
+footprint 104.5 MB -> 2.3 MB and its maxrss 105.8 MB -> 3.7 MB (the same
+counter and runs, a release build of each tree, load 2.37 at the start
+and the end, 2026-11-21).
 `tests/reader.rs` holds the survey to the walk's and the point to the
 open's cut over a file torn at every 4 093rd byte of its tail, cut short
 or zeroed to its end -- an image with a graph, graphs in the tail, spills
