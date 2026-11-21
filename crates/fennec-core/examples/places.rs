@@ -186,6 +186,8 @@ fn rusage() -> Option<(u64, u64)> {
     // `rusage_info_v4`: a 16-byte uuid, then its counters: the footprint
     // the 8th, `ri_instructions` the 30th.
     let mut info = [0u64; 40];
+    // SAFETY: `info` is 40 words, more than the 37 of `rusage_info_v4`
+    // (above) that flavor 4 writes; the call keeps no pointer to it.
     let r = unsafe { proc_pid_rusage(std::process::id() as i32, 4, info.as_mut_ptr()) };
     (r == 0).then_some((info[31], info[9]))
 }
