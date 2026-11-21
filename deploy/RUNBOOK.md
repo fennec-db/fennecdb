@@ -218,12 +218,16 @@ unit: the servers take SIGHUP for a shutdown.
 
 The servers write their log to the journal and refusals, schema changes
 and admin changes to an audit log, `/var/log/fennecdb/<role>/audit.log`
-(`node`, `router`, `global`), 0600 under the units' `UMask` -- it names
-clients' addresses and every tenant changed. A log shipper reads it through
-an ACL, set once on the directory so each new file inherits it:
+(`node`, `router`, `global`), 0600 whatever the units' `UMask`, as
+fennecdb makes every file -- it names clients' addresses and every tenant
+changed. A log shipper reads it through an ACL. A directory's default ACL
+reaches no file fennecdb makes, whose mode masks the ACL's group class to
+nothing; the file keeps the ACL it is given, so give it once, after the
+first start made it:
 
 ```sh
-setfacl -m u:<shipper>:rx -m d:u:<shipper>:r /var/log/fennecdb/node
+setfacl -m u:<shipper>:rx /var/log/fennecdb/node
+setfacl -m u:<shipper>:r /var/log/fennecdb/node/audit.log
 ```
 
 The server opens the file once and appends; it does not reopen it, and
