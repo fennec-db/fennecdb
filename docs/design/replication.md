@@ -936,15 +936,23 @@ name where version 2's was 24, and its first frame's AAD the head, three
 Poly1305 blocks more than version 2's and one more for each 16 bytes of
 the name; every frame after takes 25 bytes of AAD, the tag before and its
 place, as version 2's took the id and its place: nothing more a frame,
-and not one byte more a write. Measured on a shared M1 whose load rose
-from 8 to 57 over the run, each the best of three rounds taken in turn in
-one release binary, version 3 against version 2 (`seal::tests::seal_cost`,
-run by hand): 10 000 frames of 1 KiB, a thousand a file, 1.01; of 1 MiB,
-0.96, the same within the noise; and 10 000 files of one 64-byte frame
-each 1.70, some 2 µs a file -- the subkey, the longer first AAD and, on
-version 3's side of the loop alone, the system's randomness for the id,
-which version 2 drew as it began too. An archive's files are an image an
-hour and a segment each 64 MB: nothing a write pays.
+and not one byte more a write -- but a batch past a mebibyte, now split,
+32 bytes a mebibyte. Measured in one release binary, version 3 against
+version 2, each the best of three rounds taken in turn
+(`seal::tests::seal_cost`, run by hand), on an M1 shared with others whose
+load was 2.9 as it began and 2.0 as it ended (a run beside a load of 9.5
+was discarded): 10 000 frames of 1 KiB, a thousand a file, 1.00; of 1 MiB,
+1.00 (26.1 s against 26.0, some 400 MB/s); and 10 000 files of one 64-byte
+frame each 1.86, 1.0 µs more a file -- the subkey, the longer first AAD
+and, on version 3's side of the loop alone, the system's randomness for
+the id, which version 2 drew as it began too. An archive's files are an
+image an hour and a segment each 64 MB: nothing a write pays. The seal is
+the `fennec` binary's alone -- `fennec-server` reaches no archive and no
+seal, and fennec-http is not in the browser module -- and its code grew
+by 18.9 KB (`__text` 2 850 944 bytes built from `train-d`, 2 870 272 with
+version 3, profile `cli` on macOS arm64; the file 32.4 KB larger): the
+binding written and held by every reader, the vouched heads, the chained
+frames and the split batch.
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
