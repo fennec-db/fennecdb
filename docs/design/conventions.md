@@ -116,7 +116,10 @@ restore (GitHub's caches are read from the run's own ref or the default
 branch's; a pull request's is its merge ref's, a merge group's its queue
 branch's). The caches and their inputs, each in `paths`: the 21 cargo `actions/cache`
 steps by `hashFiles('**/Cargo.lock', 'rust-toolchain.toml')` (the Unicode
-table's by its pinned version in the file); `setup-node`'s npm cache by the
+table's by its pinned version in the file), `sanitize`'s by the nightly the
+Makefile names (`FUZZ_NIGHTLY`) as well, so no stable build's entry is
+restored under it -- the Makefile being no path, a new nightly's entry is
+saved by main's next scheduled run; `setup-node`'s npm cache by the
 Grafana plugin's `package-lock.json`; `setup-go`'s by its `go.sum`, and
 `go.mod` for the Go version; the Flutter caches by the version pinned in
 `ci.yml`; `setup-gradle`'s key is the job and the commit, not a file's hash,
@@ -631,6 +634,29 @@ a sum -- whose comment above the statement clippy takes and it does not.
 each place it reads a comment from, and, its last case, to the
 repository's own files, which is how CI's fmt job runs it.
 
+What neither check sees are the forms that are unsafe with no `unsafe`
+written, which edition 2021 allows. A plain `extern` block -- `extern "C"
+{ ... }`, Windows' `extern "system"`, 73 of them in 48 files (2026-11-21):
+`mmap`, `signal`, `pthread_kill`, `proc_pid_rusage`, `CreateFileMappingW`
+-- declares what the linker will bind by name alone, and a declaration
+whose signature is not the function's is undefined behaviour at its first
+call. `#[no_mangle]` -- 50 of them, the C ABIs' exports -- names a symbol
+another object of the program may define too. Neither asks a reason: clippy's lint is about blocks, and
+the scanner reads the keyword, which these do not carry. rustc's
+`missing_unsafe_on_extern` and `unsafe_attr_outside_unsafe` (edition 2024's
+rules, allowed by default in 2021) would have each written `unsafe extern
+"C"` and `#[unsafe(no_mangle)]`, which the scanner would then hold to a
+`SAFETY:` comment as it holds a block. Denying both in
+`[workspace.lints.rust]`, and the scanner reading those forms, is the next
+step; no lint's level changed with this paragraph. The scanner reads no
+`unsafe extern` block, `unsafe trait` or `#[unsafe(..)]` either, of which
+the tree has none; a macro's body it reads as text, so a block in one is
+held like any other (`jni.rs`'s), and the repository uses no outside
+macro. An unsafe operation in an `unsafe fn` is rustc's to refuse outside
+a block, on every target CI compiles -- x86_64 Linux, wasm32, arm64 macOS,
+x86_64 and arm64 Windows -- which leaves the Unix that is neither Linux nor
+Apple's, whose fallback (`lock.rs`) holds no `unsafe fn`.
+
 An unsafe operation in an `unsafe fn` goes in a block of its own, which
 says why it is sound like any other: rustc's `unsafe_op_in_unsafe_fn`,
 denied in `[workspace.lints.rust]`, is a lint of the compiler, not of
@@ -770,7 +796,12 @@ unsanitized debug build's: fennec-core's unit tests 54 s against 79,
 load of 35 to 46 through the sanitized run); the build took 104 s. In CI's
 test job the same binaries, unsanitized, take 3.5 minutes (60 s and 146
 s), so the job, the nightly's install and the build with it, is bounded at
-30 minutes and expected within 15.
+30 minutes and expected within 15. It restores the cargo cache as every job
+of `ci.yml` does, saved by main's runs alone ([above](#reruns)), keyed by
+the job and the nightly's date beside `Cargo.lock` and
+`rust-toolchain.toml`: what it restores was built by that nightly with
+AddressSanitizer's flags, the registry's crates among it, and never a
+stable build's `target/`. The nightly itself is installed each run.
 
 ## Coverage
 

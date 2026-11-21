@@ -2375,6 +2375,29 @@ jobs:
           esac
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
+      # The cargo cache as every job keeps it, keyed by the nightly's date
+      # and this job: a stable toolchain's target/ is never restored under
+      # it, nor one an earlier nightly built. The Makefile, which names the
+      # nightly, is no path a push to main runs for: the entry of a new
+      # nightly is saved by main's next scheduled run, and until then a run
+      # builds cold, as one did before this cache.
+      - name: The nightly's date
+        id: nightly
+        if: steps.touched.outputs.run == '1'
+        run: echo "date=$(sed -n 's/^FUZZ_NIGHTLY ?= //p' Makefile)" >> "$GITHUB_OUTPUT"
+
+      - id: cargo-cache
+        if: steps.touched.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-
+
       - name: Install the fuzzer's nightly, pinned to a date
         if: steps.touched.outputs.run == '1'
         run: make fuzz-toolchain
@@ -2382,6 +2405,22 @@ jobs:
       - name: The tests of fennec-ffi, fennec-abi and fennec-core under AddressSanitizer
         if: steps.touched.outputs.run == '1'
         run: make sanitize
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
