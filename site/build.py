@@ -675,16 +675,14 @@ def prev_next(active, base):
 # the top of engine.rs moved brotli 46 bytes, through the line numbers the
 # panics carry. A figure that is further off is stale, and fails as before.
 #
-# Not everything measured is in here. The container image's size is written
-# into four files and cannot be checked from a site build, which has neither a
-# daemon nor the registry; it drifted from 1.25 MB to a claimed 1.55 before
-# anyone noticed. `docker image inspect ghcr.io/fennec-db/fennec-server:<v>` is the
-# way to settle it by hand.
-# Not in here, and deliberately: the `fennec` and `fennec-server` binary sizes. They
-# are quoted for an Apple M-series and CI is Linux, so a check would compare
-# two different numbers and fail honest builds. They are re-measured by hand at
-# each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
-# 684/765/927 KB when the text index went in.
+# The binaries a release ships and the image are held to what CI's build job
+# measures (`binary_facts`): x86_64 Linux, static with musl, as release.yml
+# builds the tarball, the image's figure its one file, fennec-server. A site
+# build makes no binary, so it reads tools/size-budgets.json, which that job
+# holds within 1% of what it builds. They were quoted for an Apple M-series,
+# to be re-measured by hand at each release, until 0.2.0 shipped a `fennec`
+# and a `fennec-server` of 3616 and 6730 KB on macOS against the 3357 and
+# 5922 the docs said, and an image whose binary was 8.18 MB against 7.18.
 def size_drifted(written, measured, tol=0):
     """Whether a size the docs quote (`written`, as the page writes it) is
     further from `measured` than one unit of its last digit or 1% of it,
@@ -823,6 +821,28 @@ CLAIMS = [
     ("README.md", r"`@fennecdb/web/client`, (\d+) KB brotli\s+in its bundle", "kb_app_client_br", 0),
     ("web/README.md", r"`fennec.wasm` \|[^\n]*: (\d+) KB brotli", "kb_br", 0),
     ("web/README.md", r"`@fennecdb/web/client`, (\d+) KB brotli in an app's bundle", "kb_app_client_br", 0),
+    # The binaries a release ships and the image, as CI's build job measures
+    # them (`binary_facts`): x86_64 Linux, static with musl, the image its
+    # one file, fennec-server.
+    (BENCH_SIZE, r'<code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">(\d+) KB', "kb_bin_fennec", 0),
+    (BENCH_SIZE, r'no import, backup or MCP: <code>make small</code></td><td class="n"><b>(\d+) KB', "kb_bin_small", 0),
+    (BENCH_SIZE, r'<code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">(\d+) KB', "kb_bin_fennec-server", 0),
+    (BENCH_SIZE, r'container image, scratch \+ musl, amd64: its one file, <code>fennec-server</code></td><td class="n">([\d.]+) MB', "mb_image", 0),
+    ("README.md", r"\*\*Container\.\*\* ([\d.]+) MB on amd64", "mb_image", 0),
+    ("README.md", r"· (\d+)–\d+ KB binary", "kb_bin_small", 0),
+    ("README.md", r"· \d+–(\d+) KB binary", "kb_bin_fennec", 0),
+    ("README.md", r"· ([\d.]+) MB container image", "mb_image", 0),
+    ("site/content/docs/concepts.html", r'<td class="n">(\d+)–\d+ KB<br><small>x86-64 Linux', "kb_bin_small", 0),
+    ("site/content/docs/concepts.html", r'<td class="n">\d+–(\d+) KB<br><small>x86-64 Linux', "kb_bin_fennec", 0),
+    ("site/content/docs/concepts.html", r'<td class="n">([\d.]+) MB image', "mb_image", 0),
+    ("site/content/docs/vs-postgres.html", r"An? ([\d.]+) MB server image", "mb_image", 0),
+    ("site/content/docs/server.html", r"<p>The image is (\d+) MB: the binary and nothing else", "mb_image", 0),
+    ("site/content/docs/server.html", r"The image is <b>([\d.]+) MB</b> on\s+amd64", "mb_image", 0),
+    ("site/content/download.html", r"fennec-server(?:</code>)? alone, (\d+) MB on amd64", "mb_image", 0),
+    ("site/content/download.html", r'<p class="dl-fig"><b>(\d+) MB</b> the amd64 image', "mb_image", 0),
+    ("site/content/docs/build.html", r"<code>--profile cli --no-default-features</code>: (\d+) KB on x86-64 Linux", "kb_bin_small", 0),
+    ("site/content/docs/import.html", r"<code>fennec</code> is (\d+) KB on x86-64 Linux", "kb_bin_fennec", 0),
+    ("site/content/docs/import.html", r"and (\d+) KB without its default features \(<code>make small</code>\)", "kb_bin_small", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
@@ -1313,6 +1333,23 @@ def workspace_version():
     return re.search(r'^version = "([^"]+)"', body, re.MULTILINE).group(1)
 
 
+BUDGETS = os.path.join(REPO, "tools", "size-budgets.json")
+
+
+def binary_facts():
+    """`(facts, units)` of the binaries a release ships, as CI's build job
+    measured them (tools/size-budgets.json, which that job holds within 1%
+    of what it builds): each in KB of 1024 bytes (`kb_bin_<name>`), and
+    the image's figure, its one file `fennec-server`, in MB of 10^6 bytes
+    (`mb_image`) -- not what `docker images` reports."""
+    with open(BUDGETS, encoding="utf-8") as f:
+        entries = json.load(f)["binaries"]
+    facts = {f"kb_bin_{name}": e["measured"] / 1024 for name, e in entries.items()}
+    if "fennec-server" in entries:
+        facts["mb_image"] = entries["fennec-server"]["measured"] / 1e6
+    return facts, {k: " MB" if k.startswith("mb") else " KB" for k in facts}
+
+
 def compressed(path):
     """`(gzip, brotli)` bytes for a file that is served over HTTP.
 
@@ -1452,18 +1489,35 @@ def wasm_sizes_drift(modules):
     return out
 
 
+def rustc_version():
+    """`rustc -V` of the release rust-toolchain.toml pins, taken as `make
+    wasm` takes it (rustup's own first, as the Makefile prefers its cargo):
+    under CI the compiler of the module the sizes are read from, said with
+    them, since a toolchain moves sizes with no change of ours
+    (docs/design/crates.md#toolchain)."""
+    home = os.path.expanduser("~/.cargo/bin/rustc")
+    try:
+        return subprocess.run([home if os.path.exists(home) else "rustc", "-V"], cwd=REPO,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "no rustc found"
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     web = lambda name: os.path.join(REPO, "web", name)
     wasm = web("fennec.wasm")
     if not os.path.exists(wasm):
-        # The copy step above already said so. The bench's figures and the
-        # studio's need no module, so they are still held to their truth.
+        # The copy step above already said so. The bench's figures, the
+        # binaries' and the studio's need no module, so they are still held
+        # to their truth.
         bench, bench_unit = bench_facts()
         sizes, sizes_unit = size_facts()
-        unit = {**bench_unit, **sizes_unit, "kb_studio_gz": " KB"}
-        return claims_against({**bench, **sizes, "kb_studio_gz": studio_gz()}, unit,
-                              lambda f: f.startswith(BENCH_FACTS + SIZE_FACTS) or f == "kb_studio_gz")
+        binaries, binaries_unit = binary_facts()
+        unit = {**bench_unit, **sizes_unit, **binaries_unit, "kb_studio_gz": " KB"}
+        return claims_against({**bench, **sizes, **binaries, "kb_studio_gz": studio_gz()}, unit,
+                              lambda f: f.startswith(BENCH_FACTS + SIZE_FACTS) or f in binaries
+                              or f == "kb_studio_gz")
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
     # The client is fennec.js and the two modules it imports, as a page loads
@@ -1511,11 +1565,12 @@ def check_claims():
     }
     bench, bench_unit = bench_facts()
     sizes, sizes_unit = size_facts()
+    binaries, binaries_unit = binary_facts()
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
     # Every size fact is in KB; without a default the report of a drifted
     # size died on a KeyError instead of saying which file drifted.
-    unit = {**{k: " KB" for k in truth}, **bench_unit, **sizes_unit, **unit}
-    return (claims_against({**truth, **bench, **sizes}, unit, lambda f: True)
+    unit = {**{k: " KB" for k in truth}, **bench_unit, **sizes_unit, **binaries_unit, **unit}
+    return (claims_against({**truth, **bench, **sizes, **binaries}, unit, lambda f: True)
             + wasm_sizes_drift({"full": wasm, "none": web("fennec-min.wasm")}))
 
 
@@ -1745,6 +1800,8 @@ def claims_against(truth, unit, wanted):
             )
             why = ("a size integrations/ffi-sizes.md or crates/fennec-wasm/sizes.json does not hold"
                    if fact.startswith(SIZE_FACTS) else why)
+            why = ("a binary tools/size-budgets.json does not hold"
+                   if fact.startswith(("kb_bin_", "mb_image")) else why)
             why = ("a YCSB cell crates/fennec-bench/results/ycsb.tsv does not hold"
                    if fact.startswith(("ycsb:", "ycsbms:", "redis:")) else
                    "a figure crates/fennec-bench/results/requests.tsv does not hold"
@@ -1799,6 +1856,9 @@ def claims_against(truth, unit, wanted):
             elif fact.startswith("kb"):
                 drifted = size_drifted(written, want, tol)
                 want = f"{want:.1f}"
+            elif fact.startswith("mb"):
+                drifted = size_drifted(written, want, tol)
+                want = f"{want:.2f}"
             else:
                 drifted = abs(int(written) - want) > tol
             if drifted:
@@ -2553,6 +2613,7 @@ def build():
     open(os.path.join(OUT, "llms-full.txt"), "w", encoding="utf-8").write(full)
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
+    print(f"  sizes held against web/fennec.wasm; the toolchain here: {rustc_version()}")
 
     labels = check_fold_labels()
     if labels:

@@ -370,14 +370,15 @@ fn entry(db: &Arc<RwLock<Database>>, what: &str, durable: bool) -> Arc<Watched> 
 /// process's scheduler where none runs yet -- an `Err` where its thread
 /// cannot be made, for the server to stop on (`stop_with`), never to serve
 /// with its schedules unrun. `durable` is `--sync always`; `stop` is the
-/// server's one shutdown, which the scheduler's thread asks for should it
-/// end (`stop_with`). Called after both listeners are bound, since a first
-/// look may run a missed slot.
+/// server's one shutdown on a failure, which the scheduler's thread asks
+/// for should it end (`stop_failed`: the server decides the exit code, not
+/// this crate). Called after both listeners are bound, since a first look
+/// may run a missed slot.
 pub fn watch(
     what: &str,
     db: &Arc<RwLock<Database>>,
     durable: bool,
-    stop: fn(i32),
+    stop: fn(),
 ) -> std::result::Result<(), String> {
     start(stop)?;
     let w = entry(db, what, durable);
@@ -438,7 +439,7 @@ fn tell_unrun(what: &str, why: &str, n: usize) {
     }
 }
 
-fn start(stop: fn(i32)) -> std::result::Result<(), String> {
+fn start(stop: fn()) -> std::result::Result<(), String> {
     let mut started = lock(&STARTED);
     if *started {
         return Ok(());
@@ -456,24 +457,45 @@ fn start(stop: fn(i32)) -> std::result::Result<(), String> {
 /// sync -- or the loop's end stops the server through its one shutdown
 /// (`stop`), never a thread gone and the server serving with no schedule
 /// run.
-fn scheduler(stop: fn(i32)) {
+fn scheduler(stop: fn()) {
     let ended = std::panic::catch_unwind(looking);
     let words = match &ended {
         Ok(()) => "its loop ended".to_string(),
         Err(p) => panic_words(p.as_ref()),
     };
     crate::log!("the scheduler stopped ({words}): the server stops with it");
-    stop(1);
+    stop();
 }
 
 fn looking() {
     loop {
         for w in due() {
+            #[cfg(feature = "test-clock")]
+            test_fault();
             if let Some(db) = w.db.upgrade() {
                 w.woken.store(false, Ordering::Release);
                 look(&w, &db, now_ms(), true, None);
             }
         }
+    }
+}
+
+/// A test build's fault, behind `test-clock` with the test build's clock:
+/// with `FENNEC_TEST_SCHEDULER_PANIC` set, the scheduler's thread panics
+/// outside any run as a database comes due, a file's or a node's tenant's.
+/// No failure a release can meet ends that thread on demand, and
+/// fennec-server's `tests/scheduled.rs` stops a real server's scheduler
+/// with this to hold the server's exit to 1 (`durability::stop_failed`):
+/// the unit tests here see `stop` called, never the code it exits with.
+/// Behind `debug_assertions` it was live in every debug fennec-server --
+/// `cargo run`, the one the web tests start -- and a release test build
+/// (`cargo test --release`) waited for it in vain; the feature is held out
+/// of a release by `tools/release_features_check.py` and release.yml's
+/// `+test-clock` check, and a build without it never reads the variable.
+#[cfg(feature = "test-clock")]
+pub(crate) fn test_fault() {
+    if std::env::var_os("FENNEC_TEST_SCHEDULER_PANIC").is_some() {
+        panic!("FENNEC_TEST_SCHEDULER_PANIC is set");
     }
 }
 
@@ -1038,14 +1060,13 @@ fn tell_ahead(w: &Ctx<'_>, name: &str, mark: i64, now: i64, waits: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicI32;
 
     /// Makes the next look panic, outside any run.
     pub(super) static PANIC: AtomicBool = AtomicBool::new(false);
-    static STOPPED: AtomicI32 = AtomicI32::new(0);
+    static STOPPED: AtomicBool = AtomicBool::new(false);
 
-    fn stop(code: i32) {
-        STOPPED.store(code, Ordering::SeqCst);
+    fn stop() {
+        STOPPED.store(true, Ordering::SeqCst);
     }
 
     /// A panic outside a run -- here a look's -- ends the scheduler's
@@ -1067,11 +1088,10 @@ mod tests {
         // Holding a schedule, the database is looked at once given.
         watch("a test's database", &db, false, stop).unwrap();
         let t = std::time::Instant::now();
-        while STOPPED.load(Ordering::SeqCst) == 0 {
+        while !STOPPED.load(Ordering::SeqCst) {
             assert!(t.elapsed() < Duration::from_secs(20), "never stopped");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(STOPPED.load(Ordering::SeqCst), 1);
         assert!(!PANIC.load(Ordering::SeqCst), "the look panicked");
     }
 }

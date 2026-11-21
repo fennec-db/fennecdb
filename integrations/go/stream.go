@@ -20,10 +20,15 @@ type Event struct {
 	// Type is "seed" -- Rows is the whole shape, which replaces what the
 	// subscriber held -- "change" -- Puts and Dels since the last event --
 	// or "error", the last event, with Err: an *Error of Status 401 where
-	// the server ended the stream at its token's exp.
+	// the server ended the stream at its token's exp. A seed past a
+	// mebibyte of rows comes in parts of one Seq: Part 0 replaces what the
+	// subscriber held, each after it adds its Rows, and the last has More
+	// false; a Part 0 coming again is the seed begun again.
 	Type   string
 	Seq    uint64 // the change the event brings the shape up to
 	Rows   []Row
+	Part   int  // which part of a seed: 0 for its first, or its only
+	More   bool // more parts of the seed follow
 	Puts   []Row
 	Dels   []int64
 	Schema bool // the collection's schema changed
@@ -115,6 +120,8 @@ func eventOf(name string, data []byte) Event {
 	var body struct {
 		Seq    uint64  `json:"seq"`
 		Rows   []Row   `json:"rows"`
+		Part   int     `json:"part"`
+		More   bool    `json:"more"`
 		Puts   []Row   `json:"puts"`
 		Dels   []int64 `json:"dels"`
 		Schema bool    `json:"schema"`
@@ -133,7 +140,7 @@ func eventOf(name string, data []byte) Event {
 		}
 		return Event{Type: "error", Err: errors.New("fennecdb: " + body.Error)}
 	}
-	return Event{Type: name, Seq: body.Seq, Rows: body.Rows, Puts: body.Puts, Dels: body.Dels, Schema: body.Schema}
+	return Event{Type: name, Seq: body.Seq, Rows: body.Rows, Part: body.Part, More: body.More, Puts: body.Puts, Dels: body.Dels, Schema: body.Schema}
 }
 
 // Change is one write on the server's disk.

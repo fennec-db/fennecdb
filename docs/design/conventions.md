@@ -196,11 +196,12 @@ change leaves the old entries until they age out, so for a while the
 repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). All of them are,
-but two: `size (browser module)`, which only runs on a pull request and so
-would never report in the merge queue, and `perf (instructions)`, which no
-merge requires until the gate's holdout has passed
-([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
+branch protection on main, not the merge queue's ruleset). All of them are
+but `size (browser module)`, which only runs on a pull request and so would
+never report in the merge queue, and a job is left out until it has passed
+on main: `perf (instructions)` until the gate's holdout has
+([benchmarks.md](benchmarks.md#the-gate)), a new job until the merge group
+that brought it has. A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -208,9 +209,12 @@ stay pending, and a required check of one blocks a merge it should not, so
 `push` has a path filter, which no required check is read from). GitHub's
 "Troubleshooting required status checks" says both. `size (browser module)`
 is left out because a required check that never reports in the merge queue
-holds every group. A new job needs adding to the list unless it is one of
-those, and a renamed one adding under its new name before the old is taken
-out: a required check no job reports holds every group too. With every job
+holds every group. The list is kept by hand, the setting being no file: a
+new job is added once its first group is green, and a required job that is
+renamed is taken out before the pull request renaming it is queued and
+added under its new name once that has landed, since a required check no
+job reports holds every group too, the old name in the renaming group and
+the new one in every other. With every job
 required, a merge group lands when its last job ends and a red job drops
 it, a flaky one's too, so the queue builds two groups at a time and waits
 180 minutes for a group's checks (the ruleset's `max_entries_to_build` and
@@ -778,6 +782,139 @@ binary; their tests take 2.5 s of a core in `cargo test`'s build on an
 Apple M1, 1.6 s of the clock beside each other: PBKDF2's 58 cases of 4 096
 rounds and one of 80 000 are 1.6 s, the RSA files 0.8, the AEAD's and
 HMAC's 0.01.
+
+## API baselines
+
+`fennec.h`, `web/fennec.d.ts`, `web/client.d.ts`, the flags and exit codes of
+`fennec`, `fennec-server` and `fennec-shard`, and the metrics the server and
+the router serve are held to the dumps in `integrations/api-golden/` by
+`tools/api_compat.py` (`make api-check`; CI's `test` job runs it as a step,
+this checkout's copy and main's, BREAKS read from the pull request's as
+data, as `tools/openapi_compat.py`'s are; the fmt job runs the checker's own
+tests). The dumps always are what the sources dump to: a dump that is not
+fails, saying `make api-golden`, so an addition is committed with its dump
+and a later pull request cannot remove it unseen. The pull request's dumps are compared with main's, dump against
+dump: every entry of main's is in the pull request's, unless a `BREAKS`
+entry names that difference, which also catches a dump edited smaller by
+hand. An entry names one change: the surface, the symbol, the kind of
+change and the digests of the declaration before and after (the failure
+prints the entry to paste), so it approves no other change of that symbol.
+What 1.0 changes is the rule for `BREAKS`: `integrations/api-golden/frozen.json`
+says `null` until `python3 tools/api_compat.py --freeze 1.0` (once, at the
+tag; it needs the dumps current and no entry for a release not made), and
+until then an entry's release is `"1.0"`; after it, a break is a major
+version above the frozen one, and `make version` refuses 1.0.0 or later while
+the baselines are not frozen. The header is read
+as macros (one under an `#if` carries its condition) and prototypes (return
+type, each parameter's type and name, in order; whitespace and comments do
+not count). The `.d.ts` files are read by
+the checker's own scanner, not by `tsc`, so the check needs no `npm ci` and
+runs as plain Python: every export is a record, a class's, interface's,
+enum's or namespace's members are grouped by name, and a declaration is
+compared as written, so any change to one -- narrowed parameter, widened
+return, optional member made required, overload dropped or reordered --
+fails, and a harmless widening is named in `BREAKS` too. Overloads are held
+in the order written, since the first that fits is the one resolved; one
+added anywhere passes. What the scanner does not know it refuses with exit 2,
+never skips: `export { a as b }`, `export * from`, `export default`, a
+namespace sharing a name with a function or class, and in `fennec.h` a
+`typedef`, `struct`, `union` or `enum`, a function-like macro and a
+prototype under an `#if`. A change that needs one of them teaches the
+scanner in a pull request of its own first, because main's copy of the
+checker judges the next pull request and would refuse the form. It cannot see a type's meaning through the names it uses,
+a non-exported helper's body, or a new required member of an interface a
+caller implements, an overload added in front of another; `make types-check` holds that the declarations still
+compile and match `web/fennec.js`. The SDKs' dumps need outside tools
+(Kotlin's binary-compatibility-validator, swift-api-digester, .NET's
+PublicApiAnalyzers, `apidiff`) and come in 1.0.x.
+
+The CLI's and the metrics' dumps (`cli-<binary>.json`,
+`metrics-<binary>.json`) are the binaries' own, made by each binary's
+crate's `tests/api_golden.rs` (fennec-server's `tests/api_dump.rs` holds
+how, for the three) and held there byte for byte under `cargo test`, which
+`make test` runs in every leg of the required `test` job; the checker reads
+them and never makes them, and `make api-golden` has the tests write them
+into `target/api-golden` (`FENNEC_API_GOLDEN`) for `--write --built` to
+judge and copy. A command's flags are the dash-led words of its `--help`
+that its parser takes, each asked of the binary: `<flag> --help <no such
+flag>` is refused naming the flag where the parser does not know it,
+prints the help and exits 0 for a switch, and is refused at the unknown
+flag where the flag took `--help` for its value -- so a probe never runs
+the binary, and a flag's arity is the parser's, not the help's words.
+That holds because every binary and subcommand reads its whole command
+line, refusing a flag it does not read or a value missing, before it
+makes, opens, reads or locks anything a flag names: the router opened
+`--audit`'s file as the flag was read, so its probe left a file named
+`--help`, and the router, the backup family and `fennec mcp` read
+`--tls-ca`'s. The shell's subcommands go further: every refusal of the
+line -- the arguments, a flag the command needs, a URL, a token not given,
+a sealed backup's key -- comes before a file a flag names (`--tls-ca`'s,
+`--key-file`'s) is read or a lock is taken, held by fennec-cli's
+`every_refusal_comes_before_a_file_a_flag_names` beside an unreadable
+`--tls-ca` or `--key-file`; only whether the file a backup or a restore
+writes is there already (2 without `--force`) is asked under its lock, so
+nothing makes it between the asking and the rename. The router reads its
+CAs and opens its audit log before it starts tracing, as fennec-server
+does. Each probe runs in an empty directory of its own, which it
+must leave empty, and its answer must carry no system error (`(os
+error`, a file named `--help` read). A command reads, and its help names,
+its own flags alone: `fennec key`, `verify` and `prune` shared `backup`'s
+parser and help, so each took and ignored the family's eleven flags and
+the dump froze them. The subcommands are those the helps name (`fennec
+import ...`), found from help to help. A literal in the crate's sources
+that is a flag's whole spelling and no help shows fails the test, so no
+flag is taken unseen by the dump; `fennec-server`'s `--follow-<option>`
+flags, made at run time from fennec-import's `args::OPTIONS` where no scan
+sees them, are held to that list instead, each a flag of the server's help
+and dump taking a value, as `fennec import`'s are. Removing a flag, or
+turning a switch into a flag taking a value or the reverse, is a break;
+the words of its help line are not held, so a value read in other units is
+not seen. The exit codes are each binary's `exit::Code` (`src/exit.rs`)
+with its meaning: every exit goes through `exit::now` or a subcommand
+returning a `Code`, and the test refuses any other way out of the process
+in the crate's sources, read as tokens with comments and literals aside
+-- `std::process::exit` or `abort` by any path (spaced out, `r#exit`), a
+`use` taking either in under any name, or `process`'s every name (`*`), or
+the module under another (`process as p`, `{self as p}`), an `ExitCode`,
+the binary's `main()` returning a value (an `Err` exits 1 with no `Code`),
+each seeded in fennec-cli's `every_way_out_but_exit_now_is_refused` -- and
+a variant `Code::ALL` leaves out. Its lexer is the literal scan's
+(`api_dump::not_code`): every comment, string and char form Rust has, a
+nested `/* */` and a raw byte or C string (`br#"..."#`, `cr"..."`) among
+them, which it once read as a plain string, an exit after one unseen. The scheduler hands the server a failure
+(`fn()`), never a number, so no code is decided outside it, and
+fennec-server's `a_scheduler_s_failure_ends_the_server_with_1` holds that
+stop to 1, a file's server and a node's, through a test build's fault
+(`FENNEC_TEST_SCHEDULER_PANIC`) behind the `test-clock` feature, which
+`tools/release_features_check.py` and release.yml's `+test-clock` check
+hold out of a release: no failure a release can meet ends that thread on
+demand. Behind `debug_assertions` it was live in every debug server
+(`cargo run`, the web tests'), and `cargo test --release` waited for it in
+vain; built without the feature a server reads no such variable
+(`a_build_without_test_clock_has_no_scheduler_fault`), and CI's `test` job
+runs the test built with it, by name. A code means what the code
+does: 2 is a line refused before anything ran, 1 the work failing -- `fennec
+types` exits 1 for a file it cannot read or parse and an `-o` it cannot
+write, as the shell does for a file it cannot open, `fennec key` 1 when
+the system gives it no randomness, as for a key it cannot write, `verify`, `prune` and
+`restore --tenants` 1 for a root they cannot read, as for one archive, and
+the router 2 for a lock file it cannot make, as for a directory it cannot open, keeping 1 for
+a lock another holds. A code removed or its meaning reworded is a break;
+one added grows the dump. The metrics are the
+families the binaries' scrapes show, each with its type and every label a
+sample carries (a histogram's `le` aside), over configurations that between
+them show every family: a file's primary with `--hooks`, `--mcp`, a
+schedule and `--replication-token`, its replica once in contact, and a
+`--dir` node replicating; a router with `--replicas` and `--auto-failover`
+over a node in a region taking leases and a node it cannot reach, and its
+standby. A family with no sample fails the test, its labels unknown, and
+the server's test holds every `fennec_` literal of fennec-http's,
+fennec-server's and fennec-shard's sources to a dump (`fennec_router_` the
+router's, every other the server's), refusing a name built at run time:
+a family a configuration does not show, or a new one, fails there. A
+metric removed or renamed, its type changed or a label of it removed is a
+break; a metric or a label added passes, a selector naming the labels it
+had still matching.
 
 ## Security policy
 

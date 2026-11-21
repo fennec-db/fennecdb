@@ -1,6 +1,6 @@
 # Benchmarks
 
-The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how, and [the gate](#the-gate) every pull request's instruction counts are held to. The first two sections are paragraphs moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. [Instruction counts](#instruction-counts) holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
+The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how, [the gate](#the-gate) every pull request's instruction counts are held to, and [the budgets](#binary-sizes) the binaries a release ships are held to. The first two sections are paragraphs moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. [Instruction counts](#instruction-counts) holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs. [Binary sizes](#binary-sizes) is how the binaries a release ships are measured and held to their budgets, which CI's build job does.
 
 ## scale-bench
 
@@ -517,8 +517,114 @@ job judges a pull request, every one to pass or to fail on a cost its
 change is shown to have; the calibration's nine pairs again, judged by
 self costs where the calibration priced by call lines, its six merged
 changes to pass and its three regressions to fail; and the heap-shift
-control on x86_64 musl. `perf (instructions)` stays a check no merge
-requires until it passes.
+control on x86_64 musl. Each pair says what it must do (`expect`): `pass`,
+no workload failing, or the workloads that fail and by what --
+instructions, bytes or both, two joined by `+` -- and is as expected only
+when exactly those fail, a workload failing for no metric's reason
+(dropped, unrun) never; a metric marked `?` may fail or not
+(`http-scoped-get:bytes+instructions?`), for a judged figure its own runs
+put within their spread of the bar. A pair whose base predates what a
+workload's setup asks for names it (`cannot_run`) with the words of the
+base's error, 16 characters at the least -- a word or two is in every
+error -- and is judged on the workloads both sides run, one so named that
+the base runs, or does not for another reason, or that this tree runs
+fewer than five times, failing it (`perf_gate.py check --expect
+--cannot-run`). Its first run (43682293646, main at 8743f0d9), every
+merged pair expected to pass, held the control and 19 of the 24 pairs as
+expected; five were not, each cost found in the two sides' median
+profiles, function by function, and in the lines its change wrote. #593: a
+read by an id or a `@hash` bucket goes through `candidates_held`, and its
+rows are tested by `Filter::without`. Read off the profiles: +326 to +426
+instructions an op outside the allocator's functions, and an allocation of
+32 bytes more and its free; on `core-get-id`, `candidates_held` 268
+instructions of its own where `filter_candidates`, whose place it takes,
+had 241, and a call to `bcmp` (90 with `memcmp`); `Filter::made` 90 of its
+own, `Filter::taking`, which calls it, 53 fewer; `matching_ids_to` 90 more
+of its own, a call to `Expr::conjuncts` (226 with the vector it grows:
+`grow_one`, `finish_grow`, the `malloc`) and one to `bcmp` (20).
+`Filter::without` is no frame, inlined into `matching_ids_to`, so what
+follows is the source's, inferred: it collects the `and`'s terms into a
+vector even where the equality is the only one -- the call to
+`Expr::conjuncts` and its 32 bytes -- and compares each term's field with
+the bucket's, the second `bcmp`; the first is `candidates_held`'s
+comparison of the index's name, which tells it a bucket gave its rows.
+`core-get-id` +6.51% (31 → 33 calls, 807 → 839 bytes an op, +3.97%),
+`core-filter-limit` +2.15% (+1.01%), `http-get-row` +4.09% (+2.55%),
+`http-patch` +3.56% (+1.99%), `http-scoped-get` +3.02% (+1.45%), a cost to
+win back in a change of its own. #554: every scoped request charged to its
+caller's `--request-rate` as its token is checked. Read off the profiles:
++652 to +696 instructions an op outside the allocator's functions, no call
+into it more; on `http-scoped-get`, `authenticate` 110 more of its own and
+two calls it did not make, `rate::Table::lock` (94 of its own, 170 with
+the clock read it makes) and `rate::Held::take` (64 of its own, 298 with
+the `HashMap::get_mut` it makes, 93 of its own, and that one's `bcmp`).
+`rate::admitted`, which makes those calls in the source, is no frame: it
+is inlined into `authenticate`, so that `authenticate`'s 110 are
+`admitted`'s is inferred, as is, from the source, that the lookup is keyed
+by the caller's subject. `http-scoped-get` +2.85%, `http-scoped-insert`
++1.63%, `http-scoped-set` +1.22%. #568: every record carries a CRC32C --
+an open checks each it reads, `file-open` +20.23%, 257 instructions a
+record of 100 000 (`Rec::summed` 80, the sum 77, the walk over each
+record's framing 100); a compaction sums each it writes, `file-compact`
++21.76% (141 a record); a write sums its record, `Database::commit` 81,
+the sum 35, a copy 37 to 41 (a frame with no symbol, which `realloc` calls
+too) and `record_at` 17, `core-insert` +1.82%, `core-put` +1.20%,
+`http-put` +1.13%, the longer records growing the buffers they are written
+into, `core-insert` +1.54%, `core-put` +1.24% and `http-patch` +1.32% in
+bytes, all of them `realloc`'s growth -- the write's cost the owner
+accepted as it merged. The sum ran as SSE4.2's `crc32` (`crc::x86::raw`,
+no table in any profile): valgrind's CPUID offered SSE4.2, as every x86_64
+processor made since 2011 does, and an aarch64 with `crc` takes its own
+instruction a word, so the figures are a user's; only the browser module
+and a processor without the instruction take the slicing-by-8 table, eight
+lookups and their XORs for the eight bytes one instruction sums. Recheck
+#524: `http-batch` -3.18% in instructions, 4 calls a put fewer, and +2.85%
+in bytes: a batch's lines are parsed into `Query`s, each its text and what
+its first read found, then moved by `exactly_batch` into a vector of
+exactly their number, where the base pushed each statement into its one
+vector -- `realloc`'s growth 840 480 bytes a batch less (824 an element,
+over the 1 020 it grows by), 911 736 allocated outright more, 71 a put.
+Recheck #474: its scoped writes' policy grants `wake`, which #474 brought,
+and its base refuses the policy before the loop: the two workloads "the
+base's build did not run" are named as its cannot-run now, and the other
+23 passed. #474's first head against its fix -- a base that reads `wake`,
+and ran every workload -- failed on its regression alone:
+`http-scoped-insert` +3.25% (+3.26% in bytes), `http-scoped-set` +2.42%
+(+2.79%), `http-scoped-get` +1.11% (+1.09%). The pairs with a cost and the
+three regressions now name the workloads and metrics above -- #511 undone
+`core-json-page`'s instructions, #542's first head `http-get-row`'s and
+`http-patch`'s -- and every pair, judged again by the new step from the
+first run's results, came out as expected.
+
+The second run (43686447758, this workflow on its branch at 19a8322b) held
+every pair and the control as expected, and the two runs' figures agree.
+Of the 25 workloads, 13 ran their five runs the same to the instruction as
+judged -- the allocator's instructions priced at the base's cost a call --
+on every side of every pair in both runs, `http-scoped-insert` and
+`http-scoped-set` on all sides but one; the others spread, a side's runs
+against their median, by 0.12% at the most (`core-group`), then 0.03%
+(`core-insert`, `http-scoped-insert`), 0.02% (`core-put`,
+`http-put-keyed`) and 0.01% or less. As counted, the runs' spread the
+table shows, they reach 1.11% (`http-scoped-set`, on #520 in the first run
+and four other pairs in the second), 0.78% (`core-near-filtered`), 0.42%
+(`core-near`), 0.29% (`http-scoped-get`) and 0.21% (`http-scoped-insert`):
+the allocator's cost a call moving with the heap's layout, which the
+judged figure prices at the base's. The bytes an op were the same in every
+run of every side. Every judged figure within 0.2 points of the bar,
+failing or passing, came out the same in both runs, its runs the same to
+the instruction or the byte on both sides -- #593's `core-filter-limit`
++1.012% in bytes, #568's `http-put` +1.131% and `http-patch` +0.891% in
+instructions, #542's first head's `http-get-row` +1.119% and
+`http-scoped-get` +0.898%, #474's first head's `http-scoped-get` +1.115%
+and +1.087% in bytes -- but #568's `core-put`, +1.196% and +1.197%, its
+runs 0.014% apart at the most. None is within its spread of the bar, and
+no pair names a metric that may fail. The 0.29% `http-scoped-get` spreads
+by as counted on #474's first head is the allocator's cost a call, 178.7
+or 180.0 instructions by the heap's layout, which the judged figure prices
+at the base's, 178.1 or 178.5 a run, pooled: with 53 calls an op on both
+sides, only 231 a call would bring it to +1%. `perf (instructions)` stays
+a check no merge requires until the corrected workflow, on main, has a
+green run.
 
 *Why fennec-http's examples.* The program reaches every crate a request
 does and no more. In `fennec-bench`, its bundled SQLite, the MongoDB
@@ -602,3 +708,95 @@ to musl's. The count by the pull request's own checker, as the first
 version had it: an entry in `ALLOCATOR` priced a function away in the pull
 request that added it. The count and the judgement in one job: the
 change's code had run before the judgement, on the same `PATH`.
+
+## Binary sizes
+
+**What a release ships is measured as it is built, and held to a budget.**
+CI's build job (`build (release + cli profile)`, a required check) builds
+what `release.yml` puts in the x86_64 Linux tarball -- `fennec` on the
+`cli` profile and `fennec-server` on `release`, for
+`x86_64-unknown-linux-musl`, static, each in a cargo run of its own, ring's
+C built by musl-tools' compiler -- and `make small`, the shell without its
+default features, the same way, and holds each file's bytes to
+`tools/size-budgets.json` (`tools/size_budgets.py`). An entry carries what
+the job measured when it was last written (`measured`) and a budget half a
+percent above it, rounded up to a thousand bytes. A binary past its budget
+fails the job: the pull request that grew it writes the two figures the
+failure prints and says in its body what the bytes buy. One more than 1%
+under its budget, or more than 1% from its measurement, fails too, so that
+the figures the docs quote stay what ships. The docs quote `measured`, a KB
+1024 bytes, and `site/build.py` holds every figure they write within 1% of
+it (`binary_facts`): the size table, README's range, the image wherever a
+page names it. `tools/test_size_budgets.py`, in the fmt job, holds the
+check's refusals and the file's own entries.
+
+The image's figure is `fennec-server`'s, in MB of 10^6 bytes: the root
+`Dockerfile` builds the same binary with the same toolchain, on Alpine,
+and copies it alone into `scratch`. 0.2.0's amd64 image held 8 178 208
+bytes where its tarball's `fennec-server` was 8 174 128, 0.05% apart, and
+the monitoring (Grafana) job, the one job that builds the image, holds its
+binary within 1% of the figure (`--near`). What `docker images` reports is
+not it: 23.2 MB for that image under Docker Desktop.
+
+Why these figures. The docs quoted macOS arm64's, to be re-measured by
+hand at each release, and they drifted with nothing to stop them: 3357 KB
+for `fennec` and 5922 for `fennec-server` (measured 2026-11-02) when 0.2.0
+shipped 3616 and 6730 on macOS, and 7.18 MB for an image whose binary was
+8.18. A check in CI, which is Linux, cannot hold a Mac's figure, and the
+Mac's was never the Linux release's: 0.2.0's `fennec-server` is 8 174 128
+bytes for x86_64 musl against 6 891 744 for aarch64-apple-darwin. The musl
+build is what a Linux tarball, the `.deb`, the `.rpm` and the image ship,
+and a runner builds it to the same bytes each time: the compiler is
+pinned, and the paths it writes into panics' locations are the runner's.
+The job runs on `ubuntu-24.04`, the runner `release.yml` builds the
+tarball on, not `ubuntu-latest`, which became 26.04 in 2026-11: another
+release's musl, gcc (ring's C) and linker would measure another binary
+than the one that ships, and move every figure the day GitHub moves the
+label. Built in an amd64 Ubuntu 24.04 container laid out as a runner is
+(`/home/runner/work/fennecdb/fennecdb`, `CARGO_HOME` under
+`/home/runner`), main at `38f6a0bc` gave 4 856 592, 8 186 416 and
+2 951 680 bytes, and the job's first run on `ubuntu-24.04` (#648) the
+same three to the byte; 0.2.0's tarball to them moved `fennec` 4 096
+bytes and `fennec-server` 12 288, an ELF file's segments being laid out by
+4 KB pages, so a figure moves a page at a time or not at all.
+
+The check's first run on the tree that landed it (#672, 2026-11-15) failed
+all three, against figures a day old: `fennec` 4 893 456 bytes (+36 864,
++0.76%), `fennec-server` 8 292 944 (+106 528, +1.30%) and `make small`
+2 968 064 (+16 384, +0.56%). In that day 25 pull requests had landed on
+main, three of them trains of ten, eight and six branches, none held to a
+budget main did not have yet: each had been measured by its own author on
+macOS, where a Mach-O file grows a 16 KB page at a time and most of them
+read +0. The file was written again from that run. A percent in a day,
+with no pull request in which anybody saw it, is what the check is for:
+from that landing the job holds each one to what main measures.
+
+Rejected: a budget of the measurement itself, which would stop every pull
+request that adds a byte and make any two in the merge queue that each
+write one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0,
+which would leave the docs' figures free to drift 5% before anything
+failed; measuring the image in `release.yml` (`docker image inspect`),
+once a release and after the docs have shipped its figure.
+
+What the job costs. It built `make small` and `fennec-server` for the
+host (glibc), one after the other: a median of 2.3 minutes over 40 green
+runs (2026-11-13 and 14, the slowest 2.7), the two builds about 40 and
+80 s of it, the crates from outside the workspace restored from the cache.
+Each build is a chain of compiles of one unit (`codegen-units = 1`) ending
+in one fat LTO -- 68 s of `fennec-server`'s 85 -- a core's work most of
+its time, and the runner has four: the three builds run at once, `make
+small` in a target directory of its own, since a second cargo run on the
+`cli` profile's waits for the first's lock, and the cache holds the musl
+builds' crates from outside the workspace under a key of its own. Its
+first run, with nothing in that cache, took 2.2 minutes: the builds 98 s
+at once -- `fennec-server` 1 min 38 s, `fennec` 1 min 19 s, `make small`
+1 min 8 s, ring's C and rustls compiled for each profile, the three
+adding to 4 min 5 s -- and the musl target and musl-tools about 13 s of
+the install's 23.
+
+Not built here: `fennec-shard`, which no release ships yet -- its row left
+the size table, and it joins this job and the file when `release.yml`
+builds it -- nor the release profile's `fennec` with and without its
+default features, which ship nowhere and whose rows the table had. The
+browser module's figures are `site/build.py`'s own, against the module the
+test job builds.

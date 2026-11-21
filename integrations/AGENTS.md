@@ -92,7 +92,10 @@ left failing it (`clearDimming`), so one that fails half-way fails alone; a fail
 reported, each window's load step by step, and the system log of the app and
 of WebKit's processes (`keepEvidence`), the main record of a page that never
 loads; a command the app could not carry out fails its check at once with the
-app's words (`cmd-failed`). On the arm64 runner its provisioner's WSL poll, whose install
+app's words (`cmd-failed`). A check waits for a studio's load only where it
+tests the page, else for its window's studio asked for (`waitWindow`): on
+Windows each window's first load waits out a cold WebView2 browser, 25.5 s
+once on a runner (`checks/orphan.mjs`). On the arm64 runner its provisioner's WSL poll, whose install
 prompt comes over the window in front every 90 s whichever host its console
 has, is paused for the job and the prompt closed, never a key sent to it, the
 poll resumed by the job's last step (`desktop.yml`); the unit tests ask

@@ -27,6 +27,22 @@
 //! `seed` means "this is the whole shape": the client replaces its local
 //! copy. `change` is an incremental diff and **carries state**, not an
 //! operation (see `fennec_core::changes`): re-applying it is harmless.
+//!
+//! A seed past [`SEED_PART`] bytes of rows comes in parts, each a `seed`
+//! event of the same `seq`:
+//!
+//! ```text
+//! event: seed
+//! data: {"seq":42,"rows":[...],"more":true}
+//!
+//! event: seed
+//! data: {"seq":42,"part":1,"rows":[...]}
+//! ```
+//!
+//! A part without `part` begins the seed -- again, where parts of one came
+//! before it -- and the one without `more` ends it: a client holds the
+//! parts aside and lands the seed once the last came, so nothing reads a
+//! shape half seeded.
 
 use crate::access::{Mask, Scope, Who};
 use crate::api;
@@ -1331,8 +1347,14 @@ struct Seen {
 }
 
 impl Seen {
-    fn seed(&mut self, rows: &[Row]) {
-        self.ids = rows.iter().map(|r| (r.id, self.digest(r))).collect();
+    /// A page of a seed's rows, sent: the first after `ids` was cleared
+    /// ([`shown`]), since a seed sent again from its start is the whole
+    /// shape anew.
+    fn add(&mut self, rows: &[Row]) {
+        for r in rows {
+            let d = self.digest(r);
+            self.ids.insert(r.id, d);
+        }
     }
 
     /// Whether the row `id` was sent, forgetting it: a deletion is told.
@@ -1379,6 +1401,59 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
     out
 }
 
+/// The bytes of rows a seed's event holds, give or take its last page's
+/// rows: past them the rest go in further parts of the seed, so neither
+/// the server nor its client holds a seed whole. A 300 000-row seed of
+/// 155-byte rows (46.7 MB) sent as one event held the rows decoded, their
+/// JSON, the event's text and its gzip at once; in parts a stream holds a
+/// page of rows and a part (docs/design/http.md#seeds-in-parts).
+pub const SEED_PART: usize = 1 << 20;
+
+/// The rows a seed reads first. A shape holding no more is read and sent
+/// as one event, as a seed always was; a longer one is read a page at a
+/// time, each page sized by the bytes the rows before it took to fill
+/// about a part, between [`PAGE_FEWEST`] and [`PAGE_MOST`] rows.
+const SEED_PAGE: usize = 1_000;
+const PAGE_FEWEST: usize = 64;
+const PAGE_MOST: usize = 1 << 16;
+
+/// What a seed's rows are read from ([`seed`]): one is made a seed and
+/// moved into [`send_seed`] once, so the pin's size beside the other
+/// variant's costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
+enum Source {
+    /// Read under the lock, whole, masked and told `seen` there: a shape
+    /// of [`SEED_PAGE`] rows or fewer, or one past the pins' budget.
+    Whole(ResultSet),
+    /// A pin, read a page at a time with no lock held, past the last id
+    /// sent: `sel` with `id > $1` ANDed in and `limit $2`. `first` is the
+    /// page read already; `checked` where the pin was the shape's own read
+    /// ([`Database::pin`]), which asks at its end whether the ring still
+    /// reaches back to it -- a pin of the rows the lock answered
+    /// ([`Database::pin_rows`]) is at the lock's change as its hold is.
+    Pinned {
+        pin: Pinned,
+        sel: Select,
+        first: Option<ResultSet>,
+        checked: bool,
+    },
+}
+
+/// How a seed's sending ended.
+enum Sent {
+    Done,
+    /// Read past what holds -- the ring passed its pin, an image adopted
+    /// meanwhile, a page that reached for an index -- so it is read again
+    /// under the lock and sent from its start, its first part telling the
+    /// client to let go of the parts it had. `whole` where the pin was of
+    /// the rows the lock answered: read again so, it would only be refused
+    /// again, so the lock reads it whole.
+    Again {
+        whole: bool,
+    },
+    Failed(Error),
+}
+
 /// Sends the whole shape; the change it is at, the change ring held back
 /// to it until the stream's first look after it, and the images the
 /// database had adopted by then (`Database::adoptions`).
@@ -1408,6 +1483,13 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 /// it, and the pin read what it replaced. Lists the pin answered before its
 /// read reached for an index are kept where they still hold ([`Kept`]),
 /// rather than answered again under the lock.
+///
+/// The rows go a page at a time, in parts of about [`SEED_PART`] bytes
+/// ([`send_seed`]): read under the lock, only a short shape is read whole;
+/// a longer one has its ids read there and those rows pinned
+/// ([`Database::pin_rows`]), to be read beside the writers as a pinned
+/// shape is. A seed read again after parts of it went out is sent from its
+/// start, which its client takes as the seed begun anew.
 fn seed(
     out: &mut Events,
     db: &Arc<RwLock<Database>>,
@@ -1426,7 +1508,57 @@ fn seed(
     // When a row the lists read reaches its time past when they were
     // answered: the stream's `Reach::next` once the seed's read ended.
     let mut reaches = None;
-    let read = loop {
+    // The lock reads the seed whole: a pin of the rows it answered was
+    // refused a page.
+    let mut whole = false;
+    loop {
+        let picked = pick(
+            db,
+            (sub, reach, view, lists),
+            seen,
+            (&mut pin, &mut kept, &mut reaches, whole),
+        );
+        let (source, hold, adopted) = match picked {
+            Ok(p) => p,
+            Err(e) => {
+                event(out, "error", &error_json(&e))?;
+                return Err(std::io::Error::other("seeding failed"));
+            }
+        };
+        let seq = hold.seq();
+        match send_seed(out, db, source, (seq, adopted), view, seen, quiet)? {
+            Sent::Done => {}
+            Sent::Again { whole: w } => {
+                (pin, whole) = (false, whole || w);
+                continue;
+            }
+            Sent::Failed(e) => {
+                event(out, "error", &error_json(&e))?;
+                return Err(std::io::Error::other("seeding failed"));
+            }
+        }
+        if let Some(r) = reach.as_mut() {
+            r.next = r.due_at(reaches, now_ms() as i64);
+        }
+        return Ok((seq, hold, adopted));
+    }
+}
+
+/// What a seed reads its rows from, picked under the lock ([`seed`]), with
+/// the change it is at, held, and the images adopted by then.
+#[allow(clippy::type_complexity)]
+fn pick(
+    db: &Arc<RwLock<Database>>,
+    (sub, reach, view, lists): (
+        &mut api::Subscription,
+        &mut Option<Reach>,
+        &mut Option<View>,
+        &mut Option<Lists>,
+    ),
+    seen: &mut Option<Seen>,
+    (pin, kept, reaches, whole): (&mut bool, &mut Option<Kept>, &mut Option<i64>, bool),
+) -> fennec_core::error::Result<(Source, Hold, u64)> {
+    loop {
         let guard = crate::held::read(db);
         let now = now_ms() as i64;
         let (hold, adopted) = (guard.hold_changes(), guard.adoptions());
@@ -1437,100 +1569,88 @@ fn seed(
             (Some(r), _) => (r.rules(&guard).map(|a| Some((a, false))), now),
             (None, _) => (Ok(None), now),
         };
-        let ruled = match ruled {
-            Ok(r) => r,
-            Err(e) => {
-                break seed_rows(&guard, Err(e), view, seen, quiet).map(|r| (r, hold, adopted))
-            }
-        };
+        let ruled = ruled?;
         if let Some(r) = reach.as_ref() {
-            reaches = r.reaches(&guard, at);
+            *reaches = r.reaches(&guard, at);
         }
-        let stmt = Statement::Select(match &ruled {
+        let sel = match &ruled {
             Some(((filter, project, _), _)) => shape_select(&sub.collection, filter, project),
             None => api::seed_select(sub),
-        });
-        let pinned = match (pin, &ruled) {
+        };
+        let stmt = Statement::Select(sel);
+        let pinned = match (*pin, &ruled) {
             // Answered already: the lock reads it, as it did.
             (_, Some((_, true))) | (false, _) => None,
             _ => guard.pin(&[(&stmt, &[][..])]),
         };
+        let Statement::Select(sel) = stmt else {
+            unreachable!("a seed reads a select");
+        };
         let Some(p) = pinned else {
-            let rows = match ruled {
+            let sel = match ruled {
                 Some(((mut filter, project, v), done)) => {
-                    let answered = match (&mut filter, done) {
-                        (Some(f), false) => guard.answer_subqueries(f),
-                        _ => Ok(()),
-                    };
-                    answered.and_then(|()| {
-                        settle(sub, view, lists, (filter, project, v));
-                        guard.query(&Statement::Select(api::seed_select(sub)), &[])
-                    })
+                    if let (Some(f), false) = (&mut filter, done) {
+                        guard.answer_subqueries(f)?;
+                    }
+                    settle(sub, view, lists, (filter, project, v));
+                    api::seed_select(sub)
                 }
-                None => guard.query(&stmt, &[]),
+                None => sel,
             };
-            break seed_rows(&guard, rows, view, seen, quiet).map(|r| (r, hold, adopted));
+            return Ok((locked(&guard, sel, view, seen, whole)?, hold, adopted));
         };
         drop(guard);
-        let (rows, answer, ended) = match ruled {
+        let (sel, answer, ended) = match ruled {
             Some(((mut filter, project, v), _)) => {
                 if let Some(f) = &mut filter {
                     match p.answer_subqueries(f) {
                         // An inner `get` reached for an index: the lock's.
                         None => {
-                            pin = false;
+                            *pin = false;
                             continue;
                         }
-                        Some(Err(e)) => break Err(e),
+                        Some(Err(e)) => return Err(e),
                         Some(Ok(())) => {}
                     }
                 }
                 let ended = now_ms() as i64;
-                let stmt = Statement::Select(shape_select(&sub.collection, &filter, &project));
-                (p.query(&stmt, &[]), Some((filter, project, v)), ended)
+                let sel = shape_select(&sub.collection, &filter, &project);
+                (sel, Some((filter, project, v)), ended)
             }
-            None => (p.query(&stmt, &[]), None, now),
+            None => (sel, None, now),
         };
-        let Some(rows) = rows else {
+        let sel = paged(sel);
+        let Some(rows) = p.query(
+            &Statement::Select(sel.clone()),
+            &page_params(None, SEED_PAGE),
+        ) else {
             // Answered at the pin's change: kept, for the lock to read by
             // where they still hold.
-            kept = answer.map(|answered| Kept {
+            *kept = answer.map(|answered| Kept {
                 at: p.change_seq(),
                 images: adopted,
                 now,
                 ended,
                 answered,
             });
-            pin = false;
+            *pin = false;
             continue;
         };
         if let Some(a) = answer {
             settle(sub, view, lists, a);
         }
-        let read = seed_rows(p.database(), rows, view, seen, quiet);
-        drop(p);
-        let guard = crate::held::read(db);
-        let seq = hold.seq();
-        let overrun = seq < guard.change_horizon() || seq > guard.change_seq();
-        if read.is_ok() && (overrun || guard.adoptions() != adopted) {
-            pin = false;
-            continue;
-        }
-        break read.map(|r| (r, hold, adopted));
-    };
-    let (rows, hold, adopted) = match read {
-        Ok(r) => r,
-        Err(e) => {
-            event(out, "error", &error_json(&e))?;
-            return Err(std::io::Error::other("seeding failed"));
-        }
-    };
-    if let Some(r) = reach.as_mut() {
-        r.next = r.due_at(reaches, now_ms() as i64);
+        let first = match rows? {
+            Response::Rows(rs) => rs,
+            _ => ResultSet::default(),
+        };
+        let source = Source::Pinned {
+            pin: p,
+            sel,
+            first: Some(first),
+            checked: true,
+        };
+        return Ok((source, hold, adopted));
     }
-    let seq = hold.seq();
-    event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
-    Ok((seq, hold, adopted))
 }
 
 /// The stream's filter, list and view as a seed answered them, and its
@@ -1548,29 +1668,259 @@ fn settle(
     *lists = Lists::of(sub.filter.as_ref());
 }
 
-/// The seed's rows as their event sends them, read on `db` -- the database
-/// under the lock, or a pin's, whose schemas the mask reads -- and `seen`
-/// told of them.
-fn seed_rows(
+/// A seed read under the lock: whole where it is short -- its first
+/// [`SEED_PAGE`] rows and one past them read, as a page is -- else the ids
+/// of its rows read and those rows pinned, for [`send_seed`] to read a
+/// page at a time with no lock held. Past the pins' budget, or `whole`, it
+/// is read whole, as every seed was.
+fn locked(
     db: &Database,
-    rows: fennec_core::error::Result<Response>,
+    sel: Select,
     view: &Option<View>,
     seen: &mut Option<Seen>,
-    quiet: bool,
-) -> fennec_core::error::Result<String> {
-    let Response::Rows(mut rs) = rows? else {
-        return Ok(String::from("[]"));
+    whole: bool,
+) -> fennec_core::error::Result<Source> {
+    let rows = |sel: Select, limit: Option<usize>| -> fennec_core::error::Result<ResultSet> {
+        let sel = Select {
+            limit: limit.map(Count::N),
+            ..sel
+        };
+        Ok(match db.query(&Statement::Select(sel), &[])? {
+            Response::Rows(rs) => rs,
+            _ => ResultSet::default(),
+        })
     };
+    if whole {
+        return Ok(Source::Whole(shown(db, rows(sel, None)?, view, seen, true)));
+    }
+    let first = rows(sel.clone(), Some(SEED_PAGE + 1))?;
+    if first.rows.len() <= SEED_PAGE {
+        return Ok(Source::Whole(shown(db, first, view, seen, true)));
+    }
+    let ids = rows(
+        Select {
+            project: Some(vec!["id".to_string()]),
+            ..sel.clone()
+        },
+        None,
+    )?;
+    let ids: Vec<DocId> = ids.rows.iter().map(|r| r.id).collect();
+    match db.pin_rows(&sel.collection, &ids) {
+        // Only the rows the lock answered are held: the shape's filter is
+        // theirs, and the pages read them by id alone.
+        Some(pin) => Ok(Source::Pinned {
+            pin,
+            sel: paged(Select {
+                collection: sel.collection,
+                project: sel.project,
+                ..Default::default()
+            }),
+            first: None,
+            checked: false,
+        }),
+        None => Ok(Source::Whole(shown(db, rows(sel, None)?, view, seen, true))),
+    }
+}
+
+/// `sel` read a page at a time: `id > $1` ANDed in after its own terms,
+/// which a scan starts from (`Expr::conjunct_id_floor`), and `limit $2`
+/// -- one statement, its parameters each page's, so a filter holding a
+/// long list is not copied a page.
+fn paged(mut sel: Select) -> Select {
+    let past = Expr::Cmp(
+        CmpOp::Gt,
+        Box::new(Expr::Field("id".to_string())),
+        Box::new(Expr::Param(0)),
+    );
+    sel.filter = Some(match sel.filter.take() {
+        Some(f) => Expr::And(Box::new(f), Box::new(past)),
+        None => past,
+    });
+    sel.limit = Some(Count::Param(1));
+    sel
+}
+
+/// A page's parameters: past the id `after` (every id where none), and
+/// how many rows.
+fn page_params(after: Option<DocId>, rows: usize) -> [Value; 2] {
+    let after = after.map_or(-1, |id| id as i64);
+    [Value::Int(after), Value::Int(rows as i64)]
+}
+
+/// A page of a seed's rows as its event sends them, read on `db` -- the
+/// database under the lock, or a pin's, whose schemas the mask reads --
+/// and `seen` told of them: anew for a seed's first page.
+fn shown(
+    db: &Database,
+    mut rs: ResultSet,
+    view: &Option<View>,
+    seen: &mut Option<Seen>,
+    first: bool,
+) -> ResultSet {
     if let Some((scope, mask)) = shows(view) {
         scope.shown_rows(mask, db, &mut rs);
     }
     if let Some(seen) = seen {
-        seen.seed(&rs.rows);
+        if first {
+            seen.ids.clear();
+        }
+        seen.add(&rs.rows);
     }
-    Ok(match quiet {
-        true => String::from("[]"),
-        false => api::rows_json(&rs),
-    })
+    rs
+}
+
+/// A seed's event as it is written: its head -- the change, and past the
+/// first part its number -- the rows after it, and its end, which says
+/// whether more parts follow. Each part is written straight into the
+/// event's text and sent from it, with no copy of the rows between.
+struct Part {
+    text: String,
+    seq: u64,
+    n: u64,
+    rows: usize,
+}
+
+impl Part {
+    fn new(seq: u64) -> Part {
+        let mut p = Part {
+            text: String::with_capacity(SEED_PART + SEED_PART / 8),
+            seq,
+            n: 0,
+            rows: 0,
+        };
+        p.begin();
+        p
+    }
+
+    fn begin(&mut self) {
+        use std::fmt::Write as _;
+        self.text.clear();
+        self.rows = 0;
+        let _ = write!(self.text, "event: seed\ndata: {{\"seq\":{}", self.seq);
+        if self.n > 0 {
+            let _ = write!(self.text, ",\"part\":{}", self.n);
+        }
+        self.text.push_str(",\"rows\":[");
+    }
+
+    fn push(&mut self, columns: &[String], rows: &[Row]) {
+        for row in rows {
+            if self.rows > 0 {
+                self.text.push(',');
+            }
+            self.rows += 1;
+            fennec_core::json::row_object_into(&mut self.text, columns, row, None, &mut [], 0);
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.text.len() >= SEED_PART
+    }
+
+    /// The part sent: the last, or one with `more` after it.
+    fn send(&mut self, out: &mut Events, more: bool) -> std::io::Result<()> {
+        self.text.push(']');
+        if more {
+            self.text.push_str(",\"more\":true");
+        }
+        self.text.push_str("}\n\n");
+        out.send(self.text.as_bytes())?;
+        self.n += 1;
+        self.begin();
+        Ok(())
+    }
+}
+
+/// The seed's rows sent from `source`, in parts ([`SEED_PART`]): `{"seq",
+/// "rows", "more": true}` first, `{"seq", "part": n, "rows", "more"}` after
+/// it, the last without `more` -- a seed of one part is the one event it
+/// always was. A client lands it once its last part came, and lets go of
+/// the parts it holds where a part without `part` comes: the seed begun
+/// again. `seq` is the change the rows are at, `adopted` the images the
+/// database had adopted then; a pinned shape's last part waits for the
+/// lock to say the ring still reaches back to it and no image came.
+fn send_seed(
+    out: &mut Events,
+    db: &Arc<RwLock<Database>>,
+    source: Source,
+    (seq, adopted): (u64, u64),
+    view: &Option<View>,
+    seen: &mut Option<Seen>,
+    quiet: bool,
+) -> std::io::Result<Sent> {
+    let mut part = Part::new(seq);
+    let (pin, sel, mut next, checked) = match source {
+        Source::Whole(rs) => {
+            if !quiet {
+                let rs = rs.answered();
+                let mut rows = rs.rows.chunks(PAGE_FEWEST).peekable();
+                while let Some(chunk) = rows.next() {
+                    part.push(&rs.columns, chunk);
+                    if part.full() && rows.peek().is_some() {
+                        part.send(out, true)?;
+                    }
+                }
+            }
+            part.send(out, false)?;
+            return Ok(Sent::Done);
+        }
+        Source::Pinned {
+            pin,
+            sel,
+            first,
+            checked,
+        } => (pin, sel, first, checked),
+    };
+    let stmt = Statement::Select(sel);
+    let (mut after, mut want, mut first) = (None, SEED_PAGE, true);
+    // The rows and bytes sent so far, which size the next page.
+    let (mut rows, mut bytes) = (0usize, 0usize);
+    loop {
+        let rs = match next.take() {
+            Some(rs) => rs,
+            None => match pin.query(&stmt, &page_params(after, want)) {
+                None => return Ok(Sent::Again { whole: !checked }),
+                Some(Err(e)) => return Ok(Sent::Failed(e)),
+                Some(Ok(Response::Rows(rs))) => rs,
+                Some(Ok(_)) => ResultSet::default(),
+            },
+        };
+        let done = rs.rows.len() < want;
+        if let Some(r) = rs.rows.last() {
+            after = Some(r.id);
+        }
+        rows += rs.rows.len();
+        let rs = shown(pin.database(), rs, view, seen, first);
+        first = false;
+        let before = part.text.len();
+        if !quiet {
+            let rs = rs.answered();
+            part.push(&rs.columns, &rs.rows);
+        }
+        bytes += part.text.len() - before;
+        if done {
+            if checked {
+                let guard = crate::held::read(db);
+                let overrun = seq < guard.change_horizon() || seq > guard.change_seq();
+                if overrun || guard.adoptions() != adopted {
+                    return Ok(Sent::Again { whole: false });
+                }
+            }
+            part.send(out, false)?;
+            return Ok(Sent::Done);
+        }
+        if part.full() {
+            part.send(out, true)?;
+        }
+        // The next page sized to the room left in the part, by what the
+        // rows so far took: sized to a whole part, a page read as the part
+        // was nearly full sent it a page past its bytes.
+        let room = SEED_PART.saturating_sub(part.text.len());
+        want = match (rows, bytes) {
+            (0, _) | (_, 0) => PAGE_MOST,
+            (n, b) => (room / b.div_ceil(n)).clamp(PAGE_FEWEST, PAGE_MOST),
+        };
+    }
 }
 
 /// The last event of a stream whose token's `exp` passed: what a refused
