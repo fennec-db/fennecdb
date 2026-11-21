@@ -18091,9 +18091,7 @@ impl<'q> Filter<'q> {
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.passing.is_empty()
-            && !self.c.store.read_fields_passing(id, &self.passing, vals)?
-        {
+        if !self.passing.is_empty() && !self.c.store.read_fields_passing(id, &self.passing, vals)? {
             vals.clear();
             vals.resize(self.passing.len(), Value::Null);
         }

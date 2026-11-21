@@ -612,7 +612,11 @@ fn reads_past_a_dropped_place_answer_alike_before_and_after_a_compact() {
         ] {
             let mut json = String::new();
             let stmt = fennec_ql::parse_one(sql).unwrap();
-            assert_eq!(db.query_json(&stmt, &[], &mut json).unwrap(), Some(2), "{sql}");
+            assert_eq!(
+                db.query_json(&stmt, &[], &mut json).unwrap(),
+                Some(2),
+                "{sql}"
+            );
             assert_eq!(json, want, "{sql}, compacted: {compacted}");
         }
     }

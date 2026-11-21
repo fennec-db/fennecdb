@@ -2165,7 +2165,10 @@ mod tests {
             assert_eq!(plain, passing, "{id}");
         }
         assert!(!crate::schema::reclaims(&later.dropped, &payload));
-        assert!(crate::schema::reclaims(&later.dropped, st.raw(1).unwrap().unwrap()));
+        assert!(crate::schema::reclaims(
+            &later.dropped,
+            st.raw(1).unwrap().unwrap()
+        ));
         // Reclaimed, the value at the place is gone and the place stays:
         // the payload ends where a write's would, every value read as it
         // was. The one written now holds a `null` there already, as
