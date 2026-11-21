@@ -9,8 +9,10 @@ web/fennec.compat.test.js.
 
     python3 tools/compat_fixtures.py build v0.2.0 <bin-dir>
         the release's binaries, built from its tag alone: `git archive` of
-        the tag into a scratch directory, `cargo build --locked --offline`
-        of fennec-server and fennec as the tag's release.yml builds them
+        the tag into /tmp/fennec-compat-build-<tag>/ -- one path on every
+        machine, which the programs' bytes move with -- `cargo build
+        --locked --offline` of fennec-server and fennec as the tag's
+        release.yml builds them
         (`--release` and `--profile cli`, for the host's target; their
         crates from outside the workspace, behind `tls`, from cargo's
         cache: nothing downloaded), the tag's own `make wasm`, and
@@ -713,6 +715,52 @@ def write_shell(bins, out):
         run(bins / "fennec", out / "shell.fennec", "-c", q)
 
 
+# A field the release dropped and then compacted away: its `compact` takes
+# a dropped field's places out of every document and out of the schema
+# (`strip_dropped`), so every field after it moves a place down, and the
+# file keeps no record of the drop. Rows put before the drop, between it
+# and the compact and after the compact, the field added again under its
+# name -- a new last place -- and an index on a field after the dropped
+# one: a reader keeping the place, or skipping one that is not there, reads
+# them a field off.
+COMPACTED = [
+    "create collection people (n int @hash, name text, age int @sorted, city text @hash, note text)",
+    'put people [{n: 1, name: "ada", age: 36, city: "london", note: "before the drop"}, '
+    '{n: 2, name: "bo", age: 41, city: "lagos", note: "before the drop too"}]',
+    "alter collection people drop field age",
+    'put people {n: 3, name: "cy", city: "paris", note: "after the drop, before the compact"}',
+    'set people {note: "set after the drop"} where n = 2',
+    "compact",
+    'put people {n: 4, name: "dee", city: "rome", note: "after the compact"}',
+    "alter collection people add field age int",
+    'put people {n: 5, name: "eve", age: 29, city: "oslo", note: "after the field came back"}',
+]
+
+# A collection of more places than 4 096, MySQL's column count, which the
+# release made with no bound: 4 097 fields, the last one indexed, a row
+# holding a value at every place and one holding three.
+MANY_FIELDS = 4097
+LAST = f"f{MANY_FIELDS - 1}"
+MANY = [
+    "create collection many (" + ", ".join(f"f{i} int" for i in range(MANY_FIELDS - 1)) + f", {LAST} int @hash)",
+    "put many {" + ", ".join(f"f{i}: {i}" for i in range(MANY_FIELDS)) + "}",
+    f"put many {{f0: -1, f2048: -1, {LAST}: -1}}",
+]
+
+
+def write_compacted(bins, out):
+    """compacted.fennec: a field the release dropped, then compacted away,
+    the shell's file -- an open and a close a statement."""
+    for q in COMPACTED:
+        run(bins / "fennec", out / "compacted.fennec", "-c", q)
+
+
+def write_many(bins, out):
+    """many.fennec: a collection of 4 097 fields, the shell's file."""
+    for q in MANY:
+        run(bins / "fennec", out / "many.fennec", "-c", q)
+
+
 def write_page(bins, work, out):
     """The page's stores, the replica's sync among them: a server of the
     release's own for it to sync with."""
@@ -987,12 +1035,14 @@ def sums(out):
     (out / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
-def forms(set_name):
+def forms(set_name, walk=None):
     """How many forms `RELEASES`' line for the set `set_name` places in a
     file and names absent (crates/fennec-core/tests/compat/walk.rs): what
-    the set's README states, and the compat tests hold it to."""
-    walk = (SETS / "walk.rs").read_text()
-    m = re.search(r'set: "' + re.escape(set_name) + r'",(.*?)\n    \}', walk, flags=re.S)
+    the set's README states, and the compat tests hold it to. The line ends
+    at its element's close, as rustfmt lays the list out: `}];` where the
+    list holds one, `    },` an element where it holds more."""
+    walk = (SETS / "walk.rs").read_text() if walk is None else walk
+    m = re.search(r'set: "' + re.escape(set_name) + r'",(.*?)\n(?:\}\];|    \},)', walk, flags=re.S)
     if not m:
         die(f"walk.rs: RELEASES has no line for {set_name}: add it before the set is written")
     line = m.group(1)
@@ -1145,6 +1195,8 @@ def write(bins, out):
         timed("graph", write_graph, bins, work, stage)
         timed("graph-wide", write_graph_wide, bins, work, stage)
         timed("shell", write_shell, bins, stage)
+        timed("compacted", write_compacted, bins, stage)
+        timed("many", write_many, bins, stage)
         timed("on purpose", write_on_purpose, bins, stage)
         for what in ("kept", "waiting", "spill", "synclog", "synclog-torn", "synclog-spent", "synclog-unbegun",
                      "torn-wide", "torn-tail", "torn-mark", "schedules", "ids"):
@@ -1171,13 +1223,14 @@ def write(bins, out):
                  "backup-wide": "wide-backup", "archive": "server", "archive-plain": "server", "page-opfs": "page",
                  "page-opfs-stopped": "page", "page-idb": "page", "page-idb-sealed": "page", "do-sql": "do",
                  "do-kv": "do", "node": "node", "restore": "restore", "deep": "deep",
-                 "refused-lists": "refused-lists", "refused-dims": "refused-dims", "points-deep": "points-deep"}
+                 "refused-lists": "refused-lists", "refused-dims": "refused-dims", "points-deep": "points-deep",
+                 "compacted": "compacted", "many": "many"}
         for name, src in lists.items():
             shutil.copyfile(COMPAT / f"{src}.fennecql", stage / f"{name}.fennecql")
         for name in ("server", "replica", "promoted", "shell", "graph", "graph-wide", "kept", "waiting", "spill",
                      "synclog", "synclog-torn", "synclog-spent", "synclog-unbegun", "torn-wide", "torn-tail",
                      "torn-mark", "schedules", "ids", "follow", "page-opfs", "deep", "refused-lists", "refused-dims",
-                     "points-deep"):
+                     "points-deep", "compacted", "many"):
             run(bins / "compat_writer", "answers", stage / f"{name}.fennec", stage / f"{name}.fennecql",
                 stage / f"{name}.answers")
         for name, src, keyed in (("backup", stage / "backup.sealed", ["--key-file", stage / "key"]),
@@ -1209,6 +1262,9 @@ def write(bins, out):
             "set": out.name,
             "commit": manifest["commit"],
             "target": manifest["target"],
+            "cargo_home": manifest["cargo_home"],
+            "sdk": manifest["sdk"],
+            "tree": manifest["tree"],
         }
         held, absent, numbers = forms(out.name)
         versions["forms"] = (f"Forms: {held} held in a file of this set, {absent} named absent below, of the "
@@ -1283,6 +1339,44 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def tree_of(tag):
+    """Where `build` puts `tag`'s tree: one path whatever the machine, which
+    a program's bytes move with ([`build`])."""
+    return Path("/tmp").resolve() / f"fennec-compat-build-{tag}"
+
+
+def cargo_home(env):
+    """Where cargo keeps the crates from outside the workspace, as it names
+    the place (`CARGO_HOME`, or `~/.cargo`): their sources' path is in every
+    panic location of theirs a program holds, so a program built under
+    another cargo home is other bytes."""
+    return os.path.abspath(env.get("CARGO_HOME") or os.path.expanduser("~/.cargo"))
+
+
+def linked_with(program):
+    """What the platform linked `program` with, which its bytes move with:
+    on macOS the SDK and linker its `LC_BUILD_VERSION` names (what `otool
+    -l` shows; `xcrun` names the SDK installed, which need not be the one
+    the linker took), elsewhere the C compiler cargo links through."""
+    b = Path(program).read_bytes()
+    if b[:4] != b"\xcf\xfa\xed\xfe":
+        said = subprocess.run(["cc", "--version"], capture_output=True, text=True).stdout.splitlines()
+        return said[0] if said else "cc: no version"
+
+    def version(v):
+        return f"{v >> 16}.{(v >> 8) & 0xFF}" + (f".{v & 0xFF}" if v & 0xFF else "")
+
+    word = lambda at: int.from_bytes(b[at:at + 4], "little")
+    at = 32
+    for _ in range(word(16)):
+        if word(at) == 0x32:  # LC_BUILD_VERSION: platform, minos, sdk, then (tool, version) pairs
+            tools = {word(at + 24 + 8 * i): word(at + 28 + 8 * i) for i in range(word(at + 20))}
+            ld = f", ld {version(tools[3])}" if 3 in tools else ""
+            return f"macOS SDK {version(word(at + 16))}{ld}"
+        at += word(at + 4)
+    die(f"{program}: no LC_BUILD_VERSION, which every program the macOS linker makes holds")
+
+
 def tag_commit(tag):
     return run("git", "-C", ROOT, "rev-parse", f"{tag}^{{commit}}").strip()
 
@@ -1323,7 +1417,17 @@ def build(tag, bins):
     bins.mkdir(parents=True, exist_ok=True)
     if any(bins.iterdir()):
         die(f"{bins} holds files already: build into an empty directory")
-    scratch = Path(tempfile.mkdtemp(prefix=f"fennec-{tag}-"))
+    # The tag's tree at one path on every machine, never a temporary
+    # directory's of its own: the linker's UUID of a program (macOS's
+    # `LC_UUID`) hashes the object files' paths it was handed, which the
+    # release profile's `strip` then takes out, so a tree at another path
+    # is a program of other bytes -- two builds of v0.2.0 at two temporary
+    # paths differed in their UUID and signature alone.
+    scratch = tree_of(tag)
+    try:
+        scratch.mkdir()
+    except FileExistsError:
+        die(f"{scratch} is there: another build of {tag} runs, or one stopped -- remove it")
     try:
         src = scratch / "src"
         src.mkdir()
@@ -1377,6 +1481,13 @@ def build(tag, bins):
             "rustc": said["rustc"],
             "cargo": said["cargo"],
             "target": host,
+            # What a program's bytes move with beside the commit, the lock
+            # file and the compiler: built again elsewhere, the programs
+            # match these digests only under the same cargo home and SDK.
+            # The module and the files of the tag's tree hold neither.
+            "cargo_home": cargo_home(env),
+            "sdk": linked_with(made["fennec-server"]),
+            "tree": str(src),
             "built": {k: " ".join(map(str, v[1:] if v[0] == CARGO else v)) for k, v in builds.items()},
             "writer": f"tools/compat/writer.rs {sha256(COMPAT / 'writer.rs')}",
             "files": {name: sha256(bins / name) for name in sorted(made)},
@@ -1405,6 +1516,9 @@ def checked(bins, tag):
     version = pinned(tag, run("git", "-C", ROOT, "show", f"{tag}:rust-toolchain.toml"))
     if m.get("toolchain") != version or not str(m.get("rustc", "")).startswith(f"rustc {version} "):
         problems.append(f"built by {m.get('rustc')}, not the pinned rustc {version}")
+    for k in ("cargo_home", "sdk", "tree"):
+        if not m.get(k):
+            problems.append(f"no `{k}`: the programs' digests are its build's alone, and the manifest names where")
     files = m.get("files", {})
     held = {p.relative_to(bins).as_posix() for p in bins.rglob("*") if p.is_file()} - {"MANIFEST.json"}
     for name in sorted(held - files.keys()):

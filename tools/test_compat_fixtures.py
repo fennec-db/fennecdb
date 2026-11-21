@@ -77,6 +77,8 @@ class Scratch:
         self.manifest = {
             "tag": TAG, "commit": self.commit, "toolchain": "1.99.1",
             "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)", "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+            "cargo_home": "/home/t/.cargo", "sdk": "macOS SDK 26.2, ld 1230.1",
+            "tree": "/private/tmp/fennec-compat-build-v9.9.9/src",
             "files": {name: hashlib.sha256(data).hexdigest() for name, data in {**built, **kept}.items()},
         }
         self.save()
@@ -130,6 +132,9 @@ class Manifest(unittest.TestCase):
             ("the writer not built", lambda s: ((s.bins / "compat_writer").unlink(),
                                                 s.manifest["files"].pop("compat_writer"), s.save()),
              "compat_writer: not built"),
+            # What the programs' digests are its build's alone by.
+            *[(f"no {k}", lambda s, k=k: (s.manifest.pop(k), s.save()), f"no `{k}`")
+              for k in ("cargo_home", "sdk", "tree")],
         ]
         for what, change, words in cases:
             with self.subTest(what), Scratch() as s:
@@ -147,6 +152,55 @@ class Manifest(unittest.TestCase):
             (s.bins / "fennec").write_bytes(b"changed")
             why = refused(cf.write, s.bins, sets / "v9.9.9+2")
             self.assertIn("fennec: not the bytes the manifest names", why or "")
+
+
+class Forms(unittest.TestCase):
+    """The README's count reads the set's `RELEASES` line to its element's
+    close however rustfmt lays the list out, and no further."""
+
+    LINE = """    set: "{set}",
+    tag: "v9.9.9",
+    sums: "00",
+    kinds: &[1, 2],
+    ops: &[1],
+    graphs: &[9],
+    schema_tags: &[1],
+    value_tags: &[0],
+    indexes: &[0],
+    shapes: SHAPES,
+    absent: &[
+        (
+            "claim: 3 bytes",
+            "why",
+        ),
+    ],"""
+    REST = """
+const SHAPES: &[&str] = &[
+    "front: records",
+    "frame: put",
+];
+
+impl<'a> Cur<'a> {
+    pub fn new(b: &'a [u8]) -> Cur<'a> {
+        Cur { b, at: 0, absent: &[("x", "y")] }
+    }
+}
+"""
+
+    def test_one_line_and_several(self):
+        one = "pub const RELEASES: &[Writes] = &[Writes {\n" + self.LINE.format(set="v9.9.9") + "\n}];\n" + self.REST
+        indent = lambda s: "\n".join("    " + l for l in s.splitlines())
+        several = ("pub const RELEASES: &[Writes] = &[\n    Writes {\n" + indent(self.LINE.format(set="v9.9.9"))
+                   + "\n    },\n    Writes {\n" + indent(self.LINE.format(set="v9.9.9+2")) + "\n    },\n];\n"
+                   + self.REST)
+        self.assertEqual(cf.forms("v9.9.9", one), (2, 1, 7))
+        self.assertEqual(cf.forms("v9.9.9", several), (2, 1, 7))
+        self.assertEqual(cf.forms("v9.9.9+2", several), (2, 1, 7))
+
+    def test_the_tree_s_line(self):
+        held, absent, numbers = cf.forms("v0.2.0")
+        self.assertGreater(held, 0)
+        self.assertGreater(numbers, 0)
 
 
 if __name__ == "__main__":

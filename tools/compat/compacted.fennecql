@@ -1,0 +1,13 @@
+-- A field the release dropped, then compacted away -- every document and
+-- the schema without its place, the fields after it a place down -- and
+-- added again after under its name: every later build reads each row at
+-- its places and finds it through each index, as the release did.
+describe people
+get people order n
+get people order n select n, name, age, city, note
+get people where city = "paris" select n, name, note
+get people where city = "lagos" select n, note
+get people where n = 4 select name, city, note
+get people where age = 29 select n, name, city
+get people where age is null order n select n
+get people count

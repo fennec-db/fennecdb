@@ -17,20 +17,32 @@ cargo or rustc that says another). Writing it took {total} minutes:
 {took}.
 
 `MANIFEST.json` names what wrote the set: the tag, its commit, the
-compiler, the commands each program was built by, and the SHA-256 of
-every program and module -- `fennec-server`, `fennec`, `compat_writer`,
-`web/fennec.wasm`, the web client's files and its collations, the Durable
-Object's module and its stand-ins -- and of the writer's inputs
-(`tools/compat_fixtures.py`, `tools/compat/`). `write` refused to run
-before every program `build` left matched its line there and every file
-taken from the tag's tree was the tag's own bytes (`git show
-{tag}:<path>`). To check a program against it, build the tag again
+compiler, the cargo home, the SDK and the path of the tag's tree the
+programs were built under, the commands each program was built by, and the
+SHA-256 of every program and module -- `fennec-server`, `fennec`,
+`compat_writer`, `web/fennec.wasm`, the web client's files and its
+collations, the Durable Object's module and its stand-ins -- and of the
+writer's inputs (`tools/compat_fixtures.py`, `tools/compat/`). `write`
+refused to run before every program `build` left matched its line there
+and every file taken from the tag's tree was the tag's own bytes (`git
+show {tag}:<path>`).
+
+The three programs are built from the tag, not taken from the release's
+assets, and their digests reproduce only on a machine whose cargo home is
+the one the manifest records (`cargo_home`: `{cargo_home}`) and whose SDK
+is too (`sdk`: {sdk}): a program holds its cargo home's path in the panic
+locations of the crates from outside the workspace, and its layout moves
+with the SDK and its linker. `build` puts the tag's tree at one path on
+every machine (`tree`: `{tree}`), since the linker's UUID of a program
+hashes the paths of the objects it was handed. There, build the tag again
 (`tools/compat_fixtures.py build {tag} <dir>`) and compare `shasum -a 256
-<dir>/<file>` with the line of `files` naming it; a file of the tag's tree
-compares with `git show {tag}:<path> | shasum -a 256`. The release's
-published binaries are not these bytes: they hold the paths of the
-machine that built them (its cargo home, in the panic locations of the
-crates from outside the workspace) and were linked by its toolchain.
+<dir>/<file>` with the line of `files` naming it. The release's published
+binaries are not these bytes: they were built under its runner's cargo
+home and SDK, in its checkout. The module is: anyone can check
+`web/fennec.wasm`'s digest against the release itself -- the release's
+`SHA256SUMS` names `fennec-web-{tag}.tar.gz` by its sum, and the
+`fennec.wasm` in it is the bytes `files` names. A file of the tag's tree
+compares with `git show {tag}:<path> | shasum -a 256`.
 
 Every later build opens each file and answers each statement alike:
 `compat::` in fennec-core's, fennec-http's, fennec's and fennec-server's
@@ -48,6 +60,8 @@ it, and no other answer moves with the clock.
 | `replica.fennec` | fennec-server `--replica-of` the server above | a replica's file: an image whose history follows its primary (kind 8, following), and the primary's records after it |
 | `promoted.fennec` | fennec-server `--promote` on a copy of `replica.fennec` | the replica promoted: its history forked twice, a write of its own |
 | `shell.fennec` | the `fennec` shell, a `-c` an open and a close | a file an app's own process keeps, a field's expiry set on it (`alter field at @ttl(36500d)`) |
+| `compacted.fennec` | the `fennec` shell | a field v0.2.0 dropped and then compacted away: `people`'s `age`, a field among others with an index after it, dropped after two rows were put and before a third, then `compact`, which took its place out of every document and out of the schema -- the fields after it a place down, no record of the drop left -- then a row put, `age` added again as a new last place and a row holding it |
+| `many.fennec` | the `fennec` shell | a collection of 4 097 fields, more places than 4 096 (MySQL's column count), which v0.2.0 made with no bound: the last field `@hash`, a row holding a value at every place and one holding three |
 | `graph.fennec` | fennec-server's shutdown | the checkpoint: graphs (version 9) of every metric, precision and quantization -- f32, f16, int8 over an f32 and an f16 field, bit holding its vectors whole and bit codes with their centres over an f32 and an f16 field (2 100 vectors of 4 dimensions, past `BIT_TRAIN`) -- tombstones in each arena carrying their vectors, rows sharing a vector (aliases), a row whose id takes 8 bytes, and the copies table's halves |
 | `graph-wide.fennec` | fennec-server's shutdown | the checkpoint of a graph past 65 536 nodes -- 70 000 vectors of one dimension, `@hnsw(l2, m=2)`, put in an order of their own -- whose record's links take three bytes, and its steps between a list's links three bytes where two of them are more than 65 535 nodes apart |
 | `kept.fennec` | writer.rs `kept` (`set_graph_saves`, `save_graphs`) | graphs kept in the file's tail (version 10), tombstones in them, writes after them, and the close's mark that the file was synced (kind 14) |
