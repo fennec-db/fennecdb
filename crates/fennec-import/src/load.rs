@@ -78,19 +78,21 @@ fn load(
     // What the batch holds as read: put at `opts.batch` rows or at
     // `BATCH_BYTES`, whichever comes first.
     let mut held: usize = 0;
+    let fields = fields_bytes(&plan);
     while let Some(values) = src.next_row()? {
         if opts.limit.is_some_and(|n| rows >= n) {
             break;
         }
         seen += 1;
-        let doc = document(&plan, &types, values, seen)?;
+        let mut bytes = fields;
+        let doc = built(&plan, &types, values, seen, &mut bytes)?;
         if let Some(f) = &opts.filter {
             if !keep(f, &doc, &ctx, seen)? {
                 skipped += 1;
                 continue;
             }
         }
-        held += bytes_of(&doc);
+        held += bytes;
         batch.push(doc);
         rows += 1;
         if batch.len() >= opts.batch || held >= BATCH_BYTES {
@@ -142,6 +144,22 @@ pub(crate) fn document(
     values: Vec<Value>,
     row_no: u64,
 ) -> Result<Vec<(String, Expr)>> {
+    built(plan, types, values, row_no, &mut 0)
+}
+
+/// [`document`], adding to `held` the bytes its values hold as they go in
+/// ([`value_bytes`]): counted where each value is at hand, after it is
+/// adapted to its field -- a text read into a `json` field or a vector
+/// holds more than it did as read. The count is some 75 instructions a row
+/// of five values, 0.66% of a million-row import's, the same within the
+/// noise as a pass of its own over the row's values or over its document.
+fn built(
+    plan: &Plan,
+    types: &[Option<DataType>],
+    values: Vec<Value>,
+    row_no: u64,
+    held: &mut usize,
+) -> Result<Vec<(String, Expr)>> {
     if values.len() != plan.targets.len() {
         return Err(Error::Corrupt(format!(
             "row {row_no} has {} values, {} columns were expected",
@@ -154,7 +172,10 @@ pub(crate) fn document(
         match target {
             // A NULL id: let fennecdb assign its own id to this document.
             Target::Id if value.is_null() => {}
-            Target::Id => doc.push(("id".to_string(), Expr::Lit(value))),
+            Target::Id => {
+                *held += value_bytes(&value);
+                doc.push(("id".to_string(), Expr::Lit(value)));
+            }
             Target::Field(name) => {
                 let v = match ty {
                     // The position is exact here: known before entering the batch.
@@ -164,6 +185,7 @@ pub(crate) fn document(
                     })?,
                     None => value,
                 };
+                *held += value_bytes(&v);
                 doc.push((name.clone(), Expr::Lit(v)));
             }
         }
@@ -171,32 +193,47 @@ pub(crate) fn document(
     Ok(doc)
 }
 
-/// What a document being put holds, in bytes: each field's name and value
-/// as read, beside the pair holding them -- the allocator's rounding aside,
-/// never less than the bytes themselves, which [`BATCH_BYTES`] bounds. A
-/// field nobody wrote a value for holds its pair and its name: a row of a
+/// What a document being put holds, in bytes, beside its values' own
+/// ([`value_bytes`]): a pair a field and its name, the same for every row
+/// of the plan -- a document leaving out a `NULL` id holds a pair less,
+/// which this counts, never fewer. The allocator's rounding aside, never
+/// less than the bytes themselves, which [`BATCH_BYTES`] bounds: a field
+/// nobody wrote a value for holds its pair and its name, and a row of a
 /// source's 32 767 columns, its record one byte, is some 3 MB.
-fn bytes_of(doc: &[(String, Expr)]) -> usize {
-    doc.iter()
-        .map(|(name, e)| {
+fn fields_bytes(plan: &Plan) -> usize {
+    plan.targets
+        .iter()
+        .map(|t| {
             std::mem::size_of::<(String, Expr)>()
-                + name.capacity()
-                + match e {
-                    Expr::Lit(v) => value_bytes(v),
-                    _ => 0,
+                + match t {
+                    Target::Id => "id".len(),
+                    Target::Field(name) => name.len(),
                 }
         })
         .sum()
 }
 
-/// The bytes a value holds past its own `size_of`. A list or an object is
-/// counted by its members, which nest no deeper than every reader of a
-/// value lets them (`value::MAX_JSON_DEPTH`).
+/// The bytes a value holds past its own `size_of`, as it goes into the
+/// document. A text's and a blob's, the most of a row's, are read in line;
+/// any other a call away ([`nested_bytes`]).
+#[inline]
 fn value_bytes(v: &Value) -> usize {
-    use std::mem::size_of;
     match v {
         Value::Text(s) => s.capacity(),
         Value::Bytes(b) => b.capacity(),
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Timestamp(_) => 0,
+        v => nested_bytes(v),
+    }
+}
+
+/// [`value_bytes`] of a vector, a list or an object. A list or an object is
+/// counted by its members, which nest no deeper than every reader of a
+/// value lets them (`value::MAX_JSON_DEPTH`).
+#[cold]
+#[inline(never)]
+fn nested_bytes(v: &Value) -> usize {
+    use std::mem::size_of;
+    match v {
         Value::Vector(x) => x.capacity() * size_of::<f32>(),
         Value::Sparse(_, x) => x.capacity() * size_of::<(u32, f32)>(),
         Value::List(items) => {
@@ -462,11 +499,28 @@ mod tests {
         };
         assert_eq!(puts(crate::DEFAULT_BATCH), [16, 20]);
         assert_eq!(puts(5), [5, 10, 15, 20]);
-        let doc = [("t".to_string(), Expr::Lit(Value::Text("x".repeat(100))))];
+        // What a row holds is counted as its document is built: a pair and
+        // a name a field, and each value's bytes past its own size.
+        let columns = [
+            Column::new("t", DataType::Text, "text"),
+            Column::new("vec", DataType::Json, "json"),
+        ];
+        let plan = crate::map::plan(&columns, &Options::new("c")).unwrap();
         assert_eq!(
-            bytes_of(&doc),
-            std::mem::size_of::<(String, Expr)>() + 1 + 100
+            plan.targets,
+            [Target::Field("t".into()), Target::Field("vec".into())]
         );
+        let mut held = fields_bytes(&plan);
+        assert_eq!(held, 2 * std::mem::size_of::<(String, Expr)>() + 1 + 3);
+        let row = vec![
+            Value::Text("x".repeat(100)),
+            Value::List(vec![Value::Text("ab".into()), Value::Int(1)]),
+        ];
+        let doc = built(&plan, &[None, None], row, 1, &mut held).unwrap();
+        assert_eq!(doc.len(), 2);
+        let pairs = 2 * std::mem::size_of::<(String, Expr)>() + 1 + 3;
+        let list = 2 * std::mem::size_of::<Value>() + 2;
+        assert_eq!(held, pairs + 100 + list);
     }
 
     /// A text bound for a `float` -- SQLite's, a PostgreSQL cell -- past a

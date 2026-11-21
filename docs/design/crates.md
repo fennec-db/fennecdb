@@ -656,8 +656,9 @@ body's pieces read one at a time where a vector of them was 2 MiB), and
 bytes each, at most 1 MiB of them, its texts and blobs within its payload
 and its defaults within the `CREATE TABLE` text, each at most the file's
 length. And a batch is put once it holds `BATCH_BYTES`, 16 MiB, of its
-rows as read (`load::bytes_of`: each field's name and value beside the
-pair that holds them), or `--batch` rows, whichever comes first: 16 MiB is
+rows as read (`load::fields_bytes` once a plan, each field's name and the
+pair that holds it, and each value's bytes past its own size added as the
+row's document is built, `load::built`), or `--batch` rows, whichever comes first: 16 MiB is
 the most the engine holds of an open block before it spills it into the
 file (`SPILL_AT`), and a batch is one `put`, one block, which the engine
 holds again as its documents, and as their frames twice until the block
@@ -666,8 +667,18 @@ beside the frames the store holds since its file was opened, up to
 `HANDOVER_AT` (16 MB): an import holds under five times `BATCH_BYTES`
 beside the row it reads, whatever its source declares. Rows under 8 KiB
 as read, 2 000 of them, never reach it, so `--batch` alone decides for
-them, as before; the cost is a sum over a row's fields beside the
-`String` and `Expr` each field is made into. A file of 128 KiB whose 2 000
+them, as before. The count is what bounding by bytes costs, and it is
+counted after a value is adapted to its field, since a text read into a
+`json` field or a vector holds more than it did as read: some 75
+instructions a row, 0.66% of a million-row import of four small columns
+and an id (11.269 billion instructions against 11.343, four runs each in
+turn, macOS's `time -l`; 0.64 s of CPU against 0.65 s in ten pairs), the
+narrowest rows the most. Counted in a pass of its own over the row's
+values as read, or over its built document, it cost the same within the
+noise (11.357 billion); a source's own count of what it read -- a SQLite
+record's length, its absent columns' defaults summed once a table --
+would cost less, and miss what adapting a value adds.
+A file of 128 KiB whose 2 000
 three-byte rows read 46 KB each -- 199 columns named `""` with a default
 of 150 bytes -- held 339 MB at once in `load::run` before
 (`an_import_holds_a_batch_by_its_bytes_not_its_rows`, counted as above),
