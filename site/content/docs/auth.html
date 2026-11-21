@@ -313,7 +313,7 @@ curl: (22) The requested URL returned error: 404
 the same token                             [{"title":"clerk note"}] [200]
 -- and a file that is no JWKS, written over the keys by hand
 the same token                             [{"title":"clerk note"}] [200]
-jwks.json: a JWKS file is {"keys": [...]}; the keys read before stay
+jwks.json: a JWKS file is {"keys": [...]}; the keys read before stay, and the file is read again as it changes, or in a minute, until it parses
 -- a provider that signs with EC keys (Supabase's ES256): its P-256 key comes with the next fetch
 an ES256 token                             [{"title":"clerk note"}] [200]
 an ES384 token                             {"error":"only HS256, RS256 and ES256 tokens are accepted"} [401]</pre>
