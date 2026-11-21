@@ -496,3 +496,38 @@ tests:
       - eval_time: 65m
         alertname: FennecArchiveSyncUnreported
         exp_alerts: []
+
+  # A node's copies a failover may promote: two not connected for two
+  # minutes, one 5 000 writes behind for five -- and a copy behind for less
+  # than its five minutes, or a few writes behind, alerting nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fennec_copies_disconnected{job="fennecdb-node",instance="n2:8081"}'
+        values: '0 2 2 2 2 2 2 2'
+      - series: 'fennec_copies_disconnected{job="fennecdb-node",instance="n3:8081"}'
+        values: '0 0 0 0 0 0 0 0'
+      - series: 'fennec_copies_behind{job="fennecdb-node",instance="n2:8081"}'
+        values: '0 5000 5000 5000 5000 5000 5000 5000'
+      - series: 'fennec_copies_behind{job="fennecdb-node",instance="n3:8081"}'
+        values: '0 12 12 12 12 12 12 12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: FennecTenantCopiesDisconnected
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: FennecTenantCopiesDisconnected
+        exp_alerts:
+          - exp_labels: {severity: warning, job: fennecdb-node, instance: "n2:8081"}
+            exp_annotations:
+              summary: "2 tenant copies on n2:8081 are not connected to their primary: a failover now promotes each where it stands, without what it was not sent"
+              runbook: deploy/RUNBOOK.md#a-copy-not-following
+      - eval_time: 5m
+        alertname: FennecTenantCopiesBehind
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FennecTenantCopiesBehind
+        exp_alerts:
+          - exp_labels: {severity: warning, job: fennecdb-node, instance: "n2:8081"}
+            exp_annotations:
+              summary: "A tenant copy on n2:8081 is 5000 writes behind its primary: a failover now loses them"
+              runbook: deploy/RUNBOOK.md#a-copy-not-following
