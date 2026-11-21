@@ -45,6 +45,8 @@
 #       refused in words, by the old;
 #   d1-d2  an old router over new nodes and a new router over old nodes: a
 #       tenant created, written, copied to its replica, moved and deleted;
+#       the new nodes under the old router, asking no token, run
+#       `--insecure` (`insecure_under`), as g1's;
 #   e   a rolling upgrade under durable writes: a router and two `--dir`
 #       nodes, one the other's standby, all of the release, upgraded in
 #       RELEASING.md's and deploy/RUNBOOK.md's order -- the router, the
@@ -1166,13 +1168,24 @@ case_c() {
 # The address node N said it listens on.
 node_at() { cat "$C/$1.addr"; }
 
+# insecure_under ROUTER_BIN NODE_BIN: `--insecure` where the router is the
+# old release's and the nodes this tree's. They ask no data token, and such
+# a node refuses what a router from before forwards it, from loopback too
+# -- its one mark is the one a router listening past loopback sends -- unless
+# it runs `--insecure`: what the upgrade order, routers first, never meets.
+insecure_under() {
+    if [ "$1" = "$OLD" ] && [ "$2" = "$NEW" ]; then echo --insecure; fi
+}
+
 # router_case NAME ROUTER_BIN NODE_BIN: a tenant created by ROUTER_BIN's
 # router on NODE_BIN's nodes, written, copied to its replica, moved and
 # deleted, each step working or refused in words.
 router_case() {
-    local name=$1 rbin=$2 nbin=$3 n code
+    local name=$1 rbin=$2 nbin=$3 n code insecure
+    insecure=$(insecure_under "$rbin" "$nbin")
     for n in n1 n2 n3; do
-        server "$n" "$nbin" --dir "$C/$n" --admin-token "a$n" --replication-token r --sync always
+        server "$n" "$nbin" --dir "$C/$n" --admin-token "a$n" --replication-token r --sync always \
+            ${insecure:+"$insecure"}
         echo "$ADDR" >"$C/$n.addr"
     done
     router router "$rbin" --directory "$C/router.fennec" --token root --replicas
@@ -1534,9 +1547,10 @@ case_f() {
 # https_case NAME ROUTER_BIN NODE_BIN: a node serving HTTPS, recorded at its
 # https:// address by a router of the other release, which dials it over TLS.
 https_case() {
-    local name=$1 rbin=$2 nbin=$3 certs=$ROOT/crates/fennec-http/tests/certs port code
+    local name=$1 rbin=$2 nbin=$3 certs=$ROOT/crates/fennec-http/tests/certs port code insecure
+    insecure=$(insecure_under "$rbin" "$nbin")
     spawn "$C/node.log" "$nbin/fennec-server" --dir "$C/node" --http 127.0.0.1:0 --admin-token atls \
-        --tls-cert "$certs/server.pem" --tls-key "$certs/server.key"
+        --tls-cert "$certs/server.pem" --tls-key "$certs/server.key" ${insecure:+"$insecure"}
     local np=$SPAWNED
     for _ in $(seq 1 600); do
         grep -q 'listening on: https://' "$C/node.log" && break

@@ -3000,6 +3000,19 @@ fn frozen(name: &str) -> Refused {
     )
 }
 
+/// What a router puts before a tenant's name in a request it sends a node
+/// of its own in the place of a tenant it does not place (fennec-shard's
+/// `Router::stand_in`): `~` is no character of a name ([`check_name`]), so
+/// no tenant can be made under it and no file of any node answers it -- a
+/// node from before refuses it as a name, after its token. A node reads
+/// the tenant's name past it, asks every credential of it as of a tenant
+/// it holds, and answers as for one it holds no file of (`route_tenant`):
+/// a leftover file of that name -- a deleted tenant's copy that would not
+/// come off, a create taken back whose delete failed -- is no tenant of
+/// the router's, and sent the name, a node opened it for any token
+/// reaching the name, to read and to write.
+pub const STAND_IN: &str = "~";
+
 /// `[a-z0-9_-]{1,64}`, and no device's name ([`a_device`]): safe as a file
 /// name everywhere, no traversal, and the same name on a case-insensitive
 /// file system.

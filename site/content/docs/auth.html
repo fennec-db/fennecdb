@@ -218,7 +218,14 @@ fetches it every few minutes is the other half.</p>
 <p>The job below fetches the file beside the one in use and renames it over.
 The server looks at the file at most once a second and reads it again when
 its modification time has changed, so the rename is the rotation: no
-restart, and no half-written file to read. A fetch that fails, or that
+restart, and no half-written file to read. Replace the file by a rename,
+never by writing into it: a file read while it was being written does not
+parse, the keys read before stay, and it is read again as its time
+changes, or a minute later, until it does; two files written into it within
+the file system's time granularity can share a modification time, and the
+second is then read only that minute later. A file the server could not
+read at all — an error opening or reading it — is read again at the next
+look. A fetch that fails, or that
 returns a page with no RSA or P-256 key, leaves the file that works where it is. It
 takes <code>https</code> only, follows no redirect to anything else and takes
 no more than a megabyte (the stand-in provider below is plain

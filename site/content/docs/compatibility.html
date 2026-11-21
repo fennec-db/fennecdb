@@ -76,6 +76,11 @@ replicas or standbys, then primaries
   <li>No release publishes the router, <code>fennec-shard</code>, yet: upgrading
     a router means building it from the release's tag
     (<code>cargo build --release --locked -p fennec-shard</code>).</li>
+  <li>Routers go before nodes for a node that asks no data token too: such a
+    node refuses what a v0.2.0 router forwards it, even on loopback, unless it
+    runs <code>--insecure</code>
+    (<a href="sharding-reference.html#open-nodes">A node with no token behind a
+    router</a>).</li>
   <li>In a node pair, the standby's node goes first. Before the next node, wait
     until the standby holds what the primary does: on the primary's node
     <code>/t/&lt;tenant&gt;/_replication/status</code> lists the standby with
@@ -87,6 +92,11 @@ replicas or standbys, then primaries
     the restart: the router answers each that it was not sent (503), safe to
     send again. A router fails a node over only with
     <code>--auto-failover</code>.</li>
+  <li>An <code>Idempotency-Key</code> a v0.2.0 server or node kept is not
+    looked up once it runs the new release: a keyed write sent before its
+    upgrade and again after runs again. Let clients' retries of writes made
+    before end first (<a href="http.html#idempotency">Retrying a
+    write</a>).</li>
   <li>A node holding both primaries and replicas cannot be upgraded before
     every primary: in such a fleet, use no feature that moves the format until
     every node runs the release.</li>

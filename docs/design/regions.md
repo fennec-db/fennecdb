@@ -149,8 +149,16 @@ router forwarding it to the tenant's node -- from its directory, or from
 its copy of the global one (`Target::Node` carries the node's region now)
 -- answers `Fennec-Home: <region>`, the node's; a relaying router names
 nothing and passes the home router's through, and the entry takes it off
-the answer (a router names it on a 401 too, to anyone with a tenant's
-name). A tenant not heard goes to the region of the client's continent
+the answer. A router names it, a 401's too, only to a caller it can vouch
+for -- the entry naming its client under `--entry-token`, another router
+relaying under the `--token` both hold -- and a request for a tenant it
+does not place, from anyone else, goes to a node of its own in the
+tenant's place, which asks the token first ([router.md](router.md#tenants-it-does-not-place);
+the G14 review, finding 2): named to anyone, it told a caller holding
+nothing which names were tenants and where. So an entry without
+`ENTRY_TOKEN`, which names no client, learns no home, and each request of
+a tenant it has not heard is relayed once by the region it guessed. A
+tenant not heard goes to the region of the client's continent
 (`REGIONS`' `continents`, `request.cf.continent`) or `DEFAULT_REGION`, is
 relayed home once, and its next request goes home; where that region's
 routers fail, it goes on to the others (`guesses`), since any router

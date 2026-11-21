@@ -37,7 +37,14 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     tenant's node names the node's region in its answer, to the entry alone.
     A tenant the entry has not seen goes to the region nearest the client,
     whose router serves it or relays it home once; its next request goes
-    home.</li>
+    home. A router with <code>--token</code> names a home only to a caller
+    it can vouch for — the entry naming its client under
+    <code>ENTRY_TOKEN</code>, another router relaying — so an entry without
+    <code>ENTRY_TOKEN</code> learns none, and each request of a tenant
+    outside the region it guessed costs a relay. Named to anyone who asked,
+    a home told a caller holding no token which names were tenants and
+    where (<a href="sharding-reference.html#missing-tenants">A tenant the
+    router does not place</a>).</li>
   <li><b>A tenant moved to another region</b> is relayed by the router of
     the region it left, as any client's request is, and the answer names
     its new home: a stale home costs one hop, never an error.</li>
