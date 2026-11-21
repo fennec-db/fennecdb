@@ -469,12 +469,16 @@ every five seconds, a clock's comparison counted in the next run: where a
 count bounds the run it is said by the count. The platform's own code
 differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
-30 s each under ASan; `stream`'s, 120 000, from a plain build's CPU time
-beside `http`'s (3.9 s for 120 000 runs of each on a Mac), and measured
-under ASan on the pinned nightly once it adopted the images it accepts:
-34.8 s on a Mac (34.1 s of CPU) beside `http`'s 24.5 s for the same
-count, 1.42 times it -- some 43 s where CI's runner gives `http` its 30 --
-until CI's smoke says its own. Nor does a target read the wall clock: the `image`
+30 s each under ASan; `stream`'s from a plain build's CPU time beside
+`http`'s (3.9 s for 120 000 runs of each on a Mac), then measured under
+ASan on the pinned nightly once it adopted the images it accepts: 34.8 s
+on a Mac (34.1 s of CPU) for 120 000 beside `http`'s 24.5 s for the same
+count, 1.42 times it -- some 43 s where CI's runner gives `http` its 30. With
+a seed of records without sums (the review's third round), 120 000 took
+32.1 s (31.6 of CPU), past every other target's 11.8 to 25.2 s in the same
+build on the same Mac: its count is 90 000, which that run passed at 24 s
+(80 000 at 21.4 s, 100 000 at 26.6), inside `http`'s 25.2, until CI's
+smoke says its own. Nor does a target read the wall clock: the `image`
 target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in

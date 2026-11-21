@@ -69,7 +69,7 @@ pub static TARGETS: &[Target] = &[
         name: "stream",
         about: "a primary's answer as a replica, an archiver and a backup read it (fennec_http::replication: read_head, read_message, Receiver::receive), an image it promised adopted by a copy mapped as a server's (loaded, Database::adopt: repoint, rebind), and a node's stream of every tenant as its archiver reads it (node_archive), read whole or a few bytes at a time",
         max_len: 64 << 10,
-        smoke: 120_000,
+        smoke: 90_000,
         seeds: stream_seeds,
         dictionary: STREAM_TOKENS,
         run: stream,
