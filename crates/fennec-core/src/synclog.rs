@@ -278,17 +278,28 @@ pub(crate) struct SyncLog {
 impl SyncLog {
     /// The log at `path`, made its full size -- written, not left sparse,
     /// so that writing it never changes what the file system holds of it
-    /// -- with no generation begun.
-    pub(crate) fn open(path: &Path) -> io::Result<SyncLog> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
+    /// -- with no generation begun. Made, it takes the mode of `main`, the
+    /// file whose bytes it holds: its owner's alone where `main` is
+    /// (`fs::private`), and readable by whoever an operator let read
+    /// `main`, whose `--read-only` open and `fennec verify` read the log
+    /// too. A log there already keeps its own.
+    pub(crate) fn open(path: &Path, main: &File) -> io::Result<SyncLog> {
+        let mut file = crate::fs::private(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+        )
+        .open(path)?;
         let size = HEAD + ROOM;
         let mut head = [0u8; HEADER];
         let had = file.metadata()?.len();
+        if had == 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = main.metadata()?.permissions().mode() & 0o777;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
         if had < size {
             file.write_all_at(&vec![0u8; (size - had) as usize], had)?;
             file.sync_all()?;
@@ -421,7 +432,7 @@ mod tests {
         let main_path = d.join("db.fennec");
         let main = rw(&main_path);
         main.write_all_at(b"0123456789", 0).unwrap();
-        let mut log = SyncLog::open(&path_for(&main_path)).unwrap();
+        let mut log = SyncLog::open(&path_for(&main_path), &main).unwrap();
         log.begin(&main, 10).unwrap();
         assert!(log.takes(10, 3));
         log.append(10, b"abc").unwrap();
@@ -452,7 +463,7 @@ mod tests {
         let main_path = d.join("db.fennec");
         let main = rw(&main_path);
         main.write_all_at(b"the file as synced", 0).unwrap();
-        let mut log = SyncLog::open(&path_for(&main_path)).unwrap();
+        let mut log = SyncLog::open(&path_for(&main_path), &main).unwrap();
         log.begin(&main, 18).unwrap();
         log.append(18, b" and more").unwrap();
         drop(main);
@@ -477,7 +488,7 @@ mod tests {
         let main_path = d.join("db.fennec");
         let main = rw(&main_path);
         main.write_all_at(b"base", 0).unwrap();
-        let mut log = SyncLog::open(&path_for(&main_path)).unwrap();
+        let mut log = SyncLog::open(&path_for(&main_path), &main).unwrap();
         log.begin(&main, 4).unwrap();
         log.append(4, b"-one-long-entry").unwrap();
         log.append(19, b"-two").unwrap();
@@ -487,7 +498,7 @@ mod tests {
         log.append(23, b"!").unwrap();
         drop(log);
         // Reopened, the log starts a generation of its own.
-        let log = SyncLog::open(&path_for(&main_path)).unwrap();
+        let log = SyncLog::open(&path_for(&main_path), &main).unwrap();
         assert!(!log.takes(24, 1), "no generation is begun");
         main.set_len(23).unwrap();
         recover(&main, &path_for(&main_path)).unwrap();
@@ -506,7 +517,7 @@ mod tests {
         let main_path = d.join("db.fennec");
         let main = rw(&main_path);
         main.write_all_at(b"x", 0).unwrap();
-        let mut log = SyncLog::open(&path_for(&main_path)).unwrap();
+        let mut log = SyncLog::open(&path_for(&main_path), &main).unwrap();
         log.begin(&main, 1).unwrap();
         assert!(!log.takes(1, ENTRY_MAX + 1));
         let chunk = vec![7u8; ENTRY_MAX];
