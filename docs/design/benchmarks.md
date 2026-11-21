@@ -284,17 +284,51 @@ is never cancelled.
 
 *The owner approves what the gate lets through.* The judge names, as a
 warning on the run and in its summary (`edits`), every edit of the gate's
-own files -- `gate.rs`, `tools/perf_gate.py`, the workflow's `perf-count`
-and `perf` jobs, comments and blank lines aside -- and every
-`PERF_ACCEPTED` entry the pull request adds, edits or removes. main asks
-for no review, and pull requests come from the owner's account, so a
-reviewer approves nothing: such a pull request is the owner's to approve,
-and the agent merging it waits for the owner's OK rather than merging on a
-green check. The warnings are no lock -- the workflow that prints them is
-the pull request's own, and an edit to it can leave them out -- so the
-merging agent reads the diff for these files and entries too. What no
-check holds: the count runs the change's code, and a build script or a
-workload that forges the count forges the gate.
+own files and every `PERF_ACCEPTED` entry the pull request adds, edits or
+removes. The gate's own files, each in the words the judge prints:
+`gate.rs` and `tools/perf_gate.py` ("one of the gate's own files"); in
+`ci.yml`, the `perf-count` and `perf` jobs ("the gate's own job"), every
+job they need, on and on ("a job the gate's `perf` needs, which can hand
+it an output or a file" -- none today), a local action or workflow they
+use ("`./x`, which a job of the gate's uses" -- none today), and the
+workflow outside its `jobs:` ("`ci.yml` outside its `jobs:` is edited
+(`env`)"): its `env` -- a `BASH_ENV` there runs a script of the tree's
+before every step's first command, the judge's `python3 -I` among them --
+its `defaults` (a step's shell), `permissions`, `concurrency`, `on`
+(whether the jobs run at all) and the rest; and in any workflow, a job
+whose check may be shown under a gate job's name or id ("its job `j` is
+named as one of the gate's"), whose result could stand for the gate's: a
+name written so, or one an expression may make so -- a `${{ matrix.<key>
+}}` any value its matrix writes out, any other expression any text --
+named where its lines, a job it needs or its workflow's own keys change,
+so `release.yml`'s `${{ matrix.name }}` jobs, whose matrices name
+platforms, are not. The workflows are compared as YAML reads them, by a
+reader of the checker's own (`yaml_lines`; Python has no YAML, and the
+checker imports nothing of the tree's), which the tests hold to
+`tools/workflow_check.py`'s reader over every workflow of the repository
+and sixteen snippets a reader of lines gets wrong (Ruby's YAML reads each
+the same): a comment, on a line of its own or after a value, and a blank
+line holding nothing are no edit, while a `#` line or a blank one inside
+a scalar -- a `run: |` script's, a quoted one's, a plain one running on to
+the next line -- is, as is a trailing space in a block scalar (a script's
+`\ ` is no continuation). Where the workflow reads a YAML alias, every
+edit of it is named: through one, any line may reach the gate's jobs.
+Over main's last 120 landings the judge names three edits the two jobs'
+lines did not, each of `ci.yml`'s own keys: #617's `concurrency`, #656's
+`on` and #672's `permissions`. main asks for no review, and pull requests
+come from the owner's account, so a reviewer approves nothing: such a
+pull request is the owner's to approve, and the agent merging it waits
+for the owner's OK rather than merging on a green check. The warnings are
+no lock, and this is the gate's bootstrap limit: on `pull_request` and in
+a merge group GitHub runs the workflow of the commit it tests, the pull
+request's own, so a pull request that edits the workflow is judged by its
+own workflow, and an edit to it can leave the warnings out -- the judge
+can only name the edit, and the owner's OK is the lock. So the merging
+agent reads the diff for these files and entries too. What no check
+holds: the count runs the change's code, and a build script or a workload
+that forges the count forges the gate -- as does any job of the run, an
+edit of whose lines is not the gate's, that uploads over the count's
+artifacts (`overwrite`) before the judge downloads them.
 
 *What is counted.* One program, this tree's source copied into the base's
 worktree, so both sides run the same work against their own crates; a
@@ -711,8 +745,8 @@ neither the drive's cache nor the file's metadata, arm's
 `pwrite64`, `writev`, `pwritev`, `pwritev2`, `copy_file_range`,
 `sendfile`, `splice`, and `fallocate`, which gives a file room and returns
 no bytes) and the bytes they returned; the bytes written to a file and not
-yet made durable when the server next wrote to a socket (`unsynced`,
-below); the files created (an open with `O_CREAT` or `O_TMPFILE`, whether
+yet made durable when the server next began to write to a socket
+(`unsynced`, below); the files created (an open with `O_CREAT` or `O_TMPFILE`, whether
 or not the file was there, which the trace cannot tell and a run repeats;
 `creat`; `mkdir`; `mknod`; `symlink`), truncated (`ftruncate`, `truncate`,
 an open with `O_TRUNC`), linked (`link`, `linkat`) and unlinked (`unlink`,
@@ -845,6 +879,42 @@ log synced before its record is written -- one line moved in
 `SyncLog::append` -- fails with no entry, every other count of every file
 the same (*What fails*).
 
+An answer counts where its call began, every other call where it
+returned. strace prints a call's beginning as it stops the thread on the
+way in, before the call runs, and its return as it stops it on the way
+out; another thread's line can fall between (`<unfinished ...>`, `<...
+resumed>`). An answer's bytes reach the client inside the call, and the
+driver connects again -- the stretch's end -- once it has read them, so
+on a loaded runner (four traced servers, their clients and strace on
+four vCPUs) the accept's return can be printed before the answer's:
+placed at its return, as round four placed it, the last answer would
+fall past the stretch -- `io-batch`'s 23 883 bytes read as none,
+`io-put`'s 274 260 as 273 710 -- and runs of a build that changed nothing
+would differ on a required check (the twenty runs that agreed ran at a
+load near 1). Its beginning comes before its client can connect. The
+rest stay at their returns, which no other thread's line moves: an
+accept takes its connection as it returns (it began waiting long
+before), and the server hands the connection on only after, so a
+workload's calls all begin past it, and the setup's last answer begins
+before it; a sync makes a file durable as it returns -- placed where it
+began, one still running when an answer began would pass for done, and
+the two returns' order would decide the count; a write's bytes and a
+failure's error are known there; and what the server does for a request
+returns before that request's answer begins, on the answering thread in
+turn or on one it waited for, which strace let go on only once it had
+printed the return. A call the server did not wait for before answering
+falls either side of an end in any reading: its runs differ, and the
+judge says so. The tests hold each on hand-written lines as strace prints
+them -- the last answer resumed after the driver's accept, printed whole
+or resumed from its wait, and `io-batch.strace`'s answer so split, count
+as resumed before it; the setup's last answer straddling the workload's
+accept counts as the setup's; a sync interleaved with other threads'
+lines counts as one printed whole, and one still in flight when its
+answer began counts its record unsynced whichever return is printed
+first -- and the checker before this fails the first and the last. The
+captures in `tools/perf_gate_traces/` count the same in both readings,
+none holding an answer another thread's line split.
+
 *The file after the setup.* The client sends both sides the same setup,
 so the size the database file has once it is answered is the server's: a
 change to what the setup writes -- a record's encoding, the schema's, the
@@ -945,10 +1015,14 @@ would read no tree. That path is the pull request's tree's, so the step
 that writes it decides by the base alone: it refuses, in words, a change
 whose `tools/` is a link or that tracks anything at the path, clears the
 path, and writes the base's file as `git show` gives it, this tree's copy
-only where `git cat-file -e` says the base has no such file (its exit 128
-once the base's tree has been read); any other error of git's fails the
-step. The base's `gate.rs` is read in the same step, into `$RUNNER_TEMP`,
-before anything of the change runs. From the gate's first version (#619)
+only where `git ls-tree HEAD^1 -- tools/perf_gate.py` lists the base's
+tree and no file in it (exit 0, nothing listed); an error of git's --
+the tree unreadable, or the file it lists -- fails the step in words.
+Round four decided by `git cat-file -e`'s exit 128, which is also git's
+answer where the base's `tools` tree cannot be read ("exists on disk, but
+not in 'HEAD^1'"): this tree's checker would then have counted and
+judged. The base's `gate.rs` is read in the same step and the same way,
+into `$RUNNER_TEMP`, before anything of the change runs. From the gate's first version (#619)
 the copy was written by a redirection whose failure fell back to this
 tree's copy: a
 pull request committing a directory at the path made the write fail, its
@@ -959,8 +1033,11 @@ written and every judging step skipped, the job green.
 `tools/test_perf_gate.py` runs each job's first steps under bash in
 scratch repositories: a directory and a link at the path, `tools/` a link,
 a base with no checker (this tree's, and only then), a base with no
-parent and one whose checker git cannot read -- each but the bootstrap
-failing with nothing of the change's run.
+parent, one whose checker git cannot read, and one whose `tools` tree,
+program's directory or program git cannot read -- each but the bootstrap
+failing with nothing of the change's run. With the step's `git cat-file
+-e`, the unreadable trees took this tree's checker or an empty program:
+four of those subtests fail.
 
 *The results kept apart.* The count job keeps the instructions' results
 (`perf-results`) before the I/O runs, and the I/O's in an artifact of

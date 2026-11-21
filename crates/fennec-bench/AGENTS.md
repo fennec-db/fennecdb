@@ -29,9 +29,10 @@ calls at the base's cost a call, never a call line's inclusive cost -- or
 in the bytes asked of it: a call's cost moves with the heap's layout, the
 calls and bytes with the code. Both jobs run the base's copy of
 `tools/perf_gate.py`, written from the base's file as git reads it to a
-path the pull request tracks nothing at -- this tree's only where git says
-the base has none, never on another error -- for the I/O too, but where
-the base's `gate.rs` mentions no `IO_WORKLOADS`, which each job reads with
+path the pull request tracks nothing at -- this tree's only where git
+lists the base's tree without one (`git ls-tree`), never on an error --
+for the I/O too, but where the base's `gate.rs` mentions no
+`IO_WORKLOADS`, which each job reads with
 a `grep` held to `io_checker`, never Python of the change's: only the pull
 request that brought them was counted and judged by its own. A workload
 the base's `gate.rs` lists that this tree dropped, or that the base did
@@ -39,10 +40,15 @@ not run, fails. A cost taken on purpose
 is a `PERF_ACCEPTED` entry the pull request adds -- the workload, its
 metric, the most and why -- never the threshold, the runs, `ALLOCATOR` or a
 workload changed to pass. The owner approves each entry and each edit of
-the gate's own files (`gate.rs`, the checker, the two jobs), which the
-judge names: the agent merging such a pull request waits for the owner's
-OK. A change is counted unless every path is the site's, the docs', an
-integration's, `web/`'s, `studio/`'s, `deploy/`'s or Markdown. A workload
+the gate's own files, which the judge names: `gate.rs`, the checker, and
+whatever of the workflows reaches the two jobs -- the jobs, those they
+need and the local actions they use, `ci.yml` outside its `jobs:`, and
+any workflow's job its name, or an expression in it, could show as one of
+theirs -- read as YAML reads them, comments aside (`workflow_edits`): the
+agent merging such a pull request waits for the owner's OK. That OK is the
+lock: a pull request editing the workflow is judged by its own, which can
+leave the warnings out. A change is counted unless every path is the
+site's, the docs', an integration's, `web/`'s, `studio/`'s, `deploy/`'s or Markdown. A workload
 runs in process on one thread from a fixed seed, only its loop counted, the
 same count run after run but for a draw well inside the threshold (the base
 against itself, 0.1% at most), and stands for a claim in the design file's
@@ -52,8 +58,9 @@ the server alone under `strace -f`, counted from its taking the workload's
 connection to the driver's next: the syncs that make a file durable and
 the writebacks that do not, renames, the calls writing to files and their
 bytes, never a socket's or a pipe's, the bytes not yet durable when the
-server next writes to a socket, the files made, truncated, linked and
-unlinked, the calls that failed -- each sync and failure by its call and
+server next begins to write to a socket -- an answer counted where its
+call began, every other call where it returned -- the files made,
+truncated, linked and unlinked, the calls that failed -- each sync and failure by its call and
 file, bytes file by file -- and the database's size after the setup; a
 server that sets up io_uring or Linux AIO, or opens a file of the data
 directory `O_SYNC`, `O_DSYNC` or `O_DIRECT` or sets its attributes by
