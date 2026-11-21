@@ -936,11 +936,18 @@ impl Schema {
     /// (`Database::create_collection`), the one place every collection is
     /// made. A schema's fields are public, so one built in code past
     /// `Schema::new` was written as handed -- 64 lists around a point, a
-    /// `vector<0>` -- and the file refused at its next open.
+    /// `vector<0>` -- and the file refused at its next open. So are its
+    /// indexes over several fields, each held to [`Self::check_composite`]
+    /// -- whose 2 to 8 parts `Schema::decode` holds a file's to -- its
+    /// answer that one over the same fields is there aside: that is the
+    /// index itself.
     pub(crate) fn readable(&self) -> Result<()> {
         for f in &self.fields {
             nests_within(f)?;
             f.index.check(&f.name, &f.ty)?;
+        }
+        for c in &self.composites {
+            self.check_composite(c)?;
         }
         Ok(())
     }

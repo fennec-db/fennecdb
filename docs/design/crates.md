@@ -242,7 +242,15 @@ naming the field and the range (`schema::out_of_range`: "`v`: @hnsw's
 `m` is 2 to 32767, not 1099511627776"), in the browser module too. The
 test is the one `IndexKind::check` asks of every schema a write makes,
 and a create asks again of whatever schema it is handed
-(`Schema::readable`), so no open refuses what a write took. With a test
+(`Schema::readable`), so no open refuses what a write took. An index
+over several fields is read so too, 2 to 8 parts or the record refused
+(`Schema::decode`; the fuzzer's `image` target found one of none), the
+bound `check_composite` holds every one a statement or a declaration
+makes to (`add_composite`), and a create asks it again of each the
+schema it is handed holds, its answer that one over the same fields is
+there aside, the index itself: one of one part pushed into a schema in
+code was written and the file refused at its next open, until the fuzz
+fix's third review's check. With a test
 each, the check held a field's own vector alone: SQL's `create table t (e vector(1000000001)[])`
 and `Schema::new`'s `[vector<0>]` were taken and written, and at the next
 open the file was refused as damage, by every replica and every page
