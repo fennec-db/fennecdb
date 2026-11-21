@@ -955,8 +955,8 @@ fn refused_in(answer: &str, words: &str) -> bool {
 /// words, and every other statement over the file answering as the release
 /// did -- and, on copies of `deep.fennec`, each step that stands on 1.x
 /// ([`deep_steps`]): the row's `del` refused and a compact taken, copying
-/// the row as it is; its field dropped, the row read, a compact refused
-/// until the row is deleted or written over; refused again, the row and
+/// the row as it is; its field dropped, the row read and a compact
+/// taken, copying the row as it is; refused again, the row and
 /// its `del`, once a field is declared after the dropped one; the
 /// collection dropped and the rest of the file answering as the release
 /// did.
@@ -1045,11 +1045,10 @@ fn the_files_this_build_refuses_on_purpose_are_refused_in_its_words() {
 ///   writing over it are refused in the words, the rest answering as the
 ///   release did; a `compact` is taken and copies the row as it is, every
 ///   answer of the file the release's once it opens again, the row refused;
-/// - `j` dropped, the row reads; a `compact` is refused in the words --
-///   copying the row it skips the dropped place, and that skip is
-///   depth-bound -- and stays refused while the row's record is in the
-///   file; once the row is deleted, or written over, a `compact` is taken:
-///   dropping the field never frees the file by itself;
+/// - `j` dropped, the row reads; a `compact` is taken, copying the row as
+///   it is with its dropped place, the row still read; once the row is
+///   deleted, or written over, a `compact` is taken: dropping the field
+///   never frees the file of the row by itself;
 /// - the other layout, `j` dropped and a field added after it: the row and
 ///   its `del` refused again, the way out the collection dropped, the rest
 ///   of the file answering as the release did.
@@ -1116,7 +1115,7 @@ fn deep_steps(
     also.extend(held_to(&path, "compacted", true));
 
     // Its field dropped, the collection's last: the row reads, and a
-    // compact is refused for as long as the row's record is in the file.
+    // compact copies it as it is.
     let dropped = |step: &str| {
         let path = copy(step);
         let mut db = fennec_core::fs::open(&path).unwrap();
@@ -1132,7 +1131,7 @@ fn deep_steps(
         answered(read(&path, row)),
     );
     for when in ["a compact, its field dropped", "a compact asked again"] {
-        want(when, false, write(&path, "compact"));
+        want(when, true, write(&path, "compact"));
         want(
             &format!("the row after {when}"),
             true,
@@ -1218,11 +1217,13 @@ fn deep_steps(
 
 /// What stands on 1.x beside `many.fennec`'s collection of 4 097 fields,
 /// more places than 4 096, which the release made with no bound: on a copy,
-/// the file opened anew for each, a field renamed, one dropped and one
-/// added, then a compact, each step's outcome held, and after each every
-/// row read at its places as the release's file reads them.
+/// the file opened anew for each, a field renamed and one dropped, taken,
+/// one added, refused (`takes no field more`: its fields alone fill the
+/// places a collection holds), then a compact, taken, each step's outcome
+/// held, and after each every row read at its places as the release's file
+/// reads them.
 #[test]
-fn a_collection_of_more_than_4_096_places_takes_its_alters_and_a_compact() {
+fn a_collection_of_more_than_4_096_places_takes_a_rename_and_a_drop_and_refuses_a_field_more() {
     fennec_ql::install();
     let mut held = 0;
     for set in sets() {
@@ -1279,7 +1280,7 @@ fn a_collection_of_more_than_4_096_places_takes_its_alters_and_a_compact() {
             (
                 "a field added",
                 "alter collection many add field extra int",
-                Ok(()),
+                Err("takes no field more"),
             ),
             ("a compact", "compact", Ok(())),
         ];

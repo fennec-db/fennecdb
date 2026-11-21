@@ -547,9 +547,8 @@ its compat test holds what this build does with each (`ON_PURPOSE`,
 `compact` taken, copying the row as it is; dropped, its field is skipped
 as a read skips it, depth-bound, so the row reads -- and its `del` works
 -- only where no field is declared after the dropped one, a field added
-after it refused in the same words; and a `compact`, which skips the
-dropped place too, refused in the same words while the row's record is in
-the file. Dropping the field never frees the file by itself: the way out
+after it refused in the same words; and a `compact` taken, keeping the
+dropped place and copying the row as it is. Dropping the field never frees the file by itself: the way out
 on 1.x is to drop the field where it is its collection's last and delete
 the row (or write over it), and where a field follows it, to read out the
 rows that read, drop the collection and make it again. The other three
