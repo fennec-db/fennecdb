@@ -7846,7 +7846,6 @@ mod tests {
         assert!(forwarded(&bare, false).is_empty());
     }
 
-    /// An address nothing listens on: its connect is refused.
     /// A repair with no node to give a tenant's replica -- the only other
     /// node silent -- takes no claim on it, so a delete, a move, a quota or
     /// a failover of the tenant meanwhile is not refused 409, another
@@ -7908,11 +7907,18 @@ mod tests {
         addr
     }
 
+    /// An address nothing listens on, its connect refused: port 1, which
+    /// no test's server takes, as `tests/unsent.rs`'s `refusing`. A port
+    /// the system picked and let go of, as this was, is the next `bind` to
+    /// port 0's in this binary's tests run side by side: there a listener
+    /// took the router's dial and never answered -- the request gone out
+    /// whole, the router rightly answered the 502 saying it may have run,
+    /// after the upstream timeout -- or another test's router answered it,
+    /// where [`a_cut_write_that_went_whole_is_never_told_unsent`] wants the
+    /// router's own answer to a refused dial (`docs/design/conventions.md`,
+    /// *Ports*).
     fn refusing() -> String {
-        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = gone.local_addr().unwrap().to_string();
-        drop(gone);
-        addr
+        "127.0.0.1:1".into()
     }
 
     fn router(d: Directory) -> Arc<Router> {

@@ -3335,9 +3335,10 @@ mod tests {
         let ended = dialed.recv_timeout(Duration::from_secs(20)).unwrap();
         assert_eq!(ended, Some(Ended::Moved));
 
-        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = gone.local_addr().unwrap().to_string();
-        drop(gone);
+        // Port 1, which no test's server takes: a port let go of is the
+        // next `bind` to port 0's in this binary (`docs/design/conventions.md`,
+        // *Ports*).
+        let addr = "127.0.0.1:1".to_string();
         let flying = Flying::of("acme", &pool);
         assert_eq!(pool.cut(&addr, "acme"), Cuts::default());
         let none = Duration::ZERO;
