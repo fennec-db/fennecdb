@@ -1506,3 +1506,49 @@ fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
     drop((tenants, lock));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A tenant whose file is a link has an install's image and a copy's
+/// written beside the file the link leads to, as its open writes that one
+/// and its lock is taken there (`fs::resolved`): what a crash left there
+/// goes as the node starts too, under the tenant's lock -- one whose lock
+/// another holds stays -- the file and the link as they were. Looked for in
+/// the node's directory alone, they stayed for good.
+#[cfg(unix)]
+#[test]
+fn a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file() {
+    let (dir, files) = (scratch("left-linked"), scratch("left-linked-files"));
+    for d in [&dir, &files] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let image = image_of(&[1]);
+    let linked = |t: &str| {
+        let file = files.join(format!("{t}.fennec"));
+        std::fs::write(&file, &image).unwrap();
+        std::os::unix::fs::symlink(&file, dir.join(format!("{t}.fennec"))).unwrap();
+        let left = |side: &str| {
+            let p = files.join(format!("{t}.fennec.{side}"));
+            std::fs::write(&p, b"part of an image").unwrap();
+            p
+        };
+        (file, left("importing"), left("taking"))
+    };
+    let (file, importing, taking) = linked("a");
+    let (_, held, _) = linked("b");
+    let lock = fennec_abi::lock::hold(dir.join("b.fennec")).unwrap();
+    let tenants = Tenants::new(&dir).expect("dir");
+    assert!(
+        !importing.exists(),
+        "an install's file left beside the link's"
+    );
+    assert!(!taking.exists(), "a copy's image left beside the link's");
+    assert!(
+        held.exists(),
+        "a file whose tenant's lock another holds removed"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), image, "the tenant's file");
+    let link = std::fs::symlink_metadata(dir.join("a.fennec")).unwrap();
+    assert!(link.file_type().is_symlink(), "the link");
+    drop((tenants, lock));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&files);
+}

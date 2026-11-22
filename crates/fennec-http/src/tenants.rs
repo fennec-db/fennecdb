@@ -277,17 +277,39 @@ fn claimed(name: &str, by: &str) -> Refused {
 /// read: removed as the node starts, each under the tenant's lock taken
 /// without waiting, so one another process holds the lock of -- its own
 /// install under way, a shell's open -- stays. Before, a crash's
-/// `.importing` stayed until an install of the name came again.
+/// `.importing` stayed until an install of the name came again. A tenant
+/// whose file is a link had both written beside the file the link leads
+/// to (`fs::resolved`), as its open writes that one and its lock is taken
+/// there: looked for there, under the same lock. Looked for in the
+/// directory alone, as until the image review's second round, they stayed
+/// beside a linked tenant's file for good.
 fn sweep_left(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let name = e.file_name();
-        let Some(file) = name.to_str().and_then(|n| {
-            n.strip_suffix(".importing")
-                .or_else(|| n.strip_suffix(".taking"))
-        }) else {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".fennec") {
+            if e.file_type().is_ok_and(|t| t.is_symlink()) {
+                let linked = e.path();
+                let file = fennec_core::fs::resolved(&linked);
+                if file != linked {
+                    if let Ok(_held) = fennec_abi::lock::hold(&linked) {
+                        for side in ["importing", "taking"] {
+                            let _ = std::fs::remove_file(fennec_core::fs::beside(&file, side));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(file) = name
+            .strip_suffix(".importing")
+            .or_else(|| name.strip_suffix(".taking"))
+        else {
             continue;
         };
         if file.ends_with(".fennec") {
