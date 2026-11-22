@@ -46,8 +46,9 @@ its identity, unstamped, which every install after it met as there (409).
 Each is removed under `<file>.lock`: the install's under the hold it took
 before it made its image's file beside the tenant's, with its claim of the
 name, held through the rename -- so that the file is the install's own, a
-second install or a create of the name refused 409 at once
-([replication.md](replication.md#an-image-taken-as-it-arrives), the move's
+second install, a create or a reclaim of the name refused at once, a 503
+naming its wait ([below](#an-install-under-way-is-no-file-there);
+[replication.md](replication.md#an-image-taken-as-it-arrives), the move's
 image) -- the create's -- whose hold went with its database's sink --
 under the lock taken again once the database is let go
 (`Tenants::take_back_made`, as `delete_unfrozen` removes a file), the file
@@ -1152,6 +1153,77 @@ rest; `fennec-shard` 15.3 (2 936.3 -> 2 951.6): `reclaim_noted` with the
 reclaim in it 4.4, `place_replica`'s nodes kept 1.7, `left_on` with its
 identities 1.6, the repair's look 1.5, the directory's `leftovers` and
 `forget_leftover` 2.2, the move's and the attach's notes the rest.
+
+### An install under way is no file there
+
+**A node refuses a name an install is taking an image for with a 503
+naming its wait, and the router waits it out and asks again**
+(`Tenants::claim`, `tenants::claimed`, `Tenants::reclaim`'s
+`refuse_if_claimed`, `ComeBack`, `named_wait`, `Router::come_back`,
+`clear_target`, `look_at_leftovers`). An install claims the tenant's name
+in its process and takes `<file>.lock` before it writes a byte of its
+image beside the tenant's file, and holds both through the take, the
+check and the rename ([replication.md](replication.md#an-image-taken-as-it-arrives)).
+The image review's second round refused a second install or a create of
+the name meanwhile with 409 -- the status that says a file is there -- and
+let a reclaim judge the place: no file yet, so 200, `"taken": false`. The
+router reads a 409 from an install or an attach's `PUT` as a file of the
+tenant at its target and has the node take it back where it noted one
+(`clear_target`). So a move whose own install had gone unanswered -- the
+image whole on the node, its check or its sync past the router's
+`--upstream-timeout`, or the answer cut -- noted the file under the
+identity it proposed, failed, and, tried again while that install went
+on, met the 409, had the reclaim judge the place empty, forgot its note,
+met the 409 again and failed; the first install then landed, a file under
+an identity no row named, which every later move or attach met as one
+this router did not leave: an operator's to clear. With no note, the move
+noted a file that did not exist.
+
+Now the refusal is 503 with `Retry-After` and `retry_after` (a second),
+as every 503 says when to come back: nothing of the request ran, and what
+holds the name ends. A create claims the name the same way, in the one
+step that looks for another's claim -- only looked for, an install
+claiming the name between the look and the open's lock had the create
+wait the lock out under the tenant's slot, every request for the name
+with it, then answer 500 -- and a reclaim is refused while an install
+holds it (a create holds the slot a reclaim waits on). The router asks a
+node that answered so again after the wait it named, never sooner, each
+wait after twice the one before up to 8 s, while `--upstream-timeout`
+from the first lasts (`ComeBack`): a move's install, its source frozen
+meanwhile as through the copy; a cross-region install (`region::install`);
+the reclaim clearing a move's or an attach's target, its note kept. Past
+the bound the last answer stands -- the install's 503 a 502 naming the
+node's words, the reclaim's a 409 -- the note kept and the source thawed.
+An attach's own `PUT` meeting the 503 fails the attach, which a repair
+tries again (`try_again`). And the repair's look, which forgot a noted
+file its node's `GET /_admin/tenants` did not list, forgets one noted
+under an identity only on the node's word: it asks the reclaim, which
+takes it, says it is gone (200) or refuses (503, kept for the next look);
+a node from before identities, which cannot judge (404), is taken at the
+listing's word as before. A name being installed is never listed -- its
+file is not there -- and listing it would have the look note a copy the
+router did not place.
+
+The wait costs nothing where no install is under way: one look at the
+answer's status. A 503 naming no wait -- none of fennec's -- is not
+waited for. Bounded by `--upstream-timeout`, a move holds its source
+frozen no longer than one call to a node may take. Rejected: *a body field
+on the 409* -- every router before it, and every reader of the status,
+still reads a file there; *the router polling the reclaim until the
+install ends* -- the install's own `PUT` says the same thing at no more
+cost, and a reclaim during an install judges nothing anyway.
+`tests/tenants.rs`' `an_install_under_way_holds_its_name_and_another_is_refused`
+holds the second install's and the create's refusal and the answer's
+`Retry-After` and `retry_after`, and
+`a_reclaim_during_an_install_of_its_name_judges_nothing` the reclaim's;
+fennec-shard's `replica_retries.rs`,
+`a_move_meeting_an_install_of_its_name_under_way_waits_for_it`, a proxy
+stalling a move's install half way and cutting the router off: the move
+fails noting the file, a repair meanwhile keeps the note, the move tried
+again waits, asks again, takes the first install's file back once it
+lands and installs its own, nothing left noted. Each fails on the round
+before it: the reclaim answered `Ok(false)`, the install's refusal was a
+409, and the repair forgot the note.
 
 ### A detached copy taken back by its identity
 

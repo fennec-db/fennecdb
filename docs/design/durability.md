@@ -395,7 +395,9 @@ as it starts, under each tenant's lock taken without waiting
 tenant's lock another process holds
 ([replication.md](replication.md#an-image-taken-as-it-arrives)).
 The rename itself goes by the name, so `swap_in` first holds the name to the
-handle's file (`still_named`, its device and inode against an `lstat`):
+handle's file (`still_named`, its device and inode against an `lstat`; on
+Windows the volume's serial number and the file's index against the name
+opened as no link, since the image review's second round):
 another file put there since is renamed over nothing, and the sink fails, as
 a failed rename fails it. Each of these needs write access to the
 database's directory, which takes the database itself anyway: what they

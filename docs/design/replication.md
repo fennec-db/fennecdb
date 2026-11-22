@@ -612,9 +612,18 @@ own error, damage refused naming the record):
   (fennec-core's `tests/side_files.rs`,
   `an_image_is_adopted_only_from_the_file_its_follower_wrote`, which fails
   so). A compact beside the database renames `.beside` through its
-  writer's handle the same way. On Windows the rename goes by the name, as
-  a compact's does: there is no `still_named`, and what keeps the name the
-  follower's is `<file>.lock`, whose holder alone writes `.taking`. A
+  writer's handle the same way. On Windows the rename goes by the name and
+  the file is opened again by it after (`fs::windows::swap`), so the name
+  is held to the handle first by the file's identity -- its volume's
+  serial number and its index there, `GetFileInformationByHandle`'s,
+  against the name opened as no link for no access -- in `adopt_side`, in
+  the sink's `adopt` and in a rewrite's swap (`still_named`, its Windows
+  half), a mismatch failing the sink there as on a Unix; until the image
+  review's second round nothing held it there but `<file>.lock`, whose
+  holder alone writes `.taking` (`Sink::adopt` let its handle be).
+  `tests/side_files.rs`' adoption test runs on Windows CI for a file put at
+  the name (a link asks a privilege CI's tests lack). An archive's
+  records, a backup and an unseal still rename by the name alone there. A
   copy whose sink has no file -- the fuzzer's, a test's; a
   server's copy is a file's -- takes it in memory, grown as it comes.
 - **`fennec backup`** writes it into the backup's side file, its fork
@@ -650,10 +659,14 @@ own error, damage refused naming the record):
   the install's own: before it is made the install claims the name in the
   process (`Tenants::claim_import`) and takes `<file>.lock`, which it holds
   through the take, the check and the rename, the file going before the
-  lock does. A second install of the name, or a create of it, is refused
-  409 at once, its body unread (a create would otherwise wait on the lock
-  under the slot); another process holding the lock refuses the install
-  before its body is read. Made before the slot was taken, as round 2
+  lock does. A second install of the name, a create or a reclaim of it, is
+  refused at once, its body unread -- 503 naming its wait, never the 409
+  that says a file is there, which a router took for one
+  ([tenants.md](tenants.md#an-install-under-way-is-no-file-there)); a
+  create claims the name as an install does, in the step that looks for
+  another's claim, so it never waits on the lock under the slot -- and
+  another process holding the lock refuses the install before its body is
+  read. Made before the slot was taken, as round 2
   made it, two installs of one name each made `.importing` anew -- removing
   the other's by its name -- and each removed it as it went: on a Unix
   `still_named` turned that into two refusals, but on Windows, where no
@@ -662,14 +675,14 @@ own error, damage refused naming the record):
   before round 2, the slot -- every request for the name -- was held for
   the whole transfer. `tests/tenants.rs`'s
   `an_install_under_way_holds_its_name_and_another_is_refused` holds the
-  second install and a create to 409 with the first's image half taken,
+  second install and a create to 503 with the first's image half taken,
   the second's body unread, and the first to land whole; round 2's code
-  installed the second and refused the first. On Windows, which has no
-  `still_named`, the lock is what holds: taken before the file is made and
-  let go after its rename or its removal, it keeps every other install of
-  the name -- in this process or another -- from writing, removing or
-  renaming `.importing` meanwhile, so the rename by its name renames the
-  file this install wrote.
+  installed the second and refused the first. On Windows the lock holds
+  as on a Unix -- taken before the file is made and let go after its
+  rename or its removal, it keeps every other install of the name, in
+  this process or another, from writing, removing or renaming `.importing`
+  meanwhile -- and the rename is held to the install's handle by the
+  file's identity too (`still_named`'s Windows half).
 
 What a crash leaves: before the rename, the copy's file as it was and the
 image beside it, whole or not, which the next open never reads and the
@@ -684,7 +697,12 @@ large as the database for good; a crash's `.importing` stayed until an
 install of the name came again. A node now removes both as it starts
 (`tenants::sweep_left`, from `Tenants::new`), each under its tenant's lock
 taken without waiting, so one another process holds the lock of -- its
-install under way -- stays (fennec-core's `tests/side_files.rs`,
+install under way -- stays; for a tenant whose file is a link, beside the
+file it leads to, where its open, its install and its lock put them
+(`fs::resolved`), which the sweep, looking in the node's directory alone,
+missed until the image review's second round
+(`a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file`,
+a Unix's) (fennec-core's `tests/side_files.rs`,
 `an_image_a_crash_left_goes_as_the_file_is_opened_to_be_written`, mapped,
 in memory and a server's open, a read-only one leaving it; fennec-http's
 `tests/tenants.rs`,
