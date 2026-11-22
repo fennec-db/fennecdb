@@ -13,5 +13,8 @@ indexes a table of `Arc`s, never a pointer; every call returns a code under
 `catch_unwind`, built in the unwinding `ffi` profile; a test holds the
 hand-written `include/fennec.h` to the exports. As a server's, a long read
 pins and the fsync and a buffered write go after the lock
-(`Native::after`); JNI passes text as UTF-8 bytes; `<file>.lock` is an
-`fcntl` record lock (Windows: `LockFileEx`), never `flock`.
+(`Native::after`); JNI passes text as UTF-8 bytes, runs each function's
+own work under `catch_unwind` too (`guarded`), and answers what no `byte[]`
+holds as a query error, never a length cast to an `int` (`array_len`);
+`<file>.lock` is an `fcntl` record lock (Windows: `LockFileEx`), never
+`flock`.
