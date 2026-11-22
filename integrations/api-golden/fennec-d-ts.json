@@ -1219,6 +1219,9 @@
     ],
     "token": [
      "token: TokenWait | null"
+    ],
+    "unkept": [
+     "unkept: string | null"
     ]
    }
   },
@@ -1653,6 +1656,12 @@
    "declarations": [
     "function sync<T extends Tables, R extends Relations = {}>(opts: SyncOptions<any> & SchemaOptions<T, R>): Promise<FennecSync<SchemaOf<T>, R>>",
     "function sync<S extends AnySchema<S> = Schema>(opts: SyncOptions<S> & Partial<SchemaText>): Promise<FennecSync<S>>"
+   ]
+  },
+  "unpersist": {
+   "kind": "function",
+   "declarations": [
+    "function unpersist(key: string): Promise<void>"
    ]
   }
  }

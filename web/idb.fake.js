@@ -27,22 +27,29 @@ export function fakeIndexedDB() {
   };
   const store = {
     put: (value, key) => records.set(key, value),
-    delete(range) {
-      for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+    delete(q) {
+      if (!(q instanceof KeyRange)) return records.delete(q);
+      for (const k of [...records.keys()]) if (q.has(k)) records.delete(k);
     },
     get: (key) => request(() => records.get(key)),
     getAll: (range) => request(() => [...records.keys()].filter((k) => range.has(k)).sort().map((k) => records.get(k))),
   };
+  const fake = { records };
   const db = {
-    transaction() {
+    transaction(_name, mode) {
+      // A test's IndexedDB failing a read once (`failRead`), as a real one
+      // may: thrown where the transaction is made.
+      if (mode === 'readonly' && fake.failRead) {
+        fake.failRead = false;
+        throw Object.assign(new Error('the read failed'), { name: 'UnknownError' });
+      }
       const tx = { objectStore: () => store };
       setImmediate(() => tx.oncomplete?.());
       return tx;
     },
     close() {},
   };
-  return {
-    records,
+  return Object.assign(fake, {
     open() {
       const req = {};
       queueMicrotask(() => {
@@ -51,7 +58,7 @@ export function fakeIndexedDB() {
       });
       return req;
     },
-  };
+  });
 }
 
 /** Installs a fresh one as the global, with `IDBKeyRange`; returns it. */

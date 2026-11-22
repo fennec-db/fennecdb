@@ -26,6 +26,7 @@ import {
   raw,
   restore,
   sync,
+  unpersist,
   type CallAnswer,
   type Param,
   type Json,
@@ -387,6 +388,9 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   // @ts-expect-error -- a directory is a handle, not its name
   openFile(db, 'app.fennec', { dir: 'data' });
   expect<boolean>(await restore(db, 'app'));
+  expect<void>(await unpersist('app'));
+  // @ts-expect-error -- a key's store is dropped by its key, never a database
+  void unpersist(db);
   db.close();
 }
 
@@ -436,6 +440,9 @@ export async function remote() {
   });
   const code: string | null = replica.status()[0].errorCode;
   expect<string | null>(code);
+  // Why this tab stores nothing under `persist`, null where it does.
+  const unkept: string | null = replica.status()[0].unkept;
+  expect<string | null>(unkept);
   // The token the sync waits on: where its ask stands, and the refusal the
   // provider was handed -- for an app that hands its tokens over with
   // `setToken`, which it does at `asked`.

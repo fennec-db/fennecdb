@@ -1769,6 +1769,14 @@ export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOp
  * until the promise it returns settles.
  */
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
+/**
+ * Deletes what `persist` stored under `key` -- its image and its chunks, a
+ * replica's unsent writes among them -- and nothing else: a replica whose
+ * store does not restore is seeded anew after it. Refused while a replica
+ * (`sync`'s `persist`) keeps the key in this browser; one this page closed
+ * is waited for. Every database's next `persist` stores its image whole.
+ */
+export function unpersist(key: string): Promise<void>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
@@ -1903,14 +1911,29 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * that failed -- refuses the sync (`sync` rejects), kept as it stands
    * with the writes it holds unsent; only a key holding nothing is seeded.
    * A tab that takes the lead from one whose store it cannot restore
-   * stores nothing there, and tells `onError`.
+   * stores nothing there, and tells `onError`; `unpersist(key)` deletes
+   * it, its unsent writes with it, for the next sync to seed anew. One
+   * replica stores a key at a time, holding its lock (`navigator.locks`):
+   * another -- other shapes or another url under the same key, a second
+   * tab with `leader: false` -- stores nothing there until it lets go,
+   * then takes the store over, and `status()`'s `unkept` says so meanwhile.
+   * `close()` lets go of it once the persist it has out has landed, or
+   * after 5 s, past which that persist stores nothing.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
   cryptoKey?: CryptoKey | null;
-  /** `false` turns off multi-tab leader election. */
+  /**
+   * `false` turns off multi-tab leader election: each tab sends its own
+   * writes over its own streams, and a `persist` key is stored by one of
+   * them at a time.
+   */
   leader?: 'auto' | false;
-  /** Lock manager (defaults to `navigator.locks`). */
+  /**
+   * Lock manager (defaults to `navigator.locks`). With `persist`, its
+   * `request` is asked with `ifAvailable`, calling `fn(null)` where the
+   * lock is held.
+   */
   locks?: { request(name: string, opts: unknown, fn: () => unknown): Promise<unknown> };
   onError?: (e: unknown) => void;
   /**
@@ -1952,6 +1975,14 @@ export interface ShapeStatus {
    */
   token: TokenWait | null;
   leader: boolean;
+  /**
+   * Why this tab stores nothing under `persist`, null where it stores it,
+   * another tab leads, or there is none: another replica keeps the key
+   * until it lets go, or the store did not restore as this tab took it
+   * over -- read again at the next write where IndexedDB failed the read,
+   * kept as it stands where it does not open.
+   */
+  unkept: string | null;
 }
 
 /**
@@ -2060,7 +2091,11 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
 
   /** Finishes any pending live-query runs (for tests). */
   flush(): Promise<void>;
-  /** Closes the subscriptions and gives up the lead; the local database stays open. */
+  /**
+   * Closes the subscriptions and gives up the lead, and the `persist` key's
+   * store once the persist it has out has landed, or after 5 s, past which
+   * that persist stores nothing; the local database stays open.
+   */
   close(): void;
 }
 
