@@ -321,7 +321,16 @@ stores the writes made meanwhile before it lets go, and the next sends
 them`, `a leader whose persist outlasts its close stores nothing once it
 let go of the store`). The tests hold the close's timer (`closeHeld`) and
 say when the bound passes: the first assumed the persist was let through
-within 5 s of real time, and the last waited them out.
+within 5 s of real time, and the last waited them out. The third review
+found a write lost between the loop's last look for a write waiting and
+its end: `#persisting` was cleared in a `finally` a few microtasks after
+that look, so a write landing between found a persist out, left itself to
+it, and none came -- closed then, the replica let go of the store without
+it, nothing told (at two microtasks in a row after the transaction
+completed; on main such a write waited for the next). The loop now ends in
+the step it last looks, `#persisting` set before it runs and cleared with
+that look (`a write made as the persist before it ends is stored before
+the close lets go of the store`, at each of 41 microtasks).
 
 What keeps a write from landing after the next replica read the store is a
 claim, not the lock. A replica claims the store before it reads it
@@ -422,15 +431,22 @@ them, `unpersist('notes')` too, and a restore of `notes` read them as its
 chunks (the second review). A chunk's key is `key#` and nine digits
 (`chunkKey`); the range is now from `key#000000000` to `key#999999999`, and
 what it holds is read as `isChunk` says, since another key's can still be
-in it (`notes#1`, `notes#2024`'s chunks). An image reads the range's keys
-before it deletes them, one delete where they are all its own, as they
-nearly always are, a delete a key otherwise; a restore reads the keys
-beside the records (`getAllKeys`). In headless Chrome 158 (load 2.5 to 4,
-the two in turns, p50 of eight), a 4 MB image's transaction took 4.0 ms
-either way over no chunks, 7.7 ms with one delete and 9.9 ms with the keys
-read first over 300, 32.3 and 36.8 ms over 3 000, 73.5 and 77.5 ms over
-10 000 -- paid once a fold, a microsecond or two a chunk before it; a
-restore's read of 300 chunks took 1.0 ms and 1.4 (forty each).
+in it (`notes#1`, `notes#2024`'s chunks). One shape is a chunk's still:
+another key whose name is `key#` followed by nine digits is read as this
+key's chunk -- restored as one, written over by the chunk of its number,
+deleted with the key's -- so the docs say to avoid such names (the third
+review). Refused by `persist`, such a key would narrow what it takes, a
+surface that only grows
+([compatibility.md](compatibility.md#what-grows-what-breaks)). An image
+reads the range's keys before it deletes them, one delete where they are
+all its own, as they nearly always are, a delete a key otherwise; a
+restore reads the keys beside the records (`getAllKeys`). In headless
+Chrome 158 (load 2.5 to 4, the two in turns, p50 of eight), a 4 MB
+image's transaction took 4.0 ms either way over no chunks, 7.7 ms with one
+delete and 9.9 ms with the keys read first over 300, 32.3 and 36.8 ms over
+3 000, 73.5 and 77.5 ms over 10 000 -- paid once a fold, a microsecond or
+two a chunk before it; a restore's read of 300 chunks took 1.0 ms and 1.4
+(forty each).
 Deleting at once, the keys read beside to undo the transaction where
 another's were among them, took as long: the read is the cost, not the
 wait for it. A row's chunk reads nothing more (`a key's image, chunks,
@@ -441,7 +457,9 @@ comments, 2.2 KB gzipped and 1.8 KB brotli, and by 2.2 KB, 0.8 KB gzipped,
 minified by esbuild as an app bundles it. The second's grew it by 4.6 KB
 more, half of it comments, 1.4 KB gzipped and 1.1 KB brotli (283, 88 and
 74 KB where the docs quote it, `site/build.py`), and by 1.3 KB, 0.4 KB
-gzipped, minified.
+gzipped, minified. The third's grew it by 0.7 KB, nearly all comments,
+0.3 KB gzipped and 0.2 KB brotli (284, 88 and 74 KB; 363 KB brotli with
+the module), and by 28 bytes minified.
 
 ### In real browsers
 

@@ -102,10 +102,12 @@ in its own read/write transaction and stores nothing where it finds
 another's or none (`taken`, `unkept`): IndexedDB runs a store's read/write
 transactions one at a time, so this holds with no lock manager, where the
 last replica started stores the key, and asks nothing of when a lock is
-granted. `close` stores what was written before it, then lets go of the
-lock, or after `LET_GO_MS`, past which no persist starts and `onError` is
-told. A key's chunks are `key#` and nine digits (`isChunk`): nothing reads
-or deletes another key's records. `unpersist` deletes one key's store,
+granted. `close` stores what was written before it -- the persist loop
+ends in the step it last looks for a write waiting (`#persisting`) --
+then lets go of the lock, or after `LET_GO_MS`, past which no persist
+starts and `onError` is told. A key's chunks are `key#` and nine digits
+(`isChunk`): nothing reads or deletes another key's records but one named
+so, which the docs say to avoid. `unpersist` deletes one key's store,
 under its lock (`locks`). `web/fennec.persist.test.js` and
 `web/fennec.sync.test.js` hold each.
 
