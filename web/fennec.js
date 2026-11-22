@@ -1119,31 +1119,57 @@ const DB_NAME = 'fennecdb';
 const STORE = 'images';
 /** Once the chunks outgrow this share of the image, a new image replaces them. */
 const FOLD = 0.5;
-/** Per database, where its chunks stand: `{key, next, image, chunks}`. */
+/** Per database, where its chunks stand: `{key, next, image, chunks}`, and the tag the next one is sealed after (`tag`). */
 const stored = new WeakMap();
 
 const chunkKey = (key, n) => `${key}#${String(n).padStart(9, '0')}`;
 
-// Sealed with a `CryptoKey` (AES-GCM), each record is `{gen, iv, data}` --
-// the image -- or `{iv, data}`, a chunk, its tag over the key it is stored
-// under, the image's generation and its place: a chunk moved, dropped from
-// the middle, or kept from an image before is refused, as is one byte
-// changed. The generation is random and new with each image, since the
-// chunks' numbers start again under it.
+// Sealed with a `CryptoKey` (AES-GCM), each record is `{v, gen, iv, data}`
+// -- the image -- or `{iv, data}`, a chunk, its tag over the key it is
+// stored under, the image's generation, its place and the tag of the record
+// before it: a chunk moved, dropped from the middle, kept from an image
+// before or put after another than the one it was sealed after is refused,
+// as is one byte changed. A store cut short, which the page goes on from,
+// opens as it stood or as the page went on, never with a chunk it cut
+// (docs/design/js-client.md#sealed-chunks-in-a-chain). The generation is
+// random and new with each image, since the chunks' numbers start again
+// under it. Version 1 (no `v`, 0.2.0's) covers no tag before: it restores as
+// it was sealed, and the next `persist` stores an image over it.
 const te = new TextEncoder();
-const aad = (key, gen, n) => te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+const CHAINED = 2;
+/** The tag WebCrypto's AES-GCM appends to what it seals: 128 bits, its default. */
+const TAG = 16;
+const NONE = new Uint8Array(0);
 
-async function seal(ck, key, gen, n, bytes) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(key, gen, n) }, ck, bytes));
-  return n === 0 ? { gen, iv, data } : { iv, data };
+/** What a record's tag covers beside its bytes: version 1's, or version 2's with the tag `before` it. */
+function aad(v, key, gen, n, before) {
+  if (v === 1) return te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+  // Never a version 1 AAD: its prefix is another from its ninth byte on.
+  const head = te.encode(`fennecdb/${v}\0${key}\0${gen}\0${n}\0`);
+  const out = new Uint8Array(head.length + before.length);
+  out.set(head);
+  out.set(before, head.length);
+  return out;
 }
 
-async function unseal(ck, key, gen, n, rec) {
+/** A sealed record's tag, as it is stored: the last bytes of its `data`. */
+function tagOf(rec) {
+  const d = ArrayBuffer.isView(rec.data) ? new Uint8Array(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength) : new Uint8Array(rec.data);
+  return d.slice(Math.max(0, d.length - TAG));
+}
+
+/** `bytes` sealed as version 2 at place `n` -- 0 the image -- after the record whose tag is `before`. */
+async function seal(ck, key, gen, n, bytes, before) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(CHAINED, key, gen, n, before) }, ck, bytes));
+  return n === 0 ? { v: CHAINED, gen, iv, data } : { iv, data };
+}
+
+async function unseal(ck, key, v, gen, n, rec, before) {
   try {
-    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(key, gen, n) }, ck, rec.data));
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(v, key, gen, n, before) }, ck, rec.data));
   } catch {
-    throw new FennecError(`${key}: record ${n} does not open: another key, or the stored bytes changed`);
+    throw new FennecError(`${key}: record ${n} does not open: another key, the stored bytes changed or a record before it replaced`);
   }
 }
 
@@ -1311,11 +1337,12 @@ async function persistNow(fennec, key, opts) {
   // store -- a delete of the database asks it to let go first
   // (`versionchange`), the browser clearing the site's data closes it
   // (`close`, or its requests refused) -- and chunks stored after would
-  // restore nothing. Then an image, even with nothing written since.
-  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db) {
+  // restore nothing. Then an image, even with nothing written since, and
+  // over a store restored as version 1 (no `tag`).
+  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db || (ck && !s.tag)) {
     fennec.journal();
     image = fennec.snapshot();
-    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0, tag: null };
     stored.set(fennec, s);
   } else {
     const { replace, bytes } = fennec.drain();
@@ -1326,9 +1353,10 @@ async function persistNow(fennec, key, opts) {
   }
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
   let on = null;
+  let rec;
   try {
     filled(image);
-    const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
+    rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image, NONE) : await seal(ck, key, gen, s.next, chunk, s.tag);
     // The connection may end while the record is sealed or the call waits
     // its turn: a chunk is stored over the image's alone.
     const ask = (os, db) => {
@@ -1350,8 +1378,10 @@ async function persistNow(fennec, key, opts) {
     if (e === ENDED) return persistNow(fennec, key, opts);
     throw e;
   }
-  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
-  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
+  // The tag the next chunk is sealed after: this record's, as stored.
+  const tag = ck ? tagOf(rec) : null;
+  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0, tag });
+  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length, tag });
   return (image ?? chunk).length;
 }
 
@@ -1411,14 +1441,23 @@ async function restoreNow(fennec, key, opts) {
     throw new FennecError(ck ? `${key} is stored in the clear, not sealed with a key` : `${key} is sealed: restore needs its cryptoKey`);
   }
   const gen = ck ? image.gen : null;
+  let tag = null;
   if (ck) {
-    image = await unseal(ck, key, gen, 0, image);
+    const v = image.v ?? 1;
+    if (v !== 1 && v !== CHAINED) {
+      throw new FennecError(`${key} is sealed as version ${String(v)}, which a later client wrote and this one does not read`);
+    }
+    // Each record's tag is in the next one's AAD: read as stored, so they
+    // open side by side.
+    const tags = v === CHAINED ? [image, ...chunks].map(tagOf) : [];
+    image = await unseal(ck, key, v, gen, 0, image, NONE);
     // Opened side by side, refused in order: the first record that does not
     // open is the one named, whichever settled first.
-    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, v, gen, i + 1, c, tags[i])));
     const bad = opened.find((r) => r.status === 'rejected');
     if (bad) throw bad.reason;
     chunks = opened.map((r) => r.value);
+    tag = tags.at(-1) ?? null;
   }
   let bytes = image;
   if (chunks.length) {
@@ -1443,7 +1482,7 @@ async function restoreNow(fennec, key, opts) {
     await fennec.loadAsync(bytes);
     fennec.journal();
     // Its chunks follow over the connection it was read over, as `persist`'s.
-    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length, tag });
     // The database the code declared its schema for is this one now: checked
     // again, what it adds journaled with the rest.
     await checked(fennec, declared.get(fennec), 'apply');

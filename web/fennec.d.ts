@@ -1741,7 +1741,10 @@ export interface LiveOptions {
 export interface PersistOptions {
   /**
    * An AES-GCM key (`crypto.subtle.generateKey` or `deriveKey`): each
-   * record is sealed with it, and a restore needs it.
+   * record is sealed with it, its tag over its name, its place and the
+   * record before it, and a restore needs it. A store cut short restores
+   * as it was before the cut, and never with a record cut among those
+   * sealed in their places since.
    */
   cryptoKey?: CryptoKey | null;
 }
