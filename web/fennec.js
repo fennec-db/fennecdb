@@ -4146,33 +4146,45 @@ export class FennecSync {
     const key = this.#persistKey;
     const owner = this.#owner;
     const opts = { cryptoKey: this.#cryptoKey };
-    this.#persisting = (async () => {
-      // A write made while one is out, the close's among them, is stored
-      // after it: closed, until the key's lock is let go of (`#letGo`).
-      do {
-        this.#persistAgain = false;
-        // `persist`, its write refused where another replica claimed the store.
-        await inTurn(local, () => persistNow(local, key, opts, owner), 'persist');
-      } while (this.#persistAgain && !this.#fenced);
-      if (this.#persistAgain) {
-        throw new FennecError(
-          `${key}: what was written since the last persist is not stored: ` +
-            `the replica was closed, and let go of the store after ${LET_GO_MS / 1000} s waiting for it`,
-        );
-      }
-    })()
-      .catch((e) => {
-        // Claimed by another since, or deleted: this tab stores nothing there.
-        if (taken.has(e) && this.#owner === owner) {
-          this.#owner = null;
-          this.#unkeptAgain = false;
-          this.#unkeptBy(e);
+    // Set before the loop runs: one ending at once (`inTurn` throws before
+    // it awaits where a restore failed) clears it after, never before.
+    let ended;
+    this.#persisting = new Promise((r) => (ended = r));
+    (async () => {
+      let failed = null;
+      try {
+        // A write made while one is out, the close's among them, is stored
+        // after it: closed, until the key's lock is let go of (`#letGo`).
+        do {
+          this.#persistAgain = false;
+          // `persist`, its write refused where another replica claimed the store.
+          await inTurn(local, () => persistNow(local, key, opts, owner), 'persist');
+        } while (this.#persistAgain && !this.#fenced);
+        if (this.#persistAgain) {
+          failed = new FennecError(
+            `${key}: what was written since the last persist is not stored: ` +
+              `the replica was closed, and let go of the store after ${LET_GO_MS / 1000} s waiting for it`,
+          );
         }
-        this.#onError?.(e);
-      })
-      .finally(() => {
-        this.#persisting = null;
-      });
+      } catch (e) {
+        failed = e;
+      }
+      // Over in the step that last looked for a write waiting: one made
+      // after finds none out and starts the next. Cleared a few microtasks
+      // on, in a `finally`, a write between was left to a loop that had
+      // ended, and a close let go of the store without it, telling nothing
+      // (the third review).
+      this.#persisting = null;
+      ended();
+      if (!failed) return;
+      // Claimed by another since, or deleted: this tab stores nothing there.
+      if (taken.has(failed) && this.#owner === owner) {
+        this.#owner = null;
+        this.#unkeptAgain = false;
+        this.#unkeptBy(failed);
+      }
+      this.#onError?.(failed);
+    })();
   }
 
   /**

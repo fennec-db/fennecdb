@@ -59,8 +59,14 @@ export function fakeIndexedDB() {
         fake.failRead = false;
         throw Object.assign(new Error('the read failed'), { name: 'UnknownError' });
       }
-      const tx = { objectStore: () => store };
-      setImmediate(() => tx.oncomplete?.());
+      const puts = [];
+      const tx = { objectStore: () => ({ ...store, put: (value, key) => (puts.push(value), store.put(value, key)) }) };
+      setImmediate(() => {
+        tx.oncomplete?.();
+        // A test's look at a transaction as it completes, the values it
+        // put, before anything awaiting it goes on (`completed`).
+        fake.completed?.(puts);
+      });
       return tx;
     },
     close() {},

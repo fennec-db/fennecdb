@@ -1346,6 +1346,64 @@ test('a leader whose persist outlasts its close stores nothing once it let go of
   }
 });
 
+// The persist loop looked for a write waiting the last time a few
+// microtasks before it said it was over (`#persisting`, cleared in a
+// `finally`): a write between found a persist out and left itself to it,
+// and none came -- closed then, the replica let go of the store without it,
+// telling nothing (the third review's probe: lost two and three microtasks
+// after the transaction completed; three and four here, counted from the
+// fake's `completed`). Every microtask up to 40 after W1's transaction
+// completes, W2 is stored before the close lets go, or told.
+test('a write made as the persist before it ends is stored before the close lets go of the store', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  const holds = (v, text) => ArrayBuffer.isView(v) && Buffer.from(v.buffer, v.byteOffset, v.byteLength).includes(text);
+  const lost = [];
+  try {
+    for (let k = 0; k <= 40; k++) {
+      const key = `gap${k}`;
+      const errors = [];
+      const a = await open(s.url, { locks, persist: key, onError: (e) => errors.push(e) });
+      try {
+        await a.ready();
+        await until(() => idb.records.has(key), 'the replica stored its image');
+        a.setOnline(false);
+        const closed = new Promise((res) => {
+          idb.completed = (puts) => {
+            if (!puts.some((v) => holds(v, `w1-${k}`))) return;
+            idb.completed = null;
+            (async () => {
+              for (let i = 0; i < k; i++) await null;
+              a.from('tasks').where('key', 'b').update({ title: `w2-${k}` }).catch(() => {});
+              a.close();
+              res();
+            })();
+          };
+        });
+        a.from('tasks').where('key', 'a').update({ title: `w1-${k}` }).catch(() => {});
+        await closed;
+        await until(() => locks.request(`fennecdb/persist:${key}`, { ifAvailable: true }, (l) => l !== null), 'the closed replica let go of the store');
+        const r = await Fennec.open(wasm);
+        try {
+          assert.ok(await restore(r, key));
+          const title = r.rows('get tasks where key = "b" select title')[0]?.title;
+          if (title !== `w2-${k}` && errors.length === 0) lost.push(k);
+        } finally {
+          r.close();
+        }
+      } finally {
+        idb.completed = null;
+        a.close();
+      }
+    }
+    assert.deepEqual(lost, [], 'microtasks after W1 stored at which W2 was neither stored nor told');
+  } finally {
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
 // Two replicas under one persist key with other shapes, each its tabs'
 // leader, both stored there, each chunk after its own: the store spliced,
 // then never restored. One holds the key's lock; the other stores nothing
