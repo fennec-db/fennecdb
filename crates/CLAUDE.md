@@ -60,8 +60,11 @@ on a file opened again beside a database; `create_private`,
 `create_like` (`O_EXCL`) or `copy_private` (a clone with `CLONE_NOFOLLOW`
 on Apple's systems, of a file its owner's alone) for a side file written
 whole, these following no link at their name, an archive's records, a
-backup, an unseal and a compact's swap held to their writer's handle
-before their rename (`still_named`); `create_dir_private` or
+backup, an unseal, a compact's swap and a replica's image held to their
+writer's handle before their rename (`still_named`, the handle
+`Sink::adopt` is handed), one a crash left beside a database removed by its
+owner alone (`.taking` by the open that writes it, `.importing` by a node
+under the tenant's lock, `sweep_left`); `create_dir_private` or
 `create_dir_new` for a directory -- `0600`, a directory `0700`, whatever
 the umask, from the call that makes it, or for a clone, which takes its
 source's owner-only mode, on its handle before it is handed back: never

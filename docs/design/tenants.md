@@ -44,7 +44,11 @@ install's renamed file, the create's made one -- and answers 500: kept, it
 was a file at the place that no router placed and none could take back by
 its identity, unstamped, which every install after it met as there (409).
 Each is removed under `<file>.lock`: the install's under the hold it took
-for the rename, the create's -- whose hold went with its database's sink --
+before it made its image's file beside the tenant's, with its claim of the
+name, held through the rename -- so that the file is the install's own, a
+second install or a create of the name refused 409 at once
+([replication.md](replication.md#an-image-taken-as-it-arrives), the move's
+image) -- the create's -- whose hold went with its database's sink --
 under the lock taken again once the database is let go
 (`Tenants::take_back_made`, as `delete_unfrozen` removes a file), the file
 left where another process took the lock meanwhile. The #497 review found

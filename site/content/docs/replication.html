@@ -75,7 +75,11 @@ its own file. Only writes already on the primary's disk are sent.</p>
     whole, so a copy cut off or damaged on the way leaves the replica as it
     was. A database larger than the memory of either machine follows and
     backs up, and a tenant moves between the nodes of a region up to the 1
-    GiB an image installed on a node may be.</li>
+    GiB an image installed on a node may be. A copy taken slower than 64
+    KiB a second, past its first 10 seconds, is ended by the primary, which
+    logs it, and the receiver says so as it logs the cut; a copy a crash
+    left half taken beside a file is removed the next time the file is
+    opened to be written.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
   <li><b>A <code>compact</code></b>, the primary's or the replica's own, is

@@ -31,16 +31,16 @@ restart reads a copy's role from its file: one made to follow says so on
 disk before the follow is answered (`Tenants::open_as` syncs it), and an
 image is taken with the record saying it inside its rename. [An image goes
 out as a pin takes it](../../docs/design/replication.md#an-image-sent-as-it-is-read)
-(`Database::pin_image`) -- a follow's, a backup's, an archive's, a move's
-(`admin::export`) -- written as it is read with no lock held
-(`image_message`), its bytes `snapshot()`'s at its change (fennec-core's
-`tests/pinned.rs`), [and is taken as it
+(`Database::pin_image`: a follow's, a backup's, an archive's, a move's),
+written as it is read, no lock held (`image_message`), its bytes
+`snapshot()`'s at its change (fennec-core's `tests/pinned.rs`), ended
+below 64 KiB/s past `SILENCE` (`Pace`), [and is taken as it
 arrives](../../docs/design/replication.md#an-image-taken-as-it-arrives),
 written to disk and checked as it streams (`take_image`) -- a copy's
 beside its file, renamed in by its sink (`Database::adopt_side`), one torn
 or refused leaving the file as it was (`tests/images_taken.rs`): never held
-whole, each side's heap a constant beside the indexes it copies or builds
-(`tests/message_peak.rs`, fennec-shard's `tests/move_peak.rs`).
+whole, each side's heap a constant beside its indexes
+(`tests/message_peak.rs`, fennec-shard's `move_peak.rs`).
 
 **[A copy keeps the time its primary appended each write at, and an
 archive's times run in order.](../../docs/design/replication.md#a-writes-time)**

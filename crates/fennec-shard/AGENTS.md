@@ -20,7 +20,10 @@ install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A create or an
 install answers once the file and its name in the directory are durable
 (`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the
-file back under `<file>.lock` (`take_back_made`). A node
+file back under `<file>.lock` (`take_back_made`). An install's image goes
+beside the tenant's file under that lock and its claim of the name, held
+through the rename: a second install or a create of the name is 409 at
+once (`Tenants::claim_import`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
 reading (`grant_from`); the router counts a node by the directory's
