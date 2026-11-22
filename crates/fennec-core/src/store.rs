@@ -2066,8 +2066,8 @@ impl Store {
     }
 
     /// The mapped file the records are read from, as a reader is handed it
-    /// (`fs::tests`).
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    /// (`fs::tests`, whose readers' tests are a 64-bit Unix's).
+    #[cfg(all(test, unix, target_pointer_width = "64"))]
     pub(crate) fn mapped_base(&self) -> Option<&Base> {
         self.base.as_ref().map(|(b, _)| b)
     }
