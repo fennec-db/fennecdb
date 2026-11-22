@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { readFile, access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fennec, sync, connect, inc, FennecError } from './fennec.js';
+import { Fennec, sync, connect, inc, restore, putState, unpersist, FennecError } from './fennec.js';
 import { fennecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
 import * as client from './client.js';
@@ -680,11 +680,18 @@ test('a dropped connection resumes from the cursor, it does not reseed', opts, a
 // not exist on Node, so the lock manager is injected -- the same seam leaves
 // room for another coordination mechanism in the browser.
 
-/** The test stand-in for `navigator.locks`: a serial, exclusive lock. */
+/**
+ * The test stand-in for `navigator.locks`: a serial, exclusive lock; with
+ * `ifAvailable`, `fn(null)` where it is held or asked for.
+ */
 function fakeLocks() {
   const queues = new Map();
+  const out = new Map();
   return {
-    async request(name, _opts, fn) {
+    async request(name, opts, fn) {
+      if (opts?.ifAvailable && out.get(name)) return fn(null);
+      out.set(name, (out.get(name) ?? 0) + 1);
+      const free = () => out.set(name, out.get(name) - 1);
       const prev = queues.get(name) ?? Promise.resolve();
       let release;
       const held = new Promise((r) => {
@@ -698,6 +705,7 @@ function fakeLocks() {
       try {
         return await fn();
       } finally {
+        free();
         release();
       }
     },
@@ -894,6 +902,70 @@ test('writes made offline survive a reload of the page, and go once it is back',
   }
 });
 
+const aes = () => crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+/** The store's records as they stand, copied: a store held to them is held byte for byte. */
+const asStored = (idb) => new Map([...idb.records].map(([k, v]) => [k, structuredClone(v)]));
+/** The writes a replica kept unsent in the store under `key`, as `restore` reads them back. */
+async function queued(key, cryptoKey) {
+  const d = await Fennec.open(wasm);
+  try {
+    return (await restore(d, key, { cryptoKey })) ? (d.run('get _sync_queue').rows ?? []).length : 0;
+  } finally {
+    d.close();
+  }
+}
+
+// A wrong `cryptoKey` once restored nothing, which the replica took for a
+// cache it could seed again: its first persist stored the seed's image over
+// the sealed store, the writes it held unsent with it (1.0's review). A
+// store that does not restore is kept, and the sync refused.
+test('a store that does not open under the key given is kept with its writes, and the right key sends them', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const [right, wrong] = [await aes(), await aes()];
+  const started = [];
+  /** The sync's refusal; a sync that started instead is closed, and fails the test. */
+  const refused = async (o) => {
+    try {
+      started.push(await open(s.url, o));
+    } catch (e) {
+      return e;
+    }
+    assert.fail(`the sync started: ${JSON.stringify(Object.keys(o))}`);
+  };
+  try {
+    const first = await open(s.url, { fetch: flaky({ on: 'refused' }).fetch, persist: 'sealed', cryptoKey: right });
+    started.push(first);
+    await first.ready();
+    first.setOnline(false);
+    first.from('tasks').insert({ title: 'kept', status: 'open' }).catch(() => {});
+    first.from('tasks').where('key', 'a').update({ title: 'ONE' }).catch(() => {});
+    await until(async () => (await queued('sealed', right)) === 2, 'both writes stored');
+    first.close();
+    // Every persist of its database started by now has settled: a restore
+    // waits its turn behind them, and finds nothing under this name.
+    assert.equal(await restore(first.local, 'nothing here'), false);
+    const stored = asStored(idb);
+
+    const e = await refused({ persist: 'sealed', cryptoKey: wrong });
+    assert.ok(e instanceof FennecError);
+    assert.match(e.message, /stored under sealed does not restore \(sealed: record 0 does not open.*\): it is kept as it stands/);
+    assert.match((await refused({ persist: 'sealed' })).message, /stored under sealed does not restore \(sealed is sealed: restore needs its cryptoKey\)/);
+    assert.deepEqual(asStored(idb), stored, 'the store as it stood');
+
+    const second = await open(s.url, { persist: 'sealed', cryptoKey: right });
+    started.push(second);
+    assert.equal(second.status()[0].pending, 2, 'its writes came back with it');
+    await second.pushed();
+    const open_ = await s.run('get tasks where status = "open" select title order title');
+    assert.deepEqual(open_.map((r) => r.title), ['ONE', 'kept', 'two']);
+  } finally {
+    for (const r of started) r.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
 test('two replicas increment offline, and both land: the server holds +2, and both see it', opts, async () => {
   const s = await server();
   const [a, b] = [await open(s.url), await open(s.url)];
@@ -987,6 +1059,546 @@ test('a new leader sends what the tabs before it had not', opts, async () => {
   } finally {
     a.close();
     b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A tab that took the lead went on from the store as it had read it at its
+// start: its first chunk took the place of the leader's next, and the
+// leader's after it stayed -- read after this tab's, a row the leader wrote
+// before came back over this tab's write of it. Sealed, each chunk covering
+// the one before, that store no longer restored at all.
+test("a tab taking the lead stores over a store the tab before it wrote since it read it", opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const chunks = () => [...idb.records.keys()].filter((k) => k.startsWith('handover#')).length;
+  const title = async (d) => (await d.from('tasks').where('key', 'a').first())?.title;
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'handover', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('handover'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'handover', cryptoKey });
+  try {
+    await b.ready();
+    // Two chunks of the leader's after the follower read the store.
+    const read = chunks();
+    for (const [t, n] of [['A1', 1], ['A2', 2]]) {
+      await a.from('tasks').where('key', 'a').update({ title: t });
+      await until(() => chunks() >= read + n, `the leader stored ${t}`);
+    }
+    await until(async () => (await title(b)) === 'A2', "the follower holds the leader's last write");
+    a.close();
+    await until(() => b.status()[0].leader, 'the follower leads');
+    await b.from('tasks').where('key', 'a').update({ title: 'B' });
+    await b.pushed();
+    // What it stored restores as its own copy.
+    const rows = (d) => d.rows('get tasks select key, title order key');
+    await until(async () => {
+      const d = await Fennec.open(wasm);
+      try {
+        return (await restore(d, 'handover', { cryptoKey })) && JSON.stringify(rows(d)) === JSON.stringify(rows(b.local));
+      } finally {
+        d.close();
+      }
+    }, "the store restores as the new leader's copy");
+    assert.equal(await title(b), 'B');
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A tab that took the lead restored the store again for the queue the tab
+// before had kept: refused -- a store another tab sealed with another key
+// since this one found none -- it reported the error and led on, and its
+// first persist stored over the store and the queue in it.
+test('a tab taking the lead from a store it cannot restore stores nothing there', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  let open_;
+  const gate = new Promise((r) => {
+    open_ = r;
+  });
+  const held = (u, init) => gate.then(() => fetch(u, init));
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'mixed', cryptoKey: await aes(), fetch: held });
+  const errors = [];
+  // It starts while nothing is stored: the leader's fetches wait.
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'mixed', cryptoKey: await aes(), onError: (e) => errors.push(e) });
+  try {
+    assert.equal(idb.records.size, 0);
+    open_();
+    await a.ready();
+    await until(() => idb.records.has('mixed'), 'the leader stored its replica');
+    a.close();
+    // It leads once the closed one let go of the store, what that one had
+    // to store stored.
+    await until(() => b.status()[0].leader, 'the follower leads');
+    const stored = asStored(idb);
+    assert.match(errors.map((e) => e.message).join('\n'), /mixed is kept as it is, and this tab stores nothing there: mixed: record 0 does not open/);
+    const unkept = /^mixed is kept as it is, and this tab stores nothing there: mixed: record 0 does not open/;
+    assert.match(b.status()[0].unkept, unkept, 'the status says so');
+    await b.from('tasks').where('key', 'b').update({ title: 'TWO' });
+    await b.pushed();
+    // Every persist of its database started by now has settled: a restore
+    // waits its turn behind them, and finds nothing under this name.
+    assert.equal(await restore(b.local, 'nothing here'), false);
+    assert.deepEqual(asStored(idb), stored, 'the store as the leader left it');
+    // A store that does not open is not read again at a persist.
+    assert.match(b.status()[0].unkept, unkept);
+    assert.equal(errors.filter((e) => unkept.test(e.message)).length, 1);
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+/** Holds the next `crypto.subtle.encrypt` -- a persist sealing its record -- until `release()`. */
+function holdSeal() {
+  const subtle = crypto.subtle;
+  let release;
+  let reached;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const hit = new Promise((r) => {
+    reached = r;
+  });
+  subtle.encrypt = async (...args) => {
+    delete subtle.encrypt;
+    reached();
+    await gate;
+    return SubtleCrypto.prototype.encrypt.apply(subtle, args);
+  };
+  return { hit, release, undo: () => delete subtle.encrypt };
+}
+
+/** Rows enough that the writes after them are chunks, never folded into a new image. */
+const filler = Array.from({ length: 200 }, (_, i) => ({ key: `f${i}`, title: 'x'.repeat(200), status: 'open', priority: 9 }));
+
+/** Whether `key`'s store restores as `d`'s copy of `get`; a store that does not restore throws. */
+async function restoresAs(key, cryptoKey, d, get = 'get tasks select key, title order key') {
+  const r = await Fennec.open(wasm);
+  try {
+    return (await restore(r, key, { cryptoKey })) && JSON.stringify(r.rows(get)) === JSON.stringify(d.local.rows(get));
+  } finally {
+    r.close();
+  }
+}
+
+/**
+ * Closes `replica`, holding the timer its close bounds the wait for its
+ * persist by (`LET_GO_MS`): the bound passes when the test says, by
+ * `pass()`, never by the clock -- a run on a slow machine waited out a real
+ * one before its persist was let through, or a test waited 5 s for it.
+ */
+function closeHeld(replica) {
+  const bounds = [];
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (ms !== 5000) return real(fn, ms, ...args);
+    bounds.push(fn);
+    return { unref() {} };
+  };
+  try {
+    replica.close();
+  } finally {
+    globalThis.setTimeout = real;
+  }
+  assert.equal(bounds.length, 1, "the close bounds its wait for the persist out, by LET_GO_MS's 5 s");
+  return { pass: () => bounds[0]() };
+}
+
+// A leader closed while its own persist was out let go of the lock at once:
+// the next tab read the store and went on in chunks from it, then the
+// closed tab's chunk landed in the place of the next tab's first, and its
+// later ones, sealed after a record gone, never restored (the review's
+// probe). The store's lock is let go of once the persist settled.
+test('a leader closed while it stores lets go of the store once its write landed, and the next sends it', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'closing', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('closing'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'closing', cryptoKey });
+  const seal = holdSeal();
+  try {
+    await b.ready();
+    a.setOnline(false);
+    a.from('tasks').where('key', 'a').update({ title: 'A' }).catch(() => {});
+    await seal.hit;
+    // The bound never passes: the write lets go of the store.
+    closeHeld(a);
+    await until(() => b.status()[0].unkept || b.status()[0].leader, 'the follower is elected');
+    assert.equal(b.status()[0].leader, false, 'no tab leads while the store is being written');
+    assert.match(b.status()[0].unkept, /^closing is stored by another replica/);
+    seal.release();
+    await until(() => b.status()[0].leader, 'the follower leads once the write landed');
+    assert.equal(b.status()[0].unkept, null);
+    await b.from('tasks').where('key', 'b').update({ title: 'B' });
+    await b.pushed();
+    // The closed tab's write, kept in the store, went from the new leader.
+    const titles = await s.run('get tasks where key in ["a", "b"] select title order key');
+    assert.deepEqual(titles.map((r) => r.title), ['A', 'B']);
+    await until(() => restoresAs('closing', cryptoKey, b), "the store restores as the new leader's copy");
+  } finally {
+    seal.undo();
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A write made while the closing leader's persist was out was never
+// stored: the persist went on only while the replica was open, and the
+// close ended its sends, so the next tab took over a store without it (the
+// review's probe: the server got A1, not A2). Closed, a replica stores what
+// was written before its close, then lets go of the store.
+test('a leader closed while it stores stores the writes made meanwhile before it lets go, and the next sends them', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'pair', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('pair'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'pair', cryptoKey });
+  const seal = holdSeal();
+  try {
+    await b.ready();
+    a.setOnline(false);
+    a.from('tasks').where('key', 'a').update({ title: 'A1' }).catch(() => {});
+    await seal.hit;
+    // Written while A1's persist is out.
+    a.from('tasks').where('key', 'b').update({ title: 'A2' }).catch(() => {});
+    closeHeld(a);
+    seal.release();
+    await until(() => b.status()[0].leader, 'the follower leads once both landed');
+    await b.pushed();
+    const titles = await s.run('get tasks where key in ["a", "b"] select title order key');
+    assert.deepEqual(titles.map((r) => r.title), ['A1', 'A2']);
+    await until(() => restoresAs('pair', cryptoKey, b), "the store restores as the new leader's copy");
+  } finally {
+    seal.undo();
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// Past the bound the lock is let go of all the same, and the persist still
+// out stores nothing once the next tab claimed the store: the store as that
+// tab keeps it, never one of its chunks replaced.
+test('a leader whose persist outlasts its close stores nothing once it let go of the store', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const errors = [];
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'late', cryptoKey, onError: (e) => errors.push(e) });
+  await a.ready();
+  await until(() => idb.records.has('late'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'late', cryptoKey });
+  const seal = holdSeal();
+  try {
+    await b.ready();
+    a.setOnline(false);
+    a.from('tasks').where('key', 'a').update({ title: 'A' }).catch(() => {});
+    await seal.hit;
+    const bound = closeHeld(a);
+    await until(() => b.status()[0].unkept, 'the follower is elected, and waits for the store');
+    assert.equal(b.status()[0].leader, false);
+    // The 5 s the closed tab waits for its persist pass, the persist still out.
+    bound.pass();
+    await until(() => b.status()[0].leader, 'the follower leads');
+    await b.from('tasks').where('key', 'b').update({ title: 'B1' });
+    await b.pushed();
+    await until(() => restoresAs('late', cryptoKey, b), "the store restores as the new leader's copy");
+    seal.release();
+    // Its write found the next one's claim, and stored nothing: the store
+    // restores as the new leader keeps it, every record of it in its place.
+    await until(() => errors.length, 'the closed one told what it did not store');
+    assert.match(errors.map((e) => e.message).join('\n'), /late: what was written since the last persist is not stored: another replica claimed the store since/);
+    await until(() => restoresAs('late', cryptoKey, b), "the store restores as the new leader's copy still");
+    await b.from('tasks').where('key', 'c').update({ title: 'B2' });
+    await b.pushed();
+    await until(() => restoresAs('late', cryptoKey, b), 'the store restores after the next chunk');
+  } finally {
+    seal.undo();
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// The persist loop looked for a write waiting the last time a few
+// microtasks before it said it was over (`#persisting`, cleared in a
+// `finally`): a write between found a persist out and left itself to it,
+// and none came -- closed then, the replica let go of the store without it,
+// telling nothing (the third review's probe: lost two and three microtasks
+// after the transaction completed; three and four here, counted from the
+// fake's `completed`). Every microtask up to 40 after W1's transaction
+// completes, W2 is stored before the close lets go, or told.
+test('a write made as the persist before it ends is stored before the close lets go of the store', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  const holds = (v, text) => ArrayBuffer.isView(v) && Buffer.from(v.buffer, v.byteOffset, v.byteLength).includes(text);
+  const lost = [];
+  try {
+    for (let k = 0; k <= 40; k++) {
+      const key = `gap${k}`;
+      const errors = [];
+      const a = await open(s.url, { locks, persist: key, onError: (e) => errors.push(e) });
+      try {
+        await a.ready();
+        await until(() => idb.records.has(key), 'the replica stored its image');
+        a.setOnline(false);
+        const closed = new Promise((res) => {
+          idb.completed = (puts) => {
+            if (!puts.some((v) => holds(v, `w1-${k}`))) return;
+            idb.completed = null;
+            (async () => {
+              for (let i = 0; i < k; i++) await null;
+              a.from('tasks').where('key', 'b').update({ title: `w2-${k}` }).catch(() => {});
+              a.close();
+              res();
+            })();
+          };
+        });
+        a.from('tasks').where('key', 'a').update({ title: `w1-${k}` }).catch(() => {});
+        await closed;
+        await until(() => locks.request(`fennecdb/persist:${key}`, { ifAvailable: true }, (l) => l !== null), 'the closed replica let go of the store');
+        const r = await Fennec.open(wasm);
+        try {
+          assert.ok(await restore(r, key));
+          const title = r.rows('get tasks where key = "b" select title')[0]?.title;
+          if (title !== `w2-${k}` && errors.length === 0) lost.push(k);
+        } finally {
+          r.close();
+        }
+      } finally {
+        idb.completed = null;
+        a.close();
+      }
+    }
+    assert.deepEqual(lost, [], 'microtasks after W1 stored at which W2 was neither stored nor told');
+  } finally {
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// Two replicas under one persist key with other shapes, each its tabs'
+// leader, both stored there, each chunk after its own: the store spliced,
+// then never restored. One holds the key's lock; the other stores nothing
+// there, says so, and takes the store over once the first lets go. Its
+// followers said nothing while it waited to lead: they say it too.
+test('replicas of other shapes under one persist key store it one at a time', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('create collection notes (key text @hash, title text)');
+  await s.run('put notes [{key: "n", title: "note"}]');
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'shared', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('shared'), 'the first stored its replica');
+  const notes = { leader: 'auto', locks, persist: 'shared', cryptoKey, shapes: [{ collection: 'notes', key: 'key' }] };
+  const b = await open(s.url, notes);
+  let c = null;
+  try {
+    await until(() => b.status()[0].unkept || b.status()[0].leader, 'the second is elected');
+    assert.equal(await restore(a.local, 'nothing here'), false);
+    const kept = asStored(idb);
+    b.from('notes').insert({ key: 'm', title: 'mine' }).catch(() => {});
+    assert.equal(await restore(b.local, 'nothing here'), false);
+    assert.deepEqual(asStored(idb), kept, "the first's store as it stood");
+    assert.match(b.status()[0].unkept ?? 'it leads', /^shared is stored by another replica/);
+    // A tab of the second's election, which waits to lead.
+    c = await open(s.url, notes);
+    await until(() => c.status()[0].unkept, "the second's follower says it stores nothing");
+    assert.match(c.status()[0].unkept, /^the tab elected to lead stores nothing: shared is stored by another replica/);
+    assert.equal(c.status()[0].leader, false);
+    await a.from('tasks').where('key', 'a').update({ title: 'A' });
+    await a.pushed();
+    await until(() => restoresAs('shared', cryptoKey, a), "the store restores as the first's copy");
+    a.close();
+    await until(() => b.status()[0].leader, 'the second leads once the first let go');
+    await b.ready();
+    await b.pushed();
+    assert.equal(b.status()[0].unkept, null);
+    await until(() => c.status()[0].unkept === null, 'and its follower says it stores');
+    await until(() => restoresAs('shared', cryptoKey, b, 'get notes select key, title order key'), "the store restores as the second's copy");
+  } finally {
+    a.close();
+    b.close();
+    c?.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// `leader: false` in two tabs: each sends its own writes, and each stored
+// them under the key, over the other's.
+test('with leader: false a second tab stores nothing under the key till the first lets go', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const a = await open(s.url, { locks, persist: 'solo', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('solo'), 'the first stored its replica');
+  const b = await open(s.url, { locks, persist: 'solo', cryptoKey });
+  try {
+    await b.ready();
+    // The first is told nothing of the second's write: what it stores is its own.
+    a.setOnline(false);
+    await b.from('tasks').where('key', 'b').update({ title: 'B' });
+    await b.pushed();
+    assert.equal(await restore(b.local, 'nothing here'), false);
+    await until(() => restoresAs('solo', cryptoKey, a), "the store restores as the first's copy");
+    const r = await Fennec.open(wasm);
+    await restore(r, 'solo', { cryptoKey });
+    assert.equal(r.rows('get tasks where key = "b"')[0].title, 'two', "the second's write is not in it");
+    r.close();
+    assert.equal(a.status()[0].unkept, null);
+    assert.match(b.status()[0].unkept ?? 'it stores', /^solo is stored by another replica/);
+    a.close();
+    await until(() => b.status()[0].unkept === null, 'the second takes the store once the first let go');
+    await until(() => restoresAs('solo', cryptoKey, b), "the store restores as the second's copy");
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// Without a lock manager -- an http:// origin, Safari before 15.4, Firefox
+// before 96 -- nothing kept two tabs from storing one key: each stored its
+// chunks after its own, and a sealed store never restored again, an
+// unsealed one losing writes (the review's probe). Each claims the store as
+// it starts, and a write finds the last claim in its own transaction or
+// stores nothing: the last tab started stores the key, the others say they
+// do not.
+test('with no lock manager two tabs on one key leave a store that restores, the last one started storing it', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  // Node's own `navigator.locks`, hidden as a browser without it has none.
+  const nav = globalThis.navigator;
+  if (nav) Object.defineProperty(nav, 'locks', { value: undefined, configurable: true });
+  const started = [];
+  try {
+    for (const cryptoKey of [await aes(), null]) {
+      const key = cryptoKey ? 'bare-sealed' : 'bare';
+      const a = await open(s.url, { persist: key, cryptoKey, onError: () => {} });
+      started.push(a);
+      await a.ready();
+      await until(() => idb.records.has(key), 'the first stored its replica');
+      const b = await open(s.url, { persist: key, cryptoKey });
+      started.push(b);
+      await b.ready();
+      await a.from('tasks').where('key', 'a').update({ title: `A ${key}` });
+      await b.from('tasks').where('key', 'b').update({ title: `B ${key}` });
+      // The first's write reaches the second through the server, which stores it.
+      await until(async () => (await b.from('tasks').where('key', 'a').first())?.title === `A ${key}`, "the second holds the first's write");
+      await until(() => restoresAs(key, cryptoKey, b), "the store restores as the second's copy");
+      await until(() => a.status()[0].unkept, 'the first stores nothing once the second claimed the store');
+      assert.match(a.status()[0].unkept, new RegExp(`^${key}: what was written since the last persist is not stored: another replica claimed the store since`));
+      assert.equal(b.status()[0].unkept, null);
+      a.close();
+      b.close();
+    }
+  } finally {
+    for (const r of started) r.close();
+    if (nav) delete nav.locks;
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A tab whose read of the store failed as it took the lead -- IndexedDB's
+// own failure, not a store that does not open -- stored nothing there for
+// the rest of the session, and only `onError` said so.
+test('a tab whose take-over read IndexedDB failed reads the store again at its next persist', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const errors = [];
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'passing', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('passing'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'passing', cryptoKey, onError: (e) => errors.push(e) });
+  try {
+    await b.ready();
+    idb.failRead = true;
+    a.close();
+    await until(() => b.status()[0].leader, 'the follower leads');
+    const failed = /^passing is kept as it is, and this tab stores nothing there: the read failed/;
+    assert.match(b.status()[0].unkept, failed);
+    assert.match(errors.map((e) => e.message).join('\n'), failed);
+    await b.from('tasks').where('key', 'b').update({ title: 'TWO' });
+    await b.pushed();
+    await until(() => b.status()[0].unkept === null, 'the store read again');
+    await until(() => restoresAs('passing', cryptoKey, b), "the store restores as the new leader's copy");
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// The refusal said "delete it", and the only way documented, deleting
+// IndexedDB's database, dropped every account's store.
+test("unpersist deletes one key's store, refused while a replica keeps it", opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  // An image a write's chunk is small beside: one is never folded into another image.
+  await s.run('put tasks $1', [filler]);
+  const [right, wrong] = [await aes(), await aes()];
+  // The replica's own lock manager, which `unpersist` is handed: it asked
+  // `navigator.locks` alone, and with none -- or another -- deleted a store
+  // a replica kept.
+  const locks = fakeLocks();
+  const started = [];
+  try {
+    const first = await open(s.url, { persist: 'mine', cryptoKey: right, locks });
+    started.push(first);
+    await first.ready();
+    await until(() => idb.records.has('mine'), 'the image stored');
+    await first.from('tasks').where('key', 'a').update({ title: 'ONE' });
+    await until(() => [...idb.records.keys()].some((k) => k.startsWith('mine#')), 'a chunk stored');
+    await putState('mine:cursor', 7);
+    await assert.rejects(unpersist('mine', { locks }), (e) => e instanceof FennecError && /^mine is kept by a replica that runs in this browser/.test(e.message));
+    first.close();
+    await assert.rejects(open(s.url, { persist: 'mine', cryptoKey: wrong, locks }), /or delete it with unpersist\("mine"\), those writes with it, to seed anew/);
+    await unpersist('mine', { locks });
+    assert.deepEqual([...idb.records.keys()], ['mine:cursor'], 'the key and its chunks gone, nothing else');
+    assert.equal(idb.arrays.size, 0, "and the replica's claim on it");
+    const second = await open(s.url, { persist: 'mine', cryptoKey: wrong, locks });
+    started.push(second);
+    await second.ready();
+    await until(() => idb.records.has('mine'), 'seeded anew, and stored');
+  } finally {
+    for (const r of started) r.close();
     s.close();
     delete globalThis.indexedDB;
   }

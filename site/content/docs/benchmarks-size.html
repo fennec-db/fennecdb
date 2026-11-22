@@ -56,7 +56,7 @@ its bundle.</p>
 <tr><td>wasm32, browser</td><td class="n"><b>842 KB</b></td><td class="n"><b>289 KB</b></td><td class="n">349 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">611 KB</td><td class="n">213 KB</td><td class="n">255 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">551 KB</td><td class="n">190 KB</td><td class="n">227 KB</td></tr>
-<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">267 KB</td><td class="n">70 KB</td><td class="n">83 KB</td></tr>
+<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">284 KB</td><td class="n">74 KB</td><td class="n">88 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64: its one file, <code>fennec-server</code></td><td class="n">8.38 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -66,7 +66,7 @@ its bundle.</p>
 <details class="deep"><summary>Method, and where the module's bytes go</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>359 KB brotli</b> for both together. A binary you execute and an image
+<b>363 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 

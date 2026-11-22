@@ -120,6 +120,14 @@ In scope, and worth reporting:
   end, or the head's version or name's length changed so that its first
   frame's is),
   opens as the shorter file by design (below).
+- An integrity break in a page's sealed store (`persist` or `sync` with a
+  `cryptoKey`): a record that opens under another name than the one it
+  was stored under, at another place, after another record than the one it
+  was sealed after -- a chunk the page cut, among those it sealed in their
+  places since -- or with a byte changed; or a replica that stores over a
+  store it could not restore, the writes it held unsent with it. A store
+  cut at a record's edge, or an older one put back whole, restores as it
+  stood by design (below).
 - Studio, the page the server serves: it is served before any token, under a
   strict CSP, and shows stored rows to whoever holds the server token, so a
   script injected through a row it shows would take that token
@@ -367,6 +375,22 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   Keeping archives and backups in a bucket that keeps versions or locks
   objects is what holds them to their age. A plain archive promises nothing
   against whoever can write it.
+- **A page's sealed store holds its records to their name, place and
+  order, not to their age, and its end can be cut.** Whoever can write the
+  browser's storage can delete a store's latest chunks: it restores as the
+  page left it before them, as one whose latest writes were never
+  persisted would, and the page seals its next chunks in their places,
+  each covering the tag of the record before it, so they open only after
+  each other, never after a chunk it cut
+  ([JavaScript docs](https://fennecdb.com/docs/javascript#sealed)). An
+  older copy of the whole store put back restores as what it was. A store
+  sealed by 0.2.0 holds its chunks to their place alone: until the page's
+  next `persist` replaces it with an image sealed now, chunks 0.2.0 sealed
+  after such a cut still open among those cut. A replica given another
+  key, or none, refuses to start and keeps the store, where 0.2.0's seeded
+  over it and lost the writes it held unsent. Sizes and names are
+  visible, a script of the page's own origin holds its `CryptoKey` as the
+  page does, and an `openFile` file is never sealed.
 - **Nothing in memory is encrypted, and the live file is plain on disk.** The
   indexes (a text index's terms, a hash index's keys, vectors), the documents
   written since the last handover to the file (16 MB, 65 536 records or

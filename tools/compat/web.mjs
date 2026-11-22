@@ -28,7 +28,7 @@ export class KeyRange {
     return new KeyRange(lo, hi);
   }
   has(k) {
-    return k >= this.lo && k <= this.hi;
+    return typeof k === 'string' && k >= this.lo && k <= this.hi;
   }
 }
 
@@ -59,19 +59,19 @@ export function fakeIndexedDB(held = null) {
     });
     return req;
   };
+  // An array key (a replica's claim) by its JSON: a Map holds an array by
+  // its identity, a store by its value.
+  const at = (key) => (Array.isArray(key) ? JSON.stringify(key) : key);
+  const inRange = (records, range) => [...records.keys()].filter((k) => range.has(k)).sort();
   const storeOf = (records) => ({
-    put: (value, key) => records.set(key, value),
-    delete(range) {
-      for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+    put: (value, key) => records.set(at(key), value),
+    delete(q) {
+      if (!(q instanceof KeyRange)) return records.delete(at(q));
+      for (const k of inRange(records, q)) records.delete(k);
     },
-    get: (key) => request(() => records.get(key)),
-    getAll: (range) =>
-      request(() =>
-        [...records.keys()]
-          .filter((k) => range.has(k))
-          .sort()
-          .map((k) => records.get(k)),
-      ),
+    get: (key) => request(() => records.get(at(key))),
+    getAll: (range) => request(() => inRange(records, range).map((k) => records.get(k))),
+    getAllKeys: (range) => request(() => inRange(records, range)),
   });
   const handle = (d, upgrading) => ({
     get objectStoreNames() {

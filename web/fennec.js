@@ -1119,36 +1119,88 @@ const DB_NAME = 'fennecdb';
 const STORE = 'images';
 /** Once the chunks outgrow this share of the image, a new image replaces them. */
 const FOLD = 0.5;
-/** Per database, where its chunks stand: `{key, next, image, chunks}`. */
+/** Per database, where its chunks stand: `{key, next, image, chunks}`, and the tag the next one is sealed after (`tag`). */
 const stored = new WeakMap();
 
 const chunkKey = (key, n) => `${key}#${String(n).padStart(9, '0')}`;
 
-// Sealed with a `CryptoKey` (AES-GCM), each record is `{gen, iv, data}` --
-// the image -- or `{iv, data}`, a chunk, its tag over the key it is stored
-// under, the image's generation and its place: a chunk moved, dropped from
-// the middle, or kept from an image before is refused, as is one byte
-// changed. The generation is random and new with each image, since the
-// chunks' numbers start again under it.
+// Sealed with a `CryptoKey` (AES-GCM), each record is `{v, gen, iv, data}`
+// -- the image -- or `{iv, data}`, a chunk, its tag over the key it is
+// stored under, the image's generation, its place and the tag of the record
+// before it: a chunk moved, dropped from the middle, kept from an image
+// before or put after another than the one it was sealed after is refused,
+// as is one byte changed. A store cut short, which the page goes on from,
+// opens as it stood or as the page went on, never with a chunk it cut
+// (docs/design/js-client.md#sealed-chunks-in-a-chain). The generation is
+// random and new with each image, since the chunks' numbers start again
+// under it. Version 1 (no `v`, 0.2.0's) covers no tag before: it restores as
+// it was sealed, and the next `persist` stores an image over it.
 const te = new TextEncoder();
-const aad = (key, gen, n) => te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+const CHAINED = 2;
+/** The tag WebCrypto's AES-GCM appends to what it seals: 128 bits, its default. */
+const TAG = 16;
+const NONE = new Uint8Array(0);
 
-async function seal(ck, key, gen, n, bytes) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(key, gen, n) }, ck, bytes));
-  return n === 0 ? { gen, iv, data } : { iv, data };
+/** What a record's tag covers beside its bytes: version 1's, or version 2's with the tag `before` it. */
+function aad(v, key, gen, n, before) {
+  if (v === 1) return te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+  // Never a version 1 AAD: its prefix is another from its ninth byte on.
+  const head = te.encode(`fennecdb/${v}\0${key}\0${gen}\0${n}\0`);
+  const out = new Uint8Array(head.length + before.length);
+  out.set(head);
+  out.set(before, head.length);
+  return out;
 }
 
-async function unseal(ck, key, gen, n, rec) {
+/** A sealed record's tag, as it is stored: the last bytes of its `data`. */
+function tagOf(rec) {
+  const d = ArrayBuffer.isView(rec.data) ? new Uint8Array(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength) : new Uint8Array(rec.data);
+  return d.slice(Math.max(0, d.length - TAG));
+}
+
+/** `bytes` sealed as version 2 at place `n` -- 0 the image -- after the record whose tag is `before`. */
+async function seal(ck, key, gen, n, bytes, before) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(CHAINED, key, gen, n, before) }, ck, bytes));
+  return n === 0 ? { v: CHAINED, gen, iv, data } : { iv, data };
+}
+
+async function unseal(ck, key, v, gen, n, rec, before) {
   try {
-    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(key, gen, n) }, ck, rec.data));
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(v, key, gen, n, before) }, ck, rec.data));
   } catch {
-    throw new FennecError(`${key}: record ${n} does not open: another key, or the stored bytes changed`);
+    throw new FennecError(`${key}: record ${n} does not open: another key, the stored bytes changed or a record before it replaced`);
   }
 }
 
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
-const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
+/**
+ * The range `key`'s chunks are in. Other keys can be too -- `notes#1` is
+ * between `notes#000000000` and `notes#999999999` -- so what it holds is
+ * read as `isChunk` says: the range alone, `key#` to `key#\uffff`, took
+ * another key's records, `notes#archive` and its chunks among them. A key
+ * named `key#` and nine digits is read as one of its chunks all the same:
+ * the docs say to avoid such names, `persist` taking any.
+ */
+const chunkRange = (key) => IDBKeyRange.bound(chunkKey(key, 0), `${key}#999999999`);
+const isChunk = (key, k) => /^\d{9}$/.test(k.slice(key.length + 1));
+
+/** Deletes `key`'s chunks in `os`'s transaction, and no other key's. */
+function dropChunks(os, key) {
+  const range = chunkRange(key);
+  const keys = os.getAllKeys(range);
+  keys.onsuccess = () => {
+    const mine = keys.result.filter((k) => isChunk(key, k));
+    // One delete where the range holds this key's chunks alone, as it nearly always does.
+    if (mine.length === keys.result.length) os.delete(range);
+    else for (const k of mine) os.delete(k);
+  };
+}
+
+/** Where a replica's token for `key` is kept: an array, never a string key `persist` or `putState` writes. */
+const ownerKey = (key) => ['fennecdb/owner', key];
+
+const randomHex = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 /**
  * The connection every call shares, opened by the first and kept: a call
@@ -1236,6 +1288,69 @@ async function inStore(mode, ask, on = null) {
   }
 }
 
+/** The lock a replica storing under `key` holds, whatever its url, shapes or `leader` (`#lockStore`). */
+const storeLock = (key) => `fennecdb/persist:${key}`;
+
+/** How long a closed replica waits for its persist before it lets go of its key's lock (`#letGo`). */
+const LET_GO_MS = 5000;
+
+/** Per key, a replica of this page letting go of its lock: settled once the lock is free (`#letGo`). */
+const letting = new Map();
+
+/** IndexedDB's own failures reading a store or claiming it, not a store that does not open: tried again, it may (`#takeStore`). */
+const unread = new WeakSet();
+
+/** A replica's write refused: another replica claimed the store since, or it was deleted (`persistNow`'s `owner`). */
+const taken = new WeakSet();
+
+/**
+ * A replica's claim on `key`'s store, made before it reads the store: a
+ * token every later write of the key's finds in its own transaction, or
+ * stores nothing. IndexedDB runs a store's read/write transactions one at a
+ * time, each seeing the ones before: a write of the replica before lands
+ * before this claim, and the read after it sees that write, or after, and
+ * finds another's token. No lock manager is needed for it.
+ */
+async function claim(key) {
+  const token = randomHex();
+  try {
+    await inStore('readwrite', (os) => {
+      os.put(token, ownerKey(key));
+    });
+  } catch (e) {
+    if (Object(e) === e) unread.add(e);
+    throw e;
+  }
+  return token;
+}
+
+/**
+ * Deletes what `persist` stored under `key`, its image, its chunks and a
+ * replica's claim on it, and nothing else; refused while a replica keeps
+ * the key in this browser (with `locks`, the one replicas were given). The
+ * connection is let go of: every database's next `persist` in this page
+ * stores an image.
+ */
+export async function unpersist(key, opts = {}) {
+  const drop = () =>
+    inStore('readwrite', (os, db) => {
+      os.delete(key);
+      dropChunks(os, key);
+      os.delete(ownerKey(key));
+      return () => {
+        if (shared?.db === db) shared = null;
+        db.close();
+      };
+    });
+  const locks = opts.locks ?? globalThis.navigator?.locks;
+  if (!locks) return drop();
+  await letting.get(key);
+  return locks.request(storeLock(key), { ifAvailable: true }, (lock) => {
+    if (lock === null) throw new FennecError(`${key} is kept by a replica that runs in this browser (sync's persist): close it first`);
+    return drop();
+  });
+}
+
 /**
  * Per database, the last of its `persist`, `restore` and `openFile` calls.
  * Each reads where the one before left the database -- the next chunk's
@@ -1299,7 +1414,12 @@ function filled(image) {
   return image;
 }
 
-async function persistNow(fennec, key, opts) {
+/**
+ * `persist`'s work, in its turn. With `owner`, a replica's token (`claim`),
+ * the record is written only where the store still holds it, asked in the
+ * write's own transaction; refused, the write stores nothing (`taken`).
+ */
+async function persistNow(fennec, key, opts, owner = null) {
   alive(fennec, 'persist');
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
@@ -1311,11 +1431,12 @@ async function persistNow(fennec, key, opts) {
   // store -- a delete of the database asks it to let go first
   // (`versionchange`), the browser clearing the site's data closes it
   // (`close`, or its requests refused) -- and chunks stored after would
-  // restore nothing. Then an image, even with nothing written since.
-  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db) {
+  // restore nothing. Then an image, even with nothing written since, and
+  // over a store restored as version 1 (no `tag`).
+  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db || (ck && !s.tag)) {
     fennec.journal();
     image = fennec.snapshot();
-    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0, tag: null };
     stored.set(fennec, s);
   } else {
     const { replace, bytes } = fennec.drain();
@@ -1324,34 +1445,48 @@ async function persistNow(fennec, key, opts) {
     else if (s.chunks + bytes.length > s.image * FOLD) image = fennec.snapshot();
     else chunk = bytes;
   }
-  const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
+  const gen = image && ck ? randomHex() : s.gen;
   let on = null;
+  let rec;
+  let refused = false;
   try {
     filled(image);
-    const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
+    rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image, NONE) : await seal(ck, key, gen, s.next, chunk, s.tag);
     // The connection may end while the record is sealed or the call waits
     // its turn: a chunk is stored over the image's alone.
     const ask = (os, db) => {
       on = db;
-      if (image) {
-        os.put(rec, key);
-        os.delete(chunkRange(key));
-      } else {
-        os.put(rec, chunkKey(key, s.next));
-      }
+      const write = () => {
+        if (image) {
+          os.put(rec, key);
+          dropChunks(os, key);
+        } else {
+          os.put(rec, chunkKey(key, s.next));
+        }
+      };
+      if (!owner) return write();
+      const held = os.get(ownerKey(key));
+      held.onsuccess = () => (held.result === owner ? write() : (refused = true));
     };
     await inStore('readwrite', ask, image ? null : s.db);
+    if (refused) {
+      const e = new FennecError(`${key}: what was written since the last persist is not stored: another replica claimed the store since, or it was deleted`);
+      taken.add(e);
+      throw e;
+    }
   } catch (e) {
     // The drained writes are nowhere now; the next call stores an image --
     // this one, where the image's connection had ended.
     stored.delete(fennec);
     // In this call's turn still: `persist` would wait for this very call.
     // It stores an image, which a database closed meanwhile has not.
-    if (e === ENDED) return persistNow(fennec, key, opts);
+    if (e === ENDED) return persistNow(fennec, key, opts, owner);
     throw e;
   }
-  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
-  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
+  // The tag the next chunk is sealed after: this record's, as stored.
+  const tag = ck ? tagOf(rec) : null;
+  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0, tag });
+  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length, tag });
   return (image ?? chunk).length;
 }
 
@@ -1400,25 +1535,43 @@ async function restoreNow(fennec, key, opts) {
   alive(fennec, 'restore');
   const ck = opts.cryptoKey ?? null;
   let on = null;
-  let [image, chunks] = await inStore('readonly', (os, db) => {
-    on = db;
-    const img = os.get(key);
-    const ch = os.getAll(chunkRange(key));
-    return () => [img.result, ch.result];
-  });
+  let image, chunks;
+  try {
+    [image, chunks] = await inStore('readonly', (os, db) => {
+      on = db;
+      const img = os.get(key);
+      // The values and their keys, in one order: a key's chunks alone kept.
+      const ch = os.getAll(chunkRange(key));
+      const ks = os.getAllKeys(chunkRange(key));
+      return () => [img.result, ch.result.filter((_, i) => isChunk(key, ks.result[i]))];
+    });
+  } catch (e) {
+    // IndexedDB's own failure, not the store's: read again, it may restore.
+    if (Object(e) === e) unread.add(e);
+    throw e;
+  }
   if (!image) return false;
   if (isSealed(image) !== !!ck) {
     throw new FennecError(ck ? `${key} is stored in the clear, not sealed with a key` : `${key} is sealed: restore needs its cryptoKey`);
   }
   const gen = ck ? image.gen : null;
+  let tag = null;
   if (ck) {
-    image = await unseal(ck, key, gen, 0, image);
+    const v = image.v ?? 1;
+    if (v !== 1 && v !== CHAINED) {
+      throw new FennecError(`${key} is sealed as version ${String(v)}, which a later client wrote and this one does not read`);
+    }
+    // Each record's tag is in the next one's AAD: read as stored, so they
+    // open side by side.
+    const tags = v === CHAINED ? [image, ...chunks].map(tagOf) : [];
+    image = await unseal(ck, key, v, gen, 0, image, NONE);
     // Opened side by side, refused in order: the first record that does not
     // open is the one named, whichever settled first.
-    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, v, gen, i + 1, c, tags[i])));
     const bad = opened.find((r) => r.status === 'rejected');
     if (bad) throw bad.reason;
     chunks = opened.map((r) => r.value);
+    tag = tags.at(-1) ?? null;
   }
   let bytes = image;
   if (chunks.length) {
@@ -1443,7 +1596,7 @@ async function restoreNow(fennec, key, opts) {
     await fennec.loadAsync(bytes);
     fennec.journal();
     // Its chunks follow over the connection it was read over, as `persist`'s.
-    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length, tag });
     // The database the code declared its schema for is this one now: checked
     // again, what it adds journaled with the rest.
     await checked(fennec, declared.get(fennec), 'apply');
@@ -2235,6 +2388,21 @@ export class FennecSync {
   #waits = new Set();
   #pushed = [];
   #listeners = null;
+  /** Why this tab stores nothing under `persist` (`status()`'s `unkept`), and whether to read the store again. */
+  #unkept = null;
+  #unkeptAgain = false;
+  #taking = null;
+  /** The key's lock held, or no lock manager to hold one with; its release, and its request. */
+  #holding = false;
+  #releaseStore = null;
+  #storeAsk = null;
+  /** The key's lock let go of, past the close's bound: no persist is started after the one out (`#letGo`). */
+  #fenced = false;
+  /** This replica's claim on the store (`claim`), which each of its writes finds there or stores nothing. */
+  #owner = null;
+  /** This tab holds the election: its followers are told why it stores nothing (`#unkeptBy`), and say it. */
+  #elected = false;
+  #theirs = null;
 
   constructor(local, opts) {
     this.#local = local;
@@ -2300,7 +2468,7 @@ export class FennecSync {
     return this.#queue.length ? new Promise((r) => this.#pushed.push(r)) : Promise.resolve();
   }
 
-  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader}`. */
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader, unkept}`. */
   status() {
     // While a token is wanted the error is the token's too, both said here
     // from where its ask stands and never kept as a fault, as the native
@@ -2327,6 +2495,9 @@ export class FennecSync {
       // ask stands and the `TokenRefusal` it says or, delayed, will say.
       token,
       leader: this.#leader,
+      // Why this tab stores nothing under `persist`, or a follower why the
+      // tab elected to lead does not; null where it stores or the leader does.
+      unkept: this.#unkept?.message ?? this.#theirs,
     }));
   }
 
@@ -2482,7 +2653,10 @@ export class FennecSync {
     }
   }
 
-  /** Closes the subscriptions and gives up the lead. The local database stays open. */
+  /**
+   * Closes the subscriptions and gives up the lead, and the store once the
+   * persist it has out settled (`#letGo`). The local database stays open.
+   */
   close() {
     this.#closed = true;
     replicas.delete(this.#local);
@@ -2492,6 +2666,7 @@ export class FennecSync {
     this.#waits.clear();
     this.#chan?.close();
     this.#release?.();
+    this.#letGo();
     this.#lives.clear();
     if (this.#listeners) {
       for (const [k, f] of this.#listeners) globalThis.removeEventListener?.(k, f);
@@ -3510,7 +3685,21 @@ export class FennecSync {
     // the sync's words, as a native binding's `run` on a synced database
     // does; `close` gives the database back.
     replicas.add(this.#local);
-    await this.#loadPersist();
+    try {
+      // A tab with no election takes its key's lock before it reads the
+      // store, as it stands, and claims the store; one an election may make
+      // leader does so then. With no lock manager each tab claims it, the
+      // last one storing there.
+      if (this.#stores()) {
+        if (!this.#locks) this.#holding = true;
+        else if (this.#single()) await this.#tryStore();
+        if (this.#holding) await this.#claimFirst();
+      }
+      await this.#loadPersist();
+    } catch (e) {
+      this.close();
+      throw e;
+    }
     for (const text of SYNC_STATE) this.#local.run(text);
     this.#load();
     // A seed of several parts the page ended in the middle of landing: what
@@ -3600,9 +3789,15 @@ export class FennecSync {
    */
   #elect() {
     const name = `fennecdb:${this.#url}:${[...this.#shapes.keys()].join(',')}`;
-    if (this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks) {
-      // A single tab (or Node): no leader election needed.
+    if (this.#single()) {
+      // A single tab (or Node): no leader election needed. One that found
+      // its key's lock held takes the store over once it is let go of.
       this.#kick();
+      if (this.#stores() && !this.#holding) {
+        this.#awaitStore()
+          .then(() => this.#unkept || this.#persistSoon())
+          .catch((e) => this.#onError?.(e));
+      }
       return;
     }
     this.#leader = false;
@@ -3616,34 +3811,133 @@ export class FennecSync {
     // and a one-shot hello would go unanswered forever.
     this.#hello();
     this.#kick();
-    this.#locks.request(name, { mode: 'exclusive' }, async () => {
-      if (this.#closed) return;
-      await this.#lead();
-      // The lock stays with us until the tab closes.
-      return new Promise((r) => {
-        this.#release = r;
-      });
-    });
+    this.#locks
+      .request(name, { mode: 'exclusive' }, async () => {
+        if (this.#closed) return;
+        this.#elected = true;
+        this.#theirs = null;
+        // The store before the lead: the queue the tab before kept is taken
+        // over first, its writes sent before this tab's, and one tab writes
+        // the key at a time, whatever its shapes or url.
+        if (this.#stores()) {
+          const held = await this.#tryStore();
+          if (this.#closed) return;
+          if (held) await this.#takeStore();
+          else await this.#awaitStore();
+          if (this.#closed) return;
+        }
+        this.#lead();
+        // The lock stays with us until the tab closes.
+        return new Promise((r) => {
+          this.#release = r;
+        });
+      })
+      .catch((e) => this.#onError?.(e));
   }
 
-  /** This tab leads now: the queue its predecessor kept is taken over, and the others asked for theirs. */
-  async #lead() {
-    if (this.#persistKey && globalThis.indexedDB && !kept.has(this.#local)) {
-      const other = sibling(this.#local);
-      try {
-        if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
-          for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
-        }
-      } catch (e) {
-        this.#onError?.(e);
-      } finally {
-        other.close();
-      }
-    }
+  /** This tab leads now, the store taken over (`#takeStore`): the others are asked for their queues. */
+  #lead() {
     this.#leader = true;
     this.#flushing = this.#queue.length > 0;
     this.#chan.postMessage({ t: 'leader' });
     this.#kick();
+  }
+
+  /** Whether the replica is kept in IndexedDB (`persist`), not in a file. */
+  #stores() {
+    return !!this.#persistKey && !!globalThis.indexedDB && !kept.has(this.#local);
+  }
+
+  /** No election: `leader: false`, or no `BroadcastChannel` or lock manager to hold one with. */
+  #single() {
+    return this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks;
+  }
+
+  /** The key's lock, held till `#letGo`: as it stands or (`wait`) once free; false where held or closed. */
+  #lockStore(wait) {
+    return new Promise((got, failed) => {
+      // A wait the close ends, holding no place in the lock's queue.
+      const opts = wait ? { mode: 'exclusive', signal: this.#abort.signal } : { mode: 'exclusive', ifAvailable: true };
+      const asked = this.#locks.request(storeLock(this.#persistKey), opts, (lock) => {
+        if (lock === null || this.#closed) return got(false);
+        this.#holding = true;
+        got(true);
+        return new Promise((r) => {
+          this.#releaseStore = r;
+        });
+      });
+      // Settled once the lock is free again: what `letting` waits on.
+      this.#storeAsk = asked;
+      asked.catch((e) => (this.#closed ? got(false) : failed(e)));
+    });
+  }
+
+  /** The key's lock as it stands, once a replica of this page that closed has let go of it. */
+  async #tryStore() {
+    const free = letting.get(this.#persistKey);
+    if (free) {
+      this.#unkeptBy(this.#elsewhere());
+      await free;
+    }
+    const held = await this.#lockStore(false);
+    if (held) this.#unkeptBy(null);
+    return held;
+  }
+
+  /** Waits for the key's lock held elsewhere, `unkept` saying so, then takes the store over. */
+  async #awaitStore() {
+    this.#unkeptBy(this.#elsewhere());
+    if (await this.#lockStore(true)) await this.#takeStore();
+  }
+
+  /** Why this tab stores nothing, or null; told to the tabs it leads or will (`#theirs`). */
+  #unkeptBy(e) {
+    this.#unkept = e;
+    // A closed tab's channel is closed: posted to, it throws.
+    if (this.#elected && !this.#closed) this.#chan?.postMessage({ t: 'unkept', m: e?.message ?? null });
+  }
+
+  /** The store claimed before it is read (`claim`); refused, this tab stores nothing there, and tries again at its next persist. */
+  async #claimFirst() {
+    try {
+      this.#owner = await claim(this.#persistKey);
+    } catch (e) {
+      this.#unkeptAgain = true;
+      this.#unkeptBy(new FennecError(`${this.#persistKey} is kept as it is, and this tab stores nothing there: ${e.message}`, { cause: e }));
+      this.#onError?.(this.#unkept);
+    }
+  }
+
+  #elsewhere() {
+    return new FennecError(
+      `${this.#persistKey} is stored by another replica, in another tab or this one, and this one stores nothing there until it lets go`,
+    );
+  }
+
+  /**
+   * This tab writes the store now, the queue kept there taken over. A store
+   * another tab wrote since this one read it gets an image first: a chunk
+   * went on from where this tab read it. One that does not restore is kept,
+   * this tab storing nothing there (`#unkept`), read again at the next
+   * persist where IndexedDB failed the read (`#retake`).
+   */
+  async #takeStore() {
+    const other = sibling(this.#local);
+    try {
+      // Claimed first: a write of the replica before lands before the read, or not at all.
+      this.#owner = await claim(this.#persistKey);
+      if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
+        for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
+      }
+      if (!sameStore(stored.get(other), stored.get(this.#local))) stored.delete(this.#local);
+      this.#unkeptBy(null);
+    } catch (e) {
+      this.#unkeptAgain = unread.has(e);
+      this.#unkeptBy(new FennecError(`${this.#persistKey} is kept as it is, and this tab stores nothing there: ${e.message}`, { cause: e }));
+      this.#onError?.(this.#unkept);
+    } finally {
+      other.close();
+    }
   }
 
   /** Another tab's write, kept and sent here: nothing of it to put back in this replica. */
@@ -3778,6 +4072,12 @@ export class FennecSync {
   }
 
   async #onRelay(msg) {
+    // A tab that joined, or writes, learns why the one elected stores nothing, waiting to lead or leading.
+    if ((msg.t === 'hello' || msg.t === 'op') && this.#elected && this.#unkept) this.#unkeptBy(this.#unkept);
+    if (msg.t === 'unkept') {
+      this.#theirs = msg.m && `the tab elected to lead stores nothing: ${msg.m}`;
+      return;
+    }
     if (this.#leader) {
       if (msg.t === 'op') {
         this.#adopt(msg.op);
@@ -3834,36 +4134,133 @@ export class FennecSync {
    * The leader's alone: the other tabs' copies are fed by it.
    */
   #persistSoon() {
-    if (!this.#persistKey || !globalThis.indexedDB || !this.#leader || kept.has(this.#local)) return;
+    if (!this.#stores() || !this.#leader || !this.#holding || this.#closed) return;
+    if (this.#unkept) {
+      this.#retake();
+      return;
+    }
+    if (!this.#owner) return;
     if (this.#persisting) {
       this.#persistAgain = true;
       return;
     }
-    this.#persisting = (async () => {
-      do {
-        this.#persistAgain = false;
-        await persist(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
-      } while (this.#persistAgain && !this.#closed);
-    })()
-      .catch((e) => this.#onError?.(e))
-      .finally(() => {
-        this.#persisting = null;
-      });
+    const local = this.#local;
+    const key = this.#persistKey;
+    const owner = this.#owner;
+    const opts = { cryptoKey: this.#cryptoKey };
+    // Set before the loop runs: one ending at once (`inTurn` throws before
+    // it awaits where a restore failed) clears it after, never before.
+    let ended;
+    this.#persisting = new Promise((r) => (ended = r));
+    (async () => {
+      let failed = null;
+      try {
+        // A write made while one is out, the close's among them, is stored
+        // after it: closed, until the key's lock is let go of (`#letGo`).
+        do {
+          this.#persistAgain = false;
+          // `persist`, its write refused where another replica claimed the store.
+          await inTurn(local, () => persistNow(local, key, opts, owner), 'persist');
+        } while (this.#persistAgain && !this.#fenced);
+        if (this.#persistAgain) {
+          failed = new FennecError(
+            `${key}: what was written since the last persist is not stored: ` +
+              `the replica was closed, and let go of the store after ${LET_GO_MS / 1000} s waiting for it`,
+          );
+        }
+      } catch (e) {
+        failed = e;
+      }
+      // Over in the step that last looked for a write waiting: one made
+      // after finds none out and starts the next. Cleared a few microtasks
+      // on, in a `finally`, a write between was left to a loop that had
+      // ended, and a close let go of the store without it, telling nothing
+      // (the third review).
+      this.#persisting = null;
+      ended();
+      if (!failed) return;
+      // Claimed by another since, or deleted: this tab stores nothing there.
+      if (taken.has(failed) && this.#owner === owner) {
+        this.#owner = null;
+        this.#unkeptAgain = false;
+        this.#unkeptBy(failed);
+      }
+      this.#onError?.(failed);
+    })();
+  }
+
+  /**
+   * Lets go of the key's lock once the persist out has settled -- it stores
+   * what was written before the close -- as one landing after the next tab
+   * read the store replaced a record that tab's chunks were sealed after,
+   * and it never restored again. Past `LET_GO_MS` it is let go of all the
+   * same: that persist's write stores nothing once the next replica claimed
+   * the store, and none is started after it.
+   */
+  #letGo() {
+    const release = this.#releaseStore;
+    if (!release) return;
+    this.#releaseStore = null;
+    const key = this.#persistKey;
+    const free = this.#storeAsk.then(
+      () => {},
+      () => {},
+    );
+    letting.set(key, free);
+    free.then(() => letting.get(key) === free && letting.delete(key));
+    let t = null;
+    const go = () => {
+      if (this.#fenced) return;
+      clearTimeout(t);
+      this.#fenced = true;
+      this.#holding = false;
+      release();
+    };
+    const out = this.#persisting;
+    if (!out) return go();
+    t = setTimeout(go, LET_GO_MS);
+    t.unref?.();
+    out.then(go);
+  }
+
+  /** The store read again at a persist, where IndexedDB failed the take-over's read. */
+  #retake() {
+    if (!this.#unkeptAgain || this.#taking) return;
+    this.#taking = this.#takeStore().then(() => {
+      this.#taking = null;
+      if (!this.#unkept) this.#persistSoon();
+    });
   }
 
   /**
    * Restores the previous session's image: the replica, its cursors and the
-   * writes it had not sent, which go first.
+   * writes it had not sent, which go first. Only a key holding nothing is
+   * seeded: a store there that does not restore -- another key or none, a
+   * later client's, refused by the module -- stops the start, kept as it
+   * stands with its unsent writes, which a seed's first `persist` stored
+   * over (js-client.md#sealed-chunks-in-a-chain).
    */
   async #loadPersist() {
     if (!this.#persistKey || !globalThis.indexedDB || kept.has(this.#local)) return;
     try {
       await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
     } catch (e) {
-      // A corrupt or incompatible cache: reseed from scratch, not an error.
-      this.#onError?.(e);
+      throw new FennecError(
+        `the replica stored under ${this.#persistKey} does not restore (${e.message}): it is kept as it stands, ` +
+          'with the writes it has not sent; start again with the cryptoKey it was sealed with, or delete it ' +
+          `with unpersist(${JSON.stringify(this.#persistKey)}), those writes with it, to seed anew`,
+        { cause: e },
+      );
     }
   }
+}
+
+/** Whether two databases' `stored` read one store as it stood (`#takeStore`). */
+function sameStore(a, b) {
+  if (!a || !b) return false;
+  if (a.key !== b.key || a.ck !== b.ck || a.gen !== b.gen || a.next !== b.next || a.image !== b.image || a.chunks !== b.chunks) return false;
+  if (!a.tag || !b.tag) return a.tag === b.tag;
+  return a.tag.length === b.tag.length && a.tag.every((x, i) => x === b.tag[i]);
 }
 
 /** A refusal's words: the server's `{"error": ..}`, or what the transport said. */
@@ -3959,19 +4356,32 @@ function normalizeShape(raw, url) {
  *              asked for a new one when the server answers 401
  * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes,
  *              one account's -- the key names it, and a replica is never
- *              opened for another
+ *              opened for another. A store there that does not restore --
+ *              another `cryptoKey`, or none -- refuses the sync, kept as it
+ *              stands with its unsent writes; only none stored is seeded
+ *              (`unpersist` deletes one). One replica stores a key at a
+ *              time, holding its lock; another stores nothing there till
+ *              it lets go (`status()`'s `unkept`)
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
  *              with (`persist`)
  * - `onRefused` told of each write the server refused, which was put back
- * - `leader`   `false` turns off multi-tab leader election
- * - `locks`    lock manager (defaults to `navigator.locks`)
+ * - `leader`   `false` turns off multi-tab leader election: each tab sends
+ *              its own writes, and one stores `persist`'s key at a time
+ * - `locks`    lock manager (defaults to `navigator.locks`; `ifAvailable`
+ *              among its options)
  */
 export async function sync(opts = {}) {
   if (!opts.url) throw new FennecError('sync(): `url` is required');
   const local = opts.local ?? (await Fennec.open(opts.wasm ?? './fennec.wasm', { collation: opts.collation }));
-  const replica = new FennecSync(local, opts);
-  // The server owns the schema: the code's is compared with it, never applied.
-  await checked(replica.remote, opts, 'follow');
-  if (opts.schema) declared.set(replica, opts);
-  return replica.start();
+  try {
+    const replica = new FennecSync(local, opts);
+    // The server owns the schema: the code's is compared with it, never applied.
+    await checked(replica.remote, opts, 'follow');
+    if (opts.schema) declared.set(replica, opts);
+    return await replica.start();
+  } catch (e) {
+    // Opened here, the database is no one's once the sync is refused.
+    if (!opts.local) local.close();
+    throw e;
+  }
 }

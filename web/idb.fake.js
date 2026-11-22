@@ -1,6 +1,9 @@
 // The part of IndexedDB `persist`, `restore` and the sync layer use, in
 // memory, for the tests: Node has none. Keys are kept sorted as the real
-// one keeps them. web/fennec.persist.test.js has its own, which logs writes.
+// one keeps them; an array key (a replica's claim) is kept apart, in
+// `arrays` by its JSON, as a real store sorts arrays after every string. A
+// range is of strings. web/fennec.persist.test.js has its own, which logs
+// writes.
 
 export class KeyRange {
   constructor(lo, hi) {
@@ -11,12 +14,14 @@ export class KeyRange {
     return new KeyRange(lo, hi);
   }
   has(k) {
-    return k >= this.lo && k <= this.hi;
+    return typeof k === 'string' && k >= this.lo && k <= this.hi;
   }
 }
 
 export function fakeIndexedDB() {
   const records = new Map();
+  const arrays = new Map();
+  const at = (key) => (Array.isArray(key) ? [arrays, JSON.stringify(key)] : [records, key]);
   const request = (fn) => {
     const req = {};
     queueMicrotask(() => {
@@ -25,24 +30,48 @@ export function fakeIndexedDB() {
     });
     return req;
   };
+  const inRange = (range) => [...records.keys()].filter((k) => range.has(k)).sort();
   const store = {
-    put: (value, key) => records.set(key, value),
-    delete(range) {
-      for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+    put(value, key) {
+      const [m, k] = at(key);
+      m.set(k, value);
     },
-    get: (key) => request(() => records.get(key)),
-    getAll: (range) => request(() => [...records.keys()].filter((k) => range.has(k)).sort().map((k) => records.get(k))),
+    delete(q) {
+      if (!(q instanceof KeyRange)) {
+        const [m, k] = at(q);
+        return m.delete(k);
+      }
+      for (const k of inRange(q)) records.delete(k);
+    },
+    get(key) {
+      const [m, k] = at(key);
+      return request(() => m.get(k));
+    },
+    getAll: (range) => request(() => inRange(range).map((k) => records.get(k))),
+    getAllKeys: (range) => request(() => inRange(range)),
   };
+  const fake = { records, arrays };
   const db = {
-    transaction() {
-      const tx = { objectStore: () => store };
-      setImmediate(() => tx.oncomplete?.());
+    transaction(_name, mode) {
+      // A test's IndexedDB failing a read once (`failRead`), as a real one
+      // may: thrown where the transaction is made.
+      if (mode === 'readonly' && fake.failRead) {
+        fake.failRead = false;
+        throw Object.assign(new Error('the read failed'), { name: 'UnknownError' });
+      }
+      const puts = [];
+      const tx = { objectStore: () => ({ ...store, put: (value, key) => (puts.push(value), store.put(value, key)) }) };
+      setImmediate(() => {
+        tx.oncomplete?.();
+        // A test's look at a transaction as it completes, the values it
+        // put, before anything awaiting it goes on (`completed`).
+        fake.completed?.(puts);
+      });
       return tx;
     },
     close() {},
   };
-  return {
-    records,
+  return Object.assign(fake, {
     open() {
       const req = {};
       queueMicrotask(() => {
@@ -51,7 +80,7 @@ export function fakeIndexedDB() {
       });
       return req;
     },
-  };
+  });
 }
 
 /** Installs a fresh one as the global, with `IDBKeyRange`; returns it. */

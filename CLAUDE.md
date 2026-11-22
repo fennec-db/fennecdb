@@ -514,6 +514,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A live query learns what changed from the change ring.
 - A seed in parts lands in one task.
 - A page's IndexedDB calls share one connection, and let it go when asked.
+- A sealed chunk opens only after its own, and a replica keeps a store it cannot restore.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 
