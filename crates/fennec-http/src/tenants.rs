@@ -244,6 +244,52 @@ fn hold_tenant(
     })
 }
 
+/// An install's claim of a tenant's name ([`Tenants::claim_import`]),
+/// given up as it drops.
+struct Importing<'a>(&'a Tenants, String);
+
+impl Drop for Importing<'_> {
+    fn drop(&mut self) {
+        let mut importing = self.0.importing.lock().unwrap_or_else(|e| e.into_inner());
+        importing.retain(|n| *n != self.1);
+    }
+}
+
+fn importing_refusal(name: &str) -> Refused {
+    Refused(
+        409,
+        format!("tenant `{name}` is being installed by another request"),
+    )
+}
+
+/// What an install or a copy's image left beside a tenant's file as the
+/// node's last process ended in the middle of it -- `<t>.fennec.importing`
+/// ([`Tenants::import_from`]), `<t>.fennec.taking` (a follower's, which the
+/// tenant's open removes too) -- each as large as the tenant and never
+/// read: removed as the node starts, each under the tenant's lock taken
+/// without waiting, so one another process holds the lock of -- its own
+/// install under way, a shell's open -- stays. Before, a crash's
+/// `.importing` stayed until an install of the name came again.
+fn sweep_left(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(file) = name.to_str().and_then(|n| {
+            n.strip_suffix(".importing")
+                .or_else(|| n.strip_suffix(".taking"))
+        }) else {
+            continue;
+        };
+        if file.ends_with(".fennec") {
+            if let Ok(_held) = fennec_abi::lock::hold(dir.join(file)) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 /// [`fennec_core::fs::sync_dir`] as an I/O error.
 fn dir_synced(path: &Path) -> std::io::Result<()> {
     fennec_core::fs::sync_dir(path).map_err(|e| std::io::Error::other(e.to_string()))
@@ -536,6 +582,10 @@ pub struct Tenants {
     /// The threads syncing its tenants under `--sync <ms>`
     /// ([`Tenants::sync_each`]).
     syncs: syncs::Syncs,
+    /// The names an install is taking an image for in this process
+    /// ([`Tenants::import_from`]): a second install or a create of one is
+    /// refused at once, never left waiting on the first's `<file>.lock`.
+    importing: Mutex<Vec<String>>,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -609,6 +659,7 @@ impl Tenants {
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Tenants> {
         let dir = dir.into();
         fennec_core::fs::create_dir_private(&dir)?;
+        sweep_left(&dir);
         let hooks = Arc::new(crate::tenant_hooks::Store::open(&dir)?);
         Ok(Tenants {
             dir,
@@ -633,6 +684,7 @@ impl Tenants {
             scheduler: std::sync::OnceLock::new(),
             hooks,
             syncs: syncs::Syncs::default(),
+            importing: Mutex::new(Vec::new()),
         })
     }
 
@@ -1468,6 +1520,7 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
+            self.refuse_if_importing(name)?;
             self.refuse_if_shutting_down()?;
             // An identity a file of the name left -- a binary from before
             // this one deleting it -- names another file, and goes before
@@ -2366,12 +2419,13 @@ impl Tenants {
     /// [`Self::import_as`] of an image of `len` bytes read off `body` as it
     /// comes -- a move's, off the router's connection (`admin::import`):
     /// written into a file beside the tenant's (`<file>.importing`, made as
-    /// `fs::SideFile` makes one) as its bytes arrive, every record held to
+    /// `fs::SideFile` makes one, under the tenant's lock and this install's
+    /// claim of the name) as its bytes arrive, every record held to
     /// its sum as it streams (`replication::take_image`), synced, and
     /// opened from there as the node opens its tenants -- mapped, or read
     /// into memory under `--no-mmap` -- to check it: a record cut short or one
     /// that does not read refused, the file gone -- before it is renamed
-    /// into place under the tenant's slot and lock. Read whole as the
+    /// into place under the tenant's slot. Read whole as the
     /// request's body and replayed in memory, an image was the tenant twice
     /// in the node's memory, and one larger than it never moved.
     pub fn import_from(
@@ -2385,10 +2439,32 @@ impl Tenants {
         let unwritten = |e: &dyn std::fmt::Display| {
             Refused(500, format!("could not write tenant `{name}`: {e}"))
         };
+        let path = self.path(name);
+        let there = || Refused(409, format!("tenant `{name}` already exists"));
+        if path.exists() {
+            return Err(there());
+        }
+        // The file beside the tenant's is this install's own: the name
+        // claimed in this process, then `<file>.lock` held -- across the
+        // image's take, its check and the rename -- before it is made, and
+        // it goes before either is let go (dropped in turn). Made before
+        // the slot was taken, as up to the image's review, two installs of
+        // one name each made `.importing` anew, removing the other's, and
+        // each removed it by its name as it went; on Windows, where no
+        // rename is held to its writer's handle, one could rename the
+        // other's half-written image into the tenant's place. The lock
+        // also keeps another process's install of the name -- whose file
+        // it is -- from this one's, and from a node's sweep as it starts
+        // ([`sweep_left`]).
+        let _claim = self.claim_import(name)?;
+        let _held = hold_tenant(name, &path)?;
+        if path.exists() {
+            return Err(there());
+        }
         // Through a link, the file it leads to, as the open writes it, and
         // the image written beside that one: renamed over, the link would
         // be a file of its own.
-        let target = fennec_core::fs::resolved(&self.path(name));
+        let target = fennec_core::fs::resolved(&path);
         let tmp = fennec_core::fs::beside(&target, "importing");
         let mut side = fennec_core::fs::SideFile::create(&tmp).map_err(|e| unwritten(&e))?;
         let mut out = Noted {
@@ -2443,14 +2519,12 @@ impl Tenants {
         drop(check);
 
         let id = self.with_slot(name, |held| {
-            let path = self.path(name);
             if matches!(held, Held::Open(_)) || path.exists() {
-                return Err(Refused(409, format!("tenant `{name}` already exists")));
+                return Err(there());
             }
-            // Its lock across the rename: a file put in place under a
-            // shell or an app that has the name open would be written by
-            // both.
-            let _held = hold_tenant(name, &path)?;
+            // Its lock, held since before the image was taken, across the
+            // rename: a file put in place under a shell or an app that has
+            // the name open would be written by both.
             // A tenant installed here is its primary: a record left by a
             // replica of the same name deleted before would have it follow.
             let _ = std::fs::remove_file(self.follows_path(name));
@@ -2511,6 +2585,28 @@ impl Tenants {
         let id = id?;
         self.touch(name);
         Ok(id)
+    }
+
+    /// Claims `name` for an install ([`Self::import_from`]) until the
+    /// claim drops: refused (409) where another holds it.
+    fn claim_import(&self, name: &str) -> std::result::Result<Importing<'_>, Refused> {
+        let mut importing = self.importing.lock().unwrap_or_else(|e| e.into_inner());
+        if importing.iter().any(|n| n == name) {
+            return Err(importing_refusal(name));
+        }
+        importing.push(name.to_string());
+        Ok(Importing(self, name.to_string()))
+    }
+
+    /// 409 where an install is taking an image for `name`: a create would
+    /// wait on its `<file>.lock` under the slot, every request for the
+    /// name with it, and be refused as a file not let go of.
+    fn refuse_if_importing(&self, name: &str) -> std::result::Result<(), Refused> {
+        let importing = self.importing.lock().unwrap_or_else(|e| e.into_inner());
+        match importing.iter().any(|n| n == name) {
+            true => Err(importing_refusal(name)),
+            false => Ok(()),
+        }
     }
 
     /// Where a tenant whose file goes or is replaced stood is no more.

@@ -1268,3 +1268,174 @@ fn a_node_running_no_scheduler_takes_no_scheduled_statement() {
     );
     assert_eq!(r.status, 201, "{}", r.text());
 }
+
+/// An image of `xs` as rows of `c`, as a move's source sends one.
+fn image_of(xs: &[i64]) -> Vec<u8> {
+    let mut db = fennec_core::engine::Database::new();
+    let mut run = |q: &str| {
+        db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+    };
+    run("create collection c (x int)");
+    for x in xs {
+        run(&format!("put c {{x: {x}}}"));
+    }
+    db.snapshot()
+}
+
+/// The rows of tenant file `file`'s `c`, read as a tool that only looks.
+fn xs_of(file: &std::path::Path) -> Vec<String> {
+    let db = fennec_core::fs::open_read_only(file).unwrap();
+    let q = fennec_ql::parse_one("get c select x order id").unwrap();
+    let r = db.query(&q, &[]).unwrap();
+    r.rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| format!("{:?}", r.values))
+        .collect()
+}
+
+/// Two installs of one name at once: the first, part of its image taken,
+/// holds the name -- the file beside the tenant's its own, made under the
+/// tenant's lock and its claim of the name -- and the second is refused
+/// (409) before a byte of its body is read, as a create of the name is;
+/// the first lands whole, its rows the tenant's, nothing left beside it,
+/// and an install after it finds the tenant there. With the side file made
+/// before the tenant's slot was taken, as up to the image's review, the
+/// second made `.importing` anew over the first's and was installed, the
+/// first refused as its file was no longer the one written -- and on
+/// Windows, where no rename is held to its writer's handle, one could put
+/// the other's half-written image in the tenant's place.
+#[test]
+fn an_install_under_way_holds_its_name_and_another_is_refused() {
+    use std::sync::mpsc;
+    /// An image whose second half waits for `open` once its first half was
+    /// read, saying so on `told`.
+    struct Gated {
+        bytes: Vec<u8>,
+        at: usize,
+        told: Option<mpsc::Sender<()>>,
+        open: mpsc::Receiver<()>,
+    }
+    impl Read for Gated {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let half = self.bytes.len() / 2;
+            if self.at == half {
+                if let Some(told) = self.told.take() {
+                    told.send(()).unwrap();
+                    self.open.recv().unwrap();
+                }
+            }
+            let end = if self.at < half {
+                half
+            } else {
+                self.bytes.len()
+            };
+            let n = buf.len().min(end - self.at);
+            buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+    /// An image read off as it comes, counting what was read.
+    struct Counted<'a>(&'a [u8], usize);
+    impl Read for Counted<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (&self.0[self.1..]).read(buf)?;
+            self.1 += n;
+            Ok(n)
+        }
+    }
+
+    let dir = scratch("installs");
+    let tenants = Arc::new(Tenants::new(&dir).expect("dir"));
+    let (first, second) = (image_of(&[1, 2, 3]), image_of(&[7, 8]));
+    let (told, half_read) = mpsc::channel();
+    let (open, gate) = mpsc::channel();
+    let installing = {
+        let tenants = Arc::clone(&tenants);
+        let mut body = Gated {
+            bytes: first.clone(),
+            at: 0,
+            told: Some(told),
+            open: gate,
+        };
+        std::thread::spawn(move || {
+            let len = body.bytes.len() as u64;
+            tenants.import_from("acme", &mut body, len, None)
+        })
+    };
+    half_read.recv().unwrap();
+    let side = dir.join("acme.fennec.importing");
+    assert!(
+        side.exists(),
+        "the first install's image goes beside the tenant's file"
+    );
+
+    let mut body = Counted(&second, 0);
+    let refused = tenants
+        .import_from("acme", &mut body, second.len() as u64, None)
+        .expect_err("a second install of a name under way");
+    assert_eq!(refused.0, 409, "{}", refused.1);
+    assert!(refused.1.contains("being installed"), "{}", refused.1);
+    assert_eq!(body.1, 0, "the second install's body was read");
+    let made = tenants.create("acme").map(|_| ());
+    let refused = made.expect_err("a create of a name an install holds");
+    assert_eq!(refused.0, 409, "{}", refused.1);
+    assert!(side.exists(), "the first install's file went");
+
+    open.send(()).unwrap();
+    installing
+        .join()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the first install: {} {}", e.0, e.1));
+    assert!(
+        !side.exists(),
+        "the installed image left beside the tenant's file"
+    );
+    assert_eq!(
+        xs_of(&dir.join("acme.fennec")),
+        ["[Int(1)]", "[Int(2)]", "[Int(3)]"],
+        "the first install's image, whole"
+    );
+    let mut body = Counted(&second, 0);
+    let refused = tenants
+        .import_from("acme", &mut body, second.len() as u64, None)
+        .expect_err("an install of a tenant there");
+    assert_eq!(refused.0, 409, "{}", refused.1);
+    assert_eq!(body.1, 0, "a body read for a tenant there");
+    drop(tenants);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a node's last process left beside its tenants' files as it ended
+/// -- an install's `.importing`, a copy's `.taking`, each as large as the
+/// tenant -- goes as the node starts, under each tenant's lock taken
+/// without waiting: one whose lock another holds stays, its own (this
+/// process stands in for another's here: the lock refuses a second holder
+/// in one process as in two, fennec-abi's tests holding the second). A file
+/// of no tenant's name is let be. Before, a crash's `.importing` stayed
+/// until an install of the name came again.
+#[test]
+fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
+    let dir = scratch("left");
+    std::fs::create_dir_all(&dir).unwrap();
+    let left = |f: &str| {
+        let p = dir.join(f);
+        std::fs::write(&p, b"part of an image").unwrap();
+        p
+    };
+    let (importing, taking) = (left("a.fennec.importing"), left("b.fennec.taking"));
+    let (held, other) = (left("c.fennec.importing"), left("notes.importing"));
+    let lock = fennec_abi::lock::hold(dir.join("c.fennec")).unwrap();
+    let tenants = Tenants::new(&dir).expect("dir");
+    assert!(!importing.exists(), "an install's file left");
+    assert!(!taking.exists(), "a copy's image left");
+    assert!(
+        held.exists(),
+        "a file whose tenant's lock another holds removed"
+    );
+    assert!(other.exists(), "a file of no tenant's removed");
+    drop((tenants, lock));
+    let _ = std::fs::remove_dir_all(&dir);
+}
