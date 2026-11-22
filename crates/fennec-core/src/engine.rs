@@ -61,7 +61,7 @@ pub use stored::{Statements, Stored, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
-pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
+pub use pinned::{Pinned, PinnedImage, PIN_AT, PIN_BUDGET};
 #[cfg(not(target_arch = "wasm32"))]
 mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1327,23 +1327,65 @@ fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
 pub(crate) struct Summed<'a> {
     out: &'a mut dyn ImageOut,
     sum: u32,
+    /// How `out` frames the record ([`ImageOut::framing`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    framing: Framing,
 }
 
 impl<'a> Summed<'a> {
     /// The head of a record whose body is `len` bytes, written.
     pub(crate) fn begin(out: &'a mut dyn ImageOut, kind: u8, cid: u32, len: usize) -> Result<Self> {
-        let (h, n) = head(checked_kind(kind, 1), cid, len + 1 + SUM);
+        #[cfg(not(target_arch = "wasm32"))]
+        let framing = out.framing();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (kind, len) = match framing {
+            Framing::Summed => (checked_kind(kind, 1), len + 1 + SUM),
+            Framing::Later => {
+                out.later(Later::Record)?;
+                (checked_kind(kind, 1), len + 1 + SUM)
+            }
+            // As `plain_records` frames a checked record anew.
+            Framing::Plain => (kind, len),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (kind, len) = (checked_kind(kind, 1), len + 1 + SUM);
+        let (h, n) = head(kind, cid, len);
         out.write(&h[..n])?;
         Ok(Summed {
             out,
             sum: crc32c(0, &h[..n]),
+            #[cfg(not(target_arch = "wasm32"))]
+            framing,
         })
     }
 
     /// The claim, none, and the sum, written: the record is whole.
     pub(crate) fn end(mut self) -> Result<()> {
+        // The sum the out makes as it writes the record out, of the bytes
+        // from its head; a plain record ends with its body.
+        #[cfg(not(target_arch = "wasm32"))]
+        match self.framing {
+            Framing::Summed => {}
+            Framing::Later => {
+                self.out.write(&[0])?;
+                return self.out.later(Later::Sum);
+            }
+            Framing::Plain => return Ok(()),
+        }
         self.write(&[0])?;
         self.out.write(&self.sum.to_le_bytes())
+    }
+
+    /// `store`'s live records, `len` bytes, as the record's body
+    /// ([`Store::write_live`]): written, or held by an out that writes
+    /// them as it writes the image out ([`Later::Live`]).
+    pub(crate) fn write_live(&mut self, store: &Store, len: usize) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.framing != Framing::Summed {
+            return self.out.later(Later::Live(store, len));
+        }
+        let _ = len;
+        store.write_live(self)
     }
 }
 
@@ -2650,6 +2692,51 @@ pub trait ImageOut {
     fn at(&self) -> u64;
     /// Overwrites bytes written earlier, in place.
     fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+    /// How the image's records are framed in it: [`Framing::Summed`] but
+    /// in an image a pin takes ([`PinnedImage`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn framing(&self) -> Framing {
+        Framing::Summed
+    }
+    /// What an out that frames otherwise is told besides the bytes
+    /// ([`Later`]); never asked of one that sums as it is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn later(&mut self, what: Later<'_>) -> Result<()> {
+        let _ = what;
+        Err(Error::Io(
+            "an image's out told of what it does not hold".into(),
+        ))
+    }
+}
+
+/// How an image's records go into an [`ImageOut`] ([`ImageOut::framing`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Framing {
+    /// Summed as they are written: a file's, a buffer's.
+    Summed,
+    /// Each one's sum made by the out as it writes the image out, and a
+    /// collection's live records held rather than written
+    /// ([`PinnedImage`]): summed as they were taken, every document was
+    /// read under the read lock.
+    Later,
+    /// As a version before checksums wrote them, no claim and no sum: the
+    /// image [`plain_image`] makes of one, for a follower that reads no
+    /// sums.
+    Plain,
+}
+
+/// What an out framing [`Framing::Later`] or [`Framing::Plain`] is told
+/// besides the bytes ([`ImageOut::later`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub enum Later<'a> {
+    /// A record begins: its sum is of the bytes from here.
+    Record,
+    /// The record's sum goes here, 4 bytes.
+    Sum,
+    /// A collection's live records, `len` bytes of a data record's body
+    /// ([`Store::write_live`]).
+    Live(&'a Store, usize),
 }
 
 /// A stretch of a store's bytes, held: the image a load kept, which never
@@ -6819,7 +6906,8 @@ impl Database {
     /// image is what a page persists, a replica or a moved tenant is sent
     /// and an archive keeps, and written with the versions every update
     /// left behind it grew with them -- a page's image by every write since
-    /// the page was first opened.
+    /// the page was first opened. A server sends it as a pin takes it
+    /// ([`Self::pin_image`]), written out with no lock held.
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
         self.image_into(out, &self.order, &mut Vec::new())
     }
@@ -6842,7 +6930,12 @@ impl Database {
         let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
+            #[cfg(target_arch = "wasm32")]
             out.write(&self.history.record())?;
+            // The bytes `History::record` makes, framed as every record of
+            // the image is: a plain one where the out is plain.
+            #[cfg(not(target_arch = "wasm32"))]
+            put_record(out, REC_HISTORY, 0, &self.history.encode())?;
         }
 
         for name in &self.order {
@@ -6871,7 +6964,7 @@ impl Database {
                 #[cfg(not(target_arch = "wasm32"))]
                 placed.push((c.id, data.at()));
                 match compact {
-                    true => c.store.write_live(&mut data)?,
+                    true => data.write_live(&c.store, bytes)?,
                     false => c.store.write_image(&mut data)?,
                 }
                 data.end()?;

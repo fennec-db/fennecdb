@@ -16,7 +16,9 @@ it.
 **[A long read is pinned, and read with no lock held](../../../../docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
-stray read reruns under the lock. A stream's seed is one (`sse::seed`), read
+stray read reruns under the lock. An image sent is one
+(`Database::pin_image`), each record's sum made as it is written out. A
+stream's seed is one (`sse::seed`), read
 a page at a time, its scope bound under the pin's lock and its inner `get`s
 answered on the pin (`Pinned::answer_subqueries`), the ring held back to it
 till the first look (`hold_changes`); it reads again under the lock where
