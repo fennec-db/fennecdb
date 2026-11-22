@@ -944,28 +944,45 @@ impl FileSink {
     /// appended: past them is a record a crash left cut short (see
     /// [`Database::load`]). Left there, it swallowed the first write
     /// appended after it -- acknowledged, and gone on the next open.
-    pub fn cut(&mut self, len: usize) -> Result<()> {
+    /// `marked` (`Database::marks_cut`), a close's mark follows the cut,
+    /// fsynced with it (`engine::synced_mark`): the records the
+    /// open read are durable once this returns, and the mark claims them,
+    /// so the next open reads the file as this one did. The records that
+    /// claimed how far it was durable may have gone with the tail: left
+    /// unmarked, the next open found it durable only as far as the records
+    /// kept claim, and cut a synced record the disk had flipped a bit of,
+    /// which this open read unchecked below that point, with every record
+    /// after it (docs/design/storage.md#file-format). Where the file now
+    /// ends, past the mark.
+    pub fn cut(&mut self, len: usize, marked: bool) -> Result<u64> {
         // Out of the mapping first, which then covers no byte past the
         // file's end: a page wholly past it is the process's end to read
         // (`SIGBUS`), and the appends after the cut land in those bytes, in
         // place, under every slice of the mapping a reader takes
         // (`Mapping::as_ref`). Only an open cuts, before anything reads.
+        // The mark is past what it covers too: no record points there.
         #[cfg(all(unix, target_pointer_width = "64"))]
         if let Some(m) = &self.mapping {
             m.cover(len);
         }
+        let mark = match marked {
+            true => crate::engine::synced_mark(),
+            false => Vec::new(),
+        };
+        let end = (len + mark.len()) as u64;
         let mut disk = lock(&self.disk);
         disk.file.set_len(len as u64)?;
-        disk.file.sync_data()?;
         disk.file.seek(SeekFrom::End(0))?;
+        disk.file.write_all(&mark)?;
+        disk.file.sync_data()?;
         // That fsync was the whole file's, what the earlier process left
         // among it.
         disk.inherited = false;
-        disk.end = len as u64;
-        self.durable.store(len as u64, Ordering::Release);
+        disk.end = end;
+        self.durable.store(end, Ordering::Release);
         #[cfg(unix)]
-        disk.tail.reset(len as u64);
-        Ok(())
+        disk.tail.reset(end);
+        Ok(end)
     }
 }
 
@@ -1899,7 +1916,8 @@ fn open_in_memory_into(
     if existing.len() >= MAGIC.len() {
         let whole = db.load(&existing)?;
         if whole < existing.len() {
-            sink.cut(whole)?;
+            let end = sink.cut(whole, db.marks_cut())?;
+            db.cut_to(end);
         }
     }
     db.set_sink(wrap(Box::new(sink))?);
@@ -1950,7 +1968,8 @@ fn open_mapped_into(
     if whole < len {
         // The pages past the cut stay mapped, past what the mapping covers
         // ([`FileSink::cut`]): no record points there.
-        sink.cut(whole)?;
+        let end = sink.cut(whole, db.marks_cut())?;
+        db.cut_to(end);
     }
     db.set_sink(wrap(Box::new(sink))?);
     Ok(db)
@@ -2136,7 +2155,8 @@ mod tests {
     /// past the file's new end, which are the process's end to read
     /// (`SIGBUS`), and the first appends after the cut landed in its bytes
     /// in place, under every slice a reader took: what `Mapping::as_ref`
-    /// says never happens.
+    /// says never happens. The cut's mark goes past what it covers, and the
+    /// appends after the mark.
     #[cfg(all(unix, target_pointer_width = "64"))]
     #[test]
     fn a_cut_takes_the_bytes_past_it_out_of_the_mapping() {
@@ -2150,8 +2170,10 @@ mod tests {
         let (mut sink, _) = FileSink::open(&path).unwrap();
         let mapping = Arc::new(Mapping::with_room(&lock(&sink.disk).file, len).unwrap());
         sink.mapping = Some(mapping.clone());
-        sink.cut(100).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 100);
+        let mark = crate::engine::synced_mark();
+        assert_eq!(sink.cut(100, true).unwrap(), 100 + mark.len() as u64);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 108);
+        assert_eq!(std::fs::read(&path).unwrap()[100..], mark[..]);
         assert_eq!((*mapping).as_ref().len(), 100);
         // Every page of what it covers read: one past the file's end would
         // end this process.
@@ -2159,6 +2181,7 @@ mod tests {
         sink.append(&[1, 2, 3]).unwrap();
         sink.sync().unwrap();
         assert_eq!((*mapping).as_ref(), &[7u8; 100][..]);
+        assert_eq!(std::fs::read(&path).unwrap()[108..], [1, 2, 3]);
         drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2214,9 +2237,13 @@ mod tests {
             torn,
             "the reader cut"
         );
-        // A server's open after the crash, under the reader.
+        // A server's open after the crash, under the reader: the file cut,
+        // and its close's mark after the cut (`FileSink::cut`).
         drop(open(&path).unwrap());
-        let cut = std::fs::metadata(&path).unwrap().len();
+        let mark = crate::engine::synced_mark();
+        let file = std::fs::read(&path).unwrap();
+        assert!(file.ends_with(&mark), "the cut unmarked");
+        let cut = (file.len() - mark.len()) as u64;
         assert!(cut < torn, "the open cut nothing: {cut} of {torn}");
         let t = reader.collection("t").unwrap();
         let base = t
@@ -2291,9 +2318,11 @@ mod tests {
             crate::engine::surveyed(&mut |b, at| file.read_at(b, at), synced as usize).unwrap();
         assert!(floor >= PAGE_MAX, "the reader maps nothing: {floor}");
         let looked = looked(&file).unwrap();
-        // A server's open after the crash, under the reader.
+        // A server's open after the crash, under the reader: the file cut,
+        // and its close's mark after the cut (`FileSink::cut`).
         drop(open(&path).unwrap());
-        let cut = std::fs::metadata(&path).unwrap().len() as usize;
+        let mark = crate::engine::synced_mark().len();
+        let cut = std::fs::metadata(&path).unwrap().len() as usize - mark;
         assert!(
             cut < synced as usize,
             "the open cut nothing: {cut} of {synced}"

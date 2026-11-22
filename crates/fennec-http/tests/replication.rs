@@ -183,7 +183,8 @@ const SCHEMA: &str =
 /// A primary that died in the middle of an append left its last record
 /// cut short. It is cut off the file on the way back up -- no replica was
 /// sent it, since no fsync covered it -- rather than read back later with
-/// the first write after the restart as the rest of it.
+/// the first write after the restart as the rest of it, and the cut
+/// marked, synced with it (`fs::FileSink::cut`): a close's mark, 8 bytes.
 #[test]
 fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     let d = dir("torn");
@@ -207,7 +208,7 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     drop(f);
     {
         let (mut db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), whole);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), whole + 8);
         run(&mut db, "put t {x: 2}");
         db.sync().unwrap();
     }

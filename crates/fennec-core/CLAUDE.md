@@ -30,7 +30,9 @@ ones framed anew, never after checked (`claimed_into`).
 Below the newest whole claim (`survey`) records are read unchecked
 (`fennec verify`: all), a plain one after checked refused; past it damage
 (a failing sum, a head none reads, a plain record) is refused if a whole
-record after it claims past it, else cut, said (`cut_on_open`), a segment
+record after it claims past it, else cut, said (`cut_on_open`) and marked
+where a kept record has a sum, synced with it, so the next open reads
+alike (`FileSink::cut`), a segment
 by its own claims: `judge_after` frames on, scans only past an unframed
 head, bounded; a record past the end is cut unjudged (Windows:
 `cut_and_open`), a frame past its record refused, a record whole by its

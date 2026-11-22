@@ -457,6 +457,7 @@ pub(super) fn cut_and_open(
     // cut finds nothing to cut, and the server's log and a test's
     // `cut_on_open` read None on Windows alone.
     let said = db.cut_on_open().cloned();
+    let marked = db.marks_cut();
     drop(db);
     sink.mapping = None;
     if CUTTING.with(|c| c.get()) {
@@ -480,7 +481,11 @@ pub(super) fn cut_and_open(
             _ => e.into(),
         });
     }
-    sink.cut(whole)?;
+    // Marked, the open after the cut finds nothing to cut. Unmarked, the
+    // records claiming how far the file was durable gone with the tail, it
+    // found a synced record this open read unchecked a tail to cut again,
+    // and failed (`CUTTING`; `FileSink::cut`).
+    sink.cut(whole, marked)?;
     let path = sink.path().to_path_buf();
     drop(sink);
     let mut db = crate::engine::Database::new();
@@ -1305,7 +1310,8 @@ pub(super) mod tests {
         f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
         drop(f);
         let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        // Cut, and a close's mark after the cut (`FileSink::cut`).
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 8);
         assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);

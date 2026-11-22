@@ -193,7 +193,9 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
         {
             let mut db = fennec_core::fs::open(&path).expect("the open after the crash");
             assert_eq!(ids(&mut db, "t"), vec![1], "{tag}");
-            assert_eq!(std::fs::metadata(&path).unwrap().len(), whole, "{tag}");
+            // Cut, and marked after the cut (`fs::FileSink::cut`).
+            let len = std::fs::metadata(&path).unwrap().len();
+            assert_eq!(len, whole + mark().len() as u64, "{tag}");
             run(&mut db, r#"put t {a: "after"}"#);
             db.sync().expect("sync");
         }
@@ -247,7 +249,7 @@ fn zeros_to_the_end_are_cut_as_a_torn_tail() {
             {
                 let mut db = open(&path).expect("the open after the cut");
                 assert_eq!(ids(&mut db, "t"), rows, "{tag}");
-                assert_eq!(len(), whole, "{tag}");
+                assert_eq!(len(), whole + mark().len() as u64, "{tag}: cut, marked");
                 run(&mut db, r#"put t {a: "after"}"#);
                 db.sync().expect("sync");
             }
@@ -306,7 +308,7 @@ fn zeros_inside_the_image_or_before_a_claim_past_them_refuse_the_open() {
                 "said"
             );
         }
-        assert_eq!(std::fs::read(&path).unwrap(), good, "cut");
+        assert_eq!(std::fs::read(&path).unwrap(), cut_to(&good), "cut, marked");
         let mut bad = good.clone();
         bad.resize(good.len() + zeros, 0);
         let at = bad.len() as u64;
@@ -471,7 +473,7 @@ fn a_record_whose_end_the_disk_lost_is_cut() {
                 assert_eq!(ids(&mut db, "t"), vec![1], "{what}, {way}");
                 assert_eq!(
                     std::fs::read(&path).unwrap(),
-                    good[..big],
+                    cut_to(&good[..big]),
                     "{what}, {way}: cut where the record began"
                 );
                 run(&mut db, r#"put t {a: "after"}"#);
@@ -505,6 +507,37 @@ fn heads(file: &[u8]) -> Vec<(usize, usize)> {
 fn written(db: &mut Database, path: &std::path::Path) -> Vec<u8> {
     db.write_out().expect("write out");
     std::fs::read(path).unwrap()
+}
+
+/// A close's mark (`REC_SYNCED`, kind 14): claiming its own start, the
+/// same eight bytes wherever it lies.
+#[cfg(feature = "std-fs")]
+fn mark() -> Vec<u8> {
+    fennec_core::engine::record_claiming(14, 0, &[], 4096, 4096)
+}
+
+/// A file cut by an open to write it, `kept` the bytes before the cut: the
+/// open marks the cut, synced with it, where a record it keeps carries a
+/// sum (`fs::FileSink::cut`).
+#[cfg(feature = "std-fs")]
+fn cut_to(kept: &[u8]) -> Vec<u8> {
+    [kept, &mark()[..]].concat()
+}
+
+/// Each row of `collection`, its id and its text field `a`.
+#[cfg(feature = "std-fs")]
+fn texts(db: &mut Database, collection: &str) -> Vec<(u64, String)> {
+    let stmt = fennec_ql::parse_one(&format!("get {collection} select a")).expect("parse");
+    let Response::Rows(rs) = db.execute(&stmt).expect("execute") else {
+        panic!("expected rows");
+    };
+    rs.rows
+        .iter()
+        .map(|r| match r.values.first() {
+            Some(Value::Text(a)) => (r.id, a.clone()),
+            other => panic!("{}: {other:?}", r.id),
+        })
+        .collect()
 }
 
 /// Each way an open reads a file: refused with `says`, and the file left
@@ -736,7 +769,11 @@ fn a_page_lost_across_heads_past_the_durable_point_is_cut() {
                     (at as u64, (bad.len() - at) as u64),
                     "{what}, {way}"
                 );
-                assert_eq!(std::fs::read(&path).unwrap(), good[..at], "{what}, {way}");
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    cut_to(&good[..at]),
+                    "{what}, {way}"
+                );
                 run(&mut db, r#"put t {a: "after"}"#);
                 db.sync().expect("sync");
             }
@@ -786,7 +823,127 @@ fn a_hole_in_an_unsynced_record_before_a_whole_one_is_cut() {
         .unwrap_or_else(|e| panic!("{way}: {e}"));
         assert_eq!(ids(&mut db, "t"), vec![1], "{way}");
         assert_eq!(db.cut_on_open().map(|c| c.records), Some(2), "{way}");
-        assert_eq!(std::fs::read(&path).unwrap(), good[..big], "{way}");
+        assert_eq!(std::fs::read(&path).unwrap(), cut_to(&good[..big]), "{way}");
+    }
+    cleanup(dir, path);
+}
+
+/// A file torn as v0.2.0's `torn-wide.fennec` is: a synced row a disk
+/// flipped a bit of, below the point the claims after it name, which an
+/// open reads unchecked, and a page of the first write after that fsync a
+/// power cut lost, past it, where the open cuts the file -- the records
+/// claiming the point going with the tail. Opened again, every way a file
+/// opens, it cuts nothing and answers as the open that cut it did: the cut
+/// leaves a close's mark after it, synced with it (`fs::FileSink::cut`).
+/// Without one, the rows left claimed only the fsync before the flipped
+/// row, the next open held that row to its sum and cut it with the synced
+/// row after it -- silently on a Unix; on Windows, whose open cuts and
+/// opens again at once, the open was refused ("cut short again").
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_file_an_open_cut_opens_again_as_that_open_read_it() {
+    let (dir, path) = tmp_path("cut-twice");
+    let synced = "a synced row after it ".repeat(240);
+    let good = {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "first"}"#);
+        db.sync().expect("sync");
+        run(&mut db, r#"put t {a: "the row a disk flipped a bit of"}"#);
+        // More than a page: the claims after the next fsync, rounded down a
+        // page from their records, name a point past the row before it.
+        run(&mut db, &format!(r#"put t {{a: "{synced}"}}"#));
+        db.sync().expect("sync");
+        run(
+            &mut db,
+            r#"put t {a: "the row a power cut lost a page of"}"#,
+        );
+        for n in 0..20 {
+            run(&mut db, &format!(r#"put t {{a: "after the fsync, {n}"}}"#));
+        }
+        let good = written(&mut db, &path);
+        drop(db);
+        good
+    };
+    let all = heads(&good);
+    let find = |what: &[u8]| good.windows(what.len()).position(|w| w == what).unwrap();
+    let holding = |at: usize| *all.iter().find(|&&(s, e)| s <= at && at < e).unwrap();
+    let flipped = holding(find(b"the row a disk flipped"));
+    let kept = holding(find(b"a synced row after it"));
+    let lost = holding(find(b"the row a power cut lost"));
+    assert_eq!((flipped.1, kept.1), (kept.0, lost.0), "{all:?}");
+    let records = all.iter().filter(|&&(s, _)| s >= lost.0).count();
+    assert_eq!(records, 21, "the lost row and 20 after it");
+    let claim = |(at, end): (usize, usize)| {
+        fennec_core::engine::checked_claim(&good[at..end], at)
+            .map(|(_, point)| point)
+            .unwrap()
+    };
+    // The rows the cut keeps claim the fsync before the flipped row; the
+    // ones it takes, the fsync after it: the point the open reads to.
+    assert!(claim(kept) <= flipped.0, "{} {flipped:?}", claim(kept));
+    let point = claim(*all.last().unwrap());
+    assert!(flipped.1 < point && point <= lost.0, "{point} {all:?}");
+    let mut bad = good.clone();
+    bad[find(b"the row a disk flipped") + 15] ^= 0x20;
+    bad[find(b"the row a power cut lost") + 25] ^= 0x20;
+    let want: Vec<(u64, String)> = vec![
+        (1, "first".into()),
+        (2, "the row a disk Flipped a bit of".into()),
+        (3, synced),
+    ];
+    let open = |way: &str, p: &std::path::Path| match way {
+        "mapped" => fennec_core::fs::open(p),
+        "in-memory" => fennec_core::fs::open_in_memory(p),
+        "serving" => fennec_core::fs::open_serving(p, true, Box::new(Ok)),
+        "serving in memory" => fennec_core::fs::open_serving(p, false, Box::new(Ok)),
+        _ => fennec_core::fs::open_read_only(p),
+    };
+    let said = Some((lost.0 as u64, (bad.len() - lost.0) as u64, records as u64));
+    // A look first: what an open to write reads, nothing cut.
+    std::fs::write(&path, &bad).unwrap();
+    {
+        let mut db = open("read-only", &path).expect("a look");
+        assert_eq!(texts(&mut db, "t"), want, "read-only");
+        let cut = db.cut_on_open().map(|c| (c.at, c.bytes, c.records));
+        assert_eq!(cut, said, "read-only");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), bad, "the look wrote");
+    let writing = ["mapped", "in-memory", "serving", "serving in memory"];
+    for way in writing {
+        std::fs::write(&path, &bad).unwrap();
+        let after = {
+            let mut db = open(way, &path).unwrap_or_else(|e| panic!("{way}: {e}"));
+            assert_eq!(texts(&mut db, "t"), want, "{way}");
+            let cut = db.cut_on_open().map(|c| (c.at, c.bytes, c.records));
+            assert_eq!(cut, said, "{way}");
+            drop(db);
+            std::fs::read(&path).unwrap()
+        };
+        for again in writing.iter().chain(&["read-only"]) {
+            let mut db = open(again, &path).unwrap_or_else(|e| panic!("{way}, then {again}: {e}"));
+            let cut = db.cut_on_open().cloned();
+            assert_eq!(cut, None, "{way}, then {again}: cut again");
+            assert_eq!(texts(&mut db, "t"), want, "{way}, then {again}");
+            drop(db);
+            let now = std::fs::read(&path).unwrap();
+            assert!(now == after, "{way}, then {again}: the open wrote");
+        }
+        // Every byte before the mark was durable once the cut's fsync ran.
+        assert!(after == cut_to(&bad[..lost.0]), "{way}: not cut and marked");
+        // The next write lands after the mark, and every open reads it.
+        {
+            let mut db = open(way, &path).expect("the open after");
+            run(&mut db, r#"put t {a: "after the cut"}"#);
+            db.sync().expect("sync");
+        }
+        for again in writing.iter().chain(&["read-only"]) {
+            let mut db = open(again, &path).expect("the open after the write");
+            assert_eq!(db.cut_on_open(), None, "{way}, written, then {again}");
+            let mut more = want.clone();
+            more.push((4, "after the cut".into()));
+            assert_eq!(texts(&mut db, "t"), more, "{way}, written, then {again}");
+        }
     }
     cleanup(dir, path);
 }
@@ -853,7 +1010,11 @@ fn cut_every_way(path: &std::path::Path, bad: &[u8], at: usize, rows: usize, wha
             assert_eq!(ids(&mut db, "v").len(), rows, "{what}, {way}");
             let cut = db.cut_on_open().expect("the cut said").clone();
             assert_eq!(cut.at, at as u64, "{what}, {way}");
-            assert_eq!(std::fs::read(path).unwrap(), bad[..at], "{what}, {way}");
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                cut_to(&bad[..at]),
+                "{what}, {way}"
+            );
             run(
                 &mut db,
                 &format!("put v {{e: [{}]}}", ["0.5"; 64].join(", ")),
@@ -1065,10 +1226,10 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
             assert_eq!(cut, Some((x as u64, records)), "{bytes:?}, {way}");
             drop(db);
             let left = match way {
-                "read-only" => &bad,
-                _ => &good,
+                "read-only" => bad.clone(),
+                _ => cut_to(&good),
             };
-            assert_eq!(&std::fs::read(&path).unwrap(), left, "{bytes:?}, {way}");
+            assert_eq!(std::fs::read(&path).unwrap(), left, "{bytes:?}, {way}");
         }
         // A whole record after them claiming the file durable past them:
         // they were durable once, and refused -- a plain record framed by
@@ -1271,7 +1432,11 @@ fn a_torn_tail_is_cut_before_its_documents_are_read() {
             assert_eq!(ids(&mut db, "v"), vec![1], "{says}, {way}");
             assert_eq!(db.cut_on_open().map(|c| c.at), Some(last as u64));
             drop(db);
-            assert_eq!(std::fs::read(&path).unwrap(), good[..last], "{says}, {way}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                cut_to(&good[..last]),
+                "{says}, {way}"
+            );
         }
         assert!(fennec_core::engine::resum(&mut bad, at));
         refused_every_way(&path, &bad, says);
@@ -1281,7 +1446,8 @@ fn a_torn_tail_is_cut_before_its_documents_are_read() {
 
 /// A close's mark, appended with no fsync of its own, torn by a power cut
 /// after the close -- cut short, or its bytes zeros -- is cut and not said
-/// as a cut: it was no write, and everything before it was durable.
+/// as a cut: it was no write, and everything before it was durable. The
+/// cut is marked as any is, the mark whole again.
 #[cfg(feature = "std-fs")]
 #[test]
 fn a_torn_close_mark_is_cut_unsaid() {
@@ -1307,8 +1473,10 @@ fn a_torn_close_mark_is_cut_unsaid() {
         assert_eq!(ids(&mut db, "t"), vec![1]);
         assert!(db.cut_on_open().is_none(), "{:?}", db.cut_on_open());
         drop(db);
-        // Cut, and no mark again: nothing was written since.
-        assert_eq!(std::fs::read(&path).unwrap(), good[..mark]);
+        // Cut, and marked after the cut (`fs::FileSink::cut`): the same
+        // eight bytes where the torn ones were, and none more at the
+        // close, nothing written since.
+        assert_eq!(std::fs::read(&path).unwrap(), good);
     }
     cleanup(dir, path);
 }
@@ -1373,7 +1541,7 @@ fn zeros_after_a_checked_record_are_cut_whatever_its_last_byte() {
     drop(f);
     let mut db = fennec_core::fs::open(&path).expect("zeros after a checked record");
     assert_eq!(ids(&mut db, "t").len(), n + 1);
-    assert_eq!(std::fs::read(&path).unwrap(), whole, "cut");
+    assert_eq!(std::fs::read(&path).unwrap(), cut_to(&whole), "cut, marked");
     drop(db);
     cleanup(dir, path);
 }

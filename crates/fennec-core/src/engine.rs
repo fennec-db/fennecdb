@@ -2190,7 +2190,8 @@ fn unknown_kind(kind: u8, at: usize) -> Error {
 /// What an open cut off a file's end ([`Database::cut_on_open`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cut {
-    /// Where the file now ends.
+    /// Where the file now ends -- but for the close's mark an open that
+    /// writes the file puts after the cut (`fs::FileSink::cut`).
     pub at: u64,
     /// How many bytes went.
     pub bytes: u64,
@@ -2225,6 +2226,22 @@ fn records_from(bytes: &[u8], at: usize) -> u64 {
         }
     }
     n
+}
+
+/// Whether a record of `kept` -- the whole records an open keeps of a file,
+/// up to where it cuts -- carries a sum (`Database::marks_cut`): looked for
+/// from the front, the first one does in a file this version wrote; in one
+/// a version before checksums began, the first this version appended to
+/// it, after its plain ones.
+#[cfg(feature = "std-fs")]
+fn sums_before(kept: &[u8]) -> bool {
+    let mut walk = Walk::new(kept, MAGIC.len());
+    while let Ok(Some(r)) = walk.next() {
+        if r.kind != REC_SEQ && r.checked() {
+            return true;
+        }
+    }
+    false
 }
 
 /// What a walk over a file's heads finds before a load reads it: where the
@@ -5955,6 +5972,10 @@ pub struct Database {
     /// What the load cut off a torn tail, for whoever opened the file to
     /// say ([`Self::cut_on_open`]).
     cut: Option<Cut>,
+    /// Whether the open's cut of a torn tail is marked: a record before it
+    /// carries a sum ([`Self::marks_cut`]).
+    #[cfg(feature = "std-fs")]
+    marks_cut: bool,
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
@@ -6198,6 +6219,8 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             durable: None,
             cut: None,
+            #[cfg(feature = "std-fs")]
+            marks_cut: false,
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
             #[cfg(feature = "statements")]
@@ -6312,6 +6335,25 @@ impl Database {
     #[cfg(windows)]
     pub(crate) fn said_cut(&mut self, cut: Option<Cut>) {
         self.cut = cut;
+    }
+
+    /// Whether the open that cuts the file where the load stopped marks the
+    /// cut (`fs::FileSink::cut`): where a record the load kept carries a
+    /// sum, and so the file one no version before checksums reads. In a
+    /// file of no sums no claim decides what an open reads, and a mark
+    /// would be the first record such a version refuses.
+    #[cfg(feature = "std-fs")]
+    pub(crate) fn marks_cut(&self) -> bool {
+        self.marks_cut
+    }
+
+    /// The file cut where the load stopped, and marked where
+    /// [`Self::marks_cut`] says: it ends at `end`, where the next record
+    /// goes, every byte before it durable.
+    #[cfg(feature = "std-fs")]
+    pub(crate) fn cut_to(&mut self, end: u64) {
+        *self.appended.get_mut() = end;
+        self.loaded_durable = end;
     }
 
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
@@ -7588,6 +7630,12 @@ impl Database {
             bytes: (bytes.len() - whole) as u64,
             records: records_from(bytes, whole),
         });
+        // Looked for at a cut alone, from the front: in a file this version
+        // wrote, the first record past the counter carries one.
+        #[cfg(feature = "std-fs")]
+        {
+            self.marks_cut = whole < bytes.len() && sums_before(&bytes[..whole]);
+        }
         // Where appends after the load claim the file durable to until an
         // fsync of their own covers more: the image's end at least, which
         // was synced before it was renamed into place, and no further than

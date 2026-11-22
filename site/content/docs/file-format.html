@@ -125,7 +125,11 @@ file is cut there, and the server logs how many bytes and records went
 (<code>a torn tail: no whole record after it says a sync covered
 it</code>). A write answered as durable is among them only where the disk
 damaged the last record it had synced, which no record after it can
-vouch for.</p>
+vouch for. The open syncs the cut with a mark after it (kind 14), which
+says everything it kept was durable: the records that said so may have
+gone with the tail, and the next open reads the file as this one did.
+v0.2.0 made no mark there, and the open after its cut could cut again,
+synced records the first had kept among them.</p>
 
 <p>What follows is read record by record where it can be: after a record
 that fails its checksum, from that record's end. A record whose length

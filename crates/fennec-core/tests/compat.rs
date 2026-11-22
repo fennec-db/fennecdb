@@ -588,6 +588,85 @@ fn every_claim_a_release_wrote_reads_as_its_bytes() {
     assert!(wide > 0, "no claim of two bytes");
 }
 
+/// `torn-wide` cut by an open to write it, then opened again with nothing
+/// written between, every way a file opens: the second open cuts nothing
+/// and answers as the release did, as the first did. The records claiming
+/// the last fsync go with the torn tail, and the cut leaves a close's mark
+/// after it, synced with it (`fs::FileSink::cut`). Without one, the second
+/// open found the file durable only as far as the rows left claimed, held
+/// the synced row the disk flipped a bit of to its sum and cut it with the
+/// row after it -- 5 358 bytes of v0.2.0's file, silently on a Unix; on
+/// Windows, whose open cuts and opens again at once, the open was refused
+/// ("cut short again").
+#[test]
+fn torn_wide_cut_by_an_open_opens_again_as_that_open_read_it() {
+    fennec_ql::install();
+    let name = "torn-wide";
+    let opened = |path: &Path, way: &str| {
+        match way {
+            "mapped" => fennec_core::fs::open(path),
+            "in-memory" => fennec_core::fs::open_in_memory(path),
+            "serving" => fennec_core::fs::open_serving(path, true, Box::new(Ok)),
+            _ => fennec_core::fs::open_read_only(path),
+        }
+        .unwrap_or_else(|e| panic!("{name}, {way}: {e}"))
+    };
+    let (mut found, mut held) = (Vec::new(), 0);
+    for set in sets() {
+        if !set.join(format!("{name}.fennec")).is_file() {
+            continue;
+        }
+        let scratch = Scratch::new(&format!("twice-{}", set_name(&set)));
+        let writing = ["mapped", "in-memory", "serving"];
+        for way in writing {
+            let dir = scratch.0.join(way);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = copied(&set, name, &dir);
+            let torn = std::fs::metadata(&path).unwrap().len();
+            let db = at_clock(opened(&path, way), &set);
+            let cut = db.cut_on_open().cloned().expect("the open cut nothing");
+            found.extend(differences(&db, &set, name, way));
+            drop(db);
+            let len = std::fs::metadata(&path).unwrap().len();
+            eprintln!(
+                "{}/{name}, {way}: {} bytes ({} records) cut at {}, {torn} -> {len}",
+                set_name(&set),
+                cut.bytes,
+                cut.records,
+                cut.at
+            );
+            assert!(
+                cut.at <= len && len < torn,
+                "{way}: {cut:?}, {len} of {torn}"
+            );
+            for again in writing.iter().chain(&["read-only"]) {
+                let db = at_clock(opened(&path, again), &set);
+                let cut = db.cut_on_open().cloned();
+                assert_eq!(cut, None, "{way}, then {again}: cut again");
+                found.extend(differences(
+                    &db,
+                    &set,
+                    name,
+                    &format!("{way}, then {again}"),
+                ));
+                drop(db);
+                let now = std::fs::metadata(&path).unwrap().len();
+                assert_eq!(now, len, "{way}, then {again}: the open wrote");
+                held += 1;
+            }
+            // The close's mark after the cut, which claims it.
+            assert_eq!(len, cut.at + 8, "{way}: the cut unmarked");
+        }
+    }
+    assert!(held > 0, "no set holds {name}");
+    assert!(
+        found.is_empty(),
+        "{} answers differ:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+}
+
 /// `HEAD`'s reading of an index's options, laid out as the walk reads them
 /// off the bytes (`walk::index`): a graph's metric, `m`, `ef_construction`,
 /// `ef_search` and quantization; a text index's flags (kind 11), k1 and b in

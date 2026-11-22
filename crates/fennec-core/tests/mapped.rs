@@ -358,7 +358,8 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
     drop(f);
     {
         let mut db = open_mapped(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        // Cut, and a close's mark after the cut (`fs::FileSink::cut`).
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 8);
         run(&mut db, "put other {x: 2}");
         db.sync().unwrap();
         assert_eq!(answer(&db, "get other select x", &[]).rows.len(), 2);

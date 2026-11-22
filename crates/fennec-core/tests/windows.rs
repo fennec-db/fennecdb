@@ -272,7 +272,9 @@ fn a_torn_tail_is_cut_by_a_second_open() {
 
     {
         let mut db = fennec_core::fs::open_serving(&path, true, Box::new(Ok)).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        // Cut, and a close's mark after the cut (`fs::FileSink::cut`): the
+        // second open finds nothing to cut.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 8);
         assert_eq!(count(&db), 30);
         assert_eq!(db.link_pending(0), 30, "the second open linked them");
         fill(&mut db, 30, 5);
