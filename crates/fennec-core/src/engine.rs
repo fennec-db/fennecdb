@@ -7313,7 +7313,7 @@ impl Database {
         // Where the last close's mark whole by its sum ends: a cut there is
         // not marked again ([`Self::marks_cut`]).
         #[cfg(feature = "std-fs")]
-        let (mut marked_to, mut marked_before_spills) = (0, 0);
+        let (mut synced_to, mut synced_before_spills) = (0, 0);
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
             if r.kind != REC_SEQ {
@@ -7387,8 +7387,8 @@ impl Database {
             // A run of spills right after a whole mark: cut where they
             // start, the mark ends what is kept.
             #[cfg(feature = "std-fs")]
-            if dead_tail == Some(r.at) && marked_to == r.at {
-                marked_before_spills = r.at;
+            if dead_tail == Some(r.at) && synced_to == r.at {
+                synced_before_spills = r.at;
             }
             let index = frames
                 .take()
@@ -7534,7 +7534,7 @@ impl Database {
                 // Not a write: the close's mark is read by the survey alone,
                 // and by the open that cuts after it.
                 #[cfg(feature = "std-fs")]
-                REC_SYNCED if r.checked() && r.holds(bytes) => marked_to = walk.pos,
+                REC_SYNCED if r.checked() && r.holds(bytes) => synced_to = walk.pos,
                 REC_SYNCED => {}
                 other => return Err(unknown_kind(other, r.at)),
             }
@@ -7651,8 +7651,8 @@ impl Database {
         // as this one did.
         #[cfg(feature = "std-fs")]
         {
-            let ends_marked = whole == marked_to || whole == marked_before_spills;
-            self.marks_cut = whole < bytes.len() && !ends_marked && sums_before(&bytes[..whole]);
+            let ends_synced = whole == synced_to || whole == synced_before_spills;
+            self.marks_cut = whole < bytes.len() && !ends_synced && sums_before(&bytes[..whole]);
         }
         // Where appends after the load claim the file durable to until an
         // fsync of their own covers more: the image's end at least, which
