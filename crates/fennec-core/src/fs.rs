@@ -887,6 +887,14 @@ impl FileSink {
                 .truncate(false),
         )
         .open(&path)?;
+        // An image a replica's follower was taking beside the file when its
+        // process ended (`Sink::image_side`), as large as the database and
+        // never read: removed by whoever opens the file to write it, its
+        // owner under `<file>.lock` -- a primary's, a copy's, an app's, the
+        // shell's -- never by a tool that only looks. Left to the follower
+        // as it started, a copy started again as a primary kept it for good.
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = std::fs::remove_file(beside(&path, "taking"));
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
@@ -1278,16 +1286,20 @@ impl Sink for FileSink {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &Path) -> Result<()> {
+    fn adopt(&mut self, side: &Path, written: &File) -> Result<()> {
         let mut disk = lock(&self.disk);
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
-        // Opened where it is no link (`O_NOFOLLOW`): the side file's
-        // handle stays with its writer, and a link put at `.beside` since
-        // is refused here, the database as it was, rather than followed.
+        // The handle that wrote it, the file appended to after: whatever
+        // was put at `side`'s name since -- a link, or a file, which an
+        // open by the name (`O_NOFOLLOW`) took and renamed in -- is not the
+        // one written, and `swap_in`'s `still_named` refuses it, the
+        // database as it was.
         #[cfg(not(windows))]
-        let image = private_beside(OpenOptions::new().read(true).write(true)).open(side)?;
+        let image = written.try_clone()?;
+        #[cfg(windows)]
+        let _ = written;
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
         {
             self.mapping = None;

@@ -853,7 +853,7 @@ impl Database {
         b.side
             .patch(b.head_at + 9, &(len - b.body_at).to_le_bytes())?;
         b.side.sync()?;
-        let r = self.sink_mut().adopt(b.side.path());
+        let r = self.sink_mut().adopt(b.side.path(), b.side.file());
         self.storage(r)?;
         b.side.adopted();
         // The file is the new one now: a panic before every store points

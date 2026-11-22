@@ -2894,9 +2894,15 @@ pub trait Sink: Send {
         None
     }
     /// Puts the file at `side`, an image of every write so far and fsynced,
-    /// in place of this one, and appends to it from then on.
+    /// in place of this one, and appends to it from then on: the file
+    /// `written` is open on, the handle that wrote it, and on a Unix no
+    /// other put at `side`'s name since (`fs::still_named`), which is
+    /// refused. Opened again by its name, as up to the image's review, a
+    /// file put at `.beside` or `.taking` meanwhile -- no link, which the
+    /// open refused -- was renamed into the database's place.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> Result<()> {
+    fn adopt(&mut self, side: &std::path::Path, written: &std::fs::File) -> Result<()> {
+        let _ = written;
         Err(Error::Io(format!(
             "{} has no file to take the place of",
             side.display()
@@ -9220,11 +9226,18 @@ impl Database {
     /// stand, their file the database's now. Nothing is written under the
     /// lock but the rename, and nothing walked: taken in memory, the image
     /// was written to disk here whole and every record head walked again.
-    /// Refused, the file is as it was, and `side` goes as it drops.
+    /// Refused, the file is as it was, and `side` goes as it drops. The
+    /// file renamed in is the one the follower wrote, the stores `fresh`
+    /// read map: on a Unix, another put at its name since is refused before
+    /// the sink is asked, the database as it was and taking writes, and the
+    /// sink holds the rename to the side's own handle after
+    /// ([`Sink::adopt`]).
     #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     pub fn adopt_side(&mut self, fresh: Database, mut side: crate::fs::SideFile) -> Result<()> {
         self.refuse_if_failed()?;
-        let r = self.sink_mut().adopt(side.path());
+        #[cfg(unix)]
+        crate::fs::still_named(side.file(), side.path())?;
+        let r = self.sink_mut().adopt(side.path(), side.file());
         self.storage(r)?;
         side.adopted();
         *self.appended.get_mut() = ImageOut::at(&side);

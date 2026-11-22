@@ -905,8 +905,12 @@ impl Sink for Tee {
     /// The side file holds every write, and is fsynced before it takes the
     /// file's place.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> fennec_core::error::Result<()> {
-        self.file.adopt(side)?;
+    fn adopt(
+        &mut self,
+        side: &std::path::Path,
+        written: &std::fs::File,
+    ) -> fennec_core::error::Result<()> {
+        self.file.adopt(side, written)?;
         self.feed.mark_durable(self.feed.seq());
         Ok(())
     }
@@ -2350,17 +2354,8 @@ impl Follower {
         let _ends = Ends(&self.ended);
         self.refused.store(false, Ordering::SeqCst);
         // An image a crash or a kill left part taken beside the copy's file
-        // ([`arrived`]), as large as the database: the copy is its own file
-        // still, and the follower, the one writer of that name, writes the
-        // next image there anew.
-        let left = self
-            .db
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .image_side();
-        if let Some(left) = left {
-            let _ = std::fs::remove_file(left);
-        }
+        // ([`arrived`]) went as the file was opened to be written
+        // (`fennec_core::fs`'s `FileSink::create`), a copy's or a primary's.
         let mut force_image = false;
         let mut pause = Duration::from_millis(100);
         while !self.stop.load(Ordering::SeqCst) {
@@ -3541,7 +3536,11 @@ mod tests {
 
     /// An empty database made to follow, and a follower of `url` for it.
     fn copy_of(url: &str) -> (Arc<RwLock<Database>>, Arc<Follower>) {
-        let mut db = Database::new();
+        copy_over(url, Database::new())
+    }
+
+    /// [`copy_of`] over `db`.
+    fn copy_over(url: &str, mut db: Database) -> (Arc<RwLock<Database>>, Arc<Follower>) {
         let lineage = db.history().lineage.clone();
         db.follow(lineage).unwrap();
         let db = Arc::new(RwLock::new(db));
@@ -3567,26 +3566,55 @@ mod tests {
     /// Each look is held here by a halt come at that moment; without it the
     /// follower went on to adopt the image, and a promotion, a release
     /// under the tenant's slot and a node's shutdown waited for a check, a
-    /// load and a rewrite of the whole image.
+    /// load and a rewrite of the whole image. A copy with a file as a
+    /// server's has -- its image taken into `.taking` beside it, its follow
+    /// record after it, synced -- keeps its file to the byte, nothing left
+    /// beside it: without either look the image was renamed in.
     #[test]
     fn a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-repl-halt-look-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         for at in ["an image arrived", "an image loaded"] {
-            let (image, seq) = two_rows();
-            let done = Arc::new(AtomicBool::new(false));
-            let _done = Done(Arc::clone(&done));
-            let url = primary(answer(true, seq, &framed(b'I', &image)), held(done));
-            let (db, f) = copy_of(&url);
-            *lock(&f.halt_at) = Some(at);
-            f.start("fennec-test-halt-look".into()).unwrap();
-            let ended = ended_within(&f, SILENCE);
-            assert!(
-                ended && f.images() == 0,
-                "{at}: the follower took the image after its halt (ended {ended}, images {})",
-                f.images()
-            );
-            assert_eq!(db.read().unwrap().change_seq(), 0, "{at}");
-            f.halt();
+            for filed in [false, true] {
+                let (image, seq) = two_rows();
+                let done = Arc::new(AtomicBool::new(false));
+                let _done = Done(Arc::clone(&done));
+                let url = primary(answer(true, seq, &framed(b'I', &image)), held(done));
+                let path = dir.join(format!("{}-{filed}.fennec", at.replace(' ', "-")));
+                let (db, f) = match filed {
+                    false => copy_of(&url),
+                    true => copy_over(&url, fennec_core::fs::open(&path).unwrap()),
+                };
+                let before = filed.then(|| {
+                    db.write().unwrap().sync().unwrap();
+                    std::fs::read(&path).unwrap()
+                });
+                *lock(&f.halt_at) = Some(at);
+                f.start("fennec-test-halt-look".into()).unwrap();
+                let ended = ended_within(&f, SILENCE);
+                assert!(
+                    ended && f.images() == 0,
+                    "{at}, a file {filed}: the follower took the image after its halt \
+                     (ended {ended}, images {})",
+                    f.images()
+                );
+                assert_eq!(db.read().unwrap().change_seq(), 0, "{at}");
+                if let Some(before) = before {
+                    assert!(
+                        std::fs::read(&path).unwrap() == before,
+                        "{at}: the copy's file changed"
+                    );
+                    let side = fennec_core::fs::beside(&path, "taking");
+                    assert!(!side.exists(), "{at}: the image left beside the copy");
+                }
+                f.halt();
+            }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A halt whose cut the read in flight misses -- on Windows, one begun

@@ -1,17 +1,19 @@
 //! A replica's image is written into a file beside the copy's as it comes,
 //! checked as it streams, and renamed into the copy's place once whole
 //! (`replication::read_answer`, the follower's path, over a copy mapped as
-//! a server's): an image torn or refused leaves the copy's file as it was
-//! and no file beside it, and a crash at any point leaves the old file or
-//! the new, which the next start reads as it is -- the image beside it
-//! swept as the follower starts.
+//! a server's): an image torn, refused, failing to load or of another change
+//! than its hello's leaves the copy's file as it was and no file beside it,
+//! and a crash at any point leaves the old file or the new, which the next
+//! start reads as it is -- the image beside it swept as the file is opened.
+//! A halt between the image's arrival and its adoption is
+//! `replication::tests::a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`,
+//! whose look only a unit test can hold.
 
 use fennec_core::engine::Database;
 use fennec_core::history::History;
-use fennec_http::replication::{self, Follower};
+use fennec_http::replication;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -159,8 +161,14 @@ fn an_image_taken_whole_is_the_copys_file() {
 }
 
 /// An image cut short on the way, and one a record of which fails its sum,
-/// are refused as they stream: the copy holds what it held, its file is
-/// the one it had, to the byte, and nothing is left beside it.
+/// are refused as they stream; one whose every record holds its sum but
+/// one does not load -- a collection made of no schema -- is refused as it
+/// is loaded from the file it was taken into (`Database::from_side`), and
+/// one at another change than its hello said once loaded, before either
+/// is adopted: the copy holds what it held, its file is the one it had, to
+/// the byte, and nothing is left beside it. Without the load's refusal the
+/// side file was renamed in, a file of a record no open reads; without the
+/// change's, the copy followed its primary from a change it was not at.
 #[test]
 fn an_image_torn_or_refused_leaves_the_copy_as_it_was() {
     let d = dir("refused");
@@ -177,23 +185,40 @@ fn an_image_torn_or_refused_leaves_the_copy_as_it_was() {
         .position(|w| w == b"primary 1")
         .expect("a document's text");
     damaged[at] ^= 0x20;
-    for (how, bytes, said) in [
+    // A record whole by its sum that no load reads: a collection made of
+    // no schema (kind 1, `REC_CREATE`).
+    let unloaded = [&image[..], &fennec_core::engine::record(1, 9, b"")].concat();
+    for (how, bytes, read, said) in [
         (
             "torn",
             answer(&image, image.len() / 2, seq, &lineage),
+            1,
             "cut short",
         ),
         (
             "refused",
             answer(&damaged, damaged.len(), seq, &lineage),
+            1,
             "checksum",
         ),
+        (
+            "unloaded",
+            answer(&unloaded, unloaded.len(), seq, &lineage),
+            2,
+            "corrupt",
+        ),
+        (
+            "another change",
+            answer(&image, image.len(), seq + 1, &lineage),
+            2,
+            &format!("is at change {seq}, its hello at {}", seq + 1),
+        ),
     ] {
-        let file = d.join(format!("{how}.fennec"));
+        let file = d.join(format!("{}.fennec", how.replace(' ', "-")));
         let (mut db, held) = copy(&file);
         let before = std::fs::read(&file).unwrap();
         let (n, end) = replication::read_answer(&mut &bytes[..], Some(&mut db));
-        assert_eq!(n, 1, "{how}: the hello alone read whole");
+        assert_eq!(n, read, "{how}: the messages read whole");
         assert!(end.to_string().contains(said), "{how}: {end}");
         assert_eq!(rows(&db), held, "{how}: the copy holds what it held");
         assert!(!taking(&file).exists(), "{how}: nothing left beside it");
@@ -210,8 +235,9 @@ fn an_image_torn_or_refused_leaves_the_copy_as_it_was() {
 
 /// A crash before the rename -- the image written beside the copy whole,
 /// its follow record after it, synced, or cut short anywhere -- leaves the
-/// copy's file as it was, which the next start opens as the copy it was;
-/// a follower started over it sweeps the file beside it. After the rename
+/// copy's file as it was, which the next start opens as the copy it was,
+/// the file beside it removed as it is opened (fennec-core's
+/// `tests/side_files.rs` holds every open to it). After the rename
 /// the file is the image with the record saying the copy follows, which
 /// the next start opens as a copy following the primary's lineage at the
 /// image's change.
@@ -243,28 +269,7 @@ fn a_crash_leaves_the_old_file_or_the_new() {
         let db = fennec_core::fs::open(&file).unwrap();
         assert_eq!(rows(&db), held, "{how}: the copy it was");
         assert!(!db.history().following, "{how}");
-        // A follower started over it sweeps what was beside it, before it
-        // connects anywhere -- here to no primary at all.
-        let db = Arc::new(RwLock::new(db));
-        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", gone.local_addr().unwrap());
-        drop(gone);
-        let f = Follower::new(&url, "t".into(), Arc::clone(&db), None, false).unwrap();
-        let run = {
-            let f = Arc::clone(&f);
-            std::thread::spawn(move || f.run())
-        };
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while taking(&file).exists() {
-            assert!(
-                Instant::now() < deadline,
-                "{how}: the file beside it stayed"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        f.halt();
-        run.join().unwrap();
-        assert_eq!(rows(&db.read().unwrap()), held, "{how}");
+        assert!(!taking(&file).exists(), "{how}: the file beside it stayed");
     }
 
     // After the rename: the image and its follow record are the file.
