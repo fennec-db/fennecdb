@@ -739,3 +739,13 @@ await db.ready();
 db.live(db.from('tasks').order('priority', 'desc'), draw);
 await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
+
+<p>With <code>cryptoKey</code> the replica is sealed as <code>persist</code>
+seals a database (<a href="javascript.html#sealed">Sealed in IndexedDB</a>).
+Only a key that holds nothing is seeded: a replica whose store is there and
+does not restore -- sealed with another key or none, changed, written by a
+later client -- refuses to start, <code>sync</code> rejecting with the
+reason, and the store stays as it was, with the writes it had not sent.
+Started again with the key it was sealed with, it sends them. A tab that
+takes the lead from such a store stores nothing in it, and tells
+<code>onError</code>.</p>

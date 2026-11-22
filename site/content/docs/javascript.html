@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 70 KB brotli as they are served with no build step; a bundler keeps
+imports, 71 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -538,15 +538,22 @@ await restore(db, 'notes', { cryptoKey });   // another key, or none, is refused
 <details class="deep"><summary>What the seal covers, and what it costs</summary>
 <p>With a <code>cryptoKey</code> (AES-GCM, from WebCrypto) the image and
 every chunk are sealed before they reach IndexedDB, each with a random nonce
-and a tag over the key it is stored under and its place. A chunk moved,
-dropped from the middle, or left from an image before is refused, as is one
-byte changed. A restore without the key refuses a sealed record, and a
+and a tag over the key it is stored under, its place and the record before
+it. A chunk moved, dropped from the middle, left from an image before, or put
+after another than the one it was sealed after is refused, as is one byte
+changed. A store cut short restores as the page left it there, and the chunks
+the page seals next open only after each other, never after one it cut; an
+older copy of the whole store put back restores as what it was. A store
+sealed by 0.2.0 restores too, and the next <code>persist</code> stores it
+over again, whole, as it seals now. A restore without the key refuses a sealed record, and a
 restore with one refuses a record stored in the clear. Where the key comes
 from is the page's decision: derived from a passphrase, as above, or handed
 over by the server after a login, so that what IndexedDB holds on the disk
 reads as nothing without it. A key kept in IndexedDB beside the data protects
 nothing. The sync layer takes it as <code>sync({ persist, cryptoKey })</code>.
-Its cursors and unsent writes are collections of the replica, sealed with it. The same 32.4 MB in
+Its cursors and unsent writes are collections of the replica, sealed with it;
+a replica given another key, or none, refuses to start and keeps the store
+(<a href="sync.html">Sync</a>). The same 32.4 MB in
 Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file
