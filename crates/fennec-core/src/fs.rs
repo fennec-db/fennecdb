@@ -955,23 +955,41 @@ impl FileSink {
     /// (docs/design/storage.md#file-format). Where the file now ends, past
     /// the mark.
     ///
-    /// Three fsyncs, each before what would claim more than the disk holds
-    /// without it -- the pages one fsync covers reach the disk in no set
-    /// order, a file's length among them: the file first, the earlier
-    /// process's pages and the torn tail with them, before a mark says they
-    /// are durable (one fsync after the mark, the mark kept and an earlier
-    /// page lost, read that page's zeros as the rows it held); the mark,
-    /// written over the torn record's first bytes, before the cut (cut and
-    /// marked under one fsync, the shorter length kept and the mark lost,
-    /// the file was an unmarked cut again); the cut last. A power cut after
-    /// any step leaves the torn file, the mark followed by the tail it
-    /// heads, or the file cut and marked, each read as this open read it,
-    /// the next open that writes it leaving it as this one does (a cut
-    /// right after a whole mark is not marked again). The mark's eight
-    /// bytes torn across two sectors leave no frame at the cut: the records
-    /// kept alone then say how far the file was durable, and a row below
-    /// this open's point failing its sum is refused by the records past the
-    /// cut, still there (docs/design/storage.md, *The cut's order*).
+    /// Each step fsynced before the next, since the pages one fsync covers
+    /// reach the disk in no set order, a file's length among them. A power
+    /// cut after any step leaves a file every way of opening reads as this
+    /// open read it, but between the zero and the kind byte of a mark
+    /// written across a sector's end (step 2), where the walk stops at the
+    /// zero and the kept records' claims alone say how far the file was
+    /// durable: a row below this open's point that fails its sum is judged
+    /// across the torn record's bytes, refused where a whole record after
+    /// them claims past it, and cut with every record after it where none
+    /// does -- the only one claiming past it a dead spill under the zero,
+    /// or the torn record's text made a record whole by its sum claiming
+    /// nothing, a head past the end after it (docs/design/storage.md, *The
+    /// cut's order*, each state and what it opens as).
+    ///
+    /// 1. The file, before anything claims it durable: the earlier
+    ///    process's pages, which a mark under the same fsync could outlive
+    ///    (the next open read a lost page's zeros as the rows it held), and
+    ///    a close's mark ending what is kept, which the shorter length could
+    ///    outlive (the next open then cut synced rows).
+    /// 2. Marked, the mark over the torn record's first bytes, and after it
+    ///    `engine::CUT_SHORT`, a head whose length runs past any file: the
+    ///    walk stops there as at any torn tail, nothing of what the torn
+    ///    record held read or judged, where after the mark
+    ///    alone it read the record's next bytes as records -- a client's
+    ///    text whole by its sum applied as a write -- and after a single
+    ///    zero judged them, refusing the open where one claimed past it. One
+    ///    write inside a 512-byte sector, which a power cut leaves whole or
+    ///    not at all; across a sector's end, where a part of the mark kept
+    ///    and the rest lost framed the head anew and the open could cut
+    ///    synced rows, three: a zero over the torn record's kind, then the
+    ///    rest, then the mark's kind byte, so the head is the torn record's,
+    ///    a zero or the whole mark and never a mix.
+    /// 3. The cut after the mark (`set_len`), the length's alone where the
+    ///    file is unmarked: a file of no sums, or one a whole mark already
+    ///    ends the records of.
     pub fn cut(&mut self, len: usize, marked: bool) -> Result<u64> {
         // Out of the mapping first, which then covers no byte past the
         // file's end: a page wholly past it is the process's end to read
@@ -984,29 +1002,30 @@ impl FileSink {
             m.cover(len);
         }
         let mut disk = lock(&self.disk);
+        synced_step(&disk.file)?;
+        let at = len as u64;
         let end = match marked {
-            // No claim decides what the next open reads of a file of no
-            // sums, nor of one a whole mark ends the records of: the cut
-            // and its fsync.
-            false => {
-                cut_file(&disk.file, len as u64)?;
-                synced_step(&disk.file)?;
-                len as u64
-            }
+            false => at,
             true => {
-                let mark = crate::engine::synced_mark();
-                let end = (len + mark.len()) as u64;
-                synced_step(&disk.file)?;
-                disk.file.seek(SeekFrom::Start(len as u64))?;
-                disk.file.write_all(&mark)?;
-                #[cfg(test)]
-                stepped(CutStep::Write(len as u64, mark.clone()));
-                synced_step(&disk.file)?;
-                cut_file(&disk.file, end)?;
+                // The mark, then the head past the end.
+                let mut head = crate::engine::synced_mark();
+                let end = at + head.len() as u64;
+                head.extend_from_slice(&crate::engine::CUT_SHORT);
+                if at / SECTOR == (at + head.len() as u64 - 1) / SECTOR {
+                    written_step(&disk.file, at, &head)?;
+                } else {
+                    written_step(&disk.file, at, &[0])?;
+                    synced_step(&disk.file)?;
+                    written_step(&disk.file, at + 1, &head[1..])?;
+                    synced_step(&disk.file)?;
+                    written_step(&disk.file, at, &head[..1])?;
+                }
                 synced_step(&disk.file)?;
                 end
             }
         };
+        cut_file(&disk.file, end)?;
+        synced_step(&disk.file)?;
         disk.file.seek(SeekFrom::End(0))?;
         // The file's fsync, what the earlier process left among it.
         disk.inherited = false;
@@ -1042,6 +1061,21 @@ fn synced_step(file: &File) -> Result<()> {
     stepped(CutStep::Sync);
     Ok(())
 }
+
+/// `bytes` written over `file` at `at`, a step of [`FileSink::cut`].
+fn written_step(mut file: &File, at: u64, bytes: &[u8]) -> Result<()> {
+    file.seek(SeekFrom::Start(at))?;
+    file.write_all(bytes)?;
+    #[cfg(test)]
+    stepped(CutStep::Write(at, bytes.to_vec()));
+    Ok(())
+}
+
+/// The span a disk writes whole or not at all, a power cut tearing a write
+/// only where it crosses one's end: 512 bytes, the least any disk has (a
+/// 4 KiB sector's end is a 512-byte one's too). [`FileSink::cut`] writes
+/// its mark in one write inside one, and in three across one's end.
+const SECTOR: u64 = 512;
 
 /// A step of [`FileSink::cut`] that completed, as a test replays what a
 /// power cut after each leaves on the disk.
@@ -2265,30 +2299,49 @@ mod tests {
     }
 
     /// What a power cut leaves of a file at every step of an open's cut
-    /// ([`FileSink::cut`]), built from the steps the cutting open took: each
-    /// write and length after the last fsync lost or kept -- a write whole,
-    /// or the length it grew the file to alone -- and, while no fsync of
-    /// the cut has run, bytes the earlier process never synced lost
-    /// besides. Every such file, opened by every way a file opens, reads as
-    /// the cutting open read it, cutting nothing it kept, and every way
-    /// that writes leaves it as the cut does. Three files: one torn as
-    /// v0.2.0's `torn-wide` is -- the records claiming the last fsync go
-    /// with the tail, and a synced row the disk flipped a bit of lies below
-    /// the point they name, read unchecked -- and one whose rows after the
-    /// last fsync are kept, its last torn long and short: the earlier
-    /// process's pages, durable only by the cut's own fsync. With the mark
-    /// written under the cut's one fsync, a power cut kept the mark and
-    /// lost bytes of those rows, which the next open read unchecked as the
-    /// zeros it held, or kept the cut and lost the mark, and the next open
-    /// cut the flipped row and the synced row after it.
+    /// ([`FileSink::cut`]), built from the steps the cutting open took:
+    /// each write and length after the last fsync lost or kept -- a write
+    /// whole, or the length it grew the file to alone, and where it crosses
+    /// a 512-byte sector's end split at every byte, the bytes before the
+    /// split landed and those after not, or the other way -- and, while no
+    /// fsync of the cut has run, bytes the earlier process never synced
+    /// lost besides. Every such file, opened by every way a file opens,
+    /// reads as the cutting open read it, cutting nothing it kept, and
+    /// every way that writes leaves it as the cut does; but between the
+    /// zero and the kind byte of a mark across a sector's end, where it may
+    /// be refused too, and in the two cases left there, below.
     ///
-    /// The mark's write torn, half of it either way -- eight bytes across
-    /// two sectors -- reads as the cutting open read it too, but where the
-    /// point the cutting open read to came from a record past the cut and a
-    /// row below it fails its sum (`torn-wide`): there, with no frame at
-    /// the cut, the next open finds the point from the records kept alone,
-    /// and the records past the cut, still there, refuse the open naming
-    /// the row -- never a read of it otherwise, nor a cut of anything kept.
+    /// The files: one torn as v0.2.0's `torn-wide` is -- the records
+    /// claiming the last fsync go with the tail, and a synced row the disk
+    /// flipped a bit of lies below the point they name, read unchecked --
+    /// and one whose rows after the last fsync are kept, its last torn long
+    /// and short: the earlier process's pages, durable only by the cut's
+    /// own fsync. Each cut inside a sector, and across a sector's end 3
+    /// bytes into the mark and 12 bytes into what it writes; the torn
+    /// record's bytes from its ninth as written, as `83 01 ff ff 7f` (a
+    /// head whose length runs past the end), and as a record whole by its
+    /// sum claiming its own start at its ninth byte and at its tenth -- a
+    /// client's text can be one -- and one claiming nothing, that head
+    /// after it. One ending in a block that spilled and never landed, its
+    /// spill claiming the fsync past a flipped row. And one ending in a
+    /// close's mark, unsynced, then a torn record: the cut the length's.
+    ///
+    /// The two cases left, held to the window between the zero and the
+    /// mark's kind byte: the walk stops at the zero, the kept records'
+    /// claims alone say how far the file was durable, and the flipped row
+    /// below the cutting open's point is judged across what follows the
+    /// zero, where the record claiming past it is the dead spill under the
+    /// zero, or the crafted record claiming nothing sends the judgment to
+    /// the head past the end: the row cut with the synced rows after it.
+    ///
+    /// On 57f77b58 -- the mark alone in one write, and the cut after a
+    /// close's mark before any fsync -- 679 opens of 52 files failed: the
+    /// record whole at the torn record's ninth byte read as a write after
+    /// the mark, inside a sector too; the mark torn across a sector's end
+    /// cutting the flipped and the synced rows (`83 01 ff ff 7f`, the dead
+    /// spill, the crafted record) or refusing the open; and the length cut
+    /// after a close's mark kept with the mark lost, the flipped row and
+    /// the four after it cut.
     #[cfg(all(unix, target_pointer_width = "64"))]
     #[test]
     fn a_cut_a_power_cut_stops_at_any_step_opens_as_the_cutting_open_read_it() {
@@ -2320,92 +2373,108 @@ mod tests {
             }
             out
         }
-        /// `step` as a power cut left it, `how` saying what of it: nothing
-        /// (0), all (1), the length a write grew the file to alone (2), or
-        /// the first (3) or last (4) half of its bytes; whether any of it.
-        fn kept(file: &mut Vec<u8>, step: &CutStep, how: usize) -> bool {
-            match (step, how) {
-                (CutStep::Sync, _) | (_, 0) => false,
-                (CutStep::SetLen(n), _) => {
-                    file.resize(*n as usize, 0);
-                    true
-                }
-                (CutStep::Write(at, b), how) => {
-                    let (at, end, half) = (*at as usize, *at as usize + b.len(), b.len() / 2);
-                    if how == 2 && end <= file.len() {
-                        return false;
+        /// What a power cut left of a step.
+        #[derive(Clone, Copy, Debug)]
+        enum Left {
+            Nothing,
+            All,
+            /// The length a write grew the file to, its bytes the disk's
+            /// zeros.
+            Length,
+            /// A write's bytes before the split, the file grown to the
+            /// write's end or not.
+            Front(usize, bool),
+            /// Its bytes from the split on.
+            Back(usize),
+        }
+        /// What a power cut may leave of `step` over a file of `len` bytes:
+        /// a write split at every byte where it crosses a sector's end.
+        fn lefts(step: &CutStep, len: usize) -> Vec<Left> {
+            let CutStep::Write(at, b) = step else {
+                return vec![Left::Nothing, Left::All];
+            };
+            let (at, end) = (*at as usize, *at as usize + b.len());
+            let grows = end > len;
+            let mut out = vec![Left::Nothing, Left::All];
+            if grows {
+                out.push(Left::Length);
+            }
+            if at as u64 / SECTOR != (end as u64 - 1) / SECTOR {
+                for k in 1..b.len() {
+                    if grows {
+                        out.push(Left::Front(k, true));
                     }
-                    if file.len() < end {
-                        file.resize(end, 0);
+                    if at + k <= len {
+                        out.push(Left::Front(k, false));
                     }
-                    match how {
-                        1 => file[at..end].copy_from_slice(b),
-                        2 => {}
-                        3 => file[at..at + half].copy_from_slice(&b[..half]),
-                        _ => file[at + half..end].copy_from_slice(&b[half..]),
-                    }
-                    true
+                    out.push(Left::Back(k));
                 }
             }
+            out
+        }
+        /// `step` as a power cut left it; whether any of it.
+        fn kept(file: &mut Vec<u8>, step: &CutStep, left: Left) -> bool {
+            let (at, b) = match (step, left) {
+                (CutStep::Sync, _) | (_, Left::Nothing) => return false,
+                (CutStep::SetLen(n), _) => {
+                    file.resize(*n as usize, 0);
+                    return true;
+                }
+                (CutStep::Write(at, b), _) => (*at as usize, b),
+            };
+            let end = at + b.len();
+            if !matches!(left, Left::Front(_, false)) && file.len() < end {
+                file.resize(end, 0);
+            }
+            match left {
+                Left::All => file[at..end].copy_from_slice(b),
+                Left::Front(k, _) => file[at..at + k].copy_from_slice(&b[..k]),
+                Left::Back(k) => file[at + k..end].copy_from_slice(&b[k..]),
+                _ => {}
+            }
+            true
         }
         /// Every file a power cut after each of `steps` may leave of
         /// `torn`, each once, but those holding nothing of the cut: the
         /// earlier crash's own, `lost` -- bytes no fsync covered -- zeros.
-        /// Each says what it holds, and whether a write in it is torn.
-        fn stopped(
-            torn: &[u8],
-            lost: Range<usize>,
-            steps: &[CutStep],
-        ) -> Vec<(String, Vec<u8>, bool)> {
-            let mut out: Vec<(String, Vec<u8>, bool)> = Vec::new();
+        /// Each with what it holds.
+        fn stopped(torn: &[u8], lost: &Range<usize>, steps: &[CutStep]) -> Vec<(String, Vec<u8>)> {
+            let mut out: Vec<(String, Vec<u8>)> = Vec::new();
             for k in 0..=steps.len() {
                 let done = &steps[..k];
                 let synced = done.iter().rposition(|s| *s == CutStep::Sync);
                 let (on_disk, after) = done.split_at(synced.map_or(0, |i| i + 1));
-                let hows: Vec<usize> = after
-                    .iter()
-                    .map(|s| match s {
-                        CutStep::Write(..) => 5,
-                        _ => 2,
-                    })
-                    .collect();
-                for pick in 0..hows.iter().product::<usize>() {
-                    for lose in [false, true] {
-                        if lose && synced.is_some() {
-                            continue;
-                        }
-                        let mut file = torn.to_vec();
-                        if lose {
-                            file[lost.clone()].fill(0);
-                        }
-                        let mut any = false;
-                        for s in on_disk {
-                            any |= kept(&mut file, s, 1);
-                        }
-                        let (mut p, mut said, mut half) = (pick, Vec::new(), false);
-                        for (s, n) in after.iter().zip(&hows) {
-                            let how = p % n;
-                            p /= n;
-                            any |= kept(&mut file, s, how);
-                            half |= how > 2;
-                            said.push(match (s, how) {
-                                (CutStep::Write(..), 1) => "the mark",
-                                (CutStep::Write(..), 2) => "the mark's length",
-                                (CutStep::Write(..), 3) => "the mark's first half",
-                                (CutStep::Write(..), 4) => "the mark's last half",
-                                (CutStep::SetLen(_), 1) => "the length",
-                                (_, _) => "nothing",
+                for lose in [false, true] {
+                    if lose && synced.is_some() {
+                        continue;
+                    }
+                    let mut base = torn.to_vec();
+                    if lose {
+                        base[lost.clone()].fill(0);
+                    }
+                    for s in on_disk {
+                        kept(&mut base, s, Left::All);
+                    }
+                    let choices: Vec<Vec<Left>> =
+                        after.iter().map(|s| lefts(s, base.len())).collect();
+                    for pick in 0..choices.iter().map(Vec::len).product::<usize>() {
+                        let (mut file, mut p, mut said, mut any) =
+                            (base.clone(), pick, Vec::new(), !on_disk.is_empty());
+                        for (s, c) in after.iter().zip(&choices) {
+                            let left = c[p % c.len()];
+                            p /= c.len();
+                            any |= kept(&mut file, s, left);
+                            said.push(match s {
+                                CutStep::Write(at, b) => format!("{left:?} of {} at {at}", b.len()),
+                                CutStep::SetLen(n) => format!("{left:?} of the length {n}"),
+                                CutStep::Sync => "an fsync".to_string(),
                             });
                         }
-                        if lose && !any {
-                            continue;
-                        }
-                        if let Some(o) = out.iter_mut().find(|(_, f, _)| *f == file) {
-                            o.2 &= half;
+                        if (lose && !any) || out.iter().any(|(_, f)| *f == file) {
                             continue;
                         }
                         let what = format!(
-                            "after {k} of {} steps, of the unsynced ones {}{}",
+                            "after {k} of {} steps, of the unsynced {}{}",
                             steps.len(),
                             match said.is_empty() {
                                 true => "none".to_string(),
@@ -2417,7 +2486,7 @@ mod tests {
                                 ""
                             }
                         );
-                        out.push((what, file, half));
+                        out.push((what, file));
                     }
                 }
             }
@@ -2427,9 +2496,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stopped.fennec");
+        let mark = crate::engine::synced_mark();
+        let written_mark = [&mark[..], &crate::engine::CUT_SHORT[..]].concat();
+        let put = |a: &str| Statement::Put {
+            collection: "t".into(),
+            docs: vec![vec![("a".into(), Expr::Lit(Value::Text(a.to_string())))]],
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
         // The file once each step ran -- a row put, or `None` an fsync --
-        // written and not closed.
-        let written = |steps: &[Option<String>]| {
+        // written, and `close`d after an fsync or not. With `spilled`, a
+        // block putting that row after them, spilled into the file and
+        // never landed: a crash in the middle of it.
+        let written = |steps: &[Option<String>], close: bool, spilled: Option<&str>| {
             let _ = std::fs::remove_file(&path);
             let mut db = open(&path).unwrap();
             let schema = Schema::new("t", vec![Field::new("a", DataType::Text)]).unwrap();
@@ -2442,21 +2525,20 @@ mod tests {
                 match step {
                     None => db.sync().unwrap(),
                     Some(a) => {
-                        db.execute(&Statement::Put {
-                            collection: "t".into(),
-                            docs: vec![vec![("a".into(), Expr::Lit(Value::Text(a.clone())))]],
-                            docs_param: None,
-                            insert: false,
-                            if_absent: false,
-                            else_set: None,
-                            require: None,
-                            pick: None,
-                        })
-                        .unwrap();
+                        db.execute(&put(a)).unwrap();
                     }
                 }
             }
+            if let Some(a) = spilled {
+                db.set_spill(64);
+                db.begin().unwrap();
+                db.execute(&put(a)).unwrap();
+            }
             db.write_out().unwrap();
+            if close {
+                db.sync().unwrap();
+                drop(db);
+            }
             std::fs::read(&path).unwrap()
         };
         let texts = |db: &Database| -> Vec<(u64, String)> {
@@ -2473,67 +2555,185 @@ mod tests {
                 })
                 .collect()
         };
-        let opened = |way: &str| match way {
-            "mapped" => open(&path),
-            "in-memory" => open_in_memory(&path),
-            "serving" => open_serving(&path, true, Box::new(Ok)),
-            "serving in memory" => open_serving(&path, false, Box::new(Ok)),
-            _ => open_read_only(&path),
+        let opened = |path: &Path, way: &str| match way {
+            "mapped" => open(path),
+            "in-memory" => open_in_memory(path),
+            "serving" => open_serving(path, true, Box::new(Ok)),
+            "serving in memory" => open_serving(path, false, Box::new(Ok)),
+            _ => open_read_only(path),
         };
-        let row = |s: &str| Some(s.to_string());
-        let synced = "a synced row after it ".repeat(240);
-        let mut torn_wide = vec![row("first"), None, row("the row a disk flipped a bit of")];
-        // More than a page: the claims after the next fsync, rounded down a
-        // page from their records, name a point past the row before it.
-        torn_wide.extend([
-            row(&synced),
-            None,
-            row("the row a power cut lost a page of"),
-        ]);
-        torn_wide.extend((0..20).map(|n| row(&format!("after the fsync, {n}"))));
-        let mut unsynced = vec![row("first"), None];
-        unsynced.extend((0..3).map(|n| row(&format!("a row no fsync covered, {n} ").repeat(60))));
-        unsynced.push(row(&"the row a crash tore ".repeat(20)));
         let find = |file: &[u8], what: &str| {
             let what = what.as_bytes();
             file.windows(what.len()).position(|w| w == what).unwrap()
         };
-        let mark = crate::engine::synced_mark();
-        let (mut fails, mut orders, mut torn_refused) = (Vec::new(), Vec::new(), Vec::new());
-        for name in [
-            "torn-wide",
-            "kept unsynced, torn long",
-            "kept unsynced, torn short",
+        let row = |s: &str| Some(s.to_string());
+        // The first row longer by `pad` bytes: what moves the cut in its
+        // sector.
+        let first = |pad: usize| row(&format!("first{}", "x".repeat(pad)));
+        let torn_wide = |pad: usize| {
+            let mut steps = vec![first(pad), None, row("the row a disk flipped a bit of")];
+            // More than a page: the claims after the next fsync, rounded
+            // down a page from their records, name a point past the row
+            // before it.
+            steps.extend([
+                row(&"a synced row after it ".repeat(240)),
+                None,
+                row("the row a power cut lost a page of, and more of it"),
+            ]);
+            steps.extend((0..20).map(|n| row(&format!("after the fsync, {n}"))));
+            let mut bad = written(&steps, false, None);
+            let flipped = find(&bad, "the row a disk flipped") + 15;
+            let lost = find(&bad, "the row a power cut lost") + 25;
+            bad[flipped] ^= 0x20;
+            bad[lost] ^= 0x20;
+            let at = find(&bad, "after the fsync, 5");
+            (bad, at..at + 18)
+        };
+        let unsynced = |pad: usize, tail: Option<usize>| {
+            let mut steps = vec![first(pad), None];
+            steps.extend((0..3).map(|n| row(&format!("a row no fsync covered, {n} ").repeat(60))));
+            steps.push(row("a short row, 1"));
+            steps.push(row(&"the row a crash tore ".repeat(20)));
+            let good = written(&steps, false, None);
+            let last = *heads(&good).last().unwrap();
+            let tail = tail.unwrap_or((last.1 - last.0) / 2);
+            // 1 200 bytes of the second row no fsync covered.
+            let at = find(&good, "a row no fsync covered, 1");
+            (good[..last.0 + tail].to_vec(), at + 100..at + 1300)
+        };
+        // The bytes of the record of `file` holding `text`, that text's
+        // first six `FAKED!` and its claim `claim` -- 1 its own start, 0
+        // none -- summed again: whole wherever it is put.
+        let faked = |file: &[u8], text: &str, claim: u8| {
+            let at = find(file, text);
+            let (start, end) = heads(file)
+                .into_iter()
+                .find(|&(s, e)| s <= at && at < e)
+                .unwrap();
+            let mut r = file[start..end].to_vec();
+            assert_eq!(r[0] & 0x60, 0, "a claim one byte wide");
+            r[at - start..at - start + 6].copy_from_slice(b"FAKED!");
+            let n = r.len();
+            r[n - 5] = claim;
+            let mut buf = [&MAGIC[..], &r[..]].concat();
+            assert!(crate::engine::resum(&mut buf, MAGIC.len()));
+            buf[MAGIC.len()..].to_vec()
+        };
+        let past = [0x83u8, 0x01, 0xff, 0xff, 0x7f];
+        // Rows, an fsync, a block that spilled into the file and never
+        // landed: its spill claims the fsync, past the row the disk flipped
+        // a bit of, which the rows the cut keeps do not.
+        let spilled = |pad: usize| {
+            let mut steps = vec![first(pad), None, row("the row a disk flipped a bit of")];
+            steps.extend((0..3).map(|n| row(&format!("a row the fsync covered, {n}"))));
+            steps.push(None);
+            let block = "a row of a block that never landed ".repeat(4);
+            let mut bad = written(&steps, false, Some(&block));
+            let flipped = find(&bad, "the row a disk flipped") + 15;
+            bad[flipped] ^= 0x20;
+            let at = find(&bad, "a row of a block");
+            (bad, at..at + 4)
+        };
+        // `build` with the first row padded so that its cut is `target`
+        // bytes into a sector, and where it cuts.
+        let aligned = |build: &dyn Fn(usize) -> (Vec<u8>, Range<usize>), target: usize| {
+            let mut pad = 0;
+            for _ in 0..8 {
+                let (file, lost) = build(pad);
+                std::fs::write(&path, &file).unwrap();
+                let db = open_read_only(&path).unwrap();
+                let whole = db.cut_on_open().expect("nothing to cut").at as usize;
+                drop(db);
+                if whole % 512 == target {
+                    return (file, lost, whole);
+                }
+                pad = (pad + target + 512 - whole % 512) % 512;
+            }
+            panic!("no first row puts the cut {target} bytes into a sector");
+        };
+        let mut files: Vec<(String, Vec<u8>, Range<usize>)> = Vec::new();
+        for (place, target) in [
+            ("inside a sector", 100),
+            ("3 bytes before a sector's end", 509),
+            ("12 bytes before a sector's end", 500),
         ] {
-            let (torn, lost) = match name {
-                "torn-wide" => {
-                    let mut bad = written(&torn_wide);
-                    let flipped = find(&bad, "the row a disk flipped") + 15;
-                    let lost = find(&bad, "the row a power cut lost") + 25;
-                    bad[flipped] ^= 0x20;
-                    bad[lost] ^= 0x20;
-                    let at = find(&bad, "after the fsync, 5");
-                    (bad, at..at + 18)
+            let (wide, lost, whole) = aligned(&torn_wide, target);
+            let torn_end = heads(&wide).into_iter().find(|h| h.0 == whole).unwrap().1;
+            let (long, long_lost, long_whole) = aligned(&|pad| unsynced(pad, None), target);
+            let whole1 = faked(&wide, "after the fsync, 1", 1);
+            let none1 = [&faked(&wide, "after the fsync, 1", 0)[..], &past[..]].concat();
+            let long1 = faked(&long, "a short row, 1", 1);
+            let long0 = [&faked(&long, "a short row, 1", 0)[..], &past[..]].concat();
+            let inner: [(&str, usize, &[u8], &[u8]); 5] = [
+                ("as written", 0, &[], &[]),
+                ("83 01 ff ff 7f from its 9th byte", 8, &past, &past),
+                ("a whole record from its 9th byte", 8, &whole1, &long1),
+                ("a whole record from its 10th byte", 9, &whole1, &long1),
+                (
+                    "a whole record of no claim from its 10th byte, 83 01 ff ff 7f after it",
+                    9,
+                    &none1,
+                    &long0,
+                ),
+            ];
+            for (how, at, in_wide, in_long) in inner {
+                if target == 500 && at > 0 {
+                    continue;
                 }
-                _ => {
-                    let good = written(&unsynced);
-                    let last = *heads(&good).last().unwrap();
-                    let tail = match name {
-                        "kept unsynced, torn long" => (last.1 - last.0) / 2,
-                        _ => 3,
-                    };
-                    // 1 200 bytes of the second row no fsync covered.
-                    let at = find(&good, "a row no fsync covered, 1");
-                    (good[..last.0 + tail].to_vec(), at + 100..at + 1300)
-                }
-            };
-            // The open that cuts it, every way an open writes a file: the
-            // rows it reads, where it cuts and the steps it took.
+                let mut f = wide.clone();
+                assert!(
+                    whole + at + in_wide.len() <= torn_end,
+                    "{how}: past the torn record"
+                );
+                f[whole + at..whole + at + in_wide.len()].copy_from_slice(in_wide);
+                files.push((
+                    format!("torn-wide, {place}, its torn record {how}"),
+                    f,
+                    lost.clone(),
+                ));
+                let mut f = long.clone();
+                assert!(
+                    long_whole + at + in_long.len() <= f.len(),
+                    "{how}: past the file"
+                );
+                f[long_whole + at..long_whole + at + in_long.len()].copy_from_slice(in_long);
+                let name = format!("kept unsynced, torn long, {place}, its torn record {how}");
+                files.push((name, f, long_lost.clone()));
+            }
+            if target != 500 {
+                let (short, lost, _) = aligned(&|pad| unsynced(pad, Some(3)), target);
+                files.push((format!("kept unsynced, torn short, {place}"), short, lost));
+                let (dead, lost, _) = aligned(&spilled, target);
+                files.push((format!("a dead spill, {place}"), dead, lost));
+            }
+        }
+        // A close's mark, unsynced, then a record a later process appended,
+        // torn: the first half of the last row's again.
+        {
+            let mut steps = vec![first(0), None, row("the row a disk flipped a bit of")];
+            steps.extend((0..4).map(|n| row(&format!("a row the close synced, {n}"))));
+            let mut bad = written(&steps, true, None);
+            assert!(bad.ends_with(&mark), "the close left no mark");
+            let flipped = find(&bad, "the row a disk flipped") + 15;
+            bad[flipped] ^= 0x20;
+            let all = heads(&bad);
+            let (last, whole) = (all[all.len() - 2], bad.len());
+            let half = bad[last.0..(last.0 + last.1) / 2].to_vec();
+            bad.extend_from_slice(&half);
+            let lost = whole - mark.len()..whole;
+            files.push(("a close's mark, unsynced, then torn".into(), bad, lost));
+        }
+        let ways = ["mapped", "in-memory", "serving", "serving in memory"];
+        // The open that cuts `torn`, every way an open writes a file, then
+        // every file a power cut during its cut may leave, opened every way:
+        // the failures, the refusals, and where it cut by which steps.
+        let check = |n: usize, name: &str, torn: &[u8], lost: &Range<usize>| {
+            let path = dir.join(format!("stopped-{n}.fennec"));
             let mut cutting = None;
-            for way in ["mapped", "in-memory", "serving", "serving in memory"] {
-                std::fs::write(&path, &torn).unwrap();
+            for way in ways {
+                std::fs::write(&path, torn).unwrap();
                 CUT_STEPS.with(|s| s.borrow_mut().clear());
-                let db = opened(way).unwrap_or_else(|e| panic!("{name}, {way}: {e}"));
+                let db = opened(&path, way).unwrap_or_else(|e| panic!("{name}, {way}: {e}"));
                 let read = (
                     texts(&db),
                     db.cut_on_open().expect("the open cut nothing").at as usize,
@@ -2546,77 +2746,151 @@ mod tests {
                 }
             }
             let (want, whole, steps) = cutting.unwrap();
-            if name == "torn-wide" {
-                assert!(
+            match name {
+                n if n.starts_with("torn-wide") => assert!(
                     want[1].1.contains("Flipped") && want.len() == 3,
-                    "the flipped row read unchecked: {want:?}"
-                );
-            } else {
-                assert_eq!(want.len(), 4, "{name}");
+                    "{name}: the flipped row read unchecked: {want:?}"
+                ),
+                n if n.starts_with("a close's") => assert!(
+                    want[1].1.contains("Flipped") && want.len() == 6,
+                    "{name}: the flipped row read unchecked: {want:?}"
+                ),
+                n if n.starts_with("a dead spill") => assert!(
+                    want[1].1.contains("Flipped") && want.len() == 5,
+                    "{name}: the flipped row read unchecked: {want:?}"
+                ),
+                _ => assert_eq!(want.len(), 5, "{name}"),
             }
-            let left = [&torn[..whole], &mark[..]].concat();
-            for (what, file, half) in stopped(&torn, lost, &steps) {
-                for way in [
-                    "mapped",
-                    "in-memory",
-                    "serving",
-                    "serving in memory",
-                    "read-only",
-                ] {
+            let marked = steps.iter().any(|s| matches!(s, CutStep::Write(..)));
+            let left = match marked {
+                true => [&torn[..whole], &mark[..]].concat(),
+                false => torn[..whole].to_vec(),
+            };
+            // The two the cut leaves open, between the zero a mark across
+            // a sector's end writes over the torn record's kind and the
+            // mark's kind byte, where the walk stops at the zero and the
+            // durable point is the kept records' own: the torn record's own
+            // bytes a record whole by its sum claiming nothing and a head
+            // past the end after it, which the judgment of the flipped row
+            // finds past the zero and cuts there (a client's text can be
+            // so made); and a dead spill, the one record claiming the point
+            // past the flipped row, under the zero.
+            let open = name.contains("of no claim") || name.starts_with("a dead spill");
+            let (mut fails, mut refused, mut left_open) = (Vec::new(), Vec::new(), Vec::new());
+            let files = stopped(torn, lost, &steps);
+            for (what, file) in &files {
+                let mid = file.get(whole) == Some(&0) && torn[whole] != 0;
+                let mut bad = Vec::new();
+                for &way in ways.iter().chain(&["read-only"]) {
                     let at = format!("{name}, {what}, {way}");
-                    std::fs::write(&path, &file).unwrap();
-                    let db = match opened(way) {
+                    std::fs::write(&path, file).unwrap();
+                    let db = match opened(&path, way) {
                         Ok(db) => db,
-                        // A mark torn across two sectors leaves no frame
-                        // at the cut: the durable point is the kept
-                        // records' own, and a row below the cutting open's
-                        // failing its sum is refused by the records after
-                        // it, still there -- never read otherwise, nor cut.
-                        Err(crate::error::Error::Corrupt(e)) if half && name == "torn-wide" => {
-                            torn_refused.push(format!("{at}: {e}"));
+                        Err(crate::error::Error::Corrupt(e)) if mid => {
+                            refused.push(format!("{at}: {e}"));
                             continue;
                         }
                         Err(e) => {
-                            fails.push(format!("{at}: refused: {e}"));
+                            bad.push(format!("{at}: refused: {e}"));
                             continue;
                         }
                     };
                     if texts(&db) != want {
-                        fails.push(format!("{at}: read {:?}", texts(&db)));
+                        bad.push(format!("{at}: read {:?}", texts(&db)));
                     }
                     if let Some(c) = db.cut_on_open().filter(|c| c.at < whole as u64) {
-                        fails.push(format!("{at}: cut what the cut kept: {c:?}"));
+                        bad.push(format!("{at}: cut what the cut kept: {c:?}"));
                     }
                     drop(db);
                     let now = std::fs::read(&path).unwrap();
                     if way == "read-only" {
-                        assert!(now == file, "{at}: the look wrote");
+                        assert!(now == *file, "{at}: the look wrote");
                         continue;
                     }
                     if now != left {
-                        fails.push(format!(
+                        bad.push(format!(
                             "{at}: left {} bytes, not {}",
                             now.len(),
                             left.len()
                         ));
                     }
-                    let db = opened("read-only").unwrap();
+                    let db = opened(&path, "read-only").unwrap();
                     if db.cut_on_open().is_some() || texts(&db) != want {
-                        fails.push(format!("{at}, then read-only: {:?}", db.cut_on_open()));
+                        bad.push(format!("{at}, then read-only: {:?}", db.cut_on_open()));
                     }
                 }
+                match mid && open {
+                    true => left_open.extend(bad),
+                    false => fails.extend(bad),
+                }
             }
-            orders.push((name, whole, steps));
+            let _ = std::fs::remove_file(&path);
+            (fails, refused, left_open, files.len(), whole, steps)
+        };
+        // Each file on a thread of its own, eight at a time: every open
+        // that cuts fsyncs four or six times.
+        let mut done = Vec::new();
+        std::thread::scope(|s| {
+            for (k, chunk) in files.chunks(8).enumerate() {
+                let running: Vec<_> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, torn, lost))| {
+                        let check = &check;
+                        s.spawn(move || (name.clone(), check(k * 8 + i, name, torn, lost)))
+                    })
+                    .collect();
+                done.extend(running.into_iter().map(|h| h.join().unwrap()));
+            }
+        });
+        let (mut fails, mut refused, mut left_open, mut states) =
+            (Vec::new(), Vec::new(), Vec::new(), 0);
+        for (_, (f, r, o, n, _, _)) in &done {
+            fails.extend(f.iter().cloned());
+            refused.extend(r.iter().cloned());
+            left_open.extend(o.iter().cloned());
+            states += n;
         }
         assert!(fails.is_empty(), "{}:\n{}", fails.len(), fails.join("\n"));
-        eprintln!("refused, a mark torn:\n{}", torn_refused.join("\n"));
-        // The order each cut took: the file synced, the mark over the torn
-        // record's first bytes synced, the cut synced.
-        for (name, whole, steps) in orders {
-            let mark_at = CutStep::Write(whole as u64, mark.clone());
-            let cut_at = CutStep::SetLen((whole + mark.len()) as u64);
-            let sync = CutStep::Sync;
-            let order = [sync.clone(), mark_at, sync.clone(), cut_at, sync];
+        eprintln!(
+            "{} files, {states} states, each opened 5 ways; refused between the zero and \
+             the mark's kind byte ({}):\n{}\nnot as the cutting open read them there, the two \
+             cases left ({}):\n{}",
+            files.len(),
+            refused.len(),
+            refused.join("\n"),
+            left_open.len(),
+            left_open.join("\n")
+        );
+        // The order each cut took: the file synced; the mark and the head
+        // past the end after it in one write inside a sector, or across a
+        // sector's end a zero over the torn record's kind, the rest, then
+        // the mark's kind byte, each synced; the cut synced.
+        for (name, (_, _, _, _, whole, steps)) in done {
+            let (at, sync) = (whole as u64, CutStep::Sync);
+            let order = if name.starts_with("a close's") {
+                vec![sync.clone(), CutStep::SetLen(at), sync]
+            } else if at / SECTOR == (at + written_mark.len() as u64 - 1) / SECTOR {
+                vec![
+                    sync.clone(),
+                    CutStep::Write(at, written_mark.clone()),
+                    sync.clone(),
+                    CutStep::SetLen(at + mark.len() as u64),
+                    sync,
+                ]
+            } else {
+                vec![
+                    sync.clone(),
+                    CutStep::Write(at, vec![0]),
+                    sync.clone(),
+                    CutStep::Write(at + 1, written_mark[1..].to_vec()),
+                    sync.clone(),
+                    CutStep::Write(at, written_mark[..1].to_vec()),
+                    sync.clone(),
+                    CutStep::SetLen(at + mark.len() as u64),
+                    sync,
+                ]
+            };
             assert_eq!(steps, order, "{name}");
         }
         let _ = std::fs::remove_dir_all(&dir);

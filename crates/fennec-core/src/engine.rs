@@ -1155,6 +1155,32 @@ pub(crate) fn synced_mark() -> Vec<u8> {
     framed_claiming(REC_SYNCED, 0, &[], 1)
 }
 
+/// The head of a block record 2^63 - 1 bytes long, whose length runs past
+/// the end of any file: what an open's cut writes right after its mark
+/// (`fs::FileSink::cut`), over the torn record's next bytes, which the cut
+/// then takes away with the rest of them. A walk stops there as at any torn
+/// tail, nothing after it read or judged ([`whole_record`]), so a power cut
+/// after the write and before the cut leaves a file every open cuts right
+/// after the mark, whatever the torn record went on to hold. A single zero there stopped the walk too, but as
+/// a head no record reads from, which the open judges by what follows
+/// ([`judge_after`]): a record past it whole by its sum and claiming past
+/// it -- a client's text so made, or a later spill of a dead block that an
+/// fsync covered -- refused the open.
+#[cfg(feature = "std-fs")]
+pub(crate) const CUT_SHORT: [u8; 11] = [
+    CHECKED | REC_BLOCK,
+    0,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0x7f,
+];
+
 /// `records` as a version before checksums wrote them: each record's claim
 /// and sum taken off, its kind's bits too and its length its body's. What
 /// a primary sends a replica, an archiver or a `restore` that does not say

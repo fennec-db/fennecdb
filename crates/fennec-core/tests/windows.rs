@@ -217,9 +217,9 @@ fn a_rewrite_renames_over_a_file_another_process_maps() {
 /// the writes after it kept -- a server's open's second open a server's
 /// too, its vectors left to link beside the queries. Another process
 /// mapping the file refuses the cut, and the open fails rather than write
-/// past a tail it left: the tail is longer than the cut's mark, which is
-/// written over its first bytes before the cut and leaves the length
-/// (`fs::FileSink::cut`).
+/// past a tail it left: the tail is longer than what the cut writes over
+/// its first bytes before the cut -- the mark, and a head whose length runs
+/// past any file -- which leaves the length (`fs::FileSink::cut`).
 #[test]
 fn a_torn_tail_is_cut_by_a_second_open() {
     let path = tmp("torn");
@@ -247,9 +247,9 @@ fn a_torn_tail_is_cut_by_a_second_open() {
         .append(true)
         .open(&path)
         .unwrap();
-    // A data record promising 100 bytes, 13 of them there.
-    f.write_all(&[3, 1, 100, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-        .unwrap();
+    // A data record promising 100 bytes, 21 of them there.
+    let tail: Vec<u8> = [3, 1, 100].into_iter().chain(0..21).collect();
+    f.write_all(&tail).unwrap();
     drop(f);
 
     let (mut child, _said, seen) = read_elsewhere(&path);
@@ -261,7 +261,7 @@ fn a_torn_tail_is_cut_by_a_second_open() {
     assert!(refused.to_string().contains("a view"), "{refused}");
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 16);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 24);
 
     // This process's own view -- a stream or a pinned read still reading
     // the database a storage error stopped -- refuses it too, until it goes.
@@ -272,7 +272,7 @@ fn a_torn_tail_is_cut_by_a_second_open() {
     println!("a torn tail this process maps: {refused}");
     assert!(refused.to_string().contains("a view"), "{refused}");
     drop(held);
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 16);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 24);
 
     {
         let mut db = fennec_core::fs::open_serving(&path, true, Box::new(Ok)).unwrap();

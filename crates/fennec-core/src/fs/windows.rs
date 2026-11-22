@@ -473,9 +473,10 @@ pub(super) fn cut_and_open(
     // found a synced record this open read unchecked a tail to cut again,
     // and failed (`CUTTING`; `FileSink::cut`). A view refuses the cut
     // itself, the last step but its fsync ([`cut_refused`]): marked, the
-    // mark is on the disk by then, over the torn record's first bytes, and
-    // the open once the views go reads the file as this one did, cutting
-    // the rest of that record after the mark, which it does not mark again.
+    // mark and the head past the end after it are on the disk by then, over
+    // the torn record's first bytes, and the open once the views go reads
+    // the file as this one did, cutting right after the mark, which it does
+    // not mark again.
     sink.cut(whole, marked)?;
     let path = sink.path().to_path_buf();
     drop(sink);

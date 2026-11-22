@@ -31,9 +31,9 @@ Below the newest whole claim (`survey`) records are read unchecked
 (`fennec verify`: all), a plain one after checked refused; past it damage
 (a failing sum, a head none reads, a plain record) is refused if a whole
 record after it claims past it, else cut, said (`cut_on_open`) and marked
-where a kept record has a sum and no mark ends them, the file synced
-before the mark, the mark before the cut, so the next open reads alike
-(`FileSink::cut`), a segment
+where a kept record has a sum and no mark ends them, each synced: the
+file, the mark and a head past the end, the cut; the next open reads
+alike but in one window (`FileSink::cut`), a segment
 by its own claims: `judge_after` frames on, scans only past an unframed
 head, bounded; a record past the end is cut unjudged (Windows:
 `cut_and_open`), a frame past its record refused, a record whole by its
