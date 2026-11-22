@@ -21,6 +21,7 @@ mod es256;
 mod fields;
 mod gzip;
 mod idempotency;
+mod images_taken;
 mod lease_answers;
 mod mcp;
 // Opens the audit log in a child process of its own alone.

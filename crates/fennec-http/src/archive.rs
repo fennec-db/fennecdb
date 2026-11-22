@@ -44,9 +44,10 @@
 use crate::replication::{fresh_id, Message, Upstream};
 use crate::seal::{self, Binding, Frames, Key, Role};
 use fennec_core::codec::get_uvarint;
+use fennec_core::engine::PinnedImage;
 use fennec_core::history::History;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read as _, Seek, SeekFrom, Write};
+use std::io::{self, Read as _, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -573,6 +574,15 @@ pub(crate) struct Writer {
     /// the archive is opened to be written.
     latest: u64,
 }
+
+/// An image a hello brings, taken as it comes ([`Archive::hello_with`]):
+/// what writes its bytes, checked as they stream, into the file it goes to
+/// -- off a primary's stream (`Receiver::take_image`), or a node's.
+pub(crate) type Incoming<'a> = &'a mut Writes<'a>;
+
+/// What writes a file's bytes into the writer it is handed: an image
+/// taken off a stream, or one written from a pin ([`Archive::put_with`]).
+pub(crate) type Writes<'a> = dyn FnMut(&mut dyn Write) -> io::Result<()> + 'a;
 
 /// What a stream's hello did to an archive.
 #[derive(Debug, PartialEq)]
@@ -1222,6 +1232,61 @@ impl Archive {
         Ok(())
     }
 
+    /// [`Self::put`] of an image `write` writes as it comes -- off a
+    /// primary's stream, or from a pin of the archive's end -- sealed a
+    /// frame at a time where the archive is sealed ([`seal::Sealing`]): a
+    /// frame held at a time, never the image. Its file's head is sealed
+    /// before the side file is made, as `put` seals first; refused part
+    /// way, the side file goes.
+    fn put_with(
+        &self,
+        path: &Path,
+        role: Role,
+        change: u64,
+        time: u64,
+        write: &mut Writes<'_>,
+    ) -> io::Result<()> {
+        let mut began = None;
+        let mut head = Vec::new();
+        let frames = match &self.key {
+            Some(key) => {
+                let binding = self.binding(role, change, time)?;
+                began = (role == Role::Image).then_some(binding.began);
+                Some(seal::begin(key, &binding, &mut head)?)
+            }
+            None => None,
+        };
+        let tmp = path.with_extension("tmp");
+        let f = fennec_core::fs::create_like(&tmp, path)?;
+        let written = (|| -> io::Result<()> {
+            match frames {
+                // A frame of a mebibyte a write: no buffer besides.
+                Some(frames) => {
+                    (&f).write_all(&head)?;
+                    let mut sealing = seal::Sealing::new(frames, &f);
+                    write(&mut sealing)?;
+                    sealing.finish()?;
+                }
+                None => {
+                    let mut out = io::BufWriter::with_capacity(crate::replication::MESSAGE, &f);
+                    write(&mut out)?;
+                    out.flush()?;
+                }
+            }
+            f.sync_all()
+        })();
+        if let Err(e) = written {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        renamed(&f, &tmp, path)?;
+        if self.key.is_some() {
+            self.landed(role, change, time, began);
+        }
+        Ok(())
+    }
+
     /// A file of `role` sealed in this version, its name's numbers `change`
     /// and `time`, now in its place: every image after says the archive
     /// began when this one says (`began`), and the line's first file of
@@ -1392,6 +1457,13 @@ impl Archive {
         self.put(&self.image_path(seq, time), Role::Image, seq, time, image)
     }
 
+    /// [`Self::add_image`] of an image `write` writes as it comes: a
+    /// backup's off its primary's stream ([`backup`]).
+    pub fn add_image_with(&self, seq: u64, write: &mut Writes<'_>) -> io::Result<()> {
+        let time = now_ms();
+        self.put_with(&self.image_path(seq, time), Role::Image, seq, time, write)
+    }
+
     /// The last change the archive holds, the history it is on, the
     /// segment that ends there, opened to go on -- its torn tail, if a crash
     /// left one, cut off -- and the latest time the last segment holding a
@@ -1551,14 +1623,19 @@ impl Archive {
         else {
             return Err(io::Error::other("the primary did not say hello"));
         };
-        let bytes = match image {
+        let len = match image {
             true => match rx.receive()? {
-                Message::Image(bytes) => Some(bytes),
+                Message::Image(len) => Some(len),
                 _ => return Err(io::Error::other("the primary promised an image")),
             },
             false => None,
         };
-        if self.hello(&mut w, bytes.as_deref(), seq, lineage)? == Took::Diverged {
+        // Taken as it comes, into the archive's file, checked as it streams
+        // ([`crate::replication::take_image`]): read whole, it was the
+        // database in the archiver's memory.
+        let mut take = |out: &mut dyn Write| rx.take_image(len.unwrap_or(0), out);
+        let incoming = len.map(|_| &mut take as Incoming<'_>);
+        if self.hello_with(&mut w, incoming, seq, lineage)? == Took::Diverged {
             return Err(corrupt(format!(
                 "the primary is at change {seq} on a history that does not lead from \
                  this archive's change {at}: it was restored to an earlier moment, or \
@@ -1566,10 +1643,10 @@ impl Archive {
                  holds; archive it into a directory of its own"
             )));
         }
-        if let Some(bytes) = &bytes {
+        if let Some(len) = len {
             report(&format!(
                 "image at change {seq} ({:.1} MB)",
-                bytes.len() as f64 / 1e6
+                len as f64 / 1e6
             ));
         }
         // A line sealed before this version goes on from an image of its
@@ -1640,11 +1717,29 @@ impl Archive {
     /// goes on from, or the place it goes on from without one, and the
     /// history its writes are on. An image on a history that does not lead
     /// from the archive's place, and at or before it, is not taken
-    /// ([`Took::Diverged`]).
+    /// ([`Took::Diverged`]). The tests' way in, an image in memory; a
+    /// stream's is taken as it comes ([`Self::hello_with`]).
+    #[cfg(test)]
     pub(crate) fn hello(
         &self,
         w: &mut Writer,
         image: Option<&[u8]>,
+        seq: u64,
+        lineage: Vec<(u64, u64)>,
+    ) -> io::Result<Took> {
+        let mut put = |out: &mut dyn Write| out.write_all(image.unwrap_or_default());
+        let incoming = image.map(|_| &mut put as Incoming<'_>);
+        self.hello_with(w, incoming, seq, lineage)
+    }
+
+    /// [`Self::hello`] of an image taken as it comes ([`Incoming`]): into
+    /// its file as its bytes arrive, never held whole. Not taken -- an
+    /// image on another history ([`Took::Diverged`]) -- none of it is
+    /// read, and the stream goes no further.
+    pub(crate) fn hello_with(
+        &self,
+        w: &mut Writer,
+        image: Option<&mut Writes<'_>>,
         seq: u64,
         lineage: Vec<(u64, u64)>,
     ) -> io::Result<Took> {
@@ -1661,8 +1756,9 @@ impl Archive {
             return Ok(Took::Diverged);
         }
         let had = w.images;
+        let taken = image.is_some();
         match image {
-            Some(bytes) => {
+            Some(image) => {
                 // Timed by the archiver's clock, but never before the latest
                 // write the archive holds ([`Self::take`]): a clock behind
                 // the one that timed the writes dated the image before writes
@@ -1670,7 +1766,8 @@ impl Archive {
                 // took it for the base of a window those writes are in,
                 // letting go of the image a restore inside it starts from.
                 let time = now_ms().max(w.latest);
-                self.put(&self.image_path(seq, time), Role::Image, seq, time, bytes)?;
+                let path = self.image_path(seq, time);
+                self.put_with(&path, Role::Image, seq, time, image)?;
                 if let Some(s) = &mut w.segment {
                     s.sync()?;
                 }
@@ -1696,7 +1793,7 @@ impl Archive {
             // tenant: without its history a new archive asks for an image
             // again, and an image without one is read for it
             // (`ends_on_image_of`).
-            if image.is_some() && had {
+            if taken && had {
                 self.sync_dir()?;
             }
             self.put(
@@ -1711,7 +1808,7 @@ impl Archive {
             // lineage's writes under the old one's, which the primary's
             // next hello took for another database's. With one, the next
             // segment's sync (`take`) covers it.
-            if image.is_none() {
+            if !taken {
                 self.sync_dir()?;
             }
             w.history = theirs;
@@ -2041,57 +2138,67 @@ impl Archive {
         // copied a stale database-sized file, and the next round could not
         // write over it and took no image. What rounds before left goes
         // first; a name one of them still holds is not taken.
-        let (seq, bytes) = self.end_image(end)?;
-        // The segments may have gone on while this read them: the image is
-        // of the change it holds, timed by that change's write.
-        let time = if seq == end {
-            time
-        } else {
-            self.time_of(seq)?.unwrap_or(time)
-        };
-        // Not synced here: what stands on it syncs first -- `prune` before
-        // it lets go of what the image replaces, the next segment (`roll`)
-        // before its first write. Lost alone, the segments it was taken from
-        // are still there, and the next round takes it again.
-        self.put(&self.image_path(seq, time), Role::Image, seq, time, &bytes)?;
+        let (seq, put) = self.end_image(end, &mut |seq, image| {
+            // The segments may have gone on while this read them: the image
+            // is of the change it holds, timed by that change's write.
+            let time = if seq == end {
+                time
+            } else {
+                self.time_of(seq)?.unwrap_or(time)
+            };
+            // Not synced here: what stands on it syncs first -- `prune`
+            // before it lets go of what the image replaces, the next
+            // segment (`roll`) before its first write. Lost alone, the
+            // segments it was taken from are still there, and the next
+            // round takes it again.
+            let path = self.image_path(seq, time);
+            self.put_with(&path, Role::Image, seq, time, &mut |w| image.write_to(w))
+        })?;
+        put?;
         self.roll.store(true, Ordering::SeqCst);
         Ok(Some(seq))
     }
 
-    /// The database as the archive's end holds it, its image's bytes and
-    /// the change it is at: its last image and the writes after it,
-    /// assembled in a file of the round's own -- `end`, the end looked for,
-    /// names it -- and opened.
-    fn end_image(&self, end: u64) -> io::Result<(u64, Vec<u8>)> {
+    /// The database as the archive's end holds it -- its last image and the
+    /// writes after it, assembled in a file of the round's own, which `end`,
+    /// the end looked for, names -- opened, and its image handed to `then`
+    /// as a pin ([`PinnedImage`]) to write where it goes: the change it is
+    /// at, and what `then` answered. The file is mapped through the handle
+    /// that wrote it, never opened again by its name -- on Windows a copier
+    /// that opened it between could hold it from being opened to write --
+    /// its documents read where they lie, what an open builds alone in
+    /// memory, and the image written from it as it is read. Read whole and
+    /// loaded, then snapshotted, the end was the database three times over
+    /// in the archiver's memory, and one larger than it was never
+    /// consolidated.
+    fn end_image(
+        &self,
+        end: u64,
+        then: &mut dyn FnMut(u64, &PinnedImage) -> io::Result<()>,
+    ) -> io::Result<(u64, io::Result<()>)> {
         let mut said = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         self.sweep(&mut said);
         let tmp = self.dir.join(scratch_name(end, &said));
-        // Read back through the handle that wrote it, never opened again
-        // by its name: on Windows a copier that opened it between could
-        // hold it from being opened to write, which an open of a database
-        // asks (`fs::open_in_memory`).
-        let image = self
-            .assemble_into(&tmp, Target::End)
-            .and_then(|(r, mut f)| {
-                let mut bytes = Vec::new();
-                f.seek(SeekFrom::Start(0))?;
-                f.read_to_end(&mut bytes)?;
-                drop(f);
-                let mut db = fennec_core::engine::Database::new();
-                db.load(&bytes).map_err(|e| corrupt(e.to_string()))?;
-                drop(bytes);
-                if db.change_seq() != r.seq {
-                    return Err(corrupt(format!(
-                        "the archive's end is change {}, the database opened at {}",
-                        r.seq,
-                        db.change_seq()
-                    )));
-                }
-                Ok((r.seq, db.snapshot()))
-            });
+        let image = self.assemble_into(&tmp, Target::End).and_then(|(r, f)| {
+            let corrupted = |e: fennec_core::error::Error| corrupt(e.to_string());
+            let mut db = fennec_core::engine::Database::new();
+            db.load_mapped(fennec_core::fs::mapped(&f).map_err(corrupted)?)
+                .map_err(corrupted)?;
+            drop(f);
+            if db.change_seq() != r.seq {
+                return Err(corrupt(format!(
+                    "the archive's end is change {}, the database opened at {}",
+                    r.seq,
+                    db.change_seq()
+                )));
+            }
+            let image = db.pin_image(false).map_err(corrupted)?;
+            Ok((r.seq, then(r.seq, &image)))
+        });
         // Not synced: brought back by a crash, the file is no image or
         // segment by name, and the next round, or the next writer's open,
-        // removes it.
+        // removes it. Let go of once the database and its pin, which map
+        // it, are gone: Windows refuses a mapped file's removal.
         self.let_go(&tmp, &mut said);
         image
     }
@@ -2189,15 +2296,24 @@ impl Archive {
                 }
             )),
         };
-        let (seq, bytes) = self.end_image(at).map_err(refused)?;
+        let (seq, put) = self
+            .end_image(at, &mut |seq, image| {
+                // Of another change, refused below with nothing written.
+                if seq != at {
+                    return Ok(());
+                }
+                let last = self.images()?.last().map_or(0, |i| i.1);
+                let time = now_ms().max(latest).max(last.saturating_add(1));
+                let path = self.image_path(at, time);
+                self.put_with(&path, Role::Image, at, time, &mut |w| image.write_to(w))
+            })
+            .map_err(refused)?;
         if seq != at {
             return Err(refused(io::Error::other(format!(
                 "its end restores to change {seq}"
             ))));
         }
-        let last = self.images()?.last().map_or(0, |i| i.1);
-        let time = now_ms().max(latest).max(last.saturating_add(1));
-        self.put(&self.image_path(at, time), Role::Image, at, time, &bytes)
+        put
     }
 
     /// When change `seq` was appended, from the segment that holds it.
@@ -2701,13 +2817,17 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
     else {
         return Err(io::Error::other("the primary sent no image"));
     };
-    let Message::Image(mut bytes) = rx.receive()? else {
+    let Message::Image(len) = rx.receive()? else {
         return Err(io::Error::other("the primary promised an image"));
     };
+    // Taken as it comes, into its file, every record held to its sum as it
+    // streams ([`crate::replication::take_image`]): read whole, the backup
+    // was the database in the memory of the machine taking it, and one
+    // larger than that memory was never backed up.
     if out.is_dir() {
         // Durable once said taken, as a backup into a file.
         let archive = Archive::with_key(out, key.cloned())?;
-        archive.add_image(seq, &bytes)?;
+        archive.add_image_with(seq, &mut |w| rx.take_image(len, w))?;
         archive.sync_dir()?;
     } else {
         let history = History {
@@ -2715,14 +2835,40 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
             following: false,
         };
         let id = crate::replication::fork_id(&history, fresh_id());
-        bytes.extend_from_slice(&history.forked(id, seq).record());
-        if let Some(key) = key {
-            bytes = seal::seal_whole(key, &Binding::backup(), &bytes)?;
-        }
+        let forked = history.forked(id, seq).record();
+        // Sealed, its head before the side file is made: a seal the
+        // system's randomness refused left an empty `.tmp` a try.
+        let mut head = Vec::new();
+        let frames = match key {
+            Some(key) => Some(seal::begin(key, &Binding::backup(), &mut head)?),
+            None => None,
+        };
         let tmp = out.with_extension("tmp");
-        let mut f = fennec_core::fs::create_like(&tmp, out)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
+        let f = fennec_core::fs::create_like(&tmp, out)?;
+        let written = (|| -> io::Result<()> {
+            match frames {
+                // A frame of a mebibyte a write: no buffer besides.
+                Some(frames) => {
+                    (&f).write_all(&head)?;
+                    let mut sealing = seal::Sealing::new(frames, &f);
+                    rx.take_image(len, &mut sealing)?;
+                    sealing.write_all(&forked)?;
+                    sealing.finish()?;
+                }
+                None => {
+                    let mut w = io::BufWriter::with_capacity(crate::replication::MESSAGE, &f);
+                    rx.take_image(len, &mut w)?;
+                    w.write_all(&forked)?;
+                    w.flush()?;
+                }
+            }
+            f.sync_all()
+        })();
+        if let Err(e) = written {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
         crate::tenant_hooks::put_away_beside(given)?;
