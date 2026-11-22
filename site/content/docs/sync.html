@@ -520,7 +520,10 @@ changes to the others and sends every tab's writes, one queue for all.</p>
 
 <ul>
   <li><b>Turn it off</b> with <code>leader: false</code>; without
-    <code>navigator.locks</code>, as in Node, it is off already.</li>
+    <code>navigator.locks</code>, as in Node, it is off already. Each tab
+    then sends its own writes, and one at a time stores the
+    <code>persist</code> key (<a href="#one-writer">One replica stores a key
+    at a time</a>).</li>
 </ul>
 
 <details class="deep"><summary>How tabs elect a leader</summary>
@@ -746,6 +749,26 @@ Only a key that holds nothing is seeded: a replica whose store is there and
 does not restore -- sealed with another key or none, changed, written by a
 later client -- refuses to start, <code>sync</code> rejecting with the
 reason, and the store stays as it was, with the writes it had not sent.
-Started again with the key it was sealed with, it sends them. A tab that
-takes the lead from such a store stores nothing in it, and tells
-<code>onError</code>.</p>
+Started again with the key it was sealed with, it sends them; or
+<code>unpersist(key)</code> deletes that key's store, the writes in it
+with it, and the next <code>sync</code> seeds anew. A tab that takes the
+lead from such a store stores nothing in it, tells <code>onError</code>,
+and <code>status()</code>'s <code>unkept</code> says why; where IndexedDB
+itself failed the read, the next write reads the store again.</p>
+
+<pre data-lang="ts">import { unpersist } from './fennec.js';
+
+await unpersist(`tasks:${userId}`);   // refused while a replica keeps it in this browser
+</pre>
+
+<p id="one-writer"><b>One replica stores a key at a time.</b> It holds the
+key's lock (<code>navigator.locks</code>) while it stores there, whatever
+its url and shapes, so two replicas under one key -- other shapes, or tabs
+with <code>leader: false</code> -- never store over each other: the second
+stores nothing there, <code>status()</code>'s <code>unkept</code> saying
+so, and takes the store over, the first's unsent writes with it, once the
+first lets go. A tab with <code>leader: false</code> leads itself
+meanwhile; an elected one waits to lead. <code>close()</code> lets go of
+the store once the persist it has out has landed, or after 5 s, past which
+that persist stores nothing and tells <code>onError</code>: the next tab
+never reads a store a closed one is still writing.</p>
