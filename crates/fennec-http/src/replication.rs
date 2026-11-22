@@ -3719,9 +3719,11 @@ mod tests {
     #[test]
     fn a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it() {
         let dir = std::env::temp_dir().join(format!(
-            "fennec-repl-halt-look-{}-{:?}",
+            "fennec-repl-halt-look-{}-{}",
             std::process::id(),
-            Instant::now()
+            // Not an `Instant`'s `Debug`, whose `:` Windows takes in no
+            // file's name (`ERROR_DIRECTORY`, 267).
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         for at in ["an image arrived", "an image loaded"] {

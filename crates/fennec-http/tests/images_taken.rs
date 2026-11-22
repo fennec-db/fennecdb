@@ -13,13 +13,15 @@ use fennec_core::engine::Database;
 use fennec_core::history::History;
 use fennec_http::replication;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 fn dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "fennec-images-taken-{tag}-{}-{:?}",
+        "fennec-images-taken-{tag}-{}-{}",
         std::process::id(),
-        Instant::now()
+        // Nanoseconds, not an `Instant`'s `Debug`: on Windows that is
+        // `Instant { t: .. }`, and a `:` is no part of a file's name there
+        // (`ERROR_DIRECTORY`, 267).
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
     ));
     std::fs::create_dir_all(&d).unwrap();
     d
