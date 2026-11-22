@@ -333,7 +333,8 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
         // A router taking back a file it left, the node the judge: 200 only
         // where it is gone -- taken, or not there -- which a node from
-        // before identities never answers here (404).
+        // before identities never answers here (404); 503 while an install
+        // of the name is under way, which may put the file there yet.
         (Method::Post, ["tenants", t, "reclaim"]) => superseded(tenants, req)
             .and_then(|_| {
                 instance::list_in(&String::from_utf8_lossy(&req.body)).map_err(|e| Refused(400, e))

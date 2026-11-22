@@ -92,8 +92,8 @@ pub enum Kept {
     /// place, or the file made something else since -- or none (`None`):
     /// one this node cannot vouch for.
     Other(Option<u64>),
-    /// Refused as anything else is: the node going down (503), the file
-    /// still in use (409).
+    /// Refused as anything else is: the node going down or an install of
+    /// the name under way (503), the file still in use (409).
     Refused(Refused),
 }
 
@@ -244,21 +244,29 @@ fn hold_tenant(
     })
 }
 
-/// An install's claim of a tenant's name ([`Tenants::claim_import`]),
-/// given up as it drops.
-struct Importing<'a>(&'a Tenants, String);
+/// A claim of a tenant's name in this process -- an install's, through the
+/// whole take of its image, or a create's, from its look for a file to the
+/// file made ([`Tenants::claim`]) -- given up as it drops.
+struct Claim<'a>(&'a Tenants, String);
 
-impl Drop for Importing<'_> {
+impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        let mut importing = self.0.importing.lock().unwrap_or_else(|e| e.into_inner());
-        importing.retain(|n| *n != self.1);
+        let mut claims = self.0.claims.lock().unwrap_or_else(|e| e.into_inner());
+        claims.retain(|(n, _)| *n != self.1);
     }
 }
 
-fn importing_refusal(name: &str) -> Refused {
+/// The refusal of a request for a name another request's install or create
+/// holds (`by`: "installed", "made"): 503, come back in a second, as every
+/// 503 says -- nothing of this request ran, and what holds the name ends.
+/// Never a 409, which says a file is there: a router read the install's as
+/// one, had a reclaim judge the place -- no file yet, so "gone" -- forgot
+/// its note of the install that then put a file there, and failed the move,
+/// the file no router's to take back.
+fn claimed(name: &str, by: &str) -> Refused {
     Refused(
-        409,
-        format!("tenant `{name}` is being installed by another request"),
+        503,
+        format!("tenant `{name}` is being {by} by another request: come back once it is done"),
     )
 }
 
@@ -582,10 +590,12 @@ pub struct Tenants {
     /// The threads syncing its tenants under `--sync <ms>`
     /// ([`Tenants::sync_each`]).
     syncs: syncs::Syncs,
-    /// The names an install is taking an image for in this process
-    /// ([`Tenants::import_from`]): a second install or a create of one is
-    /// refused at once, never left waiting on the first's `<file>.lock`.
-    importing: Mutex<Vec<String>>,
+    /// The names an install is taking an image for, or a create making a
+    /// file for, in this process, and which ([`Tenants::claim`]): an
+    /// install, a create or a reclaim of one is refused at once (503),
+    /// never left waiting on the holder's `<file>.lock` nor answered as if
+    /// the file it may yet put in place were gone.
+    claims: Mutex<Vec<(String, &'static str)>>,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -684,7 +694,7 @@ impl Tenants {
             scheduler: std::sync::OnceLock::new(),
             hooks,
             syncs: syncs::Syncs::default(),
-            importing: Mutex::new(Vec::new()),
+            claims: Mutex::new(Vec::new()),
         })
     }
 
@@ -1520,7 +1530,13 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
-            self.refuse_if_importing(name)?;
+            // Claimed as an install claims it, the look and the claim one
+            // step: an install under way refuses the create at once (503),
+            // and one coming after meets this claim. Only looked for, an
+            // install claiming the name between the look and the open's
+            // `<file>.lock` had the create wait the lock out under the slot,
+            // every request for the name with it, then answered 500.
+            let _claim = self.claim(name, "made")?;
             self.refuse_if_shutting_down()?;
             // An identity a file of the name left -- a binary from before
             // this one deleting it -- names another file, and goes before
@@ -2456,7 +2472,7 @@ impl Tenants {
         // also keeps another process's install of the name -- whose file
         // it is -- from this one's, and from a node's sweep as it starts
         // ([`sweep_left`]).
-        let _claim = self.claim_import(name)?;
+        let _claim = self.claim(name, "installed")?;
         let _held = hold_tenant(name, &path)?;
         if path.exists() {
             return Err(there());
@@ -2587,25 +2603,27 @@ impl Tenants {
         Ok(id)
     }
 
-    /// Claims `name` for an install ([`Self::import_from`]) until the
-    /// claim drops: refused (409) where another holds it.
-    fn claim_import(&self, name: &str) -> std::result::Result<Importing<'_>, Refused> {
-        let mut importing = self.importing.lock().unwrap_or_else(|e| e.into_inner());
-        if importing.iter().any(|n| n == name) {
-            return Err(importing_refusal(name));
+    /// Claims `name` for an install ([`Self::import_from`]) or a create
+    /// ([`Self::create_as`]), `by` saying which, until the claim drops:
+    /// refused (503) where another request holds it.
+    fn claim(&self, name: &str, by: &'static str) -> std::result::Result<Claim<'_>, Refused> {
+        let mut claims = self.claims.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, held)) = claims.iter().find(|(n, _)| n == name) {
+            return Err(claimed(name, held));
         }
-        importing.push(name.to_string());
-        Ok(Importing(self, name.to_string()))
+        claims.push((name.to_string(), by));
+        Ok(Claim(self, name.to_string()))
     }
 
-    /// 409 where an install is taking an image for `name`: a create would
-    /// wait on its `<file>.lock` under the slot, every request for the
-    /// name with it, and be refused as a file not let go of.
-    fn refuse_if_importing(&self, name: &str) -> std::result::Result<(), Refused> {
-        let importing = self.importing.lock().unwrap_or_else(|e| e.into_inner());
-        match importing.iter().any(|n| n == name) {
-            true => Err(importing_refusal(name)),
-            false => Ok(()),
+    /// 503 where an install or a create holds `name` ([`Self::claim`]):
+    /// a reclaim judging the place meanwhile found no file and answered it
+    /// gone, and the router forgot its note of the file the install then
+    /// put there.
+    fn refuse_if_claimed(&self, name: &str) -> std::result::Result<(), Refused> {
+        let claims = self.claims.lock().unwrap_or_else(|e| e.into_inner());
+        match claims.iter().find(|(n, _)| n == name) {
+            Some((_, by)) => Err(claimed(name, by)),
+            None => Ok(()),
         }
     }
 
@@ -2679,6 +2697,10 @@ impl Tenants {
         let mut frozen = false;
         let out = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
+            // An install of the name under way may put a file there yet --
+            // the very one a router noted, its answer lost -- so nothing is
+            // judged meanwhile: the router waits and asks again.
+            self.refuse_if_claimed(name)?;
             let path = self.path(name);
             if matches!(held, Held::Closed) && !path.exists() {
                 return Ok(false);
