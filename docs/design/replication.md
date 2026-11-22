@@ -509,6 +509,12 @@ holds them (`Kept`) -- a live image is written a document at a time, so a
 piece a document, three times the id index; the frames' index made again
 from the pin as the image is written, 4 bytes a row fewer held, for a second
 walk of the index under the lock to say the record's length.
+fennec-server's code grows 9.6 KB for it (macOS arm64, release, its text
+against main's): the pin and its writer, a move's answer, the node stream's
+writer; the export writes through the replication stream's own writer
+type, whose code the binary holds already -- through one of its own it was
+13.4. The browser module is the same size: every change to the image's
+writer is native.
 
 What takes the image still reads it whole: a replica (`read_kind`, then
 `loaded`, which loads it into a database in memory), `fennec backup`, a
