@@ -79,7 +79,10 @@ standing. Up to 0.2.0 (from 0.1.8) the length was cast to the `int`
 unchecked, so such an answer went over as a negative length -- an
 exception the VM threw where Kotlin reads a code -- or, from 4 GiB, as its length past a multiple of 4
 GiB, the answer cut to it (1.0's review); the unit test holds the check on
-the length, as no test allocates 2 GiB. The JNI functions' own work --
+the length, as no test allocates 2 GiB. Below the check the VM may refuse
+the array itself: HotSpot makes no `byte[]` of `i32::MAX - 1` or
+`i32::MAX` bytes, and ART none past its heap, so those answers come back as
+the `OutOfMemoryError` `NewByteArray` throws, never cut short. The JNI functions' own work --
 reading their arrays, making the answer -- ran outside `call`'s
 `catch_unwind`, and a panic leaving an `extern "system"` function aborts
 the process: each now runs under one (`guarded`), a panic answered as
