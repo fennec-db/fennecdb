@@ -14,7 +14,36 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// The `Authorization` line every request of this process carries, set
+/// once before the first (`bearer`): a soak's servers ask a token, as a
+/// server reached past loopback must -- with none, one answers only a
+/// `Host` of this machine's (fennec-http's `open_refusal`), and a replica,
+/// a backup or a client reaching it by its container's name is refused.
+/// Unset, nothing: every other bench's requests are as they were.
+static AUTH: OnceLock<String> = OnceLock::new();
+
+/// Every request after this carries `Authorization: Bearer <token>` -- but
+/// one that names its own (`Http::try_request_with`'s `headers`).
+pub fn bearer(token: &str) {
+    let _ = AUTH.set(format!("Authorization: Bearer {token}\r\n"));
+}
+
+/// The line [`bearer`] set, or nothing: for a request written by hand.
+pub fn auth() -> &'static str {
+    AUTH.get().map_or("", String::as_str)
+}
+
+/// [`auth`], but nothing where `headers` names an `Authorization` of its
+/// own: a request carries one.
+fn auth_beside(headers: &str) -> &'static str {
+    match headers.contains("Authorization:") {
+        true => "",
+        false => auth(),
+    }
+}
 
 /// A kept-alive connection to fennec-server's HTTP.
 pub struct Http {
@@ -89,7 +118,8 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{}{headers}Content-Length: {}\r\n\r\n",
+            auth_beside(headers),
             body.len()
         )?;
         self.head.extend_from_slice(body);
@@ -154,7 +184,8 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{}{headers}Content-Length: {}\r\n\r\n",
+            auth_beside(headers),
             body.len()
         )
         .unwrap();
@@ -190,7 +221,8 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n",
+            auth(),
             body.len()
         )
         .unwrap();

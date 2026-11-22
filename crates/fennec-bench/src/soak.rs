@@ -8,7 +8,10 @@
 //!
 //! The server runs in a container whose `--memory` is under its file's
 //! size, so the mapped file's pages come and go; a second follows it as a
-//! replica. The load is open loop (`--rate`, a schedule a connection, an
+//! replica. Both ask a token, the run's own, as a server reached past
+//! loopback must (`Kit::start`), and a fault of the harness's own -- a
+//! server refusing the run's token or its name, the replica not following
+//! -- stops the run at once (`stop_run`), never carried for hours. The load is open loop (`--rate`, a schedule a connection, an
 //! operation's time from when it was due: a stall counts the wait of every
 //! one queued behind it), or as fast as answered for the peak (`--peak`).
 //! Its mix, over a fixed set of connections:
@@ -150,6 +153,7 @@ struct Opts {
     recall_min: f64,
     samples: u64,
     disk_floor: u64,
+    replication_buffer: u64,
     out: PathBuf,
     run_id: String,
     image: String,
@@ -166,7 +170,7 @@ const HELP: &str = "ycsb soak --sync 250|always (--rate <ops/s> [--label 50] | -
     [--kill-in-compact-every 90] [--compact-every 20] [--backup-every 120]
     [--backup-at 50] [--ttl 60] [--slack 1] [--loss-ms 650|0] [--restart-max 120]
     [--replica-back-max 60] [--lag-max 5] [--catchup-max 300] [--recall-min 0.925]
-    [--samples 3] [--disk-floor 3g] [--out soak.tsv] [--run-id <id>]
+    [--samples 3] [--disk-floor 3g] [--replication-buffer 64] [--out soak.tsv] [--run-id <id>]
     [--image fennecdb-ycsb] [--tools p6-tools] [--name p6] [--progress <file>]
     [--kept <file>] [--load-before <load>]
 ycsb soak report <soak.tsv> [<run-id>]";
@@ -205,6 +209,9 @@ impl Opts {
             recall_min: 0.925,
             samples: 3,
             disk_floor: 3 << 30,
+            // fennec-server's own default (`replication::DEFAULT_BUFFER`),
+            // passed so that the report knows the bound it holds memory by.
+            replication_buffer: 64,
             out: PathBuf::from("soak.tsv"),
             run_id: String::new(),
             image: "fennecdb-ycsb".into(),
@@ -255,6 +262,7 @@ impl Opts {
                 "--disk-floor" => {
                     o.disk_floor = super::bytes_of(&v).unwrap_or_else(|| panic!("--disk-floor {v}"))
                 }
+                "--replication-buffer" => o.replication_buffer = n(),
                 "--out" => o.out = PathBuf::from(&v),
                 "--run-id" => o.run_id = v.clone(),
                 "--image" => o.image = v.clone(),
@@ -410,10 +418,19 @@ fn say(line: String) {
 /// it, and the script's guard would find the soak silent with no word of
 /// why. A container the call named is removed once it is given up on.
 fn docker_within(within: Duration, args: &[&str]) -> (bool, String) {
+    docker_env(within, &[], args)
+}
+
+/// [`docker_within`] with `env` in the docker CLI's environment: what a
+/// `-e NAME` with no value hands the container, a run's secrets so --
+/// never an argument, which `ps` shows on this host and in the VM, and a
+/// call that does not end prints.
+fn docker_env(within: Duration, env: &[(&str, &str)], args: &[&str]) -> (bool, String) {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let spawned = Command::new("docker")
         .args(args)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -483,7 +500,13 @@ struct Kit {
     tools: String,
     memory: String,
     sync: String,
+    /// The servers' `--replication-token` and `--http-token`, the run's own
+    /// (`secret`), handed to each container in its environment (`secrets`).
     token: String,
+    http_token: String,
+    /// The servers' `--replication-buffer`, in MiB: what the report holds
+    /// the primary's memory beside (`feed_held`).
+    replication_buffer: u64,
     port: u16,
     replica_port: u16,
     /// Set once a verify failed or a mismatch was counted: the volumes
@@ -565,10 +588,28 @@ impl Kit {
         docker(&["network", "rm", &self.net()]);
     }
 
+    /// The run's secrets as the containers read them (fennec-server's
+    /// `FENNEC_HTTP_TOKEN` and `FENNEC_REPLICATION_TOKEN`, `fennec
+    /// backup`'s the latter), for [`docker_env`].
+    fn secrets(&self) -> [(&'static str, &str); 2] {
+        [
+            ("FENNEC_HTTP_TOKEN", &self.http_token),
+            ("FENNEC_REPLICATION_TOKEN", &self.token),
+        ]
+    }
+
     /// `fennec-server` in a container on the run's network, its port on
     /// this machine's loopback, held to `--memory` with no swap past it.
+    /// It asks a token, as a server reached past loopback must: with none
+    /// it answers only a `Host` of this machine's, and the replica's follow
+    /// and `fennec backup`, which reach the primary by its container's
+    /// name, were refused 403 (the dry run of 2026-11-22). Both tokens go
+    /// in its environment, never its arguments.
     fn start(&self, container: &str, port: u16, volume: &str, args: &[&str]) {
-        let (ok, out) = docker(
+        let buffer = self.replication_buffer.to_string();
+        let (ok, out) = docker_env(
+            Duration::from_secs(120),
+            &self.secrets(),
             &[
                 &[
                     "run",
@@ -587,12 +628,15 @@ impl Kit {
                     &self.memory,
                     "--memory-swap",
                     &self.memory,
+                    "-e",
+                    "FENNEC_HTTP_TOKEN",
+                    "-e",
+                    "FENNEC_REPLICATION_TOKEN",
                     &self.image,
                     "--http",
                     "0.0.0.0:8080",
-                    "--insecure",
-                    "--replication-token",
-                    &self.token,
+                    "--replication-buffer",
+                    &buffer,
                 ][..],
                 args,
             ]
@@ -639,27 +683,37 @@ impl Kit {
         script: &str,
         within: Duration,
     ) -> (bool, String) {
-        docker_within(
-            within,
-            &[
-                "run",
-                "--rm",
-                "--pull",
-                "never",
-                "--name",
-                container,
-                "--network",
-                &self.net(),
-                "-v",
-                &format!("{}:/tools:ro", self.tools),
-                "-v",
-                &format!("{volume}:/data"),
-                ALPINE,
-                "sh",
-                "-c",
-                script,
-            ],
-        )
+        self.fennec_env(container, volume, script, within, &[])
+    }
+
+    /// [`Kit::fennec`] with `env` in the container's environment, by name
+    /// (`-e NAME`), its values never in an argument.
+    fn fennec_env(
+        &self,
+        container: &str,
+        volume: &str,
+        script: &str,
+        within: Duration,
+        env: &[(&str, &str)],
+    ) -> (bool, String) {
+        let mut args = vec![
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--name",
+            container,
+            "--network",
+        ];
+        let net = self.net();
+        let tools = format!("{}:/tools:ro", self.tools);
+        let data = format!("{volume}:/data");
+        args.extend([net.as_str(), "-v", tools.as_str(), "-v", data.as_str()]);
+        for &(name, _) in env {
+            args.extend(["-e", name]);
+        }
+        args.extend([ALPINE, "sh", "-c", script]);
+        docker_env(within, env, &args)
     }
 
     /// A server's process as a shell in its process namespace sees it: its
@@ -1585,8 +1639,24 @@ impl Checker {
             if back {
                 faults.order += 1;
             }
+            // A deletion outside the range is the server's word that an id
+            // the stream does not hold changed: a plain stream judges each
+            // changed id by its filter alone, as the row stands, and tells
+            // one that does not match as deleted whether or not it ever did
+            // (fennec-core's `Database::changes_since`, "a deliberate
+            // looseness"; a client deleting a row it lacks does nothing).
+            // Nothing to hold, and no write of the range's -- the dry run of
+            // 2026-11-22 counted every write outside each range as a key
+            // sent twice and a mismatch, 23.5 million of each. A row put
+            // outside it is still wrong (`row`).
+            let dels: Vec<u64> = ev
+                .dels
+                .iter()
+                .copied()
+                .filter(|k| (from..to).contains(k))
+                .collect();
             let mut keys: HashSet<u64> = ev.rows.iter().map(|r| r.0).collect();
-            keys.extend(ev.dels.iter().copied());
+            keys.extend(dels.iter().copied());
             let owed: Vec<(u64, W)> = match back {
                 true => Vec::new(),
                 false => st
@@ -1618,14 +1688,18 @@ impl Checker {
                 .next_back()
                 .map_or(0, |(_, &s)| s)
                 .max(ev.opened);
-            if s < horizon {
-                faults.late += 1;
-            } else {
-                for &(key, got) in &ev.rows {
-                    row(key, s, true, got, &mut wrong);
-                }
-                for &key in &ev.dels {
-                    row(key, s, false, [0; FIELDS], &mut wrong);
+            // An event of ids outside the range alone holds nothing, so
+            // nothing of it is late.
+            if !ev.rows.is_empty() || !dels.is_empty() {
+                if s < horizon {
+                    faults.late += 1;
+                } else {
+                    for &(key, got) in &ev.rows {
+                        row(key, s, true, got, &mut wrong);
+                    }
+                    for &key in &dels {
+                        row(key, s, false, [0; FIELDS], &mut wrong);
+                    }
                 }
             }
         }
@@ -1873,6 +1947,11 @@ struct Shared {
     readers: Vec<Reader>,
     streams: Vec<Stream>,
     notes: Mutex<Vec<String>>,
+    /// Why the run must stop now, the harness's own setting at fault -- a
+    /// server that refused the run's token or its name, a backup refused
+    /// so -- which every minute after would meet again: the first said,
+    /// and the minute's loop ends the run on it (`stop_run`).
+    fault: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -1931,7 +2010,21 @@ impl Shared {
                 })
                 .collect(),
             notes: Mutex::new(Vec::new()),
+            fault: Mutex::new(None),
         }
+    }
+
+    /// The run stops at the minute's end for `why`, the first fault said.
+    fn fault(&self, why: String) {
+        let mut f = self.fault.lock().unwrap_or_else(|e| e.into_inner());
+        if f.is_none() {
+            say(format!("the harness's fault, the run stops: {why}"));
+            *f = Some(why);
+        }
+    }
+
+    fn faulted(&self) -> Option<String> {
+        self.fault.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn ns(&self) -> u64 {
@@ -2081,12 +2174,23 @@ impl Worker<'_> {
                     std::thread::sleep(Duration::from_millis(200));
                 }
                 Ok((status, body, _, _)) => {
-                    self.sh.failed(t, false, || {
+                    let said = || {
                         format!(
                             "{text}: {status} {}",
                             String::from_utf8_lossy(&body[..body.len().min(200)])
                         )
-                    });
+                    };
+                    // Nothing the mix sends is refused for its token or its
+                    // address by a server the run set up right: the run's
+                    // own setting is, at every request after.
+                    if status == 401 || status == 403 {
+                        self.sh.fault(format!(
+                            "the {} refused {}",
+                            if replica { "replica" } else { "primary" },
+                            said()
+                        ));
+                    }
+                    self.sh.failed(t, false, said);
                     return Answer::Refused(status);
                 }
                 Err(e) => {
@@ -2587,7 +2691,8 @@ fn subscribe(sh: &Shared, i: usize) {
             s.set_read_timeout(Some(Duration::from_secs(2)))?;
             write!(
                 s,
-                "GET /usertable/changes?where={query} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                "GET /usertable/changes?where={query} HTTP/1.1\r\nHost: localhost\r\n{}\r\n",
+                http::auth()
             )?;
             Ok(s)
         })();
@@ -2610,6 +2715,9 @@ fn subscribe(sh: &Shared, i: usize) {
                     Ok(_) if head => {
                         if !line.contains(" 200") {
                             ended = line.trim().to_string();
+                            if line.contains(" 401") || line.contains(" 403") {
+                                sh.fault(format!("subscription {i} was refused: {ended}"));
+                            }
                             break;
                         }
                         head = false;
@@ -3075,23 +3183,32 @@ impl Side {
         me.inflight.store(s, Ordering::SeqCst);
         let seq0 = super::metrics_page(&sh.addr)
             .map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"));
+        // The token from the container's environment (`fennec backup`
+        // reads FENNEC_REPLICATION_TOKEN), never the script's words: `ps`
+        // shows them.
         let script = format!(
             "rm -rf /data/archive /data/restored.fennec; \
-             /tools/fennec backup http://{}:8080 /data/archive --token {} && echo BACKUP-OK && \
+             /tools/fennec backup http://{}:8080 /data/archive && echo BACKUP-OK && \
              /tools/fennec restore /data/archive /data/restored.fennec && echo RESTORE-OK && \
              /tools/fennec verify /data/restored.fennec && echo VERIFY-OK; \
              rm -rf /data/archive",
             kit.server(),
-            kit.token
         );
         let t = Instant::now();
-        let (_, out) = kit.fennec(
+        let (_, out) = kit.fennec_env(
             &format!("{}-backup", kit.name),
             &kit.volume("backup-data"),
             &script,
             Duration::from_secs(1800),
+            &kit.secrets()[1..],
         );
         let e = sh.ns();
+        // Refused by the primary for its token or its name: the run's own
+        // setting, which every backup after would meet -- the run stops at
+        // the minute's end rather than carry it for hours.
+        if let Some(why) = refused(&out) {
+            sh.fault(format!("fennec backup was refused: {why}"));
+        }
         let backed = out.contains("BACKUP-OK");
         let restored = out.contains("RESTORE-OK") && out.contains("VERIFY-OK");
         let (seq, sampled) = match restored {
@@ -3137,33 +3254,39 @@ impl Side {
         let sh = &self.sh;
         let kit = &self.kit;
         let port = http::free_port();
-        let (ok, out) = docker(&[
-            "run",
-            "-d",
-            "--pull",
-            "never",
-            "--name",
-            &format!("{}-restored", kit.name),
-            "--network",
-            &kit.net(),
-            "-p",
-            &format!("127.0.0.1:{port}:8080"),
-            "-v",
-            &format!("{}:/data", kit.volume("backup-data")),
-            "--memory",
-            &kit.memory,
-            "--memory-swap",
-            &kit.memory,
-            &kit.image,
-            "--http",
-            "0.0.0.0:8080",
-            "--insecure",
-            "--file",
-            "/data/restored.fennec",
-            "--http-read-only",
-            "--auto-compact",
-            "off",
-        ]);
+        // The run's token, as the requests of this process carry it.
+        let (ok, out) = docker_env(
+            Duration::from_secs(120),
+            &kit.secrets()[..1],
+            &[
+                "run",
+                "-d",
+                "--pull",
+                "never",
+                "--name",
+                &format!("{}-restored", kit.name),
+                "--network",
+                &kit.net(),
+                "-p",
+                &format!("127.0.0.1:{port}:8080"),
+                "-v",
+                &format!("{}:/data", kit.volume("backup-data")),
+                "--memory",
+                &kit.memory,
+                "--memory-swap",
+                &kit.memory,
+                "-e",
+                "FENNEC_HTTP_TOKEN",
+                &kit.image,
+                "--http",
+                "0.0.0.0:8080",
+                "--file",
+                "/data/restored.fennec",
+                "--http-read-only",
+                "--auto-compact",
+                "off",
+            ],
+        );
         let mut got = (None, 0);
         if !ok {
             sh.note(format!("the restored file's server did not start: {out}"));
@@ -3352,6 +3475,9 @@ struct Settings {
     recall_min: f64,
     subscriptions: u64,
     threads: u64,
+    /// The servers' `--replication-buffer`, MiB: 64, the server's own
+    /// default, where a start line from before it does not say.
+    replication_buffer: u64,
 }
 
 impl Settings {
@@ -3371,6 +3497,7 @@ impl Settings {
             recall_min: o.recall_min,
             subscriptions: o.subscriptions as u64,
             threads: o.threads as u64,
+            replication_buffer: o.replication_buffer,
         }
     }
 
@@ -3393,6 +3520,7 @@ impl Settings {
             ("recall_min", format!("{}", self.recall_min)),
             ("subscriptions", self.subscriptions.to_string()),
             ("threads", self.threads.to_string()),
+            ("replication_buffer", self.replication_buffer.to_string()),
         ]
     }
 
@@ -3413,6 +3541,7 @@ impl Settings {
             recall_min: g("recall_min")?,
             subscriptions: g("subscriptions")? as u64,
             threads: g("threads")? as u64,
+            replication_buffer: g("replication_buffer").map_or(64, |x| x as u64),
         })
     }
 }
@@ -3556,6 +3685,58 @@ fn clock_probe(addr: &str) -> Option<(f64, f64)> {
 /// take (`CLOCK_STEP_MS`).
 fn clock_stepped(prev: (f64, f64), now: (f64, f64)) -> bool {
     (now.0 - prev.0).abs() - (prev.1 + now.1) / 2.0 > CLOCK_STEP_MS
+}
+
+/// A secret of the run's: 32 bytes of the system's randomness, as hex --
+/// the servers' tokens, held in memory and handed to each container in its
+/// environment, never written to a file, an argument or the log.
+fn secret() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .expect("/dev/urandom");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A refusal a server answered the run for its token or its address, as
+/// `fennec backup` and a replica's status word one (`the primary answered
+/// 403: ...`), from its status on: the run's own setting, which every
+/// request after meets again. `None` for anything else -- a 5xx, a cut
+/// connection -- which a restart explains and the run counts.
+fn refused(text: &str) -> Option<String> {
+    ["answered 401", "answered 403"].iter().find_map(|k| {
+        let at = text.find(k)?;
+        // Its first line, unescaped where a status's JSON quoted it.
+        let words: String = text[at..].lines().next()?.chars().take(300).collect();
+        let words = words.replace("\\\"", "\"");
+        Some(words.trim_end_matches(['"', '}']).to_string())
+    })
+}
+
+/// Ends the run at once on the harness's fault (`why`), never carrying for
+/// hours what every minute meets again: the load stopped, the run's
+/// volumes kept for whoever reads why (`--kept`), its containers removed,
+/// a `:stopped` line beside its others, and exit 4 -- the script's word for
+/// the harness's own failure, apart from a report's (1) and the
+/// environment's (2, 3).
+fn stop_run(bench: &Kit, sh: Option<&Shared>, o: &Opts, why: &str) -> ! {
+    if let Some(sh) = sh {
+        sh.stop.store(true, Ordering::SeqCst);
+    }
+    bench.keep_data(&format!("the harness stopped the run: {why}"));
+    say(format!(
+        "STOPPED, the harness's fault: {why} -- no run counts until it is fixed"
+    ));
+    append_values(
+        &o.out,
+        "soak",
+        &o.run_id,
+        &format!("{}:{}:stopped", o.sync, o.label),
+        &[("stopped", "1".to_string())],
+    );
+    bench.clean();
+    std::process::exit(4);
 }
 
 /// Whether the replica says it is connected and holds the change `target`.
@@ -3717,17 +3898,18 @@ fn run(o: &Opts) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let token: String = {
-        let mut rng = Rng::new(started ^ std::process::id() as u64);
-        (0..4).map(|_| format!("{:016x}", rng.next())).collect()
-    };
+    let http_token = secret();
+    // Every request this process sends carries it, the load's first.
+    http::bearer(&http_token);
     let bench = Bench(Kit {
         name: o.name.clone(),
         image: o.image.clone(),
         tools: o.tools.clone(),
         memory: o.memory.clone(),
         sync: o.sync.clone(),
-        token,
+        token: secret(),
+        http_token,
+        replication_buffer: o.replication_buffer,
         port: http::free_port(),
         replica_port: http::free_port(),
         keep: Arc::new(AtomicBool::new(false)),
@@ -3756,6 +3938,17 @@ fn run(o: &Opts) {
     let seq = |a: &str| {
         super::metrics_page(a).map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"))
     };
+    // The replica's own word on its follow (`/_replication/status`'s
+    // `error`): what a wait says, and a refusal ends the run at once --
+    // the dry run of 2026-11-22 waited its whole half hour, twice, on a
+    // follow its primary had refused from the first second.
+    let follow_said = || {
+        let st = bench.status(bench.replica_port).unwrap_or_default();
+        let error = st
+            .find("\"error\":")
+            .map(|at| st[at + 8..].trim_end_matches('}').to_string());
+        (refused(&st), error)
+    };
     let caught_up = |within: Duration, what: &str| -> Option<f64> {
         let t = Instant::now();
         let mut said = Instant::now();
@@ -3767,10 +3960,20 @@ fn run(o: &Opts) {
             if t.elapsed() >= within {
                 return None;
             }
+            let (refusal, error) = follow_said();
+            if let Some(why) = refusal {
+                stop_run(
+                    &bench,
+                    None,
+                    o,
+                    &format!("{what}: the replica's primary {why}"),
+                );
+            }
             if said.elapsed() >= Duration::from_secs(60) {
                 say(format!(
-                    "{what}: the replica at change {r:?}, the primary at {p:?}, {:.0} s",
-                    t.elapsed().as_secs_f64()
+                    "{what}: the replica at change {r:?}, the primary at {p:?}, {:.0} s{}",
+                    t.elapsed().as_secs_f64(),
+                    error.map_or(String::new(), |e| format!("; the replica says {e}"))
                 ));
                 said = Instant::now();
             }
@@ -3815,6 +4018,20 @@ fn run(o: &Opts) {
         &format!("{}:{}:start", o.sync, o.label),
         &v,
     );
+    // A run whose replica never followed reads nothing through it, waits
+    // out every read sent there and compares nothing at its end: no soak.
+    if follow.is_none() {
+        let (_, error) = follow_said();
+        stop_run(
+            &bench,
+            None,
+            o,
+            &format!(
+                "the replica did not follow within {follow_max} s{}",
+                error.map_or("; it said no error".into(), |e| format!("; it says {e}"))
+            ),
+        );
+    }
 
     let ranges: Vec<(u64, u64)> = (0..o.subscriptions)
         .map(|i| {
@@ -3987,6 +4204,9 @@ fn run(o: &Opts) {
         let page = super::metrics_page(&addr).unwrap_or_default();
         let rpage = super::metrics_page(&raddr).unwrap_or_default();
         let status = bench.status(bench.replica_port).unwrap_or_default();
+        if let Some(why) = refused(&status) {
+            sh.fault(format!("the replica's primary {why}"));
+        }
         // The compactions each server ran on its own in the minute: its
         // `fennec_auto_compactions_total`, which starts again with it.
         let mut own = [0u64; 2];
@@ -4092,6 +4312,16 @@ fn run(o: &Opts) {
             (
                 "memory_bytes",
                 metric_sum(page.as_bytes(), "fennec_memory_bytes").to_string(),
+            ),
+            (
+                "r_memory_bytes",
+                metric_sum(rpage.as_bytes(), "fennec_memory_bytes").to_string(),
+            ),
+            // The primary's change counter: the records its replication
+            // feed holds, whose index the report counts as held (`feed_held`).
+            (
+                "seq",
+                metric_sum(page.as_bytes(), "fennec_change_sequence").to_string(),
             ),
             (
                 "connections",
@@ -4245,6 +4475,9 @@ fn run(o: &Opts) {
         if let Some(why) = &env_failed {
             say(format!("the environment failed the run: {why}"));
             break;
+        }
+        if let Some(why) = sh.faulted() {
+            stop_run(&bench, Some(&sh), o, &format!("minute {m}: {why}"));
         }
         if o.peak && m > 1 {
             peak.push(ops as f64 / secs);
@@ -4416,6 +4649,10 @@ fn run(o: &Opts) {
     // registers settled to now -- the end's reads come after it, and a
     // session's expiry may end after them.
     checker.hold(u64::MAX, sh.ns(), u64::MAX, &[]);
+    // The last minutes' reads and events, held only now: the run's, said
+    // apart from what the end's read finds.
+    let tail = checker.mismatches - before;
+    let before = checker.mismatches;
     let t = Instant::now();
     let primary = match env_failed {
         None => read_all(&addr, &sh, o, Some(&mut checker)),
@@ -4478,9 +4715,9 @@ fn run(o: &Opts) {
     };
     let primary_ok = verify(&bench.volume("data"), "soak.fennec");
     let replica_ok = verify(&bench.volume("replica-data"), "replica.fennec");
-    if !primary_ok || !replica_ok || late > 0 || !same {
+    if !primary_ok || !replica_ok || tail > 0 || late > 0 || !same {
         bench.keep_data(&format!(
-            "at the end: the primary's file {}, the replica's {}, {late} mismatches in the end's read, the replica's rows {}",
+            "at the end: the primary's file {}, the replica's {}, {tail} mismatches in the last minutes' reads and events, {late} in the end's read, the replica's rows {}",
             if primary_ok { "verified" } else { "FAILED verify" },
             if replica_ok { "verified" } else { "FAILED verify" },
             if same { "the same" } else { "different or not compared" }
@@ -4492,7 +4729,7 @@ fn run(o: &Opts) {
         ("minutes", minutes_run.to_string()),
         ("ops", totals.0.to_string()),
         ("errors", totals.1.to_string()),
-        ("mismatches", (totals.2 + late).to_string()),
+        ("mismatches", (totals.2 + tail + late).to_string()),
         ("reads_held", checker.reads.to_string()),
         ("writes_held", checker.writes.to_string()),
         ("kills", sh.windows.lock().unwrap().len().to_string()),
@@ -4540,7 +4777,7 @@ fn run(o: &Opts) {
         "{minutes_run} minutes, {} operations, {} errors, {} mismatches ({} reads and {} writes held), the files {} and {}, the replica {}{}",
         totals.0,
         totals.1,
-        totals.2 + late,
+        totals.2 + tail + late,
         checker.reads,
         checker.writes,
         if primary_ok { "clean" } else { "NOT CLEAN" },
@@ -4725,8 +4962,8 @@ pub const CRITERIA: [&str; 19] = [
     "every minute has operations from every connection",
     "last hour's p99, steady and in compacts, <= 1.25x its schedule's",
     "file <= 2.2x live every minute",
-    "primary's anonymous memory < +5% within each life",
-    "replica's anonymous memory < +5% after the first hour",
+    "primary's memory beyond what it holds < +5% within each life",
+    "replica's memory beyond its engine's < +5% after the first hour",
     "threads less connections within 2, a life's too",
     "descriptors less connections within 2, a life's too",
     "no error",
@@ -4808,6 +5045,56 @@ type Block = (String, String, Vec<(String, f64)>);
 /// A minute's line as the report reads it: its minute and its values.
 type Line<'a> = (u64, &'a HashMap<String, f64>);
 
+/// What the primary's replication feed holds at each line of a life, in
+/// bytes: the records it appended since it opened, up to the feed's bound
+/// (`cap`, its `--replication-buffer`) -- the feed starts empty at each
+/// open and keeps the last `cap` bytes of them -- and the index the feed
+/// keeps beside each record held (`Chunk`'s `ends`, `lasts` and `times`:
+/// 24 bytes, in vectors grown by doubling, so 48 at the most), its records
+/// counted by the change counter (`seq`) where the lines have it, and none
+/// where they do not. A minute's appends are its file's growth; one whose
+/// file did not grow, or that compacted, counts the life's median minute,
+/// as does its first line. `loaded`, the life the run loaded its records
+/// in: they fill the feed at once (the file, every byte of it appended).
+fn feed_held(xs: &[Line], cap: f64, loaded: bool) -> Vec<f64> {
+    let g = |m: &HashMap<String, f64>, k: &str| m.get(k).copied();
+    // Each minute's appended bytes and records, where it grew and nothing
+    // compacted.
+    let steps: Vec<Option<(f64, Option<f64>)>> = xs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, m))| {
+            let (_, p) = xs.get(i.checked_sub(1)?)?;
+            let grew = g(m, "file")? - g(p, "file")?;
+            let records = match (g(m, "seq"), g(p, "seq")) {
+                (Some(a), Some(b)) if a >= b => Some(a - b),
+                _ => None,
+            };
+            (grew > 0.0 && quiet_look(m, false)).then_some((grew, records))
+        })
+        .collect();
+    let grown: Vec<f64> = steps.iter().flatten().map(|s| s.0).collect();
+    let per_minute = median(&grown);
+    let recs: Vec<f64> = steps.iter().flatten().filter_map(|s| s.1).collect();
+    // Records a byte of the file, over the minutes both are known for.
+    let per_byte = match recs.len() == grown.len() && !recs.is_empty() {
+        true => recs.iter().sum::<f64>() / grown.iter().sum::<f64>().max(1.0),
+        false => 0.0,
+    };
+    let mut appended = match loaded {
+        true => xs.first().and_then(|(_, m)| g(m, "file")).unwrap_or(0.0),
+        false => 0.0,
+    };
+    steps
+        .iter()
+        .map(|s| {
+            appended += s.map_or(per_minute, |x| x.0);
+            let held = appended.min(cap);
+            held + held * per_byte * 48.0
+        })
+        .collect()
+}
+
 /// Judges each run in a results file's text (or the one named) by the
 /// soak's exit criterion, each attempt of a run id apart and the latest
 /// judged.
@@ -4840,10 +5127,14 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
     for (run, cell, metrics) in blocks {
         // The script's marks -- the environment ended a run (`:env`), its
         // guard stopped a soak that printed nothing (`:hung`), `ycsb mark`
-        // both -- are the attempt's that wrote the lines before them.
+        // both -- and the soak's own stop on the harness's fault
+        // (`:stopped`) are the attempt's that wrote the lines before them.
         let started = match metrics.iter().find(|(k, _)| k == "started") {
             Some(x) => x.1 as u64,
-            None if cell.ends_with(":env") || cell.ends_with(":hung") => {
+            None if cell.ends_with(":env")
+                || cell.ends_with(":hung")
+                || cell.ends_with(":stopped") =>
+            {
                 latest.get(&run).copied().unwrap_or(0)
             }
             None => 0,
@@ -4968,15 +5259,20 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     let planned = settings.map_or(0, |s| s.minutes);
+    // Stopped on the harness's own fault (`stop_run`): its log's STOPPED
+    // line says which.
+    let stopped = find(":stopped").is_some_and(|m| get(m, "stopped") == Some(1.0));
+    let why_short = match (end.is_none(), stopped) {
+        (_, true) => ", STOPPED by the harness's fault (its log's STOPPED line says which)",
+        (true, false) => ", no end line",
+        (false, false) => "",
+    };
     v.push((
         CRITERIA[1],
-        settings.is_some() && n >= planned && end.is_some(),
+        settings.is_some() && n >= planned && end.is_some() && !stopped,
         match settings {
-            None => "no start line: its settings unknown".into(),
-            Some(_) => format!(
-                "{n} of {planned} minutes{}",
-                if end.is_none() { ", no end line" } else { "" }
-            ),
+            None => format!("no start line: its settings unknown{why_short}"),
+            Some(_) => format!("{n} of {planned} minutes{why_short}"),
         },
     ));
     // The dead-man: a minute nothing was answered in, a connection that
@@ -5058,9 +5354,19 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         &xs[xs.len().min(4)..]
     }
     // The primary is killed every half hour, so a leak is looked for
-    // within each life: the median of its first five quiet looks from its
-    // fifth line against the median of its last five -- one look in a
-    // compact, or a minute's noise, moves neither.
+    // within each life: its anonymous memory beyond what the server holds
+    // by its own account -- the engine's tables and indexes
+    // (`memory_bytes`) and its replication feed (`feed_held`) -- from the
+    // median of its first five quiet looks from its fifth line to the
+    // median of its last five, against 5% of its anonymous memory at the
+    // first five: one look in a compact, or a minute's noise, moves
+    // neither, and what it holds may grow. The feed starts empty at each
+    // open and fills to its bound (64 MiB) over the life's first 20 minutes
+    // at 80% of the peak, longer at 50%: the dry run of 2026-11-22, its
+    // anonymous memory held to a flat line, failed every life on it, the
+    // most +75.9%, its memory beyond the feed and the engine's own flat
+    // within a megabyte once the feed was full.
+    let cap = settings.map_or(64, |s| s.replication_buffer) as f64 * 1048576.0;
     let mut grew = Vec::new();
     let mut most = 0.0f64;
     let mut judged_lives = 0;
@@ -5069,10 +5375,18 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // life too few looks were left in says.
     let mut looks = Vec::new();
     for (life, xs) in &lives {
-        let quiet: Vec<f64> = settled(xs)
+        let feed = feed_held(xs, cap, *life == 0);
+        // Each settled quiet look: its anonymous memory, and that less what
+        // the server holds.
+        let quiet: Vec<(f64, f64)> = xs
             .iter()
-            .filter(|(_, m)| quiet_look(m, false))
-            .filter_map(|(_, m)| get(m, "rss_anon"))
+            .zip(&feed)
+            .skip(xs.len() - settled(xs).len())
+            .filter(|((_, m), _)| quiet_look(m, false))
+            .filter_map(|((_, m), f)| {
+                let anon = get(m, "rss_anon")?;
+                Some((anon, anon - get(m, "memory_bytes").unwrap_or(0.0) - f))
+            })
             .collect();
         let own = settled(xs)
             .iter()
@@ -5090,8 +5404,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             continue;
         }
         judged_lives += 1;
-        let (early, late) = (median(&quiet[..5]), median(&quiet[quiet.len() - 5..]));
-        let g = late / early.max(1.0) - 1.0;
+        let at = |xs: &[(f64, f64)], k: usize| -> f64 {
+            median(
+                &xs.iter()
+                    .map(|x| if k == 0 { x.0 } else { x.1 })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (first, last) = (&quiet[..5], &quiet[quiet.len() - 5..]);
+        let g = (at(last, 1) - at(first, 1)) / at(first, 0).max(1.0);
         most = most.max(g);
         if g >= 0.05 {
             grew.push(*life);
@@ -5113,9 +5434,10 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 }
             ),
             _ => format!(
-                "{judged_lives} of {} lives of ten quiet looks or more, the most {:+.1}% from the median of the first five to the last five's{}",
+                "{judged_lives} of {} lives of ten quiet looks or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of the first five to the last five's{}",
                 lives.len(),
                 most * 100.0,
+                cap / 1048576.0,
                 match grew.is_empty() {
                     true => String::new(),
                     false => format!("; lives {}", list(&grew)),
@@ -5123,22 +5445,29 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             ),
         },
     ));
-    // The replica is never killed: the median of its first five quiet
-    // looks from minute 60 against the median of every five after.
-    let rq: Vec<(u64, f64)> = minutes
+    // The replica is never killed, and its feed is full by the first
+    // hour's end: the median of its first five quiet looks from minute 60
+    // against the median of every five after, its engine's own memory
+    // (`r_memory_bytes`, growing with the rows) taken out of both and the
+    // growth held to 5% of its anonymous memory at the first five.
+    let rq: Vec<(u64, f64, f64)> = minutes
         .iter()
         .filter(|(k, m)| *k >= 60 && quiet_look(m, true))
-        .filter_map(|(k, m)| Some((*k, get(m, "r_rss_anon")?)))
+        .filter_map(|(k, m)| {
+            let anon = get(m, "r_rss_anon")?;
+            Some((*k, anon, anon - get(m, "r_memory_bytes").unwrap_or(0.0)))
+        })
         .collect();
     match rq.len() >= 10 {
         true => {
             let first: Vec<f64> = rq[..5].iter().map(|x| x.1).collect();
             let b = median(&first);
+            let base = median(&rq[..5].iter().map(|x| x.2).collect::<Vec<_>>());
             let mut over = Vec::new();
             let mut most = 0.0f64;
             for w in rq[5..].windows(5) {
-                let xs: Vec<f64> = w.iter().map(|x| x.1).collect();
-                let g = median(&xs) / b.max(1.0) - 1.0;
+                let xs: Vec<f64> = w.iter().map(|x| x.2).collect();
+                let g = (median(&xs) - base) / b.max(1.0);
                 most = most.max(g);
                 if g >= 0.05 {
                     over.push(w[4].0);
@@ -5985,6 +6314,32 @@ mod tests {
         c.spending.push((0, s));
         c.hold(100, 0, 100, &[(1, 4)]);
         assert_eq!(c.mismatches, 1);
+        // Ids outside the range told as deleted, beside a write of the
+        // range's and alone -- the server's word that an id the stream
+        // does not hold changed (`Database::changes_since`), every write
+        // outside the range told so: no fault, no mismatch.
+        let mut c = Checker::new(100, kills(), 60, 5, &range);
+        c.take(vec![
+            write(10, 0, 42, 20, 30, Some(5)),
+            write(50, 0, 7, 31, 32, Some(6)),
+        ]);
+        c.spending.push((0, seed(1, 4, 10)));
+        let mut ch = change(1, 5, 40, vec![(10, with(10, 0, 42))]);
+        ch.dels = vec![3, 90];
+        c.spending.push((0, ch));
+        let mut ch = change(1, 6, 41, vec![]);
+        ch.dels = vec![50];
+        c.spending.push((0, ch));
+        c.hold(100, 0, 100, &[(1, 6)]);
+        assert_eq!((c.faults, c.mismatches), (StreamFaults::default(), 0));
+        // A row put outside the range is wrong.
+        let mut c = Checker::new(100, kills(), 60, 5, &range);
+        c.take(vec![write(50, 0, 7, 20, 30, Some(5))]);
+        c.spending.push((0, seed(1, 4, 10)));
+        c.spending
+            .push((0, change(1, 5, 40, vec![(50, with(50, 0, 7))])));
+        c.hold(100, 0, 100, &[(1, 5)]);
+        assert_eq!(c.mismatches, 1);
     }
 
     #[test]
@@ -6004,6 +6359,7 @@ mod tests {
             recall_min: 0.925,
             subscriptions: 64,
             threads: 32,
+            replication_buffer: 64,
         };
         let at = |m| schedule(m, 480, 30, 90, 20, 120, 50);
         assert_eq!(at(50), vec![Doing::Backup]);
@@ -6050,6 +6406,7 @@ mod tests {
             recall_min: 0.925,
             subscriptions: 64,
             threads: 32,
+            replication_buffer: 64,
         };
         let mut out = String::new();
         let mut line = |cell: &str, m: &HashMap<&'static str, f64>| {
@@ -6908,10 +7265,116 @@ mod tests {
             memory: String::new(),
             sync: "250".into(),
             token: "x".into(),
+            http_token: "y".into(),
+            replication_buffer: 64,
             port: 1,
             replica_port,
             keep: Arc::new(AtomicBool::new(false)),
             kept: None,
+        }
+    }
+
+    /// The servers ask a token, and every request carries it: the head a
+    /// request writes, the bearer set once, an `Authorization` of its own
+    /// sent in its place (`Kit::status`'s, the replication token's).
+    #[test]
+    fn every_request_carries_the_runs_token_and_only_one() {
+        use std::io::Read;
+        http::bearer("t0k");
+        assert_eq!(http::auth(), "Authorization: Bearer t0k\r\n");
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let heads = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for _ in 0..2 {
+                let (mut c, _) = l.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap();
+                heads.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+            heads
+        });
+        let mut c = http::Http::try_connect(&addr, Duration::from_secs(10)).unwrap();
+        c.try_query("get usertable", "").unwrap();
+        let mut c = http::Http::try_connect(&addr, Duration::from_secs(10)).unwrap();
+        c.try_request_with(
+            "GET",
+            "/_replication/status",
+            "text/plain",
+            "Authorization: Bearer r3p\r\n",
+            b"",
+        )
+        .unwrap();
+        let heads = heads.join().unwrap();
+        assert_eq!(
+            heads[0].matches("Authorization:").count(),
+            1,
+            "{}",
+            heads[0]
+        );
+        assert!(
+            heads[0].contains("Authorization: Bearer t0k\r\n"),
+            "{}",
+            heads[0]
+        );
+        assert_eq!(
+            heads[1].matches("Authorization:").count(),
+            1,
+            "{}",
+            heads[1]
+        );
+        assert!(
+            heads[1].contains("Authorization: Bearer r3p\r\n"),
+            "{}",
+            heads[1]
+        );
+    }
+
+    /// A refusal for the run's token or its name -- the primary's 403 to a
+    /// replica or a backup reaching it by its container's name, the dry
+    /// run of 2026-11-22's -- is the harness's own fault, read from its
+    /// words; anything a restart explains is not. A worker answered one
+    /// says it, and the run stops at the minute's end.
+    #[test]
+    fn a_refusal_of_the_runs_token_or_name_is_the_harness_s_fault() {
+        let backup = "fennec backup: the primary answered 403: {\"error\":\"Host `p6-server:8080` is not this machine's, and this server asks for no token: reach it as localhost or by its address, or give it --http-token\"}\n";
+        let status = "{\"role\":\"replica\",\"seq\":0,\"connected\":false,\"error\":\"the primary answered 403: {\\\"error\\\":\\\"Host `p6-server:8080` is not this machine's, and this server asks for no token: reach it as localhost or by its address, or give it --http-token\\\"}\"}";
+        for text in [backup, status] {
+            let why = refused(text).unwrap_or_else(|| panic!("not read: {text}"));
+            assert!(
+                why.starts_with("answered 403: {\"error\":\"Host `p6-server:8080` is not"),
+                "{why}"
+            );
+            assert!(why.ends_with("give it --http-token"), "{why}");
+        }
+        assert!(refused("fennec backup: the primary answered 401: wrong token").is_some());
+        for text in [
+            "the primary answered 503: {\"error\":\"starting\"}",
+            "{\"role\":\"replica\",\"connected\":false,\"error\":\"Connection refused (os error 111)\"}",
+            "",
+        ] {
+            assert_eq!(refused(text), None, "{text}");
+        }
+        for (status, fault) in [(403, true), (401, true), (500, false), (404, false)] {
+            let addr = fake(move |_, _| (status, "{\"error\":\"no\"}".into()));
+            let sh = Shared::new(&opts(), addr.clone(), addr, &[]);
+            let mut w = Worker {
+                sh: &sh,
+                slot: &sh.slots[0],
+                c: None,
+                rc: None,
+                rng: Rng::new(1),
+            };
+            assert!(!w.read(5, false));
+            assert_eq!(sh.faulted().is_some(), fault, "{status}");
+            if fault {
+                let why = sh.faulted().unwrap();
+                assert!(
+                    why.contains(&format!("refused get usertable where id = $1: {status} ")),
+                    "{why}"
+                );
+            }
         }
     }
 
@@ -7247,6 +7710,83 @@ mod tests {
             said.starts_with("16 of 16 lives of ten quiet looks"),
             "{said}"
         );
+    }
+
+    /// The primary's memory beside what it holds: its replication feed,
+    /// empty at each open, filling with the file's appends -- 3 MB a
+    /// minute, records of 800 bytes -- to its 64 MiB and its index, and its
+    /// engine's own, a sawtooth. The life the records were loaded in holds
+    /// it full from its first line. Held to a flat line, as the dry run of
+    /// 2026-11-22 was, a life grew some +100%; beyond what it holds,
+    /// nothing -- and a leak of half a MB a minute on top of it fails.
+    #[test]
+    fn a_primarys_memory_is_judged_beyond_what_it_holds() {
+        let cap = 64.0 * 1048576.0;
+        let run = |leak: f64| {
+            synthetic(480, &move |m, x| {
+                if m == 0 || m == u64::MAX {
+                    return;
+                }
+                // Lines 30k + 1 to 30k + 30 are life k's (`synthetic`).
+                let (life, i) = ((m - 1) / 30, ((m - 1) % 30) as f64);
+                let compacts = ((m - 1) / 20) as f64;
+                x.insert("file", 1.0e9 + 3e6 * m as f64 - 50e6 * compacts);
+                x.insert("seq", 3750.0 * m as f64);
+                let engine = 30e6 + 2e6 * ((m % 4) as f64);
+                x.insert("memory_bytes", engine);
+                let held = match life {
+                    0 => cap,
+                    _ => (3e6 * (i + 1.0)).min(cap),
+                };
+                let feed = held * (1.0 + 3750.0 / 3e6 * 48.0);
+                x.insert("rss_anon", 15e6 + engine + feed + leak * i);
+            })
+        };
+        let j = judge(&run(0.0), None);
+        let (_, pass, said) = &j[0].verdicts[5];
+        assert!(pass, "{said}");
+        assert!(said.starts_with("16 of 16 lives"), "{said}");
+        // Its anonymous memory alone grew far past 5% in a life.
+        let text = run(0.0);
+        let anon = |m: u64| -> f64 {
+            let cell = format!("\t250:50:m{m:04}\trss_anon\t");
+            let l = text.lines().find(|l| l.contains(&cell)).unwrap();
+            l.rsplit('\t').next().unwrap().parse().unwrap()
+        };
+        assert!(anon(58) > 1.5 * anon(36), "{} {}", anon(36), anon(58));
+        let j = judge(&run(0.5e6), None);
+        let (_, pass, said) = &j[0].verdicts[5];
+        assert!(!pass, "{said}");
+        // What the feed holds, line by line: its appends up to its bound,
+        // a compacted minute at the life's median, and its index.
+        let lines: Vec<HashMap<String, f64>> = [
+            (3e6, 0.0, 0.0),
+            (6e6, 3750.0, 0.0),
+            (9e6, 7500.0, 0.0),
+            (5e6, 11250.0, 1.0),
+            (8e6, 15000.0, 0.0),
+        ]
+        .iter()
+        .map(|&(file, seq, compact)| {
+            [("file", file), ("seq", seq), ("compact", compact)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()
+        })
+        .collect();
+        let xs: Vec<Line> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i as u64, m))
+            .collect();
+        let index = 1.0 + 3750.0 / 3e6 * 48.0;
+        let held = feed_held(&xs, 1e9, false);
+        for (got, want) in held.iter().zip([3e6, 6e6, 9e6, 12e6, 15e6]) {
+            assert!((got - want * index).abs() < 1.0, "{held:?}");
+        }
+        // Bounded, and full at once where the records were loaded.
+        assert!(feed_held(&xs, 7e6, false)[4] <= 7e6 * index + 1.0);
+        assert!((feed_held(&xs, 2e6, true)[0] - 2e6 * index).abs() < 1.0);
     }
 
     #[test]

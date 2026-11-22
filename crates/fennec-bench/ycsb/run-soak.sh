@@ -47,6 +47,12 @@
 # cannot take ends the run with a line `<sync>:<fraction>:env env_failed 1`
 # -- the environment's failure, never a pass and never the server's -- and
 # a soak silent ten minutes is stopped and marked `<sync>:<fraction>:hung`.
+# A soak that meets the harness's own fault -- a server refusing the run's
+# token or its address (401, 403), the replica not following within its
+# bound -- stops at once, its STOPPED line saying which, its volumes kept,
+# and the script after it with exit 4: nothing after it runs, never hours
+# carried on a setting every minute meets again. The servers ask a token,
+# the run's own, each container handed it in its environment.
 #
 # Everything it starts is named after the run, its process id in the name
 # (p6-250-<pid>-80-server), so that no run removes another's, and removed
@@ -157,6 +163,10 @@ fi
 child=
 # The soaks started, by name, for the cleanup.
 names=
+# Every call goes on past a failure: under `set -e` the first to fail ended
+# the trap, and `docker network rm` of a network the soak had removed itself
+# fails -- the dry run of 2026-11-22 left the second soak's volumes unsaid
+# and the tools' volume behind.
 # shellcheck disable=SC2329 # the EXIT trap's
 cleanup() {
     env_stop_child
@@ -168,18 +178,18 @@ cleanup() {
             cs="$cs $n-$c"
         done
         # shellcheck disable=SC2086
-        env_within 120 "docker rm" docker rm -f $cs >/dev/null 2>&1
+        env_within 120 "docker rm" docker rm -f $cs >/dev/null 2>&1 || true
         for v in data replica-data backup-data; do
             if [ -f "$KEPT" ] && grep -qx "$n-$v" "$KEPT"; then
-                echo "kept the volume $n-$v (a verify failed or a mismatch was counted): docker volume rm $n-$v once read" >&2
+                echo "kept the volume $n-$v (a verify failed, a mismatch was counted or the harness stopped the run): docker volume rm $n-$v once read" >&2
             else
-                env_within 60 "docker volume rm" docker volume rm -f "$n-$v" >/dev/null 2>&1
+                env_within 60 "docker volume rm" docker volume rm -f "$n-$v" >/dev/null 2>&1 || true
             fi
         done
-        env_within 60 "docker network rm" docker network rm "$n-net" >/dev/null 2>&1
+        env_within 60 "docker network rm" docker network rm "$n-net" >/dev/null 2>&1 || true
     done
-    env_within 120 "docker rm" docker rm -f "$NAME-build" "$NAME-df" >/dev/null 2>&1
-    env_within 60 "docker volume rm" docker volume rm -f "$NAME-tools" >/dev/null 2>&1
+    env_within 120 "docker rm" docker rm -f "$NAME-build" "$NAME-df" >/dev/null 2>&1 || true
+    env_within 60 "docker volume rm" docker volume rm -f "$NAME-tools" >/dev/null 2>&1 || true
     rm -f "$KEPT"
     env_end
     return 0
@@ -242,12 +252,23 @@ echo "$(date '+%F %H:%M') the peak, $PEAK_MINUTES minutes as fast as answered"
 soak_names "$NAME-peak"
 env_check "$need" "$ENV_VOLUME" || env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$ENV_WHY"
 peaks="${TMPDIR:-/tmp}/$NAME.peak"
+rc=0
 # shellcheck disable=SC2086
 guarded $awake "$YCSB" soak $common --peak --minutes "$PEAK_MINUTES" --name "$NAME-peak" \
-    --load-before "$(env_load)" --run-id "$RUN-s$sync-peak" >"$peaks" || true
+    --load-before "$(env_load)" --run-id "$RUN-s$sync-peak" >"$peaks" || rc=$?
 [ -s "$ENV_MARKER" ] &&
     env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$(cat "$ENV_MARKER")"
 [ -s "$ENV_MARKER.hung" ] && hung "$RUN-s$sync-peak" "$sync:peak:hung" "$(cat "$ENV_MARKER.hung")"
+# A soak stopped on the harness's own fault (`ycsb soak`'s exit 4, its
+# STOPPED line saying which): the next one would meet it again.
+harness_stopped() {
+    if [ "$rc" = 4 ]; then
+        rm -f "$peaks"
+        echo "$(date '+%F %H:%M') $1 stopped on the harness's own fault, its STOPPED line above saying which: nothing after it is run" >&2
+        exit 4
+    fi
+}
+harness_stopped "$RUN-s$sync-peak"
 peak=$(awk '$1 == "peak" {print $2}' "$peaks")
 rm -f "$peaks"
 [ -n "$peak" ] || {
@@ -267,15 +288,18 @@ for f in $FRACTIONS; do
     echo "$(date '+%F %H:%M') $run: $MINUTES minutes at $rate a second, $f% of the peak"
     soak_names "$NAME-$f"
     env_check "$need" "$ENV_VOLUME" || env_failed "$run" "$sync:$f:env" "$ENV_WHY"
+    rc=0
     # shellcheck disable=SC2086
     guarded $awake "$YCSB" soak $common --rate "$rate" --label "$f" --name "$NAME-$f" \
         --minutes "$MINUTES" --kill-every "$KILL_EVERY" --compact-every "$COMPACT_EVERY" \
         --backup-every "$BACKUP_EVERY" --backup-at "$BACKUP_AT" \
         --kill-in-compact-every "$KILL_IN_COMPACT_EVERY" --load-before "$(env_load)" \
-        --run-id "$run" || status=1
+        --run-id "$run" || rc=$?
+    [ "$rc" = 0 ] || status=1
     [ -s "$ENV_MARKER" ] && env_failed "$run" "$sync:$f:env" "$(cat "$ENV_MARKER")"
     [ -s "$ENV_MARKER.hung" ] && hung "$run" "$sync:$f:hung" "$(cat "$ENV_MARKER.hung")"
     "$YCSB" soak report "$OUT" "$run" || status=1
+    harness_stopped "$run"
 done
 echo "$(date '+%F %H:%M') done"
 exit "$status"

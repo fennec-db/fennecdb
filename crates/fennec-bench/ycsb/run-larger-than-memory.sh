@@ -157,9 +157,12 @@ ENV_MARKER=$gate/env-failed
 cleanup() {
     env_stop_child
     env_stop_guard
+    # Each call goes on past a failure -- one stopped at its bound among
+    # them: under `set -e` the first to fail ends the trap, and run-soak.sh's
+    # left a run's volumes behind so (2026-11-22).
     env_within 120 "docker rm" docker rm -f "$P-server-watch" "$P-server-look" "$P-server" \
-        "$P-engine" "$P-build" "$P-df" >/dev/null 2>&1
-    env_within 120 "docker volume rm" docker volume rm -f "$P-data" "$P-engine-data" "$P-tools" >/dev/null 2>&1
+        "$P-engine" "$P-build" "$P-df" >/dev/null 2>&1 || true
+    env_within 120 "docker volume rm" docker volume rm -f "$P-data" "$P-engine-data" "$P-tools" >/dev/null 2>&1 || true
     [ -n "$gate" ] && [ -d "$gate" ] && rm -rf "$gate"
     env_end
     return 0
