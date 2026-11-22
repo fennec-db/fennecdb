@@ -1897,7 +1897,13 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * and is never opened for another, or another account's sign-in on the
    * same browser sends the writes left under its own token and shows their
    * rows. Signing out keeps it, for that account's next sign-in to send
-   * its `pending` writes; deleting it loses them.
+   * its `pending` writes; deleting it loses them. One stored that does not
+   * restore -- sealed with another `cryptoKey` or none, stored in the clear
+   * where a key is given, changed, a later client's, an IndexedDB read
+   * that failed -- refuses the sync (`sync` rejects), kept as it stands
+   * with the writes it holds unsent; only a key holding nothing is seeded.
+   * A tab that takes the lead from one whose store it cannot restore
+   * stores nothing there, and tells `onError`.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */

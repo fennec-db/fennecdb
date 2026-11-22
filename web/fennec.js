@@ -2274,6 +2274,8 @@ export class FennecSync {
   #waits = new Set();
   #pushed = [];
   #listeners = null;
+  /** Why this tab stores nothing: its store did not restore as it took the lead (`#lead`). */
+  #unkept = null;
 
   constructor(local, opts) {
     this.#local = local;
@@ -3549,7 +3551,12 @@ export class FennecSync {
     // the sync's words, as a native binding's `run` on a synced database
     // does; `close` gives the database back.
     replicas.add(this.#local);
-    await this.#loadPersist();
+    try {
+      await this.#loadPersist();
+    } catch (e) {
+      this.close();
+      throw e;
+    }
     for (const text of SYNC_STATE) this.#local.run(text);
     this.#load();
     // A seed of several parts the page ended in the middle of landing: what
@@ -3665,7 +3672,13 @@ export class FennecSync {
     });
   }
 
-  /** This tab leads now: the queue its predecessor kept is taken over, and the others asked for theirs. */
+  /**
+   * This tab leads now: the queue its predecessor kept is taken over, and
+   * the others asked for theirs. A store another tab wrote since this one
+   * read it gets an image first: a chunk went on from where this tab read
+   * it, the leader's later ones left after it. One that does not restore is
+   * kept, and this tab stores nothing there (`#unkept`).
+   */
   async #lead() {
     if (this.#persistKey && globalThis.indexedDB && !kept.has(this.#local)) {
       const other = sibling(this.#local);
@@ -3673,8 +3686,10 @@ export class FennecSync {
         if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
           for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
         }
+        if (!sameStore(stored.get(other), stored.get(this.#local))) stored.delete(this.#local);
       } catch (e) {
-        this.#onError?.(e);
+        this.#unkept = new FennecError(`${this.#persistKey} is kept as it is, and this tab stores nothing there: ${e.message}`, { cause: e });
+        this.#onError?.(this.#unkept);
       } finally {
         other.close();
       }
@@ -3873,7 +3888,7 @@ export class FennecSync {
    * The leader's alone: the other tabs' copies are fed by it.
    */
   #persistSoon() {
-    if (!this.#persistKey || !globalThis.indexedDB || !this.#leader || kept.has(this.#local)) return;
+    if (!this.#persistKey || !globalThis.indexedDB || !this.#leader || kept.has(this.#local) || this.#unkept) return;
     if (this.#persisting) {
       this.#persistAgain = true;
       return;
@@ -3892,17 +3907,32 @@ export class FennecSync {
 
   /**
    * Restores the previous session's image: the replica, its cursors and the
-   * writes it had not sent, which go first.
+   * writes it had not sent, which go first. Only a key holding nothing is
+   * seeded: a store there that does not restore -- another key or none, a
+   * later client's, refused by the module -- stops the start, kept as it
+   * stands with its unsent writes, which a seed's first `persist` stored
+   * over (js-client.md#sealed-chunks-in-a-chain).
    */
   async #loadPersist() {
     if (!this.#persistKey || !globalThis.indexedDB || kept.has(this.#local)) return;
     try {
       await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
     } catch (e) {
-      // A corrupt or incompatible cache: reseed from scratch, not an error.
-      this.#onError?.(e);
+      throw new FennecError(
+        `the replica stored under ${this.#persistKey} does not restore (${e.message}): it is kept as it stands, ` +
+          'with the writes it has not sent; start again with the cryptoKey it was sealed with, or delete it to seed anew',
+        { cause: e },
+      );
     }
   }
+}
+
+/** Whether two databases' `stored` read one store as it stood (`#lead`). */
+function sameStore(a, b) {
+  if (!a || !b) return false;
+  if (a.key !== b.key || a.ck !== b.ck || a.gen !== b.gen || a.next !== b.next || a.image !== b.image || a.chunks !== b.chunks) return false;
+  if (!a.tag || !b.tag) return a.tag === b.tag;
+  return a.tag.length === b.tag.length && a.tag.every((x, i) => x === b.tag[i]);
 }
 
 /** A refusal's words: the server's `{"error": ..}`, or what the transport said. */
@@ -3998,7 +4028,9 @@ function normalizeShape(raw, url) {
  *              asked for a new one when the server answers 401
  * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes,
  *              one account's -- the key names it, and a replica is never
- *              opened for another
+ *              opened for another. A store there that does not restore --
+ *              another `cryptoKey`, or none -- refuses the sync, kept as it
+ *              stands with its unsent writes; only none stored is seeded
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
  *              with (`persist`)
  * - `onRefused` told of each write the server refused, which was put back
@@ -4008,9 +4040,15 @@ function normalizeShape(raw, url) {
 export async function sync(opts = {}) {
   if (!opts.url) throw new FennecError('sync(): `url` is required');
   const local = opts.local ?? (await Fennec.open(opts.wasm ?? './fennec.wasm', { collation: opts.collation }));
-  const replica = new FennecSync(local, opts);
-  // The server owns the schema: the code's is compared with it, never applied.
-  await checked(replica.remote, opts, 'follow');
-  if (opts.schema) declared.set(replica, opts);
-  return replica.start();
+  try {
+    const replica = new FennecSync(local, opts);
+    // The server owns the schema: the code's is compared with it, never applied.
+    await checked(replica.remote, opts, 'follow');
+    if (opts.schema) declared.set(replica, opts);
+    return await replica.start();
+  } catch (e) {
+    // Opened here, the database is no one's once the sync is refused.
+    if (!opts.local) local.close();
+    throw e;
+  }
 }

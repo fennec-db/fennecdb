@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { readFile, access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fennec, sync, connect, inc, FennecError } from './fennec.js';
+import { Fennec, sync, connect, inc, restore, FennecError } from './fennec.js';
 import { fennecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
 import * as client from './client.js';
@@ -894,6 +894,70 @@ test('writes made offline survive a reload of the page, and go once it is back',
   }
 });
 
+const aes = () => crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+/** The store's records as they stand, copied: a store held to them is held byte for byte. */
+const asStored = (idb) => new Map([...idb.records].map(([k, v]) => [k, structuredClone(v)]));
+/** The writes a replica kept unsent in the store under `key`, as `restore` reads them back. */
+async function queued(key, cryptoKey) {
+  const d = await Fennec.open(wasm);
+  try {
+    return (await restore(d, key, { cryptoKey })) ? (d.run('get _sync_queue').rows ?? []).length : 0;
+  } finally {
+    d.close();
+  }
+}
+
+// A wrong `cryptoKey` once restored nothing, which the replica took for a
+// cache it could seed again: its first persist stored the seed's image over
+// the sealed store, the writes it held unsent with it (1.0's review). A
+// store that does not restore is kept, and the sync refused.
+test('a store that does not open under the key given is kept with its writes, and the right key sends them', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const [right, wrong] = [await aes(), await aes()];
+  const started = [];
+  /** The sync's refusal; a sync that started instead is closed, and fails the test. */
+  const refused = async (o) => {
+    try {
+      started.push(await open(s.url, o));
+    } catch (e) {
+      return e;
+    }
+    assert.fail(`the sync started: ${JSON.stringify(Object.keys(o))}`);
+  };
+  try {
+    const first = await open(s.url, { fetch: flaky({ on: 'refused' }).fetch, persist: 'sealed', cryptoKey: right });
+    started.push(first);
+    await first.ready();
+    first.setOnline(false);
+    first.from('tasks').insert({ title: 'kept', status: 'open' }).catch(() => {});
+    first.from('tasks').where('key', 'a').update({ title: 'ONE' }).catch(() => {});
+    await until(async () => (await queued('sealed', right)) === 2, 'both writes stored');
+    first.close();
+    // Every persist of its database started by now has settled: a restore
+    // waits its turn behind them, and finds nothing under this name.
+    assert.equal(await restore(first.local, 'nothing here'), false);
+    const stored = asStored(idb);
+
+    const e = await refused({ persist: 'sealed', cryptoKey: wrong });
+    assert.ok(e instanceof FennecError);
+    assert.match(e.message, /stored under sealed does not restore \(sealed: record 0 does not open.*\): it is kept as it stands/);
+    assert.match((await refused({ persist: 'sealed' })).message, /stored under sealed does not restore \(sealed is sealed: restore needs its cryptoKey\)/);
+    assert.deepEqual(asStored(idb), stored, 'the store as it stood');
+
+    const second = await open(s.url, { persist: 'sealed', cryptoKey: right });
+    started.push(second);
+    assert.equal(second.status()[0].pending, 2, 'its writes came back with it');
+    await second.pushed();
+    const open_ = await s.run('get tasks where status = "open" select title order title');
+    assert.deepEqual(open_.map((r) => r.title), ['ONE', 'kept', 'two']);
+  } finally {
+    for (const r of started) r.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
 test('two replicas increment offline, and both land: the server holds +2, and both see it', opts, async () => {
   const s = await server();
   const [a, b] = [await open(s.url), await open(s.url)];
@@ -984,6 +1048,101 @@ test('a new leader sends what the tabs before it had not', opts, async () => {
     assert.equal(b.status()[0].leader, true);
     assert.equal((await s.run('get tasks where title = "from a" count'))[0].count, 1);
     assert.equal((await s.run('get tasks where title = "from b" count'))[0].count, 1);
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A tab that took the lead went on from the store as it had read it at its
+// start: its first chunk took the place of the leader's next, and the
+// leader's after it stayed -- read after this tab's, a row the leader wrote
+// before came back over this tab's write of it. Sealed, each chunk covering
+// the one before, that store no longer restored at all.
+test("a tab taking the lead stores over a store the tab before it wrote since it read it", opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  // An image large enough that the writes below are chunks, never folded
+  // into a new one.
+  const filler = Array.from({ length: 200 }, (_, i) => ({ key: `f${i}`, title: 'x'.repeat(200), status: 'open', priority: 9 }));
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const chunks = () => [...idb.records.keys()].filter((k) => k.startsWith('handover#')).length;
+  const title = async (d) => (await d.from('tasks').where('key', 'a').first())?.title;
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'handover', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('handover'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'handover', cryptoKey });
+  try {
+    await b.ready();
+    // Two chunks of the leader's after the follower read the store.
+    const read = chunks();
+    for (const [t, n] of [['A1', 1], ['A2', 2]]) {
+      await a.from('tasks').where('key', 'a').update({ title: t });
+      await until(() => chunks() >= read + n, `the leader stored ${t}`);
+    }
+    await until(async () => (await title(b)) === 'A2', "the follower holds the leader's last write");
+    a.close();
+    await until(() => b.status()[0].leader, 'the follower leads');
+    await b.from('tasks').where('key', 'a').update({ title: 'B' });
+    await b.pushed();
+    // What it stored restores as its own copy.
+    const rows = (d) => d.rows('get tasks select key, title order key');
+    await until(async () => {
+      const d = await Fennec.open(wasm);
+      try {
+        return (await restore(d, 'handover', { cryptoKey })) && JSON.stringify(rows(d)) === JSON.stringify(rows(b.local));
+      } finally {
+        d.close();
+      }
+    }, "the store restores as the new leader's copy");
+    assert.equal(await title(b), 'B');
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// A tab that took the lead restored the store again for the queue the tab
+// before had kept: refused -- a store another tab sealed with another key
+// since this one found none -- it reported the error and led on, and its
+// first persist stored over the store and the queue in it.
+test('a tab taking the lead from a store it cannot restore stores nothing there', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  let open_;
+  const gate = new Promise((r) => {
+    open_ = r;
+  });
+  const held = (u, init) => gate.then(() => fetch(u, init));
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'mixed', cryptoKey: await aes(), fetch: held });
+  const errors = [];
+  // It starts while nothing is stored: the leader's fetches wait.
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'mixed', cryptoKey: await aes(), onError: (e) => errors.push(e) });
+  try {
+    assert.equal(idb.records.size, 0);
+    open_();
+    await a.ready();
+    await until(() => idb.records.has('mixed'), 'the leader stored its replica');
+    a.close();
+    // Every persist of the leader's started by now has settled: a restore
+    // waits its turn behind them, and finds nothing under this name.
+    assert.equal(await restore(a.local, 'nothing here'), false);
+    const stored = asStored(idb);
+    await until(() => b.status()[0].leader, 'the follower leads');
+    assert.match(errors.map((e) => e.message).join('\n'), /mixed is kept as it is, and this tab stores nothing there: mixed: record 0 does not open/);
+    await b.from('tasks').where('key', 'b').update({ title: 'TWO' });
+    await b.pushed();
+    // Every persist of its database started by now has settled: a restore
+    // waits its turn behind them, and finds nothing under this name.
+    assert.equal(await restore(b.local, 'nothing here'), false);
+    assert.deepEqual(asStored(idb), stored, 'the store as the leader left it');
   } finally {
     a.close();
     b.close();
