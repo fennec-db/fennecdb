@@ -130,14 +130,16 @@ says everything it kept was durable: the records that said so may have
 gone with the tail, and the next open reads the file as this one did. It
 syncs the file first, then the mark, written where the cut begins with a
 record head after it whose length ends any read there, then the cut, so
-the next open reads the file the same way wherever a power cut stops it.
-Where the mark would cross a disk sector's end it is written in three
-synced steps, and a power cut between them can have the next open refuse
-the file, naming the damaged record; and where a record below the cut was
-itself damaged on the disk and the only record vouching for it was the
-one being overwritten — a large write that never finished, or a record
-crafted into the torn one's text — cut that record and the ones after
-it.
+the next open reads the file the same way wherever a power cut stops it,
+given a disk that writes a 512-byte sector whole or not at all, as NVMe
+drives promise. Where the mark would cross a disk sector's end it is
+written in three synced steps, and a power cut between them can have the
+next open refuse the file, naming the damaged record; and where a record
+below the cut was itself damaged on the disk, cut that record and the
+ones after it: where the only record vouching for it was one being
+overwritten — a large write that never finished, or the record right
+after a torn one shorter than the 19 bytes the mark and head take — or a
+record crafted into the torn one's text hides those that vouch.
 v0.2.0 made no mark there, and the open after its cut could cut again,
 synced records the first had kept among them.</p>
 

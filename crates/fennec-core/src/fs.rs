@@ -958,16 +958,23 @@ impl FileSink {
     /// Each step fsynced before the next, since the pages one fsync covers
     /// reach the disk in no set order, a file's length among them. A power
     /// cut after any step leaves a file every way of opening reads as this
-    /// open read it, but between the zero and the kind byte of a mark
-    /// written across a sector's end (step 2), where the walk stops at the
-    /// zero and the kept records' claims alone say how far the file was
-    /// durable: a row below this open's point that fails its sum is judged
-    /// across the torn record's bytes, refused where a whole record after
-    /// them claims past it, and cut with every record after it where none
-    /// does -- the only one claiming past it a dead spill under the zero,
-    /// or the torn record's text made a record whole by its sum claiming
-    /// nothing, a head past the end after it (docs/design/storage.md, *The
-    /// cut's order*, each state and what it opens as).
+    /// open read it -- given a disk that writes a 512-byte sector whole or
+    /// not at all (`SECTOR`) -- but between the zero and the kind byte of
+    /// a mark written across a sector's end (step 2), where the walk stops
+    /// at the zero and the kept records' claims alone say how far the file
+    /// was durable: a row below this open's point that fails its sum is
+    /// judged across what follows the zero, refused where the judgment
+    /// reaches a whole record claiming past it, and cut with every record
+    /// after it where it reaches none. Every record claiming past the row
+    /// has its head under the 19 bytes this cut writes -- a dead spill
+    /// whose head the zero is, or the record after a torn record shorter
+    /// than those bytes, whose head the other 18 take -- or the torn
+    /// record's text is made a record whole by its sum claiming nothing,
+    /// which the judgment finds before the cut's bytes reach it, and a head
+    /// past the end after it, where the judgment stops. A write or an fsync
+    /// that fails there, the zero written, leaves that state for an open
+    /// tried again with no power cut (docs/design/storage.md, *The cut's
+    /// order*, each state and what it opens as).
     ///
     /// 1. The file, before anything claims it durable: the earlier
     ///    process's pages, which a mark under the same fsync could outlive
@@ -977,16 +984,16 @@ impl FileSink {
     /// 2. Marked, the mark over the torn record's first bytes, and after it
     ///    `engine::CUT_SHORT`, a head whose length runs past any file: the
     ///    walk stops there as at any torn tail, nothing of what the torn
-    ///    record held read or judged, where after the mark
-    ///    alone it read the record's next bytes as records -- a client's
-    ///    text whole by its sum applied as a write -- and after a single
-    ///    zero judged them, refusing the open where one claimed past it. One
-    ///    write inside a 512-byte sector, which a power cut leaves whole or
-    ///    not at all; across a sector's end, where a part of the mark kept
-    ///    and the rest lost framed the head anew and the open could cut
-    ///    synced rows, three: a zero over the torn record's kind, then the
-    ///    rest, then the mark's kind byte, so the head is the torn record's,
-    ///    a zero or the whole mark and never a mix.
+    ///    record held read or judged, where after the mark alone it read
+    ///    the record's next bytes as records -- a client's text whole by its
+    ///    sum applied as a write -- and after a single zero judged them,
+    ///    refusing the open where one claimed past it. One write inside a
+    ///    512-byte sector, which a power cut is taken to leave whole or not
+    ///    at all (`SECTOR`); across a sector's end, where a part of the
+    ///    mark kept and the rest lost framed the head anew and the open
+    ///    could cut synced rows, three: a zero over the torn record's kind,
+    ///    then the rest, then the mark's kind byte, so the head is the torn
+    ///    record's, a zero or the whole mark and never a mix.
     /// 3. The cut after the mark (`set_len`), the length's alone where the
     ///    file is unmarked: a file of no sums, or one a whole mark already
     ///    ends the records of.
@@ -1071,10 +1078,15 @@ fn written_step(mut file: &File, at: u64, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The span a disk writes whole or not at all, a power cut tearing a write
-/// only where it crosses one's end: 512 bytes, the least any disk has (a
-/// 4 KiB sector's end is a 512-byte one's too). [`FileSink::cut`] writes
-/// its mark in one write inside one, and in three across one's end.
+/// The span [`FileSink::cut`] takes a disk to write whole or not at all, a
+/// power cut tearing a write only where it crosses one's end: 512 bytes,
+/// the least any disk has (a 4 KiB sector's end is a 512-byte one's too).
+/// It writes its mark in one write inside one, and in three across one's
+/// end. An assumption, not every disk's promise: NVMe's is a logical block
+/// at least, SATA's none, and a sector torn from one end, as SQLite allows
+/// for, can keep a part of the one write inside it -- the mix the three
+/// writes keep out across a sector's end (docs/design/storage.md, *The
+/// cut's order*).
 const SECTOR: u64 = 512;
 
 /// A step of [`FileSink::cut`] that completed, as a test replays what a
@@ -2309,7 +2321,8 @@ mod tests {
     /// reads as the cutting open read it, cutting nothing it kept, and
     /// every way that writes leaves it as the cut does; but between the
     /// zero and the kind byte of a mark across a sector's end, where it may
-    /// be refused too, and in the two cases left there, below.
+    /// be refused too, and in the cases left there, below. A disk is taken
+    /// to write a 512-byte sector whole or not at all (`SECTOR`).
     ///
     /// The files: one torn as v0.2.0's `torn-wide` is -- the records
     /// claiming the last fsync go with the tail, and a synced row the disk
@@ -2323,16 +2336,24 @@ mod tests {
     /// sum claiming its own start at its ninth byte and at its tenth -- a
     /// client's text can be one -- and one claiming nothing, that head
     /// after it. One ending in a block that spilled and never landed, its
-    /// spill claiming the fsync past a flipped row. And one ending in a
-    /// close's mark, unsynced, then a torn record: the cut the length's.
+    /// spill claiming the fsync past a flipped row. One whose torn record,
+    /// a row of no text, is 13 bytes, shorter than the 19 the cut writes,
+    /// and the one record after it the only one claiming past a flipped
+    /// row, each cut inside a sector, 3 and 12 bytes before a sector's end.
+    /// And one ending in a close's mark, unsynced, then a torn record: the
+    /// cut the length's.
     ///
-    /// The two cases left, held to the window between the zero and the
-    /// mark's kind byte: the walk stops at the zero, the kept records'
-    /// claims alone say how far the file was durable, and the flipped row
-    /// below the cutting open's point is judged across what follows the
-    /// zero, where the record claiming past it is the dead spill under the
-    /// zero, or the crafted record claiming nothing sends the judgment to
-    /// the head past the end: the row cut with the synced rows after it.
+    /// The cases left, held to the window between the zero and the mark's
+    /// kind byte (`window_case`): the walk stops at the zero, the kept
+    /// records' claims alone say how far the file was durable, and the
+    /// flipped row below the cutting open's point is judged across what
+    /// follows the zero, cut with the synced rows after it where the
+    /// judgment reaches no record claiming past it. Every record claiming
+    /// past the row, one in each file built, has its head under the 19
+    /// bytes the cut writes -- the dead spill, under the zero; the record
+    /// after the torn record of 13 bytes, under the other 18 -- or the
+    /// crafted record claiming nothing sends the judgment to the head past
+    /// the end before the records that claim past the row.
     ///
     /// On 57f77b58 -- the mark alone in one write, and the cut after a
     /// close's mark before any fsync -- 679 opens of 52 files failed: the
@@ -2634,6 +2655,35 @@ mod tests {
             let at = find(&bad, "a row of a block");
             (bad, at..at + 4)
         };
+        // Rows, an fsync and two rows after it, the first of no text --
+        // its record shorter than the 19 bytes the cut writes -- torn, and
+        // the second the only record claiming the fsync, past the row the
+        // disk flipped a bit of: the cut's other 18 bytes write over its
+        // head.
+        let short_torn = |pad: usize| {
+            let mut steps = vec![first(pad), None, row("the row a disk flipped a bit of")];
+            // More than a page, as in `torn_wide`.
+            steps.extend([
+                row(&"a synced row after it ".repeat(240)),
+                None,
+                row(""),
+                row("w"),
+            ]);
+            let mut bad = written(&steps, false, None);
+            let flipped = find(&bad, "the row a disk flipped") + 15;
+            bad[flipped] ^= 0x20;
+            let all = heads(&bad);
+            let (torn, after) = (all[all.len() - 2], all[all.len() - 1]);
+            assert!(
+                torn.1 - torn.0 < written_mark.len(),
+                "a torn record of {} bytes, not under the cut's {}",
+                torn.1 - torn.0,
+                written_mark.len()
+            );
+            // Its sum.
+            bad[torn.1 - 1] ^= 0x20;
+            (bad, torn.0..after.1)
+        };
         // `build` with the first row padded so that its cut is `target`
         // bytes into a sector, and where it cuts.
         let aligned = |build: &dyn Fn(usize) -> (Vec<u8>, Range<usize>), target: usize| {
@@ -2706,6 +2756,10 @@ mod tests {
                 let (dead, lost, _) = aligned(&spilled, target);
                 files.push((format!("a dead spill, {place}"), dead, lost));
             }
+            let (short, lost, _) = aligned(&short_torn, target);
+            let name =
+                format!("a torn record shorter than the cut writes, {place}, then one record");
+            files.push((name, short, lost));
         }
         // A close's mark, unsynced, then a record a later process appended,
         // torn: the first half of the last row's again.
@@ -2722,6 +2776,21 @@ mod tests {
             bad.extend_from_slice(&half);
             let lost = whole - mark.len()..whole;
             files.push(("a close's mark, unsynced, then torn".into(), bad, lost));
+        }
+        /// Whether `name` is one of the cases left between the zero and the
+        /// mark's kind byte (above), where the flipped row is cut with the
+        /// synced rows after it: every record claiming past the row has its
+        /// head under the 19 bytes the cut writes -- a dead spill, under
+        /// the zero; the record after a torn record shorter than those
+        /// bytes, under the other 18 -- or the torn record's own bytes are
+        /// a record whole by its sum claiming nothing, found before the
+        /// cut's bytes reach it, and a head past the end after it, where
+        /// the judgment stops short of the records claiming past the row (a
+        /// client's text can be so made).
+        fn window_case(name: &str) -> bool {
+            name.contains("of no claim")
+                || name.starts_with("a dead spill")
+                || name.starts_with("a torn record shorter")
         }
         let ways = ["mapped", "in-memory", "serving", "serving in memory"];
         // The open that cuts `torn`, every way an open writes a file, then
@@ -2747,10 +2816,12 @@ mod tests {
             }
             let (want, whole, steps) = cutting.unwrap();
             match name {
-                n if n.starts_with("torn-wide") => assert!(
-                    want[1].1.contains("Flipped") && want.len() == 3,
-                    "{name}: the flipped row read unchecked: {want:?}"
-                ),
+                n if n.starts_with("torn-wide") || n.starts_with("a torn record shorter") => {
+                    assert!(
+                        want[1].1.contains("Flipped") && want.len() == 3,
+                        "{name}: the flipped row read unchecked: {want:?}"
+                    )
+                }
                 n if n.starts_with("a close's") => assert!(
                     want[1].1.contains("Flipped") && want.len() == 6,
                     "{name}: the flipped row read unchecked: {want:?}"
@@ -2766,16 +2837,7 @@ mod tests {
                 true => [&torn[..whole], &mark[..]].concat(),
                 false => torn[..whole].to_vec(),
             };
-            // The two the cut leaves open, between the zero a mark across
-            // a sector's end writes over the torn record's kind and the
-            // mark's kind byte, where the walk stops at the zero and the
-            // durable point is the kept records' own: the torn record's own
-            // bytes a record whole by its sum claiming nothing and a head
-            // past the end after it, which the judgment of the flipped row
-            // finds past the zero and cuts there (a client's text can be
-            // so made); and a dead spill, the one record claiming the point
-            // past the flipped row, under the zero.
-            let open = name.contains("of no claim") || name.starts_with("a dead spill");
+            let open = window_case(name);
             let (mut fails, mut refused, mut left_open) = (Vec::new(), Vec::new(), Vec::new());
             let files = stopped(torn, lost, &steps);
             for (what, file) in &files {
@@ -2852,9 +2914,19 @@ mod tests {
             states += n;
         }
         assert!(fails.is_empty(), "{}:\n{}", fails.len(), fails.join("\n"));
+        // Each case the window leaves is one: across a sector's end, a state
+        // in it is read otherwise than the cutting open read the file.
+        for (name, (_, _, o, ..)) in &done {
+            if window_case(name) && !name.starts_with("kept") && name.contains("sector's end") {
+                assert!(
+                    !o.is_empty(),
+                    "{name}: the window read it as the cutting open did"
+                );
+            }
+        }
         eprintln!(
             "{} files, {states} states, each opened 5 ways; refused between the zero and \
-             the mark's kind byte ({}):\n{}\nnot as the cutting open read them there, the two \
+             the mark's kind byte ({}):\n{}\nnot as the cutting open read them there, the \
              cases left ({}):\n{}",
             files.len(),
             refused.len(),

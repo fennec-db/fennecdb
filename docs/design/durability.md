@@ -211,11 +211,14 @@ sector's end, the mark's kind byte last), then the cut. Each comes before
 what would claim more than the disk holds without it, so the next open
 reads the file as the one that cut it did whatever step a power cut stops
 -- the records that claimed how far it was durable may have gone with the
-tail -- but in the window of a mark across a sector's end, where it may
-be refused, and where, given a row below the durable point the disk
-damaged, two shapes of file have that row cut with the synced ones after
-it ([storage.md](storage.md#file-format),
-*What a cut leaves*, *The cut's order*). An open hands its durable point to the sink
+tail -- on a disk that writes a 512-byte sector whole or not at all, which
+NVMe promises and SATA does not, but in the window of a mark across a
+sector's end, where it may be refused, and where, given a row below the
+durable point the disk damaged, three shapes of file have that row cut
+with the synced ones after it; a write or an fsync of the cut failing
+there leaves that window for an open tried again
+([storage.md](storage.md#file-format), *What a cut leaves*, *The cut's
+order*, *The sector, an assumption*). An open hands its durable point to the sink
 (`Sink::set_durable`), the appends after it claiming it until an fsync of
 their own covers more.
 

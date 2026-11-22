@@ -808,7 +808,8 @@ which a close writes unsynced. 2. Marked, the mark is written over the
 torn record's first eight bytes, in place, and right after it a head
 whose length runs past any file (`engine::CUT_SHORT`, 11 bytes: the head
 of a block 2^63 - 1 bytes long), and fsynced: one write inside a 512-byte
-sector, which a disk writes whole or not at all, and across a sector's
+sector, which a power cut is taken to leave whole or as it was (*The
+sector, an assumption*, below), and across a sector's
 end -- the cut in the 18 bytes before one -- three, each fsynced: a zero
 over the torn record's kind byte, the other 18 bytes, then the mark's
 kind byte, so the head at the cut is the torn record's, a zero or the
@@ -832,14 +833,22 @@ cut and marked; after it, the file cut and marked. Unmarked, the torn file
 with what it keeps durable, or the file cut. Each opens, every way a file
 opens, as the open that cut it read it, cutting nothing it kept, and
 every open that writes leaves it as the uninterrupted cut does: the bytes
-kept and one mark. An fsync of the cut that fails fails the open, nothing
-after it written; an open tried again reads the file as the page cache
-holds it -- what the failed step wrote among it, the mark perhaps, which
-may never reach the disk -- and goes on from there, as every reopen after
-a failed fsync takes the page cache's word for bytes the disk may not
-hold ([durability.md](durability.md#storage-errors): the kernel may have
-dropped the pages, and a failed fsync is never retried): that general
-case, which the cut neither widens nor closes.
+kept and one mark. A write or an fsync of the cut that fails fails the
+open, nothing after it written; an open tried again reads the file as the
+page cache holds it -- what the failed step wrote among it, the mark
+perhaps, which may never reach the disk -- and goes on from there, as
+every reopen after a failed fsync takes the page cache's word for bytes
+the disk may not hold ([durability.md](durability.md#storage-errors): the
+kernel may have dropped the pages, and a failed fsync is never retried):
+that general case, which the cut neither widens nor closes but in one
+state. Across a sector's end, a failure once the zero is written -- its
+fsync, the write of the other 18 bytes or of the mark's kind byte (step
+2's second and third writes), or the fsync after either -- leaves the
+zero where an open tried again reads it, durable once its own fsync ran,
+and the kind byte perhaps not: that open reads the window's state below
+with no power cut, refused or, in the window's cases, cutting the flipped
+row and the synced rows after it. A failed cut (step 3) leaves the mark
+whole and durable, read as after step 2.
 
 What came before. The mark alone in one write (57f77b58): torn across a
 sector's end, its first bytes and the torn record's next framed a head
@@ -869,20 +878,51 @@ follows the zero: refused where a record there claims past it -- the
 records past the torn record, still on the disk until step 3 ("the record
 at 289 fails its checksum, and the whole record at 5692 says the file was
 durable past it", the test's) -- and cut, with every record after it,
-synced ones, where none does. Two such files the test holds to this
-window: the one record claiming past the row is the dead spill whose head
-the zero is (a block that spilled just after an fsync and never landed:
-the row and the three synced after it cut, "a dead spill, 3 bytes before
-a sector's end"); or the torn record's own bytes, a client's text, are made
-a record whole by its sum that claims nothing and then a head whose length
-runs past the end, where the judgment goes on from that record and stops
-(the row and the synced one after it cut). So a cut of synced rows needs
-all of a row the disk damaged below D, a crash that tore the tail, a
-power cut in the window -- three fsyncs, about 10 ms here -- and a cut in
-the 18 bytes before a sector's end (18 in 512 cuts). Closing it needs a judgment that
+synced ones, where the judgment reaches none. It reaches none in two
+ways, three files the test holds to this window (`window_case`). Every
+record claiming past the row -- one, in each file built -- has its head
+under the 19 bytes the cut writes, which take it: the dead spill whose head the zero is (a block
+that spilled just after an fsync and never landed: the row and the three
+synced after it cut, "a dead spill, 3 bytes before a sector's end"), or
+the one record after a torn record shorter than those bytes, whose head
+the other 18 write over (a row of no text, 13 bytes, torn, then one row,
+the only record claiming the fsync past the flipped row: the row and the
+synced one after it cut, "a torn record shorter than the cut writes, 3
+bytes before a sector's end, then one record", and 12 bytes before). Or
+the torn record's own bytes, a client's text, are made a record whole by
+its sum that claims nothing and then a head whose length runs past the
+end: found before the cut's other 18 bytes reach it, that record sends
+the judgment on to the head, where it stops short of the records that
+claim past the row (the row and the synced one after it cut). So a cut of
+synced rows needs all of a row the disk damaged below D, a crash that
+tore the tail, a power cut in the window -- three fsyncs, about 10 ms
+here -- or a write or an fsync failing there (above), and a cut in the 18
+bytes before a sector's end (18 in 512 cuts). Closing it needs a judgment that
 stops at the cut's zero rather than looking past it: a byte no head of
 this version is, which a judgment reaching it refuses -- a change to how
 an open judges any damaged file, not made here.
+
+*The sector, an assumption.* That a power cut leaves a 512-byte sector's
+bytes whole or as they were is what the cut assumes, not what every disk
+promises. NVMe promises it: a write no longer than its atomic write unit
+for a power failure (AWUPF, a logical block at least: 512 bytes or 4 KiB)
+that crosses no atomic boundary lands whole or not at all, and so any
+512-byte span inside one block. SATA's standard promises nothing of a
+sector a power cut stops. SQLite assumes less than the cut: that a sector
+is written linearly, from one end, so a power cut keeps a part of it at its
+front or its back. On a disk that tears a sector so, step 2's one write
+inside a sector can be kept in part as a write across a sector's end can,
+with no zero before it -- a front of the mark and the torn record's next
+bytes framing a head anew, or the mark whole and nothing of the head past
+the end -- the states 57f77b58 left (*What came before*): the next open
+may cut the flipped row and the synced rows after it in `torn-wide`'s
+shape, or read a record of the torn record's bytes whole by its sum as a
+write. The three writes hold under such a tear -- a byte alone kept or
+not, the 18 bytes kept at either end from any byte, as the test builds
+them across a sector's end -- and inside a sector too would cost every
+marked cut two writes and two fsyncs more (+257 k instructions and about
+7 ms an open here, as across a sector's end): not done here, as NVMe's
+promise makes them needless.
 
 On Windows a view another process maps of the file refuses the cut itself
 (step 3; `cut_refused`, `SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`, the
@@ -923,17 +963,21 @@ Held by `a_cut_a_power_cut_stops_at_any_step_opens_as_the_cutting_open_read_it`
 cut after each may leave -- each write after the last fsync lost, whole,
 its length alone, and where it crosses a sector's end split at every byte
 either way, and before the first fsync bytes the earlier process never
-synced lost too -- of 27 files: one torn as `torn-wide` is and one whose
+synced lost too -- of 30 files: one torn as `torn-wide` is and one whose
 kept rows no fsync covered, torn long and short, each cut inside a sector
 and 3 and 12 bytes before a sector's end, the torn record's bytes from its
 ninth as written, `83 01 ff ff 7f`, a record whole by its sum claiming its
 own start from its ninth byte and from its tenth, and one claiming
-nothing, that head after it; a dead spill; a close's mark, then a torn
-record. 562 files a power cut may leave, each opened every way, read-only
-too: each as the cutting open read it, but in the window above, where 960
-opens were refused, and its two cases cut, 40 opens of the crafted record
-and 160 of the dead spill. On 57f77b58's cut 679 opens of 52 of them
-failed: the record whole at the torn record's ninth byte read as a write
+nothing, that head after it; a dead spill; a torn record of 13 bytes, a
+row of no text, then the one record claiming past a flipped row, at the
+same three places; a close's mark, then a torn record. 639 files a power
+cut may leave, each opened every way, read-only too: each as the cutting
+open read it, but in the window above, where 1 080 opens were refused,
+and its three cases cut, 40 opens of the crafted record, 160 of the dead
+spill and 220 of the record after the short torn one (44 files, each
+after the zero's fsync, the other 18 bytes over that record's head kept
+whole or in part), each case held to be reached. On 57f77b58's cut 679
+opens of 52 of the 27 files then built failed: the record whole at the torn record's ninth byte read as a write
 after the mark, inside a sector too; the mark torn across a sector's end
 cutting the flipped and the synced rows or refusing the open; and the
 length cut after a close's mark kept with the mark lost, the flipped row
