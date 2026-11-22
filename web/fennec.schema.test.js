@@ -477,7 +477,7 @@ async function fakeStore(image) {
   const db = {
     transaction() {
       const tx = {
-        objectStore: () => ({ get: (k) => request(() => records.get(k)), getAll: () => request(() => []) }),
+        objectStore: () => ({ get: (k) => request(() => records.get(k)), getAll: () => request(() => []), getAllKeys: () => request(() => []) }),
       };
       setTimeout(() => tx.oncomplete?.());
       return tx;
