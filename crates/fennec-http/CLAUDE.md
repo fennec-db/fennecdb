@@ -29,7 +29,13 @@ stands every `ALIVE`, behind as caught up (`stream`'s `told`), which a
 copy's `behind` counts from. A
 restart reads a copy's role from its file: one made to follow says so on
 disk before the follow is answered (`Tenants::open_as` syncs it), and an
-image is taken with the record saying it inside its rename.
+image is taken with the record saying it inside its rename. [An image goes
+out as a pin takes it](../../docs/design/replication.md#an-image-sent-as-it-is-read)
+(`Database::pin_image`) -- a follow's, a backup's, an archive's, a move's
+(`admin::export`) -- written as it is read with no lock held
+(`image_message`), never built whole: its bytes `snapshot()`'s at its
+change (fennec-core's `tests/pinned.rs`), its heap the indexes it copies,
+16 bytes a row, and a constant (`tests/message_peak.rs`).
 
 **[A copy keeps the time its primary appended each write at, and an
 archive's times run in order.](../../docs/design/replication.md#a-writes-time)**

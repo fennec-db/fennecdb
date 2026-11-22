@@ -434,6 +434,89 @@ records and `rebind` binds its statements, which no target reached before
 every collection of the copy is read after (`an_answers_image_is_adopted_by_a_mapped_copy`
 holds the path to the adoption). The seeds' answer holds such an image.
 
+### An image sent as it is read
+
+**An image goes out as a pin takes it, and is written as it is read**
+(`Database::pin_image`, `PinnedImage`, `replication::image_message`). A
+replica's first follow, one past the feed's buffer, a backup (`fennec
+backup`, the stream's `archive=1`), an archiver's image and a node's archive
+stream's (`node_stream.rs`) and a move's image (`GET
+/_admin/tenants/<t>/file`, `admin::export`) are each the database's image,
+and every release from 0.1.5, replication's first, to 0.2.0 built it whole
+in the primary's heap under the read lock (`snapshot()`) and wrote it as one
+message: a second copy of every live document beside the database, three
+for a follower that reads no sums (`plain_unless` copied it again, and
+`plain_records` once more inside it). The soak harness found it (P6, round
+6): 250 000 records, 259 MB, under a container of 256 MiB, the primary was
+killed out of memory 0.7 s after its replica began to follow, twice of two.
+
+Under the read lock `pin_image` runs the image's own writer
+(`Database::snapshot_into`) into a `PinnedImage`, which copies every byte
+but a collection's documents -- the counter, the history, the schemas,
+each collection's index of its frames (a few bytes a row), its graphs, the
+statements and their marks -- and takes each collection's documents as
+`Store::pinned` takes a pinned read's: the id index copied, 12 bytes a row,
+the mapped file and the segments shared. Its length is known then, so the
+message's head says it; `PinnedImage::write_to` writes it with no lock
+held, each collection's live records read from its pinned store a document
+at a time (`Store::write_live`, the same call the snapshot makes), into the
+connection's buffer. A record's sum is made as it is written out
+(`Framing::Later`: `Summed` marks where a record begins and where its sum
+goes, and the writer carries the sum over the bytes between): summed as
+taken, every document would be read under the lock. A follower that reads
+no sums is sent the image taken plain (`Framing::Plain`: each record's head
+framed with its body's length, no claim, no sum -- what `plain_image` makes
+of a snapshot), its history record written through `put_record` natively so
+that it is framed as the rest are; the browser module writes it as it did.
+Nothing a write changes in place is held: an append to the open segment
+copies it first (8 MB at most, once an image), and a handover or a compact
+lets go of its own hold only, the mapping keeping the file it renamed over;
+on Windows a cut of a torn tail at an open waits for the image's view to go,
+as for a pinned read's (`cut_refused` names both). A move's image is the
+tenant's as it is frozen; an image a node's stream holds until the tenant's
+disk covers it (`Pending`) holds the pin, never a copy.
+
+The bytes are the snapshot's at the image's change, to the last one:
+fennec-core's `pinned::a_pinned_image_is_the_snapshot_at_its_pin` holds
+`pin_image` to `snapshot()` and `plain_image(snapshot())`, over a database
+with every index kind, a graph with tombstones, a field added, a named and a
+scheduled statement and a history, its documents in the mapped file and in
+memory, written out after deletes, updates, a field added, a statement
+defined, a handover and a compact beside it, a few bytes a write and whole.
+The follow's numbering and durability are as they were: the image is taken
+where `snapshot()` was, at the change judged under the same read lock, and
+sent once the feed is durable to it. What it holds is a constant beside 16
+bytes a row: `message_peak`'s
+`a_primary_sends_an_image_holding_a_constant_however_large_the_database`
+counts every thread of the process while an in-process primary sends a
+replica its first image -- 1.29 MB at the most for 8 000 rows of a kilobyte
+(an image of 8.1 MB), 1.70 for 32 000 (32.5 MB), plain alike, the
+connection's 1 MiB buffer among it -- and failed on main's path (12.4 MB
+for the first, past its 3 MiB). Over 250 000 rows of a kilobyte, a file of
+253 MB and an image of 254 (macOS arm64, release, three rounds, a load of
+1.6-1.8; the process's instructions retired less an open's): main's way
+held the lock 55-56 ms, held 257 MB more than the open and took 426-430 M
+instructions; the pin holds the lock 4.7 ms, holds 6.2 MB more -- 12 bytes
+a row of id index, 4 of frames' index, the buffer -- and takes 347-348 M,
+the whole image written in 40 ms against 55. Plain, main's held the lock
+113-199 ms and 764 MB more, 724-766 M instructions; the pin's 4.7 ms, 6.2
+MB, 210-211 M (no sum to make). Rejected: an image spilled into a file
+beside the database under the lock and sent from there -- a heap of a
+constant, but the lock held for a disk write of the image, longer than the
+copy it replaces, the image's bytes written and read twice, and a file a
+crash leaves to sweep; the image's stretches held as the browser module
+holds them (`Kept`) -- a live image is written a document at a time, so a
+piece a document, three times the id index; the frames' index made again
+from the pin as the image is written, 4 bytes a row fewer held, for a second
+walk of the index under the lock to say the record's length.
+
+What takes the image still reads it whole: a replica (`read_kind`, then
+`loaded`, which loads it into a database in memory), `fennec backup`, a
+move's router (`Pool::call`) and its target (`Tenants::import`, which
+replays it in memory before its rename), and an archive's consolidation
+(`Archive::end_image`). A database larger than the memory of the machine
+taking it does not follow or move yet; the primary is no longer what fails.
+
 ### A copy across a compact
 
 **A copy agrees with its primary across a compact because a compact

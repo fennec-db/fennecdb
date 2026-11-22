@@ -66,6 +66,12 @@ its own file. Only writes already on the primary's disk are sent.</p>
   <li><b>A restarted replica</b> asks only for what it missed.</li>
   <li><b>A replica far behind</b> (past 64 MiB of writes) is sent a whole
     copy of the database instead.</li>
+  <li><b>A whole copy is read from the primary's file as it is sent</b> —
+    a new replica's, a backup's, an archive's, a moved tenant's — never
+    gathered in the primary's memory first, and with no lock held while it
+    goes: a database larger than the primary's memory follows and backs up.
+    What takes the copy — the replica, <code>fennec backup</code>, a move's
+    router and target — still reads it whole.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
   <li><b>A <code>compact</code></b>, the primary's or the replica's own, is

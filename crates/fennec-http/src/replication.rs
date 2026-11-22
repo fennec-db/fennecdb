@@ -56,6 +56,7 @@
 
 use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
+use fennec_core::engine::PinnedImage;
 use fennec_core::prelude::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -1419,6 +1420,29 @@ pub(crate) fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Res
     Ok(())
 }
 
+/// An image's message: its head, `before`, then the image written as it
+/// is read ([`PinnedImage::write_to`]) -- its documents from the database's
+/// file and segments as they stood at the pin, never gathered. Built whole
+/// in the primary's memory, an image was a second copy of the database
+/// there, and one larger than that memory was killed at its first follow
+/// (docs/design/replication.md#an-image-sent-as-it-is-read).
+pub(crate) fn image_message(
+    out: &mut impl Write,
+    tag: u8,
+    before: &[&[u8]],
+    image: &PinnedImage,
+) -> io::Result<()> {
+    let len = before.iter().map(|p| p.len() as u64).sum::<u64>() + image.len();
+    let mut head = [0u8; 9];
+    head[0] = tag;
+    head[1..].copy_from_slice(&len.to_le_bytes());
+    out.write_all(&head)?;
+    for p in before {
+        out.write_all(p)?;
+    }
+    image.write_to(out)
+}
+
 pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -1475,7 +1499,9 @@ fn stream(
     // the image or the cursor one record off.
     let (seq, lineage, epoch, image) = {
         // An image of what has landed: a block's writes reach the replica
-        // as the record it lands as, or never.
+        // as the record it lands as, or never. Pinned, and written out
+        // once the lock is let go ([`image_message`]); plain where the
+        // follower reads no sums.
         let g = crate::held::read(db);
         let now = g.change_seq();
         let epoch = feed.epoch();
@@ -1483,10 +1509,10 @@ fn stream(
         if go_on {
             (since, g.history().clone(), epoch, None)
         } else {
-            (now, g.history().clone(), epoch, Some(g.snapshot()))
+            (now, g.history().clone(), epoch, Some(g.pin_image(!sums)))
         }
     };
-    let image = match image.map(|i| plain_unless(sums, i)).transpose() {
+    let image = match image.transpose() {
         Ok(i) => i,
         Err(e) => {
             let _ = Response::error(500, &e.to_string()).write(out, false, false);
@@ -1538,7 +1564,7 @@ fn stream(
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {
-            message(&mut w, b'I', &[image])?;
+            image_message(&mut w, b'I', &[], image)?;
         }
         w.flush()
     });

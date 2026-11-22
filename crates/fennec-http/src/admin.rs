@@ -81,6 +81,7 @@ use crate::http::{Method, Request, Response};
 use crate::instance;
 use crate::tenants::{Kept, Refused, Tenants};
 use crate::{crypto::ct_eq, Config};
+use std::io::{BufWriter, Write};
 
 /// Whether `req` carries the admin `token`, compared in constant time.
 pub(crate) fn carries(req: &Request, token: &str) -> bool {
@@ -112,14 +113,95 @@ pub(crate) fn is_import(req: &Request) -> bool {
         && segs.next().is_none()
 }
 
-pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
+/// Whether `req` is a tenant's image going out, `GET
+/// /_admin/tenants/<t>/file`, which [`export`] answers before [`handle`]:
+/// read off its path with nothing allocated, as [`is_import`].
+pub(crate) fn is_export(req: &Request) -> bool {
+    let mut segs = req.path.split('/').filter(|s| !s.is_empty());
+    req.method == Method::Get
+        && segs.next() == Some("_admin")
+        && segs.next() == Some("tenants")
+        && segs.next().is_some()
+        && segs.next() == Some("file")
+        && segs.next().is_none()
+}
+
+/// The admin token asked of a request under `/_admin/`: `None` where it
+/// carries it, the refusal otherwise.
+fn admitted(cfg: &Config, req: &Request) -> Option<Response> {
     let Some(token) = &cfg.admin_token else {
-        return Response::error(404, "the admin endpoints are off (--admin-token)");
+        return Some(Response::error(
+            404,
+            "the admin endpoints are off (--admin-token)",
+        ));
     };
     if !carries(req, token) {
-        return refused();
+        return Some(refused());
     }
     crate::audit::verified();
+    None
+}
+
+/// `GET /_admin/tenants/<t>/file`, a move's image: pinned under the
+/// tenant's read lock ([`Tenants::export_pinned`]) and written out as it is
+/// read, after a head saying its length; every refusal as [`handle`]
+/// answers it. Answered as a body, the image was a second copy of the
+/// tenant in the node's memory, and a tenant larger than what was left of
+/// it killed the node and every tenant on it
+/// (docs/design/replication.md#an-image-sent-as-it-is-read). The answer's
+/// status, and whether the connection may go on.
+pub(crate) fn export(
+    out: &mut impl Write,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    keep_alive: bool,
+) -> (u16, bool) {
+    let mut answer = |resp: Response| {
+        let status = resp.status;
+        let sent = crate::cors(resp, cfg).write(&mut *out, keep_alive, false);
+        (status, sent.is_ok())
+    };
+    if let Some(no) = admitted(cfg, req) {
+        return answer(no);
+    }
+    let segs = req.segments();
+    let image = match tenants.export_pinned(segs.get(2).copied().unwrap_or("")) {
+        Ok(image) => image,
+        Err(r) => return answer(r.response()),
+    };
+    let mut head = String::with_capacity(256);
+    head.push_str("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ");
+    head.push_str(&image.len().to_string());
+    head.push_str("\r\nConnection: ");
+    head.push_str(if keep_alive { "keep-alive" } else { "close" });
+    head.push_str("\r\n");
+    if let Some(origin) = cfg.cors.as_deref() {
+        crate::cors::push_into(&mut head, origin);
+    }
+    crate::request_id::with(|id| {
+        if !id.is_empty() {
+            head.push_str(crate::request_id::HEADER);
+            head.push_str(": ");
+            head.push_str(id);
+            head.push_str("\r\n");
+        }
+    });
+    crate::audit::push_verified(&mut head);
+    head.push_str("\r\n");
+    // A store's records go out a document at a time: through a buffer, as
+    // a replica's stream sends them.
+    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, &mut *out);
+    let sent = (w.write_all(head.as_bytes()))
+        .and_then(|_| image.write_to(&mut w))
+        .and_then(|_| w.flush());
+    (200, sent.is_ok())
+}
+
+pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
+    if let Some(no) = admitted(cfg, req) {
+        return no;
+    }
 
     let segs = req.segments();
     let result = match (req.method, &segs[1..]) {
@@ -232,16 +314,8 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Post, ["tenants", t, "thaw"]) => tenants
             .thaw(t)
             .map(|_| Response::json(200, "{\"frozen\":false}")),
-        (Method::Get, ["tenants", t, "file"]) => tenants.export(t).map(|image| Response {
-            status: 200,
-            body: image,
-            content_type: "application/octet-stream",
-            extra: Vec::new(),
-            seq: None,
-            history: None,
-            version: None,
-            no_transform: false,
-        }),
+        // `GET tenants/<t>/file` is answered by `export`, its image written
+        // out as it is read.
         // A router recording the lineage of a tenant made before it kept
         // any, to bind its read replicas to, or asking the primary it
         // places a tenant on which lineage it is of. `ready`: whether the

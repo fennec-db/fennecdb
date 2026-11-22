@@ -85,8 +85,11 @@
 //! tenant's disk, as a replica's are.
 
 use crate::http::{Method, Request, Response};
-use crate::replication::{message, u64s, Feed, Next, ALIVE, MESSAGE, SILENCE, VERSION};
+use crate::replication::{
+    image_message, message, u64s, Feed, Next, ALIVE, MESSAGE, SILENCE, VERSION,
+};
 use crate::tenants::{a_device, check_name, shaped, Refused, Seen, Tenant, Tenants};
+use fennec_core::engine::PinnedImage;
 use fennec_core::history::History;
 use fennec_core::prelude::Database;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -608,9 +611,10 @@ impl Write for Out<'_> {
 }
 
 /// An image taken and not yet sent: its tenant's disk does not hold all of
-/// it yet.
+/// it yet. Pinned ([`PinnedImage`]): it holds the tenant's id indexes and
+/// shares its file and segments, never a copy of its documents.
 struct Pending {
-    image: Vec<u8>,
+    image: PinnedImage,
     seq: u64,
     history: History,
     feed: Arc<Feed>,
@@ -903,12 +907,13 @@ impl Session<'_> {
                     return Ok(());
                 }
                 _ => {
-                    // An image, its snapshot as long as the tenant is large:
-                    // held up for it. On the feed behind it, so the tenant
-                    // keeps the writes after it until they are sent and no
-                    // write waits for the stream until it has caught up.
+                    // An image, pinned and written out as it is sent: held
+                    // up for it. On the feed behind it, so the tenant keeps
+                    // the writes after it until they are sent and no write
+                    // waits for the stream until it has caught up. Plain
+                    // where the client reads no sums.
                     let _held = l.hold();
-                    let image = g.snapshot();
+                    let image = g.pin_image(!self.sums).map_err(io::Error::other)?;
                     feed.sending_as(l.key, now, Some(&l.held), true);
                     Pending {
                         image,
@@ -984,7 +989,7 @@ impl Session<'_> {
     fn hello(
         &mut self,
         name: &str,
-        image: Option<&[u8]>,
+        image: Option<&PinnedImage>,
         seq: u64,
         durable: u64,
         history: &History,
@@ -995,15 +1000,11 @@ impl Session<'_> {
         hello.extend_from_slice(&history.encode());
         self.send(b'H', name, &[&hello])?;
         self.hello_at.insert(name.into(), now);
+        // Taken plain where the client reads no sums (`judge`).
         if let Some(image) = image {
-            match self.sums {
-                true => self.send(b'I', name, &[image])?,
-                false => {
-                    let plain =
-                        fennec_core::engine::plain_image(image).map_err(io::Error::other)?;
-                    self.send(b'I', name, &[&plain])?
-                }
-            }
+            let len = [name.len() as u8];
+            image_message(&mut self.w, b'I', &[&len, name.as_bytes()], image)?;
+            self.quiet = Instant::now();
         }
         self.w.flush()
     }

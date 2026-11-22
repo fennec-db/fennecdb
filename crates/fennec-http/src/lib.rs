@@ -1326,6 +1326,21 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         // of the spans and none of the time.
         trace::begin(&req);
 
+        // A tenant's image going to a move, written out as it is read
+        // rather than as an answer's body, which held it whole
+        // (`admin::export`).
+        if let Backend::Tenants(tenants) = backend {
+            if admin::is_export(&req) {
+                let (status, sent) = admin::export(&mut out, tenants, cfg, &req, keep_alive);
+                audit::http(&req, status, peer);
+                trace::end(status);
+                if !sent || !keep_alive {
+                    return;
+                }
+                continue;
+            }
+        }
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a

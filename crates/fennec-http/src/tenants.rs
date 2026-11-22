@@ -28,6 +28,7 @@ use crate::node_stream::NodeStreams;
 use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
 use crate::replication::{fresh_id, Follower, Replication, Said};
 use crate::sse::Hub;
+use fennec_core::engine::PinnedImage;
 use fennec_core::history::History;
 use fennec_core::prelude::*;
 use std::collections::HashMap;
@@ -2307,11 +2308,21 @@ impl Tenants {
     }
 
     /// The tenant's whole image, graph included -- what a checkpoint would
-    /// write, so the receiving node opens it without rebuilding anything.
+    /// write, so the receiving node opens it without rebuilding anything --
+    /// in memory: what a test reads. A move's is written out as it is read
+    /// ([`Self::export_pinned`]).
     pub fn export(&self, name: &str) -> std::result::Result<Vec<u8>, Refused> {
+        self.export_pinned(name).map(|image| image.to_vec())
+    }
+
+    /// [`Self::export`] pinned under the tenant's read lock, for
+    /// `admin::export` to write out with none held ([`PinnedImage`]): taken
+    /// whole, a move's image was a second copy of the tenant in the node's
+    /// memory.
+    pub fn export_pinned(&self, name: &str) -> std::result::Result<PinnedImage, Refused> {
         let t = self.get(name)?;
-        let image = crate::held::read(&t.db).snapshot();
-        Ok(image)
+        let image = crate::held::read(&t.db).pin_image(false);
+        image.map_err(|e| Refused(500, e.to_string()))
     }
 
     /// Installs an image as a new tenant. It is replayed in memory first, so
