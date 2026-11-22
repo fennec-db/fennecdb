@@ -1,0 +1,11 @@
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":16402}]}}
+{"kind":"rows","result":{"columns":["id","n"],"rows":[{"id":1,"n":1},{"id":2,"n":2}]}}
+{"kind":"rows","result":{"columns":["id","n"],"rows":[{"id":1,"n":1}]}}
+{"kind":"rows","result":{"columns":["id","n","body"],"rows":[{"id":1,"n":0,"body":null},{"id":2,"n":1,"body":null},{"id":3,"n":2,"body":null},{"id":16384,"n":16383,"body":null},{"id":16385,"n":16384,"body":null},{"id":16400,"n":16399,"body":null}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":2}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":40000},{"n":40001}]}}
+{"kind":"rows","result":{"columns":["id","n"],"rows":[{"id":16402,"n":40001},{"id":16401,"n":40000},{"id":16400,"n":16399}]}}
+{"kind":"schemas","collections":[{"name":"mid","fields":[{"name":"n","type":"int","index":"hash"},{"name":"s","type":"text","index":"none"}]},{"name":"deep","fields":[{"name":"n","type":"int","index":"none"}]},{"name":"wide","fields":[{"name":"n","type":"int","index":"hash"},{"name":"body","type":"text","index":"none"}]}]}
+{"kind":"rows","result":{"columns":["n","body"],"rows":[{"n":40000,"body":"the row a disk Flipped a bit of"}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":1}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":0}]}}

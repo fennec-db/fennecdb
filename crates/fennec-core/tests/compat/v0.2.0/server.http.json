@@ -1,0 +1,592 @@
+{
+ "serve": {
+  "args": [
+   "--http-token",
+   "compat-token",
+   "--replication-token",
+   "compat-replication",
+   "--no-checkpoint",
+   "--auth-delay",
+   "0",
+   "--idempotency-ttl",
+   "3000000000"
+  ],
+  "hooks": "github github {secret} keep 36500d",
+  "secret": "the fixture set's webhook secret",
+  "token": "compat-token"
+ },
+ "queries": [
+  [
+   200,
+   "[{\"name\":\"kinds\",\"fields\":[{\"name\":\"b\",\"type\":\"bool\",\"index\":null,\"required\":false},{\"name\":\"i\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"f\",\"type\":\"float\",\"index\":\"sorted\",\"required\":false},{\"name\":\"t\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4)\",\"required\":false},{\"name\":\"by\",\"type\":\"bytes\",\"index\":null,\"required\":false},{\"name\":\"ts\",\"type\":\"timestamp\",\"index\":\"sorted\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":null,\"required\":false},{\"name\":\"vi\",\"type\":\"vector<4>\",\"index\":\"hnsw(cosine, m=8, ef_search=100)\",\"required\":false},{\"name\":\"vh\",\"type\":\"vector<4, f16>\",\"index\":null,\"required\":false},{\"name\":\"l\",\"type\":\"[int]\",\"index\":null,\"required\":false},{\"name\":\"sp\",\"type\":\"sparse<8>\",\"index\":\"inverted\",\"required\":false},{\"name\":\"j\",\"type\":\"json\",\"index\":null,\"required\":false},{\"name\":\"g\",\"type\":\"geo\",\"index\":\"geo\",\"required\":false},{\"name\":\"tr\",\"type\":\"text\",\"index\":\"sorted\",\"required\":false,\"collate\":\"tr\"},{\"name\":\"un\",\"type\":\"text\",\"index\":\"sorted\",\"required\":false,\"collate\":\"und\"},{\"name\":\"email\",\"type\":\"text\",\"index\":\"unique\",\"required\":false,\"nocase\":true},{\"name\":\"tag\",\"type\":\"text\",\"index\":\"hash\",\"also\":\"text(k1=0.9, b=0.4)\",\"required\":false},{\"name\":\"word\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4, chars)\",\"required\":false},{\"name\":\"acc\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4, accents)\",\"required\":false},{\"name\":\"exp\",\"type\":\"timestamp\",\"index\":\"ttl(2d)\",\"required\":false},{\"name\":\"a\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"z\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"remark\",\"type\":\"text\",\"index\":null,\"required\":false}],\"indexes\":[\"sorted(a, z)\",\"unique(a, i)\"]},{\"name\":\"shapes\",\"fields\":[{\"name\":\"req\",\"type\":\"int\",\"index\":null,\"required\":true},{\"name\":\"tn\",\"type\":\"text\",\"index\":\"unique\",\"also\":\"text(k1=0.9, b=0.4)\",\"required\":false,\"collate\":\"tr\",\"nocase\":true},{\"name\":\"cb\",\"type\":\"text\",\"index\":\"hash\",\"also\":\"text(k1=0.9, b=0.4, chars)\",\"required\":false,\"collate\":\"und\"},{\"name\":\"nb\",\"type\":\"text\",\"index\":\"sorted\",\"also\":\"text(k1=0.9, b=0.4, accents)\",\"required\":false,\"nocase\":true},{\"name\":\"ca\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4, chars, accents)\",\"required\":false},{\"name\":\"lb\",\"type\":\"[bool]\",\"index\":null,\"required\":false},{\"name\":\"lf\",\"type\":\"[float]\",\"index\":null,\"required\":false},{\"name\":\"lt\",\"type\":\"[text]\",\"index\":null,\"required\":false},{\"name\":\"lby\",\"type\":\"[bytes]\",\"index\":null,\"required\":false},{\"name\":\"lts\",\"type\":\"[timestamp]\",\"index\":null,\"required\":false},{\"name\":\"lv\",\"type\":\"[vector<2>]\",\"index\":null,\"required\":false},{\"name\":\"lvh\",\"type\":\"[vector<2, f16>]\",\"index\":null,\"required\":false},{\"name\":\"ll\",\"type\":\"[[int]]\",\"index\":null,\"required\":false},{\"name\":\"lsp\",\"type\":\"[sparse<4>]\",\"index\":null,\"required\":false},{\"name\":\"lg\",\"type\":\"[geo]\",\"index\":null,\"required\":false},{\"name\":\"j\",\"type\":\"json\",\"index\":null,\"required\":false},{\"name\":\"a\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"b\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"cn\",\"type\":\"text\",\"index\":null,\"required\":false,\"collate\":\"und\",\"nocase\":true},{\"name\":\"cx\",\"type\":\"text\",\"index\":\"unique\",\"also\":\"text(k1=0.9, b=0.4, chars, accents)\",\"required\":false}],\"indexes\":[\"sorted(a desc, b)\"]},{\"name\":\"orders\",\"fields\":[{\"name\":\"ref\",\"type\":\"text\",\"index\":\"unique\",\"required\":false},{\"name\":\"status\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"total\",\"type\":\"int\",\"index\":null,\"required\":false}]},{\"name\":\"audit\",\"fields\":[{\"name\":\"ref\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"what\",\"type\":\"text\",\"index\":null,\"required\":false}]},{\"name\":\"ticks\",\"fields\":[{\"name\":\"k\",\"type\":\"text\",\"index\":\"unique\",\"required\":false}]},{\"name\":\"issues\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"action\",\"type\":\"text\",\"index\":null,\"required\":false}]},{\"name\":\"retired\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"s\",\"type\":\"text\",\"index\":null,\"required\":false}]},{\"name\":\"edges\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"f\",\"type\":\"float\",\"index\":\"sorted\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":null,\"required\":false},{\"name\":\"vh\",\"type\":\"vector<4, f16>\",\"index\":null,\"required\":false},{\"name\":\"lv\",\"type\":\"[vector<2>]\",\"index\":null,\"required\":false},{\"name\":\"lf\",\"type\":\"[float]\",\"index\":null,\"required\":false}]},{\"name\":\"signed\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"sorted\",\"required\":false},{\"name\":\"at\",\"type\":\"timestamp\",\"index\":\"sorted\",\"required\":false},{\"name\":\"l\",\"type\":\"[int]\",\"index\":null,\"required\":false},{\"name\":\"ts\",\"type\":\"[timestamp]\",\"index\":null,\"required\":false},{\"name\":\"j\",\"type\":\"json\",\"index\":null,\"required\":false}]},{\"name\":\"tuned\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"t\",\"type\":\"text\",\"index\":\"text(k1=1.5, b=0.9, prefix=6, prefix_min=2)\",\"required\":false},{\"name\":\"c\",\"type\":\"text\",\"index\":\"text(k1=1.2, b=0.6, prefix=5, prefix_min=1, chars)\",\"required\":false},{\"name\":\"a\",\"type\":\"text\",\"index\":\"text(k1=2, b=1, prefix=4, prefix_min=2, accents)\",\"required\":false},{\"name\":\"h\",\"type\":\"text\",\"index\":\"hash\",\"also\":\"text(k1=0.5, b=0.2, prefix=3, prefix_min=1)\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":\"hnsw(l2, m=12, ef_search=24)\",\"required\":false},{\"name\":\"q\",\"type\":\"vector<4>\",\"index\":\"hnsw(dot, m=6, ef_search=30, quant=int8)\",\"required\":false}]},{\"name\":\"extra\",\"fields\":[{\"name\":\"k\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"n\",\"type\":\"int\",\"index\":null,\"required\":false}]},{\"name\":\"blocked\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"s\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"m\",\"type\":\"int\",\"index\":null,\"required\":false}]},{\"name\":\"_hook_events\",\"fields\":[{\"name\":\"key\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"digest\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"taken\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"until\",\"type\":\"timestamp\",\"index\":\"ttl(1ms)\",\"required\":false}]},{\"name\":\"_idempotency\",\"fields\":[{\"name\":\"key\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"request\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"status\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"body\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"at\",\"type\":\"timestamp\",\"index\":\"ttl(50000000m)\",\"required\":false}]},{\"name\":\"_consumers\",\"fields\":[{\"name\":\"name\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"since\",\"type\":\"int\",\"index\":null,\"required\":false}]},{\"name\":\"_migrations\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"unique\",\"required\":false},{\"name\":\"text\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"at\",\"type\":\"timestamp\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"kinds\",\"fields\":[{\"name\":\"b\",\"type\":\"bool\",\"index\":null,\"required\":false},{\"name\":\"i\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"f\",\"type\":\"float\",\"index\":\"sorted\",\"required\":false},{\"name\":\"t\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4)\",\"required\":false},{\"name\":\"by\",\"type\":\"bytes\",\"index\":null,\"required\":false},{\"name\":\"ts\",\"type\":\"timestamp\",\"index\":\"sorted\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":null,\"required\":false},{\"name\":\"vi\",\"type\":\"vector<4>\",\"index\":\"hnsw(cosine, m=8, ef_search=100)\",\"required\":false},{\"name\":\"vh\",\"type\":\"vector<4, f16>\",\"index\":null,\"required\":false},{\"name\":\"l\",\"type\":\"[int]\",\"index\":null,\"required\":false},{\"name\":\"sp\",\"type\":\"sparse<8>\",\"index\":\"inverted\",\"required\":false},{\"name\":\"j\",\"type\":\"json\",\"index\":null,\"required\":false},{\"name\":\"g\",\"type\":\"geo\",\"index\":\"geo\",\"required\":false},{\"name\":\"tr\",\"type\":\"text\",\"index\":\"sorted\",\"required\":false,\"collate\":\"tr\"},{\"name\":\"un\",\"type\":\"text\",\"index\":\"sorted\",\"required\":false,\"collate\":\"und\"},{\"name\":\"email\",\"type\":\"text\",\"index\":\"unique\",\"required\":false,\"nocase\":true},{\"name\":\"tag\",\"type\":\"text\",\"index\":\"hash\",\"also\":\"text(k1=0.9, b=0.4)\",\"required\":false},{\"name\":\"word\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4, chars)\",\"required\":false},{\"name\":\"acc\",\"type\":\"text\",\"index\":\"text(k1=0.9, b=0.4, accents)\",\"required\":false},{\"name\":\"exp\",\"type\":\"timestamp\",\"index\":\"ttl(2d)\",\"required\":false},{\"name\":\"a\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"z\",\"type\":\"int\",\"index\":null,\"required\":false},{\"name\":\"remark\",\"type\":\"text\",\"index\":null,\"required\":false}],\"indexes\":[\"sorted(a, z)\",\"unique(a, i)\"]}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"orders\",\"fields\":[{\"name\":\"ref\",\"type\":\"text\",\"index\":\"unique\",\"required\":false},{\"name\":\"status\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"total\",\"type\":\"int\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"extra\",\"fields\":[{\"name\":\"k\",\"type\":\"text\",\"index\":\"hash\",\"required\":false},{\"name\":\"n\",\"type\":\"int\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"blocked\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"s\",\"type\":\"text\",\"index\":null,\"required\":false},{\"name\":\"m\",\"type\":\"int\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"b\":true,\"i\":1,\"f\":1.5,\"t\":\"the quick brown fox\",\"by\":[0,159,255],\"ts\":\"2026-01-01T00:00:00Z\",\"v\":[1,0,0,0],\"vi\":[1,0,0,0],\"vh\":[0.5,0.25,0,1],\"l\":[3,1,2],\"sp\":\"{1:0.5,6:2}/8\",\"j\":{\"deep\":{\"x\":[1,\"two\",null,true]},\"kind\":\"a\",\"n\":1},\"g\":[13.4,52.5],\"tr\":\"ılık\",\"un\":\"Émile\",\"email\":\"Alice@Example.com\",\"tag\":\"red fox\",\"word\":\"東京タワー\",\"acc\":\"café crème\",\"exp\":\"2099-01-01T00:00:00Z\",\"a\":1,\"z\":10,\"remark\":null},{\"id\":2,\"b\":false,\"i\":2,\"f\":9.5,\"t\":\"lazy dogs sleep\",\"by\":[116,101,120,116,32,97,115,32,98,121,116,101,115],\"ts\":\"2026-01-01T00:00:00Z\",\"v\":[0,1,0,0],\"vi\":[0,1,0,0],\"vh\":[0,1,0,0],\"l\":[],\"sp\":\"{2:1}/8\",\"j\":[1,2.5,\"x\"],\"g\":[2.35,48.86],\"tr\":\"Istanbul\",\"un\":\"zoe\",\"email\":\"bob@example.com\",\"tag\":\"green fox\",\"word\":\"京都\",\"acc\":\"cafe\",\"exp\":\"2099-06-01T00:00:00Z\",\"a\":1,\"z\":20,\"remark\":null},{\"id\":6,\"b\":false,\"i\":5,\"f\":2.5,\"t\":\"brown bears\",\"by\":null,\"ts\":\"2026-03-01T12:00:00Z\",\"v\":null,\"vi\":[0,0,0,1],\"vh\":null,\"l\":null,\"sp\":null,\"j\":null,\"g\":null,\"tr\":null,\"un\":null,\"email\":null,\"tag\":null,\"word\":null,\"acc\":null,\"exp\":null,\"a\":3,\"z\":3,\"remark\":\"after the alter\"},{\"id\":5,\"b\":true,\"i\":9007199254740993,\"f\":0.1,\"t\":\"a fox again\",\"by\":null,\"ts\":null,\"v\":null,\"vi\":[0,0,1,0],\"vh\":null,\"l\":null,\"sp\":null,\"j\":{\"big\":9007199254740993,\"kind\":\"b\"},\"g\":null,\"tr\":null,\"un\":\"eclair\",\"email\":null,\"tag\":null,\"word\":null,\"acc\":null,\"exp\":null,\"a\":2,\"z\":1,\"remark\":null}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"b\":true,\"f\":1.5,\"t\":\"the quick brown fox\",\"by\":[0,159,255],\"ts\":\"2026-01-01T00:00:00Z\",\"l\":[3,1,2],\"j\":{\"deep\":{\"x\":[1,\"two\",null,true]},\"kind\":\"a\",\"n\":1},\"g\":[13.4,52.5],\"tr\":\"ılık\",\"un\":\"Émile\",\"email\":\"Alice@Example.com\",\"tag\":\"red fox\",\"word\":\"東京タワー\",\"acc\":\"café crème\",\"exp\":\"2099-01-01T00:00:00Z\",\"a\":1,\"z\":10,\"remark\":null},{\"i\":2,\"b\":false,\"f\":9.5,\"t\":\"lazy dogs sleep\",\"by\":[116,101,120,116,32,97,115,32,98,121,116,101,115],\"ts\":\"2026-01-01T00:00:00Z\",\"l\":[],\"j\":[1,2.5,\"x\"],\"g\":[2.35,48.86],\"tr\":\"Istanbul\",\"un\":\"zoe\",\"email\":\"bob@example.com\",\"tag\":\"green fox\",\"word\":\"京都\",\"acc\":\"cafe\",\"exp\":\"2099-06-01T00:00:00Z\",\"a\":1,\"z\":20,\"remark\":null},{\"i\":5,\"b\":false,\"f\":2.5,\"t\":\"brown bears\",\"by\":null,\"ts\":\"2026-03-01T12:00:00Z\",\"l\":null,\"j\":null,\"g\":null,\"tr\":null,\"un\":null,\"email\":null,\"tag\":null,\"word\":null,\"acc\":null,\"exp\":null,\"a\":3,\"z\":3,\"remark\":\"after the alter\"},{\"i\":9007199254740993,\"b\":true,\"f\":0.1,\"t\":\"a fox again\",\"by\":null,\"ts\":null,\"l\":null,\"j\":{\"big\":9007199254740993,\"kind\":\"b\"},\"g\":null,\"tr\":null,\"un\":\"eclair\",\"email\":null,\"tag\":null,\"word\":null,\"acc\":null,\"exp\":null,\"a\":2,\"z\":1,\"remark\":null}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"v\":[1,0,0,0],\"vi\":[1,0,0,0],\"vh\":[0.5,0.25,0,1],\"sp\":\"{1:0.5,6:2}/8\"},{\"i\":2,\"v\":[0,1,0,0],\"vi\":[0,1,0,0],\"vh\":[0,1,0,0],\"sp\":\"{2:1}/8\"},{\"i\":5,\"v\":null,\"vi\":[0,0,0,1],\"vh\":null,\"sp\":null},{\"i\":9007199254740993,\"v\":null,\"vi\":[0,0,1,0],\"vh\":null,\"sp\":null}]"
+  ],
+  [
+   200,
+   "[{\"id\":2,\"b\":false,\"i\":2,\"f\":9.5,\"t\":\"lazy dogs sleep\",\"by\":[116,101,120,116,32,97,115,32,98,121,116,101,115],\"ts\":\"2026-01-01T00:00:00Z\",\"v\":[0,1,0,0],\"vi\":[0,1,0,0],\"vh\":[0,1,0,0],\"l\":[],\"sp\":\"{2:1}/8\",\"j\":[1,2.5,\"x\"],\"g\":[2.35,48.86],\"tr\":\"Istanbul\",\"un\":\"zoe\",\"email\":\"bob@example.com\",\"tag\":\"green fox\",\"word\":\"京都\",\"acc\":\"cafe\",\"exp\":\"2099-06-01T00:00:00Z\",\"a\":1,\"z\":20,\"remark\":null}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993,\"j\":{\"big\":9007199254740993,\"kind\":\"b\"}}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"email\":\"Alice@Example.com\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":1}]"
+  ],
+  [
+   200,
+   "[{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":0.1823216},{\"i\":2,\"_score\":0.1823216}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":1.7844198},{\"i\":9007199254740993,\"_score\":0.6931472}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":1.4328704},{\"i\":2,\"_score\":0.20140176}]"
+  ],
+  [
+   200,
+   "[{\"i\":2,\"_score\":0.19461294},{\"i\":1,\"_score\":0.17149061}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":0.65197015}]"
+  ],
+  [
+   200,
+   "[{\"i\":1}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993,\"tr\":null},{\"i\":5,\"tr\":null},{\"i\":1,\"tr\":\"ılık\"},{\"i\":2,\"tr\":\"Istanbul\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":2},{\"i\":1}]"
+  ],
+  [
+   200,
+   "[{\"i\":5,\"un\":null},{\"i\":9007199254740993,\"un\":\"eclair\"},{\"i\":1,\"un\":\"Émile\"},{\"i\":2,\"un\":\"zoe\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":2,\"un\":\"zoe\"},{\"i\":1,\"un\":\"Émile\"},{\"i\":9007199254740993,\"un\":\"eclair\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":2,\"f\":9.5},{\"i\":5,\"f\":2.5},{\"i\":1,\"f\":1.5},{\"i\":9007199254740993,\"f\":0.1}]"
+  ],
+  [
+   200,
+   "[{\"i\":1},{\"i\":5},{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"ts\":\"2026-01-01T00:00:00Z\"},{\"i\":2,\"ts\":\"2026-01-01T00:00:00Z\"},{\"i\":5,\"ts\":\"2026-03-01T12:00:00Z\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":1}]"
+  ],
+  [
+   200,
+   "[{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"exp\":\"2099-01-01T00:00:00Z\"},{\"i\":2,\"exp\":\"2099-06-01T00:00:00Z\"}]"
+  ],
+  [
+   200,
+   "[{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":1},{\"i\":2,\"_score\":0}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":1},{\"i\":2,\"_score\":0}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":0.5}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":0.5}]"
+  ],
+  [
+   200,
+   "[{\"i\":1,\"_score\":61924.902}]"
+  ],
+  [
+   200,
+   "[{\"i\":1},{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"i\":2,\"z\":20},{\"i\":1,\"z\":10}]"
+  ],
+  [
+   200,
+   "[{\"i\":2}]"
+  ],
+  [
+   200,
+   "[{\"count\":4}]"
+  ],
+  [
+   200,
+   "[{\"a\":1,\"n\":2},{\"a\":2,\"n\":1},{\"a\":3,\"n\":1}]"
+  ],
+  [
+   200,
+   "[{\"n\":3}]"
+  ],
+  [
+   200,
+   "[{\"a\":1,\"n\":2},{\"a\":2,\"n\":1},{\"a\":3,\"n\":1}]"
+  ],
+  [
+   200,
+   "[]"
+  ],
+  [
+   200,
+   "[{\"i\":5,\"_score\":0.7398762},{\"i\":1,\"_score\":0.65197015}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993,\"_score\":0.032786883},{\"i\":1,\"_score\":0.032258064},{\"i\":2,\"_score\":0.015873017}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993,\"_score\":1},{\"i\":1,\"_score\":0}]"
+  ],
+  [
+   200,
+   "[{\"i\":9007199254740993,\"highlight(t)\":[[2,5]],\"_score\":0.6931472},{\"i\":1,\"highlight(t)\":[[16,19]],\"_score\":0.65197015}]"
+  ],
+  [
+   200,
+   "[{\"i\":5,\"snippet(t)\":{\"marks\":[[0,5]],\"text\":\"brown bears\"},\"_score\":0.7398762},{\"i\":1,\"snippet(t)\":{\"marks\":[[1,6]],\"text\":\"…brown fox\"},\"_score\":0.65197015}]"
+  ],
+  [
+   200,
+   "{\"rows\":[{\"i\":9007199254740993,\"_score\":0.6931472},{\"i\":1,\"_score\":0.65197015}],\"facets\":{\"tag\":[{\"value\":null,\"count\":1},{\"value\":\"red fox\",\"count\":1}]}}"
+  ],
+  [
+   200,
+   "{\"rows\":[],\"facets\":{\"b\":[{\"value\":false,\"count\":2},{\"value\":true,\"count\":2}],\"a\":[{\"value\":1,\"count\":2},{\"value\":2,\"count\":1},{\"value\":3,\"count\":1}]}}"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"k\":\"x\",\"n\":1},{\"id\":4,\"k\":\"migrated\",\"n\":2},{\"id\":3,\"k\":\"after the consumer\",\"n\":3},{\"id\":2,\"k\":\"after the refused slot\",\"n\":5}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"ref\":\"o-1\",\"status\":\"open\",\"total\":2000},{\"id\":2,\"ref\":\"o-2\",\"status\":\"open\",\"total\":500},{\"id\":3,\"ref\":\"o-3\",\"status\":\"open\",\"total\":50},{\"id\":4,\"ref\":\"o-4\",\"status\":\"open\",\"total\":70}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"ref\":\"o-1\",\"what\":\"placed\"},{\"id\":2,\"ref\":\"o-2\",\"what\":\"placed\"},{\"id\":3,\"ref\":\"o-3\",\"what\":\"placed\"},{\"id\":4,\"ref\":\"o-4\",\"what\":\"placed\"}]"
+  ],
+  [
+   200,
+   "[{\"ref\":\"o-1\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-2\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-3\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-4\",\"audit\":[{\"what\":\"placed\"}]}]"
+  ],
+  [
+   200,
+   "[{\"ref\":\"o-1\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-2\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-3\",\"audit\":[{\"what\":\"placed\"}]},{\"ref\":\"o-4\",\"audit\":[{\"what\":\"placed\"}]}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"n\":1,\"s\":\"in a block\",\"m\":null},{\"id\":2,\"n\":2,\"s\":\"after its field\",\"m\":2}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"k\":\"tick\"}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"n\":7,\"action\":\"opened\"}]"
+  ],
+  [
+   200,
+   "[{\"status\":200,\"body\":\"{\\\"affected\\\":1}\"}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"compat\",\"since\":105}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"text\":\"put extra {k: \\\"migrated\\\", n: 2}\"}]"
+  ],
+  [
+   200,
+   "[{\"taken\":1}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"blocked_n\",\"version\":[-8866076858685274104,77],\"signature\":\"($n int)\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"gh_issue\",\"version\":[-8866076858685274104,95],\"signature\":\"($n int from event.issue.number, $a text from event.action)\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":\"github\",\"armed\":true},{\"name\":\"on_d\",\"version\":[-8866076858685274104,59],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"del\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_i\",\"version\":[-8866076858685274104,57],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"insert\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_id\",\"version\":[-8866076858685274104,61],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"insert or del\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_is\",\"version\":[-8866076858685274104,60],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"insert or set\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_isd\",\"version\":[-8866076858685274104,63],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"insert or set or del\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_order\",\"version\":[-8866076858685274104,23],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"orders\",\"insert\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_s\",\"version\":[-8866076858685274104,58],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"set\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"on_sd\",\"version\":[-8866076858685274104,62],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"set or del\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"order_by_ref\",\"version\":[-8866076858685274104,54],\"signature\":\"($r text)\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null},{\"name\":\"past_range\",\"version\":[-8866076858685274104,32],\"signature\":\"()\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"order_by_ref\",\"version\":[-8866076858685274104,54],\"signature\":\"($r text)\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null,\"answers\":[\"ref\",\"status\",\"total\"],\"text\":\"create or replace statement order_by_ref($r text) as get orders select ref, status, total where ref = $r and status != 'void'\",\"depends\":[\"orders\",\"orders.ref\",\"orders.status\",\"orders.total\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"on_order\",\"version\":[-8866076858685274104,23],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"orders\",\"insert\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null,\"answers\":[],\"text\":\"create statement on_order after insert orders as insert audit {ref: new.ref, what: 'placed'}\",\"depends\":[\"orders\",\"orders.ref\",\"audit\",\"audit.ref\",\"audit.what\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"gh_issue\",\"version\":[-8866076858685274104,95],\"signature\":\"($n int from event.issue.number, $a text from event.action)\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":\"github\",\"armed\":true,\"answers\":[],\"text\":\"create statement gh_issue($n int from event.issue.number, $a text from event.action) on hook github as insert issues {n: $n, action: $a}\",\"depends\":[\"issues\",\"issues.n\",\"issues.action\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"blocked_n\",\"version\":[-8866076858685274104,77],\"signature\":\"($n int)\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null,\"answers\":[\"n\",\"s\",\"m\"],\"text\":\"create statement blocked_n($n int) as get blocked select n, s, m where n = $n\",\"depends\":[\"blocked\",\"blocked.n\",\"blocked.s\",\"blocked.m\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"ref\":\"o-1\",\"status\":\"open\",\"total\":2000}]"
+  ],
+  [
+   200,
+   "[{\"ref\":\"o-3\",\"status\":\"open\",\"total\":50}]"
+  ],
+  [
+   200,
+   "[{\"n\":2,\"s\":\"after its field\",\"m\":2}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"req\":1,\"tn\":\"Işık\",\"cb\":\"東京 tower\",\"nb\":\"Crème Brûlée\",\"ca\":\"naïve 東京\",\"lb\":[true,false],\"lf\":[1.5,-2.25],\"lt\":[\"x\",\"y\"],\"lby\":[[97,98],[99]],\"lts\":[\"2026-01-01T00:00:00Z\",\"2026-01-01T00:00:00Z\"],\"lv\":[[1,0],[0,1]],\"lvh\":[[0.5,0.25]],\"ll\":[[1,2],[3]],\"lsp\":[\"{1:0.5}/4\",\"{2:1,4:2}/4\"],\"lg\":[[13.4,52.5]],\"j\":{\"k\":\"one\",\"n\":1},\"a\":1,\"b\":2,\"cn\":\"Ärger\",\"cx\":\"Façade 東京\"},{\"id\":2,\"req\":2,\"tn\":\"istanbul\",\"cb\":\"京都\",\"nb\":\"creme\",\"ca\":\"cafe\",\"lb\":[],\"lf\":[0.5],\"lt\":[],\"lby\":[],\"lts\":[],\"lv\":[],\"lvh\":[],\"ll\":[[]],\"lsp\":[],\"lg\":[],\"j\":{\"k\":\"two\",\"n\":2},\"a\":1,\"b\":3,\"cn\":null,\"cx\":null},{\"id\":4,\"req\":4,\"tn\":\"Ilık\",\"cb\":null,\"nb\":null,\"ca\":null,\"lb\":null,\"lf\":null,\"lt\":null,\"lby\":null,\"lts\":null,\"lv\":null,\"lvh\":null,\"ll\":null,\"lsp\":null,\"lg\":null,\"j\":{\"k\":\"four\",\"n\":4},\"a\":3,\"b\":5,\"cn\":\"apfel\",\"cx\":\"facade\"},{\"id\":5,\"req\":5,\"tn\":null,\"cb\":null,\"nb\":null,\"ca\":null,\"lb\":null,\"lf\":null,\"lt\":null,\"lby\":null,\"lts\":null,\"lv\":null,\"lvh\":null,\"ll\":null,\"lsp\":null,\"lg\":null,\"j\":null,\"a\":4,\"b\":2,\"cn\":\"Zebra\",\"cx\":\"Zürich\"}]"
+  ],
+  [
+   200,
+   "[{\"req\":5,\"tn\":null},{\"req\":4,\"tn\":\"Ilık\"},{\"req\":1,\"tn\":\"Işık\"},{\"req\":2,\"tn\":\"istanbul\"}]"
+  ],
+  [
+   200,
+   "[{\"req\":5,\"a\":4,\"b\":2},{\"req\":4,\"a\":3,\"b\":5},{\"req\":1,\"a\":1,\"b\":2},{\"req\":2,\"a\":1,\"b\":3}]"
+  ],
+  [
+   200,
+   "[{\"req\":1}]"
+  ],
+  [
+   200,
+   "[{\"req\":1,\"_score\":0.9808292}]"
+  ],
+  [
+   200,
+   "[{\"req\":2,\"_score\":0.1873939},{\"req\":1,\"_score\":0.17751662}]"
+  ],
+  [
+   200,
+   "[{\"req\":2,\"_score\":0.19461294},{\"req\":1,\"_score\":0.17149061}]"
+  ],
+  [
+   200,
+   "[{\"req\":1,\"_score\":0.62239116}]"
+  ],
+  [
+   200,
+   "[{\"req\":2}]"
+  ],
+  [
+   200,
+   "[{\"req\":1}]"
+  ],
+  [
+   200,
+   "[{\"req\":2,\"nb\":\"creme\"},{\"req\":1,\"nb\":\"Crème Brûlée\"}]"
+  ],
+  [
+   200,
+   "[{\"req\":2,\"cn\":null},{\"req\":4,\"cn\":\"apfel\"},{\"req\":1,\"cn\":\"Ärger\"},{\"req\":5,\"cn\":\"Zebra\"}]"
+  ],
+  [
+   200,
+   "[{\"req\":1}]"
+  ],
+  [
+   200,
+   "[{\"req\":4}]"
+  ],
+  [
+   200,
+   "[{\"req\":4,\"_score\":0.5191901},{\"req\":1,\"_score\":0.39513576}]"
+  ],
+  [
+   200,
+   "[{\"req\":1,\"_score\":0.8245908}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"on_isd\",\"version\":[-8866076858685274104,63],\"signature\":\"()\",\"writes\":true,\"comment\":null,\"broken\":null,\"after\":[\"shapes\",\"insert or set or del\"],\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null,\"answers\":[],\"text\":\"create statement on_isd after insert or set or del shapes as del ticks where k = 'never'\",\"depends\":[\"shapes\",\"ticks\",\"ticks.k\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"n\":1,\"s\":\"kept\"},{\"id\":2,\"n\":2,\"s\":\"kept too\"}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"edges\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"f\",\"type\":\"float\",\"index\":\"sorted\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":null,\"required\":false},{\"name\":\"vh\",\"type\":\"vector<4, f16>\",\"index\":null,\"required\":false},{\"name\":\"lv\",\"type\":\"[vector<2>]\",\"index\":null,\"required\":false},{\"name\":\"lf\",\"type\":\"[float]\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"id\":1,\"n\":1,\"f\":null,\"v\":[null,0,0,0],\"vh\":[null,0,0,1],\"lv\":[[null,1],[0,1]],\"lf\":[null,null,2.5]},{\"id\":2,\"n\":2,\"f\":null,\"v\":[null,1,0,0],\"vh\":[null,1,0,0],\"lv\":[[1,null]],\"lf\":[]},{\"id\":3,\"n\":3,\"f\":1.5,\"v\":[0,0,1,0],\"vh\":[0.5,0,0,0],\"lv\":[],\"lf\":[0.5]}]"
+  ],
+  [
+   200,
+   "[{\"n\":2,\"f\":null},{\"n\":3,\"f\":1.5},{\"n\":1,\"f\":null}]"
+  ],
+  [
+   200,
+   "[{\"n\":1},{\"n\":3},{\"n\":2}]"
+  ],
+  [
+   200,
+   "[{\"n\":1}]"
+  ],
+  [
+   200,
+   "[{\"n\":2}]"
+  ],
+  [
+   200,
+   "[{\"n\":3},{\"n\":1}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"v\":[null,0,0,0],\"vh\":[null,0,0,1],\"lv\":[[null,1],[0,1]],\"lf\":[null,null,2.5]},{\"n\":2,\"v\":[null,1,0,0],\"vh\":[null,1,0,0],\"lv\":[[1,null]],\"lf\":[]},{\"n\":3,\"v\":[0,0,1,0],\"vh\":[0.5,0,0,0],\"lv\":[],\"lf\":[0.5]}]"
+  ],
+  [
+   200,
+   "[{\"hi\":null,\"lo\":null,\"c\":3}]"
+  ],
+  [
+   200,
+   "[{\"n\":1}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"past_range\",\"version\":[-8866076858685274104,32],\"signature\":\"()\",\"writes\":false,\"comment\":null,\"broken\":null,\"after\":null,\"schedule\":null,\"next\":null,\"last\":null,\"held\":null,\"hook\":null,\"armed\":null,\"answers\":[\"n\"],\"text\":\"create statement past_range() as get edges select n where f >= 1e400\",\"depends\":[\"edges\",\"edges.n\",\"edges.f\"],\"condition\":null}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"signed\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"sorted\",\"required\":false},{\"name\":\"at\",\"type\":\"timestamp\",\"index\":\"sorted\",\"required\":false},{\"name\":\"l\",\"type\":\"[int]\",\"index\":null,\"required\":false},{\"name\":\"ts\",\"type\":\"[timestamp]\",\"index\":null,\"required\":false},{\"name\":\"j\",\"type\":\"json\",\"index\":null,\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"n\":-300},{\"n\":-5},{\"n\":0},{\"n\":7}]"
+  ],
+  [
+   200,
+   "[{\"n\":7,\"at\":\"2026-01-01T00:00:00Z\"},{\"n\":0,\"at\":\"1970-01-01T00:00:00Z\"},{\"n\":-5,\"at\":\"1969-07-20T20:17:40Z\"},{\"n\":-300,\"at\":\"1900-01-01T00:00:00Z\"}]"
+  ],
+  [
+   200,
+   "[{\"n\":-300},{\"n\":-5}]"
+  ],
+  [
+   200,
+   "[{\"n\":-300,\"at\":\"1900-01-01T00:00:00Z\"},{\"n\":-5,\"at\":\"1969-07-20T20:17:40Z\"},{\"n\":0,\"at\":\"1970-01-01T00:00:00Z\"},{\"n\":7,\"at\":\"2026-01-01T00:00:00Z\"}]"
+  ],
+  [
+   200,
+   "[{\"n\":-300},{\"n\":-5}]"
+  ],
+  [
+   200,
+   "[{\"n\":0},{\"n\":7}]"
+  ],
+  [
+   200,
+   "[{\"n\":-5,\"j\":{\"deep\":{\"m\":-7},\"list\":[-1,2],\"n\":-42}},{\"n\":-300,\"j\":{\"n\":-1}},{\"n\":0,\"j\":{\"n\":0}},{\"n\":7,\"j\":{\"n\":42}}]"
+  ],
+  [
+   200,
+   "[{\"n\":-5},{\"n\":-300}]"
+  ],
+  [
+   200,
+   "[{\"n\":-5}]"
+  ],
+  [
+   200,
+   "[{\"n\":-300,\"l\":[-1],\"ts\":null,\"j\":{\"n\":-1}},{\"n\":-5,\"l\":[-3,0,3],\"ts\":[\"1969-12-31T23:59:59.999Z\",\"1970-01-01T00:00:00Z\"],\"j\":{\"deep\":{\"m\":-7},\"list\":[-1,2],\"n\":-42}},{\"n\":0,\"l\":[],\"ts\":[],\"j\":{\"n\":0}},{\"n\":7,\"l\":[-9007199254740993,9007199254740993],\"ts\":[\"1969-12-31T00:00:00Z\"],\"j\":{\"n\":42}}]"
+  ],
+  [
+   200,
+   "[{\"s\":-298,\"lo\":-300,\"first\":\"1900-01-01T00:00:00Z\"}]"
+  ],
+  [
+   200,
+   "[{\"name\":\"tuned\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\",\"required\":false},{\"name\":\"t\",\"type\":\"text\",\"index\":\"text(k1=1.5, b=0.9, prefix=6, prefix_min=2)\",\"required\":false},{\"name\":\"c\",\"type\":\"text\",\"index\":\"text(k1=1.2, b=0.6, prefix=5, prefix_min=1, chars)\",\"required\":false},{\"name\":\"a\",\"type\":\"text\",\"index\":\"text(k1=2, b=1, prefix=4, prefix_min=2, accents)\",\"required\":false},{\"name\":\"h\",\"type\":\"text\",\"index\":\"hash\",\"also\":\"text(k1=0.5, b=0.2, prefix=3, prefix_min=1)\",\"required\":false},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":\"hnsw(l2, m=12, ef_search=24)\",\"required\":false},{\"name\":\"q\",\"type\":\"vector<4>\",\"index\":\"hnsw(dot, m=6, ef_search=30, quant=int8)\",\"required\":false}]}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"_score\":1.3438648},{\"n\":3,\"_score\":0.9597341},{\"n\":2,\"_score\":0.7891612}]"
+  ],
+  [
+   200,
+   "[{\"n\":4,\"_score\":0.5875553},{\"n\":3,\"_score\":0.47986704},{\"n\":2,\"_score\":0.1865647}]"
+  ],
+  [
+   200,
+   "[{\"n\":2,\"_score\":0.62975776}]"
+  ],
+  [
+   200,
+   "[{\"n\":3,\"_score\":2.7614677},{\"n\":1,\"_score\":1.7999247},{\"n\":2,\"_score\":0.40431008}]"
+  ],
+  [
+   200,
+   "[{\"n\":2,\"_score\":0.40431008},{\"n\":3,\"_score\":0.40431008},{\"n\":1,\"_score\":0.26352933}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"_score\":1.6377933},{\"n\":3,\"_score\":0.99076384},{\"n\":2,\"_score\":0.7101936}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"_score\":2.1528018},{\"n\":3,\"_score\":1.3023121},{\"n\":2,\"_score\":0.47346237}]"
+  ],
+  [
+   200,
+   "[{\"n\":4,\"_score\":1.5841748}]"
+  ],
+  [
+   200,
+   "[{\"n\":3,\"_score\":1.1147896}]"
+  ],
+  [
+   200,
+   "[{\"n\":3}]"
+  ],
+  [
+   200,
+   "[{\"n\":2,\"_score\":1.2553365},{\"n\":3,\"_score\":1.1124022},{\"n\":1,\"_score\":1.0803137}]"
+  ],
+  [
+   200,
+   "[{\"n\":4,\"_score\":1.1926146}]"
+  ],
+  [
+   200,
+   "[{\"n\":4,\"_score\":1.1926146}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"_score\":0},{\"n\":4,\"_score\":0.70710677}]"
+  ],
+  [
+   200,
+   "[{\"n\":1,\"_score\":1},{\"n\":4,\"_score\":0.5}]"
+  ],
+  [
+   200,
+   "[{\"n\":4,\"_score\":0.14142136},{\"n\":2,\"_score\":0.5656854},{\"n\":1,\"_score\":0.84852815},{\"n\":3,\"_score\":1.2328827}]"
+  ]
+ ],
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/query",
+   "headers": {
+    "Content-Type": "application/json",
+    "Idempotency-Key": "compat-idempotency-key"
+   },
+   "body": "{\"query\": \"put orders {ref: \\\"o-4\\\", status: \\\"open\\\", total: 70}\"}",
+   "token": true,
+   "status": 200,
+   "answer": "{\"affected\":1}"
+  },
+  {
+   "method": "POST",
+   "path": "/_hooks/github",
+   "headers": {
+    "Content-Type": "application/json",
+    "X-Hub-Signature-256": "sha256=a2565c5a5fbcd132f3cf9b99770d35e6378539cb3375479d3f87827c583aa039",
+    "X-GitHub-Event": "issues"
+   },
+   "body": "{\"action\":\"opened\",\"issue\":{\"number\":7,\"title\":\"a fixture\"}}",
+   "token": false,
+   "status": 200,
+   "answer": "{\"event\":\"1b3ac427ac66f1c8167f718b37df13b26fe24b5d6c963d8a4e9913a884428dff\",\"taken\":1}"
+  },
+  {
+   "method": "GET",
+   "path": "/_changes/consumers",
+   "headers": {},
+   "body": "",
+   "token": true,
+   "status": 200,
+   "answer": "[{\"name\":\"compat\",\"since\":105,\"behind\":4}]"
+  },
+  {
+   "method": "GET",
+   "path": "/_schema",
+   "headers": {},
+   "body": "",
+   "token": true,
+   "status": 200,
+   "answer": "{\"format\":1,\"collections\":[{\"name\":\"kinds\",\"fields\":[{\"name\":\"b\",\"type\":\"bool\"},{\"name\":\"i\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"f\",\"type\":\"float\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"t\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4}},{\"name\":\"by\",\"type\":\"bytes\"},{\"name\":\"ts\",\"type\":\"timestamp\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"v\",\"type\":\"vector<4>\"},{\"name\":\"vi\",\"type\":\"vector<4>\",\"index\":{\"kind\":\"hnsw\",\"metric\":\"cosine\",\"m\":8,\"ef_construction\":200,\"ef_search\":100}},{\"name\":\"vh\",\"type\":\"vector<4, f16>\"},{\"name\":\"l\",\"type\":\"[int]\"},{\"name\":\"sp\",\"type\":\"sparse<8>\",\"index\":{\"kind\":\"inverted\"}},{\"name\":\"j\",\"type\":\"json\",\"paths\":[{\"path\":\"kind\",\"index\":{\"kind\":\"hash\"}}]},{\"name\":\"g\",\"type\":\"geo\",\"index\":{\"kind\":\"geo\"}},{\"name\":\"tr\",\"type\":\"text\",\"collate\":\"tr\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"un\",\"type\":\"text\",\"collate\":\"und\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"email\",\"type\":\"text\",\"nocase\":true,\"index\":{\"kind\":\"unique\"}},{\"name\":\"tag\",\"type\":\"text\",\"index\":{\"kind\":\"hash\"},\"also\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4}},{\"name\":\"word\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"chars\":true}},{\"name\":\"acc\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"accents\":true}},{\"name\":\"exp\",\"type\":\"timestamp\",\"index\":{\"kind\":\"ttl\",\"ms\":172800000}},{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"z\",\"type\":\"int\"},{\"name\":\"remark\",\"type\":\"text\"}],\"indexes\":[{\"kind\":\"sorted\",\"keys\":[{\"field\":\"a\"},{\"field\":\"z\"}]},{\"kind\":\"unique\",\"keys\":[{\"field\":\"a\"},{\"field\":\"i\"}]}]},{\"name\":\"shapes\",\"fields\":[{\"name\":\"req\",\"type\":\"int\",\"required\":true},{\"name\":\"tn\",\"type\":\"text\",\"collate\":\"tr\",\"nocase\":true,\"index\":{\"kind\":\"unique\"},\"also\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4}},{\"name\":\"cb\",\"type\":\"text\",\"collate\":\"und\",\"index\":{\"kind\":\"hash\"},\"also\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"chars\":true}},{\"name\":\"nb\",\"type\":\"text\",\"nocase\":true,\"index\":{\"kind\":\"sorted\"},\"also\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"accents\":true}},{\"name\":\"ca\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"chars\":true,\"accents\":true}},{\"name\":\"lb\",\"type\":\"[bool]\"},{\"name\":\"lf\",\"type\":\"[float]\"},{\"name\":\"lt\",\"type\":\"[text]\"},{\"name\":\"lby\",\"type\":\"[bytes]\"},{\"name\":\"lts\",\"type\":\"[timestamp]\"},{\"name\":\"lv\",\"type\":\"[vector<2>]\"},{\"name\":\"lvh\",\"type\":\"[vector<2, f16>]\"},{\"name\":\"ll\",\"type\":\"[[int]]\"},{\"name\":\"lsp\",\"type\":\"[sparse<4>]\"},{\"name\":\"lg\",\"type\":\"[geo]\"},{\"name\":\"j\",\"type\":\"json\",\"paths\":[{\"path\":\"n\",\"index\":{\"kind\":\"sorted\"}},{\"path\":\"k\",\"index\":{\"kind\":\"unique\"}}]},{\"name\":\"a\",\"type\":\"int\"},{\"name\":\"b\",\"type\":\"int\"},{\"name\":\"cn\",\"type\":\"text\",\"collate\":\"und\",\"nocase\":true},{\"name\":\"cx\",\"type\":\"text\",\"index\":{\"kind\":\"unique\"},\"also\":{\"kind\":\"text\",\"k1\":0.9,\"b\":0.4,\"chars\":true,\"accents\":true}}],\"indexes\":[{\"kind\":\"sorted\",\"keys\":[{\"field\":\"a\",\"desc\":true},{\"field\":\"b\"}]}],\"bindings\":[{\"name\":\"on_d\",\"events\":\"del\",\"text\":\"create statement on_d after del shapes as del ticks where k = 'never'\"},{\"name\":\"on_i\",\"events\":\"insert\",\"text\":\"create statement on_i after insert shapes as del ticks where k = 'never'\"},{\"name\":\"on_id\",\"events\":\"insert or del\",\"text\":\"create statement on_id after insert or del shapes as del ticks where k = 'never'\"},{\"name\":\"on_is\",\"events\":\"insert or set\",\"text\":\"create statement on_is after insert or set shapes as del ticks where k = 'never'\"},{\"name\":\"on_isd\",\"events\":\"insert or set or del\",\"text\":\"create statement on_isd after insert or set or del shapes as del ticks where k = 'never'\"},{\"name\":\"on_s\",\"events\":\"set\",\"text\":\"create statement on_s after set shapes as del ticks where k = 'never'\"},{\"name\":\"on_sd\",\"events\":\"set or del\",\"text\":\"create statement on_sd after set or del shapes as del ticks where k = 'never'\"}]},{\"name\":\"orders\",\"fields\":[{\"name\":\"ref\",\"type\":\"text\",\"index\":{\"kind\":\"unique\"}},{\"name\":\"status\",\"type\":\"text\"},{\"name\":\"total\",\"type\":\"int\"}],\"bindings\":[{\"name\":\"on_order\",\"events\":\"insert\",\"text\":\"create statement on_order after insert orders as insert audit {ref: new.ref, what: 'placed'}\"}]},{\"name\":\"audit\",\"fields\":[{\"name\":\"ref\",\"type\":\"text\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"what\",\"type\":\"text\"}]},{\"name\":\"ticks\",\"fields\":[{\"name\":\"k\",\"type\":\"text\",\"index\":{\"kind\":\"unique\"}}]},{\"name\":\"issues\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"action\",\"type\":\"text\"}]},{\"name\":\"retired\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"s\",\"type\":\"text\"}]},{\"name\":\"edges\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"f\",\"type\":\"float\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"v\",\"type\":\"vector<4>\"},{\"name\":\"vh\",\"type\":\"vector<4, f16>\"},{\"name\":\"lv\",\"type\":\"[vector<2>]\"},{\"name\":\"lf\",\"type\":\"[float]\"}]},{\"name\":\"signed\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"at\",\"type\":\"timestamp\",\"index\":{\"kind\":\"sorted\"}},{\"name\":\"l\",\"type\":\"[int]\"},{\"name\":\"ts\",\"type\":\"[timestamp]\"},{\"name\":\"j\",\"type\":\"json\",\"paths\":[{\"path\":\"n\",\"index\":{\"kind\":\"sorted\"}}]}]},{\"name\":\"tuned\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"t\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":1.5,\"b\":0.9,\"prefix\":6,\"prefix_min\":2}},{\"name\":\"c\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":1.2,\"b\":0.6,\"prefix\":5,\"prefix_min\":1,\"chars\":true}},{\"name\":\"a\",\"type\":\"text\",\"index\":{\"kind\":\"text\",\"k1\":2,\"b\":1,\"prefix\":4,\"prefix_min\":2,\"accents\":true}},{\"name\":\"h\",\"type\":\"text\",\"index\":{\"kind\":\"hash\"},\"also\":{\"kind\":\"text\",\"k1\":0.5,\"b\":0.2,\"prefix\":3,\"prefix_min\":1}},{\"name\":\"v\",\"type\":\"vector<4>\",\"index\":{\"kind\":\"hnsw\",\"metric\":\"l2\",\"m\":12,\"ef_construction\":40,\"ef_search\":24}},{\"name\":\"q\",\"type\":\"vector<4>\",\"index\":{\"kind\":\"hnsw\",\"metric\":\"dot\",\"m\":6,\"ef_construction\":50,\"ef_search\":30,\"quant\":\"int8\"}}]},{\"name\":\"extra\",\"fields\":[{\"name\":\"k\",\"type\":\"text\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"n\",\"type\":\"int\"}]},{\"name\":\"blocked\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":{\"kind\":\"hash\"}},{\"name\":\"s\",\"type\":\"text\"},{\"name\":\"m\",\"type\":\"int\"}]}],\"hooks\":[{\"name\":\"gh_issue\",\"hook\":\"github\",\"text\":\"create statement gh_issue($n int from event.issue.number, $a text from event.action) on hook github as insert issues {n: $n, action: $a}\",\"armed\":true}]}"
+  },
+  {
+   "method": "POST",
+   "path": "/_schema/plan",
+   "headers": {
+    "Content-Type": "application/json"
+   },
+   "body": "{\"format\": 1, \"collections\": [{\"name\": \"kinds\", \"fields\": [{\"name\": \"b\", \"type\": \"bool\"}, {\"name\": \"i\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"f\", \"type\": \"float\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"t\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4}}, {\"name\": \"by\", \"type\": \"bytes\"}, {\"name\": \"ts\", \"type\": \"timestamp\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"v\", \"type\": \"vector<4>\"}, {\"name\": \"vi\", \"type\": \"vector<4>\", \"index\": {\"kind\": \"hnsw\", \"metric\": \"cosine\", \"m\": 8, \"ef_construction\": 200, \"ef_search\": 100}}, {\"name\": \"vh\", \"type\": \"vector<4, f16>\"}, {\"name\": \"l\", \"type\": \"[int]\"}, {\"name\": \"sp\", \"type\": \"sparse<8>\", \"index\": {\"kind\": \"inverted\"}}, {\"name\": \"j\", \"type\": \"json\", \"paths\": [{\"path\": \"kind\", \"index\": {\"kind\": \"hash\"}}]}, {\"name\": \"g\", \"type\": \"geo\", \"index\": {\"kind\": \"geo\"}}, {\"name\": \"tr\", \"type\": \"text\", \"collate\": \"tr\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"un\", \"type\": \"text\", \"collate\": \"und\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"email\", \"type\": \"text\", \"nocase\": true, \"index\": {\"kind\": \"unique\"}}, {\"name\": \"tag\", \"type\": \"text\", \"index\": {\"kind\": \"hash\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4}}, {\"name\": \"word\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"chars\": true}}, {\"name\": \"acc\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"accents\": true}}, {\"name\": \"exp\", \"type\": \"timestamp\", \"index\": {\"kind\": \"ttl\", \"ms\": 172800000}}, {\"name\": \"a\", \"type\": \"int\"}, {\"name\": \"z\", \"type\": \"int\"}, {\"name\": \"remark\", \"type\": \"text\"}], \"indexes\": [{\"kind\": \"sorted\", \"keys\": [{\"field\": \"a\"}, {\"field\": \"z\"}]}, {\"kind\": \"unique\", \"keys\": [{\"field\": \"a\"}, {\"field\": \"i\"}]}]}, {\"name\": \"shapes\", \"fields\": [{\"name\": \"req\", \"type\": \"int\", \"required\": true}, {\"name\": \"tn\", \"type\": \"text\", \"collate\": \"tr\", \"nocase\": true, \"index\": {\"kind\": \"unique\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4}}, {\"name\": \"cb\", \"type\": \"text\", \"collate\": \"und\", \"index\": {\"kind\": \"hash\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"chars\": true}}, {\"name\": \"nb\", \"type\": \"text\", \"nocase\": true, \"index\": {\"kind\": \"sorted\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"accents\": true}}, {\"name\": \"ca\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"chars\": true, \"accents\": true}}, {\"name\": \"lb\", \"type\": \"[bool]\"}, {\"name\": \"lf\", \"type\": \"[float]\"}, {\"name\": \"lt\", \"type\": \"[text]\"}, {\"name\": \"lby\", \"type\": \"[bytes]\"}, {\"name\": \"lts\", \"type\": \"[timestamp]\"}, {\"name\": \"lv\", \"type\": \"[vector<2>]\"}, {\"name\": \"lvh\", \"type\": \"[vector<2, f16>]\"}, {\"name\": \"ll\", \"type\": \"[[int]]\"}, {\"name\": \"lsp\", \"type\": \"[sparse<4>]\"}, {\"name\": \"lg\", \"type\": \"[geo]\"}, {\"name\": \"j\", \"type\": \"json\", \"paths\": [{\"path\": \"n\", \"index\": {\"kind\": \"sorted\"}}, {\"path\": \"k\", \"index\": {\"kind\": \"unique\"}}]}, {\"name\": \"a\", \"type\": \"int\"}, {\"name\": \"b\", \"type\": \"int\"}, {\"name\": \"cn\", \"type\": \"text\", \"collate\": \"und\", \"nocase\": true}, {\"name\": \"cx\", \"type\": \"text\", \"index\": {\"kind\": \"unique\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.9, \"b\": 0.4, \"chars\": true, \"accents\": true}}], \"indexes\": [{\"kind\": \"sorted\", \"keys\": [{\"field\": \"a\", \"desc\": true}, {\"field\": \"b\"}]}], \"bindings\": [{\"name\": \"on_d\", \"events\": \"del\", \"text\": \"create statement on_d after del shapes as del ticks where k = 'never'\"}, {\"name\": \"on_i\", \"events\": \"insert\", \"text\": \"create statement on_i after insert shapes as del ticks where k = 'never'\"}, {\"name\": \"on_id\", \"events\": \"insert or del\", \"text\": \"create statement on_id after insert or del shapes as del ticks where k = 'never'\"}, {\"name\": \"on_is\", \"events\": \"insert or set\", \"text\": \"create statement on_is after insert or set shapes as del ticks where k = 'never'\"}, {\"name\": \"on_isd\", \"events\": \"insert or set or del\", \"text\": \"create statement on_isd after insert or set or del shapes as del ticks where k = 'never'\"}, {\"name\": \"on_s\", \"events\": \"set\", \"text\": \"create statement on_s after set shapes as del ticks where k = 'never'\"}, {\"name\": \"on_sd\", \"events\": \"set or del\", \"text\": \"create statement on_sd after set or del shapes as del ticks where k = 'never'\"}]}, {\"name\": \"orders\", \"fields\": [{\"name\": \"ref\", \"type\": \"text\", \"index\": {\"kind\": \"unique\"}}, {\"name\": \"status\", \"type\": \"text\"}, {\"name\": \"total\", \"type\": \"int\"}], \"bindings\": [{\"name\": \"on_order\", \"events\": \"insert\", \"text\": \"create statement on_order after insert orders as insert audit {ref: new.ref, what: 'placed'}\"}]}, {\"name\": \"audit\", \"fields\": [{\"name\": \"ref\", \"type\": \"text\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"what\", \"type\": \"text\"}]}, {\"name\": \"ticks\", \"fields\": [{\"name\": \"k\", \"type\": \"text\", \"index\": {\"kind\": \"unique\"}}]}, {\"name\": \"issues\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"action\", \"type\": \"text\"}]}, {\"name\": \"retired\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"s\", \"type\": \"text\"}]}, {\"name\": \"edges\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"f\", \"type\": \"float\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"v\", \"type\": \"vector<4>\"}, {\"name\": \"vh\", \"type\": \"vector<4, f16>\"}, {\"name\": \"lv\", \"type\": \"[vector<2>]\"}, {\"name\": \"lf\", \"type\": \"[float]\"}]}, {\"name\": \"signed\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"at\", \"type\": \"timestamp\", \"index\": {\"kind\": \"sorted\"}}, {\"name\": \"l\", \"type\": \"[int]\"}, {\"name\": \"ts\", \"type\": \"[timestamp]\"}, {\"name\": \"j\", \"type\": \"json\", \"paths\": [{\"path\": \"n\", \"index\": {\"kind\": \"sorted\"}}]}]}, {\"name\": \"tuned\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"t\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 1.5, \"b\": 0.9, \"prefix\": 6, \"prefix_min\": 2}}, {\"name\": \"c\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 1.2, \"b\": 0.6, \"prefix\": 5, \"prefix_min\": 1, \"chars\": true}}, {\"name\": \"a\", \"type\": \"text\", \"index\": {\"kind\": \"text\", \"k1\": 2, \"b\": 1, \"prefix\": 4, \"prefix_min\": 2, \"accents\": true}}, {\"name\": \"h\", \"type\": \"text\", \"index\": {\"kind\": \"hash\"}, \"also\": {\"kind\": \"text\", \"k1\": 0.5, \"b\": 0.2, \"prefix\": 3, \"prefix_min\": 1}}, {\"name\": \"v\", \"type\": \"vector<4>\", \"index\": {\"kind\": \"hnsw\", \"metric\": \"l2\", \"m\": 12, \"ef_construction\": 40, \"ef_search\": 24}}, {\"name\": \"q\", \"type\": \"vector<4>\", \"index\": {\"kind\": \"hnsw\", \"metric\": \"dot\", \"m\": 6, \"ef_construction\": 50, \"ef_search\": 30, \"quant\": \"int8\"}}]}, {\"name\": \"extra\", \"fields\": [{\"name\": \"k\", \"type\": \"text\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"n\", \"type\": \"int\"}]}, {\"name\": \"blocked\", \"fields\": [{\"name\": \"n\", \"type\": \"int\", \"index\": {\"kind\": \"hash\"}}, {\"name\": \"s\", \"type\": \"text\"}, {\"name\": \"m\", \"type\": \"int\"}]}], \"hooks\": [{\"name\": \"gh_issue\", \"hook\": \"github\", \"text\": \"create statement gh_issue($n int from event.issue.number, $a text from event.action) on hook github as insert issues {n: $n, action: $a}\", \"armed\": true}], \"migrations\": [\"put extra {k: \\\"migrated\\\", n: 2}\"]}",
+   "token": true,
+   "status": 200,
+   "answer": "{\"kind\":\"schema\",\"applied\":false,\"ran\":false,\"migrations\":[],\"statements\":[],\"refusals\":[]}"
+  }
+ ]
+}

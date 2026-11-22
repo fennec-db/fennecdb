@@ -1,0 +1,7 @@
+{"kind":"rows","result":{"columns":["id","n","s"],"rows":[{"id":1,"n":1,"s":"one"},{"id":2,"n":2,"s":"two"}]}}
+{"kind":"rows","result":{"columns":["id","n","s"],"rows":[{"id":2,"n":2,"s":"two"}]}}
+{"kind":"schemas","collections":[{"name":"plain","fields":[{"name":"n","type":"int","index":"hash"},{"name":"s","type":"text","index":"none"}]},{"name":"deep","fields":[{"name":"n","type":"int","index":"hash"},{"name":"j","type":"[[json]]","index":"none"}]}]}
+{"kind":"rows","result":{"columns":["id","n","j"],"rows":[{"id":1,"n":1,"j":[[{"shallow":true}]]}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1},{"n":2}]}}
+{"kind":"rows","result":{"columns":["id","n","j"],"rows":[{"id":2,"n":2,"j":[[{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}]]}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":2}]}}

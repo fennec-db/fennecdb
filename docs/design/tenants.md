@@ -408,7 +408,87 @@ its lineage (the review's `empty_refused.rs`). `{"force": true}` on `POST
 /_admin/tenants/<t>/promote` or `POST /_shard/nodes/<n>/failover` promotes
 whatever the copy holds, an audit event on each (`promote_forced`,
 `failover_forced`), and `promoted()` then records the other file's lineage
-as the tenant's, the one before among those it was. And a repair gives no
+as the tenant's, the one before among those it was. Every promotion goes
+through that route (`Tenants::promote_as`). A copy's own replication route,
+`/t/<t>/_replication/promote`, forked it with the replication token alone --
+every node of a `--replicas` region holds that token, so does every
+archiver, and a stand-in at a primary's address read it off a follow over
+plain HTTP -- past the lease's fence (`admin::superseded`), the lineage and
+history it is held to (`refusal`), `forget_following`, the identity, the
+node's stream and the audit: a standby forked unknown to the router, which
+counted it a standby still, and on a node without `--lease` took writes
+beside its primary. No router called it. A tenant node answers it 404, as
+any path it does not serve (`replication::handle_tenant`, G14's review,
+area D, a break before 1.0: [compatibility.md](compatibility.md)); a
+file's server and a router's directory keep theirs. Nor does a copy stop
+following any other way and stay promotable as though current: its
+follower ends for good only where its database failed -- its disk, or a
+panic that may have left it part way ([replication.md](replication.md#replication),
+`Changing`) -- whose fork every promotion is refused with, forced or not
+(500, named among a failover's `failed`), until the file is opened again;
+where its primary was of another lineage, the copy deleting itself; and at
+a halt, which a promotion forks after and a release closes the tenant or
+starts the follower again behind (`reopen_streams`). A copy whose follower
+runs but is behind -- its primary slow, or its images refused -- or is not
+connected -- reconnecting, its primary unreachable from it, or a stand-in
+on a plain-HTTP hop cutting its stream at will -- is promoted where it
+stands, the trade a failover makes; the router asks no position. So
+`--sync always` loses no write the copy was sent, and nothing more is
+promised: a durable write waits a `SENT_WAIT` at most for the streams
+keeping up and none for one lagging, reconnecting or failed, and what such
+a copy was not sent is lost with its primary, a write the primary answered
+among it (G14's review, area D, second round: the site said a failover
+under `--sync always` lost none, from 0.1.5 on). It is seen before it
+matters: a copy's status names `connected`, `behind` and
+`last_contact_ms`, and a node counts its copies a failover may promote --
+a standby's and a tenant's replica of its own, never a read replica's --
+not connected or with no follower running, and the most writes one is
+behind (`fennec_copies_disconnected`,
+`fennec_copies_behind`, `Tenants::stats`' `Copies`, never by tenant),
+which the kit's `FennecTenantCopiesDisconnected` (two minutes) and
+`FennecTenantCopiesBehind` (more than 1 000 writes for five) alert on,
+with promtool's tests in `deploy/alerts/fennecdb.rules.test.yml` and a
+RUNBOOK section of their own ("A copy not following"). A copy a failover
+may promote stays open whether its follower runs or not
+(`Tenants::promotable`, asked by `close` and the scrape alike): one whose
+follower ended -- its database failed -- was closed as idle after
+`--idle-close`, and one nothing follows for -- a standby's file on a node
+started without `--replica-of` -- once a request had opened it; closed,
+nothing opened either again but a request or the failover, and the
+scrape, which reads open tenants alone (a closed one's role is in its
+file), counted it no more, `FennecTenantCopiesDisconnected` resolving while
+it followed nothing (the review's third round). Counting closed copies
+instead would have the scrape open files, or the registry keep a list of
+closed copies by name beside the files that every install, follow and
+delete would have to keep right; kept open, such a copy costs its
+memory, as a copy whose follower runs does, until a follow, a release or
+a delete. A restart opens only the tenants a `.follows` names, or every
+tenant on a standby (`Tenants::resume_following`), so after one a copy
+nothing follows for is counted once something opens it -- a request, the
+failover: only an open reads whether a file follows, its history a record
+in it, and looking at every tenant at a start would open each file --
+mapped, its index of frames adopted, a few milliseconds a tenant
+([storage.md](storage.md)) and its pages after -- on a node of thousands
+for the few copies a node started without `--replica-of` holds. Its
+`behind` counts from a keep-alive a stream
+sends every `ALIVE` behind as caught up ([replication.md](replication.md#replication)):
+sent only once a stream had caught up, a copy as far behind as its
+primary's buffer read 0 until the third round. And it is seen as
+it happens: the admin's promotion answers what its copy knew as the
+promotion began and its follower stopped (`replication::Heard`, by the
+status's names, `Follower::promote_heard`, `Tenants::promote_heard`), the
+router's failover logs them in its line for the tenant (`promote_on`) and
+counts the copy by them, `fennec_router_promotions_total{copy="connected"
+| "not_connected" | "unknown"}` (unknown: a node before the fields). A
+node whose process is killed ends its copies' streams with it, so its
+failover counts them not connected too; `last_contact_ms` against when the
+node stopped answering tells a copy cut off long before from one its
+node's end cut off. A node whose machine is lost or cut off leaves them
+connected: `connected` holds until a read fails, `SILENCE` (10 s) on, past
+a 5 s lease's lapse. So the router's line says what the copy was not sent
+is lost unless it was connected, nothing behind and heard from within two
+keep-alives (`STALE_MS`, 4 s; the review's third round), while the count
+stays by `connected`, as the node said it. And a repair gives no
 tenant a copy while its primary does not answer its `GET /_admin/tenants`
 -- one that ran between a node's death and its lapse attached a copy
 following nothing, which the failover promoted and the node's return wiped

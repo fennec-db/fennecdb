@@ -86,7 +86,45 @@ a socket's bytes reach the replica after the process is killed, though
 not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
 (0.14 before the wait) and at most 283 ms under `--sync 250`, durable
 writes 254 a second against 246; ten failovers under `always` lost no
-acknowledged write. An archive (`fennec archive`,
+acknowledged write, each promoting a replica that kept up. That is the
+promise and all of it: none the replica was sent. A replica lagging,
+reconnecting or failed is waited for not at all, and a promotion asks no
+position, so one not connected, or behind, as its primary is lost is
+promoted where it stands, without the writes its primary answered
+meanwhile -- and on a plain-HTTP hop whoever can reach it can cut the
+stream and hold it there. It is watched (`connected`, `behind` and
+`last_contact_ms` in a replica's status, `fennec_replica_*` and a node's
+`fennec_copies_*` in `/_metrics`, the kit's alerts on each) and a
+tenant's promotion says what its copy knew ([tenants.md](tenants.md),
+`replication::Heard`); the site said a failover under `--sync always`
+lost none, from 0.1.5, until the review's second round (G14, area D).
+"Sent" is handed to the primary's kernel, which a machine lost takes
+with it; and a stream sent an image is waited for from the image's flush
+(`sending_standby`), so the writes answered between it and the replica's
+adoption of the image -- its check and load, which a halt walks away
+from -- are lost to a promotion then, the copy saying `connected` false.
+`behind` counts from what the primary last said of its disk: a keep-alive
+every `ALIVE` (2 s), which a stream sent only once it had caught up, so a
+replica as far behind as the feed's buffer -- its reads slower than the
+writes, its socket full -- read `behind` 0, and so did a node's
+`fennec_copies_behind`, a promotion's answer and the router's line, and
+`FennecTenantCopiesBehind` never fired on it. A stream behind now sends
+one after the writes it sends once `ALIVE` has passed since it last told
+(`stream`'s `told`; the review's third round): 33 bytes every 2 s a
+lagging stream, a stream that has sent every write on disk saying
+nothing. It looks, at the clock once a `W` message and at the feed's
+`durable` once `ALIVE` has passed, after `Feed::sent` has let the writes
+waiting on that `W` go, and sends the keep-alive in a flush of its own --
+a `write` every 2 s, none a `W` -- so a `--sync always` write waits for
+neither: nothing on a request's path. The third round sent it in the
+`W`'s flush, where such a write waited on the look and, every 2 s, on the
+keep-alive's bytes; the fourth moved both after `Feed::sent`. Every
+replica since 0.1.5 reads a keep-alive between any two messages, and an
+archiver syncs its segment on one, as it does every
+250 ms while it takes writes. `connected` is true until a read fails: a
+primary's process killed ends the stream at once, its machine lost or cut
+off only after `SILENCE` (10 s) -- past a 5 s lease's lapse -- so a
+router reads `last_contact_ms` beside it ([tenants.md](tenants.md)). An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
@@ -154,11 +192,12 @@ reaches -- or, where a file of that name stays, the first
 `consolidating-<end>-<k>.fennec` that does not (`scratch_name`) -- and
 reads it back through the handle that wrote it (`assemble_into`), never
 opening it again by its name: on Windows that handle writes it from its
-making (`copied`), where a copier holding it between `fs::copy` and an
+making (`fs::copy_private`), where a copier holding it between `fs::copy` and an
 open after kept the round's appends, and its read -- an open of a
 database asks to write (`fs::open_in_memory`) -- from it. On a Unix the
-image is still copied by the system (a clone on APFS, `copy_file_range`
-on Linux) and nothing changes but the name. What rounds left goes as a
+image is cloned on APFS where it is its owner's alone and copied by
+`copy_file_range` on Linux (docs/design/durability.md#files-modes), and
+nothing changes but the name. What rounds left goes as a
 round begins and as an archiver opens the archive to write
 (`Archive::sweep`, in `writer`, never while a round runs beside it),
 `consolidating.fennec` among it, and a file that will not go is said in
@@ -202,6 +241,278 @@ is, some 30 bytes more in an image's own rename, and 768 bytes of
 macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
+
+*What a replica reads of its primary.* Whoever answers at the address a
+replica follows -- or stands between them where the hop is plain HTTP --
+sends what they like, and the reader of a stream (a follower, `fennec
+archive`, `fennec backup`, a node's archiver) holds every byte of it to
+what a primary of this code sends, refusing the rest in words; the
+internal review G14 (area D, 2026-11-15) found four ways it did not. Each
+is held by a stand-in at the primary's address in fennec-http's
+`tests/primaries.rs`, and for a tenant node -- its read answered, its
+admin's promotion completed and the node stopped on SIGTERM within 10 s
+after each -- in fennec-server's.
+
+- *A message is held to its kind's bound before its body is read, and
+  grown as it comes* (`read_kind`). An image and writes are `LONGEST`, a
+  terabyte: an image is the whole database, and a block's record goes
+  alone however long it is -- past 16 MB a block spills into its primary's
+  file, and the feed sends it whole (`landed_block`), so nothing smaller
+  bounds it. A hello, a keep-alive and an end are `SHORT`, a mebibyte: a
+  keep-alive is 24 bytes, and a hello's lineage an entry of 18 bytes at
+  the most for each promotion its database had, some 58 000 of them. A
+  node's stream of every tenant adds a name's 256 bytes to each
+  (`node_sends`). A kind no primary sends is refused at its head, as it
+  was at its body. The body was `vec![0; len]` for any length to a
+  terabyte, allocated before a byte of it came: Linux's overcommit
+  refuses an allocation past memory and swap, and std answers a refused
+  one by aborting the process, so nine bytes killed a node with every
+  tenant it held, and its supervisor's restart followed the same stream.
+  On macOS the terabyte was mapped lazily and its read refused (EINVAL);
+  the unit test's reader was asked to fill 1 099 511 627 776 bytes for 3
+  MiB sent. Now a body is first given `FIRST` (2 MiB and 16 bytes) at the
+  most and doubles, to its length and no further, as its bytes fill it,
+  and a message cut short says so with its length. Each allocation is
+  asked with `try_reserve_exact`, a refusal an error naming the kind, the
+  length and the bytes asked for (`grown`): with `reserve_exact` a refused
+  one still aborted a node, `fennec archive` or `fennec backup` once a
+  peer sent enough bytes (the review's second round); the image's room
+  for the record saying it follows is asked so too (`loaded`, the third
+  round), where `reserve_exact` copied the image whole into a buffer
+  aborting on a refusal. What `Database::load` allocates as it reads the
+  image -- its documents, its indexes -- still aborts the process on a
+  refusal: the engine has no fallible path for a load, and an image taken
+  whole is a database's size by its primary's word. A growth holds the
+  bytes that came and the buffer twice as long the allocator moves them
+  into -- three times what came at the most -- and a message read whole
+  has held twice its length at the most, not the "twice what came" this
+  first said: measured by an allocator counting the reading thread's
+  bytes, a growth counted as the move it may be (`tests/message_peak.rs`,
+  a binary of its own), an image of 40 MiB held 72 MiB at the most, 1.80
+  times it; one a byte past `FIRST` doubled twice, 2.00 times; and a
+  terabyte announced with 3 MiB sent, refused as cut short, 6 MiB, three
+  times the `FIRST` that had come as it grew. The follower's image then
+  takes the record saying it follows, one more growth of the image's
+  length (`loaded`). A stream's writes in one message where no
+  record goes alone -- `MESSAGE` of records and a time for each, fewer
+  bytes than its record -- are under `FIRST`, so a steady stream's message
+  is still one zeroed allocation of its length and one `read_exact`, the
+  code it was but a match on its kind and a comparison
+  (`a_message_is_held_in_its_length_and_its_kind_bound` holds the
+  capacity to the length). Past it, an image is copied as it doubles and
+  zeroed as it grows -- once its length over, beside its transfer, its
+  checks and its load.
+- *A `W` message's count of writes is held to its bytes.* `16 + 8 * n`
+  wrapped in a release build for a count of 2^61, a body of 32 bytes
+  passed, and the times were collected 2^61 of them: a panic of the
+  follower's thread -- in a debug build the multiplication's own -- and in
+  `fennec archive`, built with `panic = abort`, the process's end. The
+  check is `node_archive`'s, which had it already: `checked_mul`,
+  `checked_add`, past the body refused naming the count. `fennec backup`
+  reads a hello and an image alone, and met the terabyte.
+- *The answer's head is held to the server's bound for a request's*
+  (`MAX_HEADER_BYTES`, 64 KiB), each line read by the server's own reader
+  (`http::read_line`) with what is left of it: the status line was read
+  to its newline however long, and a header line measured only once its
+  newline came, so a stand-in sending a line with no end, a byte in each
+  `SILENCE`, grew a replica's memory for as long as it liked -- the test's
+  stand-in wrote 64 MiB of a status line into one. A line two bytes at the
+  least, the count of header lines is held by the bytes, as a request's
+  is; a line runs a buffer's fill past the bound at the most before it
+  is refused.
+- *A panic anywhere in a session is that session's failure*
+  (`Follower::session_caught`), caught in words, logged as a broken
+  stream is (`replication: a panic in the session: ...; connecting
+  again`) and in the status's `error`. It was caught around `apply`
+  alone: one in the framing, an image's check and load, its adoption or
+  a hello's callback ended the thread, and `ended` stayed false -- the
+  line setting it was at the end of `run`, which a panic skips -- so the
+  copy served what it held for good, `running` said it ran, a tenant's
+  close kept it open, and a halt waited for ever: a promotion's; a
+  release's, holding the tenant's slot, behind which every later `get` of
+  the tenant waited, connection threads piling up to the cap, and the
+  node's shutdown, which takes every slot, never completed. The thread
+  now says its end as a guard's drop (`Ends`), whichever way it ends. A
+  panic that changed nothing of the copy -- the framing, an image's check,
+  the image loaded into a database of its own before the lock, a hello's
+  callback -- is a session that failed: the follower connects again after
+  its back-off. One that may have left the copy part way through a change
+  the engine does not put back itself -- an image adopted (its file
+  replaced, then its memory), its history followed, this server's feed
+  started on it, a message's times, its flush and its fsync -- unwinds
+  through `Changing`, made before the write lock so it drops after it,
+  which fails the database in words (`Database::fail`: "a panic as the
+  follower adopted its primary's image: the copy's file and memory may
+  disagree, ..."): no write lands on the copy, a promotion's fork is
+  refused with those words (500), its status's `error` names the panic,
+  and the loop stops, as after its disk failed; opened again, the copy is
+  its file's. A panic in `apply` is the engine's, which puts back what did
+  not land or fails the database from the sink call on, as before. No
+  panic of the image path is reached by a primary's bytes in a release
+  build -- `check_records` and `load` are the `image` target's -- but one
+  was in a debug build: a `debug_assert` that the image is at the change
+  its hello said, now a refusal before the image replaces anything. The
+  tests force one through a hook a database already has, a watcher whose
+  `notify` panics, which `adopt` calls last, under the lock, and one
+  through a hello's callback.
+- *A halt waits on the thread's end as an event* (a `Condvar` `wait`; it
+  looked every 50 ms), and every place the thread can be is bounded: a
+  read of the primary ends at the cut -- on Unix at once, on Windows at
+  once where it waited already -- and one begun after the cut ends at its
+  next byte, the read looking at the halt before each read of the socket
+  (`Watched`, an atomic's load beside a system call), or at `SILENCE`, the
+  10 s every read has, from a primary gone silent; a connect is walked
+  away from within 10 ms, the back-off within 20; else the thread is
+  landing one message under the lock, an image's load and adoption among
+  them, and its fsync. A primary sending a byte in each `SILENCE` kept a
+  Windows read begun after the cut, and the halt, going for as long as it
+  liked. A promotion and a tenant's release end within that, and a `get`
+  of the tenant and the node's shutdown, which wait for the slot a release
+  holds as it halts. `tests/primaries.rs` in fennec-server holds a primary
+  gone silent in the middle of a message, the follower blocked reading it:
+  its promotion answers at once. That passes without `Watched` on Unix,
+  where the cut ends the read; `replication::tests::a_halt_a_read_in_a_message_missed_ends_at_the_next_byte`
+  holds `Watched` itself on every platform: a halt come after the look
+  between messages and its cut missed -- the flag alone, as Windows' cut is
+  to a read begun after it -- a primary sending a byte every 20 ms, and the
+  thread's end waited for `SILENCE`; with `Watched`'s look taken out it
+  read on and the test failed at its bound (the review's second round, run
+  so before the look went back).
+- *A halt is looked at past the socket's reads too* (`Follower::halted`):
+  as an image has arrived, and once it is loaded, before `Changing`. The
+  bound above held an image's `check_records`, `load` and adoption whole --
+  minutes for many gigabytes -- for a promotion, a release under the
+  tenant's slot, every `get` behind it and the node's shutdown. Walked away
+  from, the copy holds what it held and follows on from there once
+  started again. A halt that comes while the check and load are under way
+  still waits for them -- nothing looks inside `load`, minutes for many
+  gigabytes -- and walks away at the second look, before the adoption.
+  What a halt can still wait for besides is an adoption begun: the
+  image written over the copy's file and synced, a write of the image's
+  length, then the copy's memory pointed at it; or one message landing
+  and its fsync. `a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`
+  has the halt come at each look (a test's seam, `halt_at`, which sets the
+  flag at that look and is compiled into tests alone), the thread ending
+  with the copy at change 0 and no image taken; with either look taken
+  out, the follower took the image and the test failed.
+- *A peer's words reach a log line and the status's `error` cut and
+  escaped* (`peer_words`): the first 200 characters, as Rust writes a
+  string -- a newline `\n`, an escape character `\u{1b}`, a quote `\"` --
+  and the bytes there were where that is not all. An `E` message's text
+  (a mebibyte, any bytes) and a refusal's body (64 KiB) went in as they
+  came, while the status line was cut to 80: whoever answers at a
+  primary's address, or stands on a plain-HTTP hop before it, wrote lines
+  of its own into the log and a mebibyte into it and the status at every
+  reconnect. One helper at every place a peer's bytes reach either -- a
+  primary's `E` (`decode`), a node's (`node_archive`), a refusal's body
+  (`answered`: a follower's, an archiver's, a backup's, a node archiver's)
+  and a status line (`read_head`); `a_peers_words_are_cut_and_escaped`
+  holds each with a mebibyte holding a newline, an escape and quotes. A
+  router's log of a node's answers and the errors it answers with -- `said`,
+  a promotion's refusal, every `{status}: {body}` of a node's -- went in as
+  they came too, from anyone at a node's address or on a plain-HTTP hop;
+  they go through it now (`peer_words_within`, fennec-shard's `words`, the
+  third round), cut at 2 000 characters rather than 200: a node's refusal
+  is shown whole, the lineage one a failover meets 313 bytes, whose `force`
+  a cut at 200 took off (fennec-shard's
+  `a_standby_that_never_synced_is_promoted_by_force_alone_and_its_read_replica_follows`
+  failed so). `a_nodes_words_are_cut_and_escaped` holds `said`, `words`
+  and `expect` to it.
+
+The stream's framing is a parser of untrusted bytes, fuzzed as one: the
+`stream` target ([conventions.md](conventions.md#fuzzing)) hands
+`read_answer` -- the head, each message held to its bound, decoded -- a
+replica's stream and a node's, whole or a few bytes a read, its seeds a
+primary's answer, a node's, a refusal and the two findings above. An
+image its hello promised, accepted as the follower accepts one (`loaded`,
+the follower's own path: its records' sums, the record saying it follows,
+the load, the change its hello said), is adopted by a copy mapped as a
+server's -- its sink an in-memory one that hands the rewritten bytes back
+as the mapping -- so `Database::adopt`'s `repoint` walks the image's
+records and `rebind` binds its statements, which no target reached before
+(the review's second round, where it was suspected and not settled), and
+every collection of the copy is read after (`an_answers_image_is_adopted_by_a_mapped_copy`
+holds the path to the adoption). The seeds' answer holds such an image.
+
+### A copy across a compact
+
+**A copy agrees with its primary across a compact because a compact
+changes no place** ([storage.md](storage.md#dropped-places)). A compact is
+no record: it rewrites the file, marks the feed durable and sends nothing,
+so a copy, an archive or a standby holds whatever places it held, and
+applies every record after the compact by them. A compact that took a
+dropped field's places out -- every release from 0.1.7 to 0.2.0 -- left
+each copy reading the collection's later writes one field early. A copy
+that compacted itself first -- a server's own compaction runs on a
+following database from 0.1.10 -- read them one field late. An archive's restore
+from an image before the compact misread them, and so did its images
+after. A `--dir` node's standby misread them, and a failover made those
+values the tenant's. Kept places, each one's value made a `null`, leave
+every copy's documents readable by the primary's places whichever of the
+two compacts, and in whatever order.
+`tests/replication.rs` holds a copy caught up before its primary's compact,
+one behind that catches up across it by the records, one connecting after
+it, and one compacting first, each over real replication. `tests/archive.rs`
+holds a restore from the image before the compact, its `verify`, and an
+image of the archive's own end. fennec-shard's `tests/replicas.rs` holds a
+standby and its failover, the promoted copy's file read on its own. The sync
+protocol's replicas take rows as values and write them by their own schema
+(`fennec_abi::sync`), so no place reaches them; `fennec-abi`'s
+`tests/sync.rs` holds one across a drop and a compact on its server.
+
+*A 0.2.0 primary.* Replicas upgrade before primaries, so for as long as a
+0.2.0 primary runs, its compact still takes the places out and tells
+nobody. A newer copy tells at the primary's next write of that collection:
+it reads each write as it was made (`Schema::read_written`), a value at
+every place up to the last field and none past it, as every release since
+0.1.7 encodes one (`Store::encode_doc` writes a `null` at every dropped
+place a field follows), and a write made by other places than the copy
+holds -- one value short where the primary took a place out, one over
+where the copy did, under a release that compacted it -- is refused by name
+before anything reads it: "the primary's writes moved the fields of `x`:
+... seed the copy again from its primary". An alter that comes first is
+refused alike: it carries the schema after it (record kind 12), whose
+dropped places the copy holds to its own, the same or one more for a drop
+(`keeps_places`); a `create index` carries the whole schema, held to the
+copy's layout as it was. Where no field followed the dropped one, its
+place was last in every document, which a write leaves out: the primary's
+writes after its compact hold what the copy's would, read alike on both,
+and the copy tells at the primary's next alter or `create index` of the
+collection instead. A server's follower takes an image of its primary
+on a write it cannot apply, and holds what the primary holds from there,
+so no value read a field off reaches a copy's file. The check is the end
+of the read `apply` makes of every write already, and costs the copy a
+comparison a write; a check at the compact itself would need the compact
+to say so in the feed, a record kind, which a format change and an older
+copy's refusal would bring, for a window 1.0 closes.
+
+*A 0.2.0 copy.* The other way round -- a 1.x primary, a 0.2.0 copy, as a
+`--dir` node upgraded first leaves its tenants' standbys on the node not
+yet upgraded -- a field dropped on the primary keeps its place, and the
+copy's own compact takes it out of the copy's documents: it reads every
+later write of the collection a field late, with nothing to check it, and
+a failover makes those values the tenant's. The primary cannot tell the
+copy's release to refuse the drop: a copy's request names only where it
+stands (`since`, `history`, `sums`, `image`, `archive`, `reader`) with its
+token, and the hello is the primary's; both are the same in 0.2.0 and 1.x.
+The compatibility contract's rule is to drop no field until every node and
+every copy runs 1.x, or to run each 0.2.0 copy with `--auto-compact off`
+until it does.
+
+An archive does not tell: it keeps the stream's bytes, and a restore is an
+image and the writes after it opened (`Archive::restore`, `fs::open`),
+which reads a payload by the schema it holds and never refuses one for its
+length -- an open reads the documents of an image written before an `add
+field`, one value short, as every image has. A restore from an image
+taken before a 0.2.0 primary's stripping compact, to a moment after it,
+reads the writes after it a field early, as every image the archiver
+takes from there does. What an operator does is the compatibility
+contract's ([compatibility.md](compatibility.md#a-020-node-and-a-compact)).
+`tests/replication.rs`'
+`a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write`
+holds a follower of a stripped primary seeded again at the write, and
+fennec-core's `compact_places::a_copy_refuses_a_write_made_by_other_places_than_it_holds`
+both directions.
 
 ## A write's time
 

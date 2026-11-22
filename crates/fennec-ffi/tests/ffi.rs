@@ -8,6 +8,9 @@ use std::path::PathBuf;
 fn taken(code: i32, out: *mut c_char) -> (i32, String) {
     let text = match out.is_null() {
         true => String::new(),
+        // SAFETY: `out` is not NULL: the text the call just wrote through it,
+        // a NUL-ended `CString`, read once and then freed once, as fennec.h
+        // says.
         false => unsafe {
             let s = CStr::from_ptr(out).to_str().unwrap().to_string();
             fennec_free_string(out);
@@ -19,6 +22,9 @@ fn taken(code: i32, out: *mut c_char) -> (i32, String) {
 
 fn open(path: &str, flags: u32) -> Result<u64, (i32, String)> {
     let (mut h, mut out) = (0, std::ptr::null_mut());
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_open(
             path.as_ptr(),
@@ -37,6 +43,8 @@ fn open(path: &str, flags: u32) -> Result<u64, (i32, String)> {
 
 fn memory() -> u64 {
     let mut h = 0;
+    // SAFETY: `h` is a local to write; the out pointers are NULL, as fennec.h
+    // allows.
     let code = unsafe { fennec_open_memory(&mut h, std::ptr::null_mut(), std::ptr::null_mut()) };
     assert_eq!(code, FENNEC_OK);
     h
@@ -44,6 +52,9 @@ fn memory() -> u64 {
 
 fn query_with(h: u64, sql: &str, params: &str, vectors: &[u8]) -> (i32, String) {
     let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -73,12 +84,16 @@ fn by_handle(
     h: u64,
 ) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: `f` is one of the C ABI's calls taking a handle and the out
+    // pointers: `out` a local to write, `out_len` NULL, as fennec.h allows.
     let code = unsafe { f(h, &mut out, std::ptr::null_mut()) };
     taken(code, out)
 }
 
 fn changes(h: u64, since: u64) -> String {
     let mut out = std::ptr::null_mut();
+    // SAFETY: a handle and a number, and `out` a local to write; `out_len`
+    // NULL, as fennec.h allows.
     let code = unsafe { fennec_changes(h, since, &mut out, std::ptr::null_mut()) };
     let (code, text) = taken(code, out);
     assert_eq!(code, FENNEC_OK, "{text}");
@@ -152,6 +167,9 @@ fn an_error_is_its_code_and_its_json() {
     // Not UTF-8, and a null with a length.
     let bad = [0xff, 0xfe];
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -166,6 +184,9 @@ fn an_error_is_its_code_and_its_json() {
         )
     };
     assert_eq!(taken(code, out).0, FENNEC_MISUSE);
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -181,6 +202,9 @@ fn an_error_is_its_code_and_its_json() {
     };
     assert_eq!(taken(code, out).0, FENNEC_MISUSE);
     // The out pointers may be null: the answer is let go of.
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         let sql = "get t";
         fennec_query(
@@ -559,6 +583,9 @@ fn an_index_built_beside_the_database_lands_in_the_file() {
 
 fn schema(h: u64, text: &str, mode: u32) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_schema(
             h,
@@ -574,6 +601,9 @@ fn schema(h: u64, text: &str, mode: u32) -> (i32, String) {
 
 fn warm(h: u64, only: &str) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe { fennec_warm(h, only.as_ptr(), only.len(), &mut out, std::ptr::null_mut()) };
     taken(code, out)
 }
@@ -731,12 +761,16 @@ fn the_header_declares_what_the_library_exports() {
 
 #[test]
 fn the_version_is_the_crates() {
+    // SAFETY: `fennec_version` answers a static NUL-ended string.
     let v = unsafe { CStr::from_ptr(fennec_version()) };
     assert_eq!(v.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
 }
 
 fn feed(h: u64, kind: u32, id: u64, status: i32, bytes: &[u8]) -> String {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_sync_feed(
             h,
@@ -769,6 +803,9 @@ fn a_synced_handle_queues_its_writes_for_the_server() {
     query(h, "create collection notes (t text)", "");
     let config = r#"{"url":"https://example.test","token":"tk","seed":"ab","shapes":[{"collection":"tasks","key":"key"}]}"#;
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_sync_start(
             h,
@@ -863,6 +900,9 @@ fn a_synced_handle_refuses_a_call_that_reads() {
     );
     let config = r#"{"url":"https://example.test","token":"tk","seed":"ab","shapes":[{"collection":"tasks","key":"key"}]}"#;
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_sync_start(
             h,

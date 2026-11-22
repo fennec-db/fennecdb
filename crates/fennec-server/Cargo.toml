@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 fennec-core = { workspace = true, features = ["std-fs", "full"] }
 # `<file>.lock`, which the native library and `fennec mcp --file` take too.

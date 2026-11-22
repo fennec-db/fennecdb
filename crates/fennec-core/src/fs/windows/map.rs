@@ -256,9 +256,13 @@ struct Views {
     stuck: Option<usize>,
 }
 
-// The pages are read-only and shared by nothing but readers; the views
-// grow under a mutex.
+// SAFETY: a `Mapping` owns its views and its placeholder, which no other
+// value points at, and the system lets them go from whichever thread drops
+// it (`Teardown`, on a thread of its own past `IN_PLACE` views).
 unsafe impl Send for Mapping {}
+// SAFETY: through `&Mapping` the views are only read -- mapped
+// `PAGE_READONLY`, nothing writing through `at` -- the length a reader
+// takes is an atomic, and the views grow under `views`' mutex (`grow`).
 unsafe impl Sync for Mapping {}
 
 thread_local! {
@@ -552,6 +556,8 @@ pub fn touch(m: &crate::store::Base) {
         unsafe { PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0) };
         for at in (from..to).step_by(4096) {
             // Volatile, or the compiler drops reads whose result is unused.
+            // SAFETY: `at < to <= bytes.len()`: a byte of `bytes`, which `m`
+            // keeps mapped across the call.
             sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) };
         }
     }
@@ -629,6 +635,7 @@ pub(in crate::fs) mod tests {
         };
         let e = io::Error::last_os_error();
         if !s.is_null() {
+            // SAFETY: `s` is the section just made, closed once, here.
             unsafe { CloseHandle(s) };
         }
         assert!(

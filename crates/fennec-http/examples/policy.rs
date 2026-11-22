@@ -626,6 +626,9 @@ extern "C" {
 /// streams' readers', which a turn of each side shares alike.
 fn cpu_us() -> f64 {
     let mut r = Rusage::default();
+    // SAFETY: the struct is a whole `struct rusage` of 64-bit Linux and macOS
+    // -- two `timeval`s of two words, then fourteen longs -- writable, and the
+    // call keeps no pointer to it.
     unsafe { getrusage(0, &mut r) };
     // macOS's microseconds are an `int` beside 4 bytes of padding.
     let us = |t: &Timeval| t.sec as f64 * 1e6 + (t.usec as i32) as f64;

@@ -1,7 +1,8 @@
 //! `alter collection` adds, drops and renames a field without rewriting a
 //! document: a field added reads `null` in the documents written before it,
-//! a field dropped leaves a place skipped on read until `compact` takes it
-//! out, a rename is the schema alone. Each answers the same after the file
+//! a field dropped leaves a place skipped on read for the collection's life
+//! -- `compact` makes its values `null`s and keeps it -- a rename is the
+//! schema alone. Each answers the same after the file
 //! is opened again, after a checkpoint, on a replica, and is put back with
 //! the block it was in.
 
@@ -308,7 +309,7 @@ fn a_field_added_under_a_dropped_name_is_a_new_field() {
 }
 
 #[test]
-fn compact_takes_the_dropped_places_out_of_every_document() {
+fn compact_reclaims_a_dropped_fields_values_and_keeps_its_place() {
     let tap = Tap::new();
     let mut db = tap.database();
     orders(&mut db);
@@ -323,7 +324,7 @@ fn compact_takes_the_dropped_places_out_of_every_document() {
     ok(&mut db, "compact");
     assert!(tap.file.lock().unwrap().len() < len);
     let schema = db.collection("orders").unwrap().schema.clone();
-    assert!(schema.dropped.is_empty(), "{schema:?}");
+    assert_eq!(schema.dropped, [2], "{schema:?}");
     assert_eq!(everything(&db), before);
     // Written after the compact, read after an open: the same documents.
     ok(&mut db, r#"put orders {customer: "f", total: 60}"#);
@@ -344,7 +345,7 @@ fn compact_takes_the_dropped_places_out_of_every_document() {
 
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 #[test]
-fn compact_over_a_mapped_file_takes_them_out_too() {
+fn compact_over_a_mapped_file_keeps_them_too() {
     let dir = std::env::temp_dir().join(format!("fennecdb-alter-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("mapped.fennec");
@@ -360,14 +361,14 @@ fn compact_over_a_mapped_file_takes_them_out_too() {
         "alter collection orders rename field total to amount",
     );
     let before = everything(&db);
-    // Beside the database, as a server runs it: a dropped field's places
-    // need the documents read, which holds the lock instead.
+    // Beside the database, as a server runs it, a dropped field's values
+    // reclaimed on the way.
     let lock = std::sync::RwLock::new(db);
     Database::maintain(&lock, &fennec_ql::parse_one("compact").unwrap())
         .unwrap()
         .unwrap();
     let db = lock.into_inner().unwrap();
-    assert!(db.collection("orders").unwrap().schema.dropped.is_empty());
+    assert_eq!(db.collection("orders").unwrap().schema.dropped, [0]);
     assert_eq!(everything(&db), before);
     drop(db);
     let db = fennec_core::fs::open_mapped(&path).unwrap();

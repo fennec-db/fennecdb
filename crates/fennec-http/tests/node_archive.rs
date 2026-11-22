@@ -426,6 +426,32 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
             .all(|(_, r)| matches!(r, Restoring::Restored(..))),
         "{done:?}"
     );
+
+    // What the archiver and the restore made is their user's alone: a
+    // tenant's `presence` and `history`, the directory a restore of every
+    // tenant made, and `began`, written as an image is let go of.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&root.join("doomed").join("presence")),
+            0o600,
+            "presence"
+        );
+        for t in ["doomed", "keep"] {
+            assert_eq!(mode(&root.join(t).join("history")), 0o600, "{t}'s history");
+        }
+        assert_eq!(
+            mode(&out),
+            0o700,
+            "the directory a restore of every tenant made"
+        );
+        let keep = Archive::new(root.join("keep")).unwrap();
+        assert!(keep.consolidate().unwrap().is_some(), "no image taken");
+        keep.prune(0, u64::MAX).unwrap();
+        assert_eq!(mode(&root.join("keep").join("began")), 0o600, "began");
+    }
 }
 
 /// A tenant deleted and made again under its name starts a history of its

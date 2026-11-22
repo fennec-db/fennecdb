@@ -381,10 +381,11 @@ fn a_record_naming_a_collection_no_create_gives_is_refused_where_a_file_is_opene
 /// and holding one vector had the open's index ask for 2^41 links a node,
 /// and the process was killed. No `create` makes such a field --
 /// `Schema::new` asks the decoder's own test (`schema::out_of_range`), a
-/// list's dimension too -- so one a version before made is refused alike,
-/// a list of vectors past the range among them, which `Schema::new` and
-/// SQL's `vector(1000000001)[]` took until the check held a list's
-/// dimension as the decoder does: fennecdb is alpha.
+/// list's dimension too, and a create asks it again of a schema built past
+/// `Schema::new` (`Schema::readable`) -- so one a version before made is
+/// refused alike, a list of vectors past the range among them, which
+/// `Schema::new` and SQL's `vector(1000000001)[]` took until the check
+/// held a list's dimension as the decoder does: fennecdb is alpha.
 #[test]
 fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_applied() {
     let hnsw = |dim: usize, m: usize| {
@@ -423,30 +424,29 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
     .enumerate()
     {
         // Made as no `create` makes it -- `Schema::new` refuses the field,
-        // with the words the open refuses it with -- and as a crafted file
-        // or a version before holds it: a create takes the schema it is
-        // handed, and its record is the file's.
+        // with the words the open refuses it with, and so does a create of
+        // a schema it was pushed into past `Schema::new` -- and as a crafted
+        // file or a version before holds it: the create's record by hand.
         let written = Schema::new("w", vec![Field::new("n", DataType::Int), field.clone()]);
         match written {
             Err(Error::Type(m)) => assert_eq!(m, says),
             other => panic!("{says}: written {:?}", other.map(|_| ())),
         }
-        let sink = Records::default();
-        let mut db = Database::with_sink(Box::new(sink.clone()));
         let mut schema = Schema::new("w", vec![Field::new("n", DataType::Int)]).unwrap();
         schema.fields.push(field);
-        db.execute(&Statement::CreateCollection {
-            schema,
+        let mut db = Database::new();
+        match db.execute(&Statement::CreateCollection {
+            schema: schema.clone(),
             if_not_exists: false,
-        })
-        .unwrap();
-        let mut records = sink.0.lock().unwrap().clone();
-        // The create's record, kind 1 in a checked record's low five bits:
-        // `[kind][cid][len]`.
-        let create = records.iter().find(|r| r[0] & 0x1f == 1).expect("a create");
-        let cid = get_uvarint(create, &mut 1).unwrap() as u32;
-        // And a document holding a vector, put by hand: the in-memory
-        // database above would build the index it names.
+        }) {
+            Err(Error::Type(m)) => assert_eq!(m, says),
+            other => panic!("{says}: created {:?}", other.map(|_| ())),
+        }
+        assert!(db.collection_names().is_empty(), "{says}");
+        let cid = 1;
+        let mut records = vec![fennec_core::engine::record(1, cid, &schema.encode())];
+        // And a document holding a vector, its record by hand as the
+        // create's is: no database holds the collection to put it into.
         let mut doc = Vec::new();
         fennec_core::codec::encode_value(&mut doc, &Value::Int(1));
         fennec_core::codec::encode_value(&mut doc, &Value::Vector(vec![1.0, 2.0]));
@@ -467,9 +467,9 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
 
 /// A point is a level of its field's type, as it is of the value it reads
 /// as: 64 lists around one are a type 65 levels deep, which `Schema::new`
-/// refuses and a file declaring it is refused for, read into memory,
-/// mapped and applied by a replica. Read off the bytes as it was, the
-/// schema opened, and every row's point was then refused at each read
+/// and a create refuse, and a file declaring it is refused for, read into
+/// memory, mapped and applied by a replica. Read off the bytes as it was,
+/// the schema opened, and every row's point was then refused at each read
 /// (the fuzz fix's second review). 63 lists down -- the most a write makes
 /// -- a file opens and its row reads back. A version before bounded no
 /// type's depth, so such a field one made is refused at the open as
@@ -494,25 +494,28 @@ fn a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_app
     let written = query(&db, "get g").unwrap();
     assert_eq!(query(&back, "get g").unwrap(), written);
 
+    let says = "`p`: a type nests at most 64 levels, a list one and a point one";
     match Schema::new("g", vec![Field::new("p", around(64))]) {
-        Err(Error::Type(m)) => assert_eq!(
-            m,
-            "`p`: a type nests at most 64 levels, a list one and a point one"
-        ),
+        Err(Error::Type(m)) => assert_eq!(m, says),
         other => panic!("written: {:?}", other.map(|_| ())),
     }
-    // Made as no `create` makes it, as a crafted file or a version before
-    // holds it: a create takes the schema it is handed.
-    let sink = Records::default();
-    let mut db = Database::with_sink(Box::new(sink.clone()));
+    // Nor does a create of a schema it was pushed into past `Schema::new`,
+    // whose fields are public: taken as handed, it was written, and the
+    // file refused at its next open (the third review).
     let mut schema = Schema::new("g", vec![Field::new("n", DataType::Int)]).unwrap();
     schema.fields.push(Field::new("p", around(64)));
-    db.execute(&Statement::CreateCollection {
-        schema,
+    let mut db = Database::new();
+    match db.execute(&Statement::CreateCollection {
+        schema: schema.clone(),
         if_not_exists: false,
-    })
-    .unwrap();
-    let records = sink.0.lock().unwrap().clone();
+    }) {
+        Err(Error::Type(m)) => assert_eq!(m, says),
+        other => panic!("created: {:?}", other.map(|_| ())),
+    }
+    assert!(db.collection_names().is_empty());
+    // Made as a crafted file or a version before holds it: the create's
+    // record by hand.
+    let records = vec![fennec_core::engine::record(1, 1, &schema.encode())];
     deep_refusal(Database::new().load(&file(&records)));
     let dir = std::env::temp_dir().join(format!("fennecdb-damage-point-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

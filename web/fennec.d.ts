@@ -1698,9 +1698,11 @@ export declare class Fennec<S extends AnySchema<S> = Schema, Rel extends Relatio
     parts: () => Iterable<Uint8Array | ArrayBuffer> | AsyncIterable<Uint8Array | ArrayBuffer>,
   ): Promise<number>;
   /**
-   * Lets the database go. A `persist` of it not yet run is refused, as is
-   * a `restore` or `openFile` not yet done with it, and every later one; a
-   * `persist` already storing what it took finishes.
+   * Lets the database go, and the file it is kept in (`openFile`) with it.
+   * A `persist` of it not yet run is refused, as is a `restore` or
+   * `openFile` not yet done with it, and every later one; a `persist`
+   * already storing what it took finishes. After the module stopped (a
+   * trap) it throws nothing and writes nothing.
    */
   close(): void;
 
@@ -1782,7 +1784,11 @@ export interface FennecFile {
   flush(): number;
   /** The file's bytes, which `fennec` and a server open. */
   bytes(): Uint8Array;
-  /** Flushes and lets the file go: the database is kept in it no longer. */
+  /**
+   * Flushes and lets the file go: the database is kept in it no longer. A
+   * second call does nothing; after the module stopped (a trap) it writes
+   * nothing and throws nothing.
+   */
   close(): void;
 }
 
@@ -1793,7 +1799,9 @@ export interface FennecFile {
  * on `run` appends every statement's writes to it and flushes before it
  * answers. Only in a dedicated worker, one at a time a file: one another
  * worker holds is waited for 3 s, then refused -- the worker of a page
- * reloaded while it was busy lets go of it only once it has ended. In turn
+ * reloaded while it was busy lets go of it only once it has ended. One
+ * another database of this worker keeps is refused at once, or taken from
+ * it, nothing written, once its module stopped (a trap). In turn
  * with `persist` and `restore`: refused, its file let go of, once the
  * database is closed before it is done opening the file, and, called while
  * a `restore` is out, when that restore fails (as `persist`, which see).

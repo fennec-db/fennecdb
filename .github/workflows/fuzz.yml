@@ -39,14 +39,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [http, json, fennecql, codec, image, sqlite, certificate]
+        target: [http, json, fennecql, codec, image, sqlite, certificate, stream]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # The nightly is the Makefile's FUZZ_NIGHTLY, a date: AddressSanitizer
-      # is a nightly flag, and only this and ci.yml's fuzz-smoke take one.
+      # is a nightly flag, and only this and ci.yml's fuzz-smoke and
+      # sanitize take one.
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 

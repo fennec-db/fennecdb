@@ -1,174 +1,174 @@
 {
  "full": {
-  "raw": 860664,
-  "gzip": 356424,
-  "brotli": 294623
+  "raw": 862018,
+  "gzip": 356849,
+  "brotli": 295163
  },
  "none": {
-  "raw": 566648,
-  "gzip": 233778,
-  "brotli": 195684
+  "raw": 567942,
+  "gzip": 234233,
+  "brotli": 196155
  },
  "features": {
   "vector": {
    "added": {
-    "raw": 67184,
-    "gzip": 25959,
-    "brotli": 21041
+    "raw": 67113,
+    "gzip": 25931,
+    "brotli": 20899
    },
    "saved": {
-    "raw": 62923,
-    "gzip": 23912,
-    "brotli": 18870
+    "raw": 62946,
+    "gzip": 23884,
+    "brotli": 18627
    }
   },
   "text": {
    "added": {
-    "raw": 49277,
-    "gzip": 21435,
-    "brotli": 17415
+    "raw": 49286,
+    "gzip": 21368,
+    "brotli": 17559
    },
    "saved": {
-    "raw": 52794,
-    "gzip": 22808,
-    "brotli": 18386
+    "raw": 52845,
+    "gzip": 22852,
+    "brotli": 18376
    }
   },
   "sparse": {
    "added": {
-    "raw": 8121,
-    "gzip": 3158,
-    "brotli": 2665
+    "raw": 8137,
+    "gzip": 3243,
+    "brotli": 2623
    },
    "saved": {
-    "raw": 3849,
-    "gzip": 1571,
-    "brotli": 834
+    "raw": 3870,
+    "gzip": 1647,
+    "brotli": 1037
    }
   },
   "sorted": {
    "added": {
-    "raw": 31011,
-    "gzip": 10915,
-    "brotli": 8734
+    "raw": 30968,
+    "gzip": 10897,
+    "brotli": 8668
    },
    "saved": {
-    "raw": 75631,
-    "gzip": 30011,
-    "brotli": 23167
+    "raw": 75718,
+    "gzip": 30089,
+    "brotli": 23248
    }
   },
   "composite": {
    "added": {
-    "raw": 33879,
-    "gzip": 14505,
-    "brotli": 11390
+    "raw": 33918,
+    "gzip": 14434,
+    "brotli": 11345
    },
    "saved": {
-    "raw": 33404,
-    "gzip": 13421,
-    "brotli": 10441
+    "raw": 33444,
+    "gzip": 13456,
+    "brotli": 10532
    }
   },
   "geo": {
    "added": {
-    "raw": 6469,
-    "gzip": 2889,
-    "brotli": 2531
+    "raw": 6477,
+    "gzip": 2851,
+    "brotli": 2578
    },
    "saved": {
-    "raw": 15770,
-    "gzip": 6236,
-    "brotli": 5242
+    "raw": 15823,
+    "gzip": 6306,
+    "brotli": 5442
    }
   },
   "nocase": {
    "added": {
-    "raw": 8045,
-    "gzip": 3535,
-    "brotli": 2887
+    "raw": 8064,
+    "gzip": 3605,
+    "brotli": 2901
    },
    "saved": {
-    "raw": 7218,
-    "gzip": 2941,
-    "brotli": 2523
+    "raw": 7261,
+    "gzip": 3062,
+    "brotli": 2533
    }
   },
   "facets": {
    "added": {
-    "raw": 10014,
-    "gzip": 4278,
-    "brotli": 3515
+    "raw": 9998,
+    "gzip": 4290,
+    "brotli": 3566
    },
    "saved": {
-    "raw": 11174,
-    "gzip": 4249,
-    "brotli": 3804
+    "raw": 11187,
+    "gzip": 4259,
+    "brotli": 3738
    }
   },
   "highlight": {
    "added": {
-    "raw": 10665,
-    "gzip": 4724,
-    "brotli": 3980
+    "raw": 10655,
+    "gzip": 4727,
+    "brotli": 3868
    },
    "saved": {
-    "raw": 10141,
-    "gzip": 3972,
-    "brotli": 3320
+    "raw": 10147,
+    "gzip": 3999,
+    "brotli": 3177
    }
   },
   "analytics": {
    "added": {
-    "raw": 15376,
-    "gzip": 6731,
-    "brotli": 5554
+    "raw": 15368,
+    "gzip": 6666,
+    "brotli": 5624
    },
    "saved": {
-    "raw": 14652,
-    "gzip": 5980,
-    "brotli": 4908
+    "raw": 14660,
+    "gzip": 5979,
+    "brotli": 4864
    }
   },
   "collate": {
    "added": {
-    "raw": 20893,
-    "gzip": 10478,
-    "brotli": 8919
+    "raw": 20877,
+    "gzip": 10405,
+    "brotli": 8892
    },
    "saved": {
-    "raw": 19593,
-    "gzip": 9768,
-    "brotli": 8194
+    "raw": 19617,
+    "gzip": 9907,
+    "brotli": 8251
    }
   },
   "schema": {
    "added": {
-    "raw": 30042,
-    "gzip": 12249,
-    "brotli": 9854
+    "raw": 30075,
+    "gzip": 12304,
+    "brotli": 9975
    },
    "saved": {
-    "raw": 29937,
-    "gzip": 11926,
-    "brotli": 9441
+    "raw": 29970,
+    "gzip": 11982,
+    "brotli": 9727
    }
   }
  },
  "code": {
-  "code": 764369,
-  "data": 86059,
+  "code": 765283,
+  "data": 86491,
   "parts": {
    "compiler_builtins, libm": 757,
    "fennec_abi": 5694,
    "fennec_core::case": 2969,
    "fennec_core::changes": 1486,
-   "fennec_core::codec": 10531,
+   "fennec_core::codec": 10546,
    "fennec_core::collate": 8159,
    "fennec_core::composite": 9915,
    "fennec_core::crc": 851,
    "fennec_core::declared": 15634,
-   "fennec_core::engine": 231333,
+   "fennec_core::engine": 231612,
    "fennec_core::error": 462,
    "fennec_core::fuzzy": 7204,
    "fennec_core::geo": 7726,
@@ -180,10 +180,10 @@
    "fennec_core::num": 7272,
    "fennec_core::plugin": 4620,
    "fennec_core::query": 40020,
-   "fennec_core::schema": 17235,
+   "fennec_core::schema": 17758,
    "fennec_core::sorted": 19930,
    "fennec_core::sparse": 5709,
-   "fennec_core::store": 12017,
+   "fennec_core::store": 12119,
    "fennec_core::text": 19991,
    "fennec_core::time": 3724,
    "fennec_core::tz": 5833,
@@ -192,16 +192,16 @@
    "fennec_ql": 1929,
    "fennec_ql::join": 17626,
    "fennec_ql::lexer": 6967,
-   "fennec_ql::parser": 78624,
+   "fennec_ql::parser": 78600,
    "fennec_ql::sqltypes": 1072,
-   "fennec_wasm": 9064,
+   "fennec_wasm": 9120,
    "std: HashMap": 12371,
    "std: Unicode tables": 1920,
-   "std: Vec, String, Box": 52191,
+   "std: Vec, String, Box": 52134,
    "std: allocator": 8655,
    "std: core, the rest": 18123,
    "std: core::fmt, the rest": 4682,
-   "std: drop glue": 11818,
+   "std: drop glue": 11838,
    "std: panics": 2443,
    "std: sort": 23561,
    "std: std, the rest": 1040

@@ -66,6 +66,9 @@ const closed = new WeakSet();
 /** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
 const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
+/** The module's word that bytes are no image of a database (`#take`). */
+const NOT_AN_IMAGE = 'could not load image (corrupt or incompatible version)';
+
 /** A second database over a database's module (`Fennec`'s static block). */
 let sibling;
 /** A database made empty again, its handle a new one (`Fennec`'s static block). */
@@ -77,6 +80,8 @@ let met;
  * (`Fennec`'s static block): what lands a sync's seed in parts as one.
  */
 let block;
+/** Whether a database's module stopped (`Fennec`'s static block). */
+let stoppedOf;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -91,6 +96,143 @@ function whyNoModule(err) {
     ? err
     : new FennecError('fennec.wasm needs WebAssembly SIMD (Chrome 91+, Firefox 89+, Safari 16.4+)');
 }
+
+/**
+ * The most bytes the module is handed at once. It reads a length as an
+ * `i32`, which JavaScript makes of any number by ToInt32: 2^32 + 8 went
+ * over as 8 and `NaN` or `undefined` as 0, an allocation smaller than what
+ * was then written into it, over the module's heap. Past 2^31 - 1, its
+ * `isize::MAX`, the module has no room for any.
+ */
+const MAX_LEN = 0x7fffffff;
+
+/** `len`, refused unless it is a length the module can be handed. */
+function lengthOf(len, what) {
+  if (Number.isInteger(len) && len >= 0 && len <= MAX_LEN) return len;
+  throw new FennecError(`${what} must be a whole number of bytes from 0 to ${MAX_LEN}, not ${String(len)}`);
+}
+
+/**
+ * The module's exports, each call made through a guard. A trap -- an
+ * abort where the module has no memory left to answer in, a bound it
+ * checks -- leaves the instance as it stopped: its stack pointer where the
+ * call left it, a statement landed and neither answered nor flushed to its
+ * file. Run on, it answered from that state or trapped again; so every
+ * later call, on every database of the module, throws the one error
+ * saying to open the database again. A `TypeError` is a value no export
+ * takes (a `BigInt`), refused before the module runs.
+ *
+ * Each export's guard takes the arguments it does, by name, and so has its
+ * `length`, which `run` tells a module from before vectors went over apart
+ * by: a guard of `(...args)` made an array of them on every call, and a
+ * `run` makes five to eight. No export takes more than `GUARDS` has room
+ * for, and one that did is refused here rather than handed part of what
+ * it was given (`web/fennec.test.js` holds the module's to it).
+ */
+function guarded(exports) {
+  let trap = null;
+  const stopped = () =>
+    new FennecError(`the module stopped (${trap?.message ?? trap}): nothing more runs on its databases; open the database again`, { cause: trap });
+  // What a call that threw throws: a trap is kept, and stops every call after.
+  const failed = (e) => {
+    if (e instanceof TypeError) return e;
+    trap = e;
+    halted.add(out);
+    return stopped();
+  };
+  const ok = () => {
+    if (trap) throw stopped();
+  };
+  const out = {};
+  for (const [name, f] of Object.entries(exports)) {
+    if (typeof f !== 'function') {
+      out[name] = f;
+      continue;
+    }
+    if (f.length >= GUARDS.length) throw new FennecError(`${name} takes ${f.length} arguments, past the ${GUARDS.length - 1} its guard passes on`);
+    out[name] = GUARDS[f.length](f, ok, failed);
+  }
+  return out;
+}
+
+/** The guarded exports whose module stopped (`guarded`): no close enters it. */
+const halted = new WeakSet();
+
+/** A guard (`guarded`) by its export's arity: `GUARDS[n](f, ok, failed)` passes `n` arguments on. */
+const GUARDS = [
+  (f, ok, failed) => () => {
+    ok();
+    try {
+      return f();
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a) => {
+    ok();
+    try {
+      return f(a);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b) => {
+    ok();
+    try {
+      return f(a, b);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c) => {
+    ok();
+    try {
+      return f(a, b, c);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d) => {
+    ok();
+    try {
+      return f(a, b, c, d);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e) => {
+    ok();
+    try {
+      return f(a, b, c, d, e);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h, i) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h, i);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+];
 
 export class Fennec {
   #wasm; #handle; #collation;
@@ -130,6 +272,7 @@ export class Fennec {
       f.#handle = f.#wasm.fennec_open();
     };
     met = (f) => f.#wasm.fennec_wide?.();
+    stoppedOf = (f) => halted.has(f.#wasm);
     block = (f, op) => {
       const out = JSON.parse(f.#readString(f.#wasm.fennec_block(f.#handle, op)));
       if (out.kind === 'error') throw new FennecError(out.message);
@@ -169,7 +312,7 @@ export class Fennec {
     // Instantiated from a compiled module, `instantiate` gives the instance
     // alone, and from bytes the module and the instance: read as the
     // latter, a Worker's module had no exports and `open` threw.
-    const wasm = (mod instanceof WebAssembly.Instance ? mod : mod.instance).exports;
+    const wasm = guarded((mod instanceof WebAssembly.Instance ? mod : mod.instance).exports);
     // With `schema`, what the code declares is checked and made: a load
     // (`restore`, `openFile`) checks the database it brings in again.
     const db = new Fennec(wasm, wasm.fennec_open(), opts.collation ?? beside(src));
@@ -199,8 +342,14 @@ export class Fennec {
     return new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
   }
 
-  /** Reads the returned buffer and frees it. */
-  #readBytes(ptr) {
+  /**
+   * Reads the returned buffer and frees it. An address comes back as the
+   * `i32` its bits make, negative from 2 GiB on, where the module's memory,
+   * which has no maximum, may reach: read as the unsigned one it is
+   * (`>>> 0`), here, in `#readString` and where `fennec_alloc` answers.
+   */
+  #readBytes(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     // Copies, and has to: the array outlives the buffer freed on the next
     // line, and a view into wasm memory would read whatever lands there next.
@@ -213,19 +362,36 @@ export class Fennec {
   // `#readBytes` makes -- the decode is itself the copy -- and going through
   // it first meant every result was copied twice, which on a large result set
   // is megabytes of pure waste. The decode must finish before the free.
-  #readString(ptr) {
+  #readString(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     const out = dec.decode(new Uint8Array(this.#wasm.memory.buffer, ptr + 4, len));
     this.#wasm.fennec_free(ptr, 4 + len);
     return out;
   }
 
-  /** Copies a string, or bytes, into WASM memory. */
+  /**
+   * Copies a string, or bytes, into WASM memory. Never at 0, the null the
+   * module answers when it has no room: written there, the bytes went over
+   * the bottom of its stack.
+   */
   #write(data) {
     const bytes = typeof data === 'string' ? enc.encode(data) : data;
-    const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return [ptr, bytes.length];
+    const len = lengthOf(bytes.length, 'a text, its parameters or collation data');
+    const ptr = this.#wasm.fennec_alloc(len || 1) >>> 0;
+    if (!ptr) throw new FennecError(`no room in the module for ${len} bytes`);
+    this.#into(ptr, len, bytes);
+    return [ptr, len];
+  }
+
+  /**
+   * Writes `bytes` at `at` into the allocation of `len` at `ptr`, through a
+   * view of that allocation alone: bytes past it are a `RangeError`, never
+   * the module's memory beyond. A view each time: a call into the module
+   * may have grown its memory, which detaches the buffer before.
+   */
+  #into(ptr, len, bytes, at = 0) {
+    new Uint8Array(this.#wasm.memory.buffer, ptr, len).set(bytes, at);
   }
 
   /**
@@ -255,19 +421,25 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
-    // Not `jsonOf`: the module reads an int no double holds as the double
-    // it rounds to (`as_double`), and a look here cost every `run`.
-    const [pp, pl] = this.#write(JSON.stringify(json));
-    const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
+    let pp = 0;
+    let pl = 0;
+    let vp = 0;
+    let vl = 0;
     let out;
     try {
+      // Not `jsonOf`: the module reads an int no double holds as the double
+      // it rounds to (`as_double`), and a look here cost every `run`.
+      [pp, pl] = this.#write(JSON.stringify(json));
+      if (vectors) [vp, vl] = this.#write(vectors);
       // The time a read of a collection whose rows expire (`@ttl`) is
       // answered at: the module has no clock of its own.
       out = this.#readString(this.#wasm.fennec_query(this.#handle, sp, sl, pp, pl, vp, vl, this.now()));
     } finally {
+      // Those written before one that could not be -- a parameter
+      // `JSON.stringify` refuses, no room -- too.
       this.#wasm.fennec_free(sp, sl || 1);
-      this.#wasm.fennec_free(pp, pl || 1);
-      if (vectors) this.#wasm.fennec_free(vp, vl || 1);
+      if (pp) this.#wasm.fennec_free(pp, pl || 1);
+      if (vp) this.#wasm.fennec_free(vp, vl || 1);
     }
     // After an error too: the change ring says what landed, after the task.
     if (this.#lives?.size && !quiet) this.#touch();
@@ -357,13 +529,12 @@ export class Fennec {
     });
     const got = await Promise.all(want.map((name) => this.#chunk(name)));
     got.forEach((bytes, k) => {
-      const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-      new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+      const [ptr, len] = this.#write(bytes);
       let at;
       try {
-        at = this.#wasm.fennec_add_chunk(ptr, bytes.length);
+        at = this.#wasm.fennec_add_chunk(ptr, len);
       } finally {
-        this.#wasm.fennec_free(ptr, bytes.length || 1);
+        this.#wasm.fennec_free(ptr, len || 1);
       }
       if (chunks[at] !== want[k]) {
         throw new FennecError(`${want[k]}.bin is not this module's collation data (another version's?)`);
@@ -572,7 +743,9 @@ export class Fennec {
    * answer is simply "everything is stale" -- no data is lost.
    */
   setChangeCapacity(n) {
-    this.#wasm.fennec_set_change_capacity(this.#handle, whole(n, 'capacity'));
+    // The module takes a `u32`: 2^32 went over as 0, a ring of one.
+    if (whole(n, 'capacity') > 0xffffffff) throw new FennecError(`capacity must be at most ${0xffffffff}: ${n}`);
+    this.#wasm.fennec_set_change_capacity(this.#handle, n);
   }
 
   /** Collection schemas (the `collections` output). */
@@ -638,15 +811,21 @@ export class Fennec {
    * `restore` fetches it and loads the image again.
    */
   load(bytes) {
-    const ptr = this.#room(bytes.length);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return this.#take(ptr, bytes.length);
+    if (!(bytes instanceof Uint8Array)) throw new FennecError('load takes the image as a Uint8Array');
+    const len = bytes.length;
+    const ptr = this.#room(len);
+    this.#into(ptr, len, bytes);
+    return this.#take(ptr, len);
   }
 
-  /** Room in the module for an image of `len`: never 0, which is the module's own data. */
+  /**
+   * Room in the module for an image of `len`: never 0, which is the module's
+   * own data, and never for a length that is not one (`lengthOf`).
+   */
   #room(len) {
     if (kept.has(this)) throw new FennecError('the database is kept in a file (openFile): a load would leave the file behind');
-    const ptr = this.#wasm.fennec_alloc(len);
+    lengthOf(len, "an image's length");
+    const ptr = this.#wasm.fennec_alloc(len) >>> 0;
     if (!ptr) throw new FennecError(`no room for an image of ${len} bytes`);
     return ptr;
   }
@@ -669,7 +848,7 @@ export class Fennec {
       const e = new FennecError('the image needs collation data the module has not been handed');
       throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
     }
-    if (r !== 0) throw new FennecError('could not load image (corrupt or incompatible version)');
+    if (r !== 0) throw new FennecError(NOT_AN_IMAGE);
     // Another database now, whose counter may stand where a live query's
     // cursor did: every live query runs again, whatever the ring says.
     if (this.#lives?.size) {
@@ -713,9 +892,12 @@ export class Fennec {
     let at = 0;
     const put = (p) => {
       const bytes = p instanceof ArrayBuffer ? new Uint8Array(p) : p;
+      // Anything else's `length` is not its bytes': a `DataView` has none,
+      // and the next part went at `ptr + NaN`, the module's address 0.
+      if (!(bytes instanceof Uint8Array)) throw new FennecError('each part is a Uint8Array or an ArrayBuffer');
       if (at + bytes.length > length) throw new FennecError(`the parts hold more than the ${length} bytes said`);
       // A view each part: an await may let in a write that grows the memory.
-      new Uint8Array(this.#wasm.memory.buffer, ptr + at, bytes.length).set(bytes);
+      this.#into(ptr, length, bytes, at);
       at += bytes.length;
     };
     try {
@@ -730,10 +912,19 @@ export class Fennec {
     return this.#take(ptr, length);
   }
 
+  /**
+   * Lets the database go, and its file (`openFile`) as the file's `close`
+   * does. After a trap it enters the module no more and throws nothing:
+   * thrown, it kept the file's name from the open the error asks for.
+   */
   close() {
     closed.add(this);
     this.#lives?.clear();
-    this.#wasm.fennec_close(this.#handle);
+    try {
+      kept.get(this)?.close();
+    } finally {
+      if (!halted.has(this.#wasm)) this.#wasm.fennec_close(this.#handle);
+    }
   }
 }
 
@@ -1334,13 +1525,14 @@ function refused(name, e) {
  * Chrome puts off 2 s for a busy one (web/browser/).
  */
 const HELD_MS = 3000;
-/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
+/** The files this worker keeps, by directory (`null`: the origin's) and name: the `FennecFile` keeping each. */
 const holding = new Map();
 
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
   #fennec; #main; #aside; #name; #size; #image; #where;
   #failed = null;
+  #closed = false;
 
   constructor(fennec, name, main, aside, size, image, where) {
     this.#fennec = fennec;
@@ -1350,8 +1542,27 @@ class FennecFile {
     this.#size = size;
     this.#image = image;
     this.#where = where;
-    if (!holding.has(where)) holding.set(where, new Set());
-    holding.get(where).add(name);
+    if (!holding.has(where)) holding.set(where, new Map());
+    holding.get(where).set(name, this);
+  }
+
+  /**
+   * `openFile`'s look at a name this worker keeps: refused while its
+   * database runs; let go of once its module stopped, of which nothing runs
+   * again: whether it was. A static method, never a static block assigning
+   * it: a block runs as the module loads, a side effect a bundler keeps,
+   * and with it this class and all it reaches in an app that opens no file
+   * (esbuild, minified: 2.0 KB of the 51 KB an app of `connect` bundled to
+   * through this module, 0.65 KB brotli).
+   */
+  static here(where, name) {
+    const holder = holding.get(where)?.get(name);
+    if (!holder) return false;
+    if (!stoppedOf(holder.#fennec)) {
+      throw new FennecError(`${name} is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first`);
+    }
+    holder.close();
+    return true;
   }
 
   /** The file's name in its directory. */
@@ -1396,18 +1607,32 @@ class FennecFile {
     return readAt(this.#main, this.#size);
   }
 
-  /** Flushes and lets the file go: the database is kept in it no longer. */
+  /**
+   * Flushes and lets the file go, whatever throws: the database is kept in
+   * it no longer; a second call does nothing. After a trap nothing enters
+   * the module and nothing is thrown, the handles closed with nothing
+   * written: left open, they refused the open the error asks for, as
+   * "open elsewhere".
+   */
   close() {
+    if (this.#closed) return;
+    this.#closed = true;
     try {
-      this.flush();
+      if (!stoppedOf(this.#fennec)) this.flush();
     } finally {
       kept.delete(this.#fennec);
-      this.#fennec.journal(false);
-      this.#main.close();
-      this.#aside.close();
       const names = holding.get(this.#where);
-      names?.delete(this.#name);
+      if (names?.get(this.#name) === this) names.delete(this.#name);
       if (names?.size === 0) holding.delete(this.#where);
+      try {
+        if (!stoppedOf(this.#fennec)) this.#fennec.journal(false);
+      } finally {
+        try {
+          this.#main.close();
+        } finally {
+          this.#aside.close();
+        }
+      }
     }
   }
 
@@ -1425,10 +1650,10 @@ class FennecFile {
 
 /**
  * Synchronous access to `name` in `dir`, created if absent; held
- * elsewhere, asked for again for `HELD_MS` -- held by this worker
- * (`ours`), refused at once.
+ * elsewhere, asked for again for `HELD_MS`, and kept by a database of this
+ * worker (`mine`), refused at once or taken.
  */
-async function syncAccess(dir, name, ours) {
+async function syncAccess(dir, name, mine) {
   const fh = await dir.getFileHandle(name, { create: true });
   if (typeof fh.createSyncAccessHandle !== 'function') {
     throw new FennecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
@@ -1441,12 +1666,24 @@ async function syncAccess(dir, name, ours) {
       // Safari names a held file InvalidStateError, where the standard
       // (and Chrome and Firefox) say NoModificationAllowedError.
       if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
-      if (ours || Date.now() >= until) {
+      // Kept by a database of this worker whose module stopped, its
+      // handles were let go of just now: asked again at once.
+      if (mine()) continue;
+      if (Date.now() >= until) {
         throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
       }
       // Nothing tells when a handle is let go: asked again.
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+}
+
+/** `f()` on the way out of an error, which what it throws never takes the place of. */
+function quietly(f) {
+  try {
+    f();
+  } catch {
+    // The error on its way out says why.
   }
 }
 
@@ -1457,16 +1694,41 @@ async function syncAccess(dir, name, ours) {
  */
 function loads(fennec, bytes) {
   const trial = sibling(fennec);
+  let took;
   try {
     trial.load(bytes);
-    return true;
+    took = true;
   } catch (e) {
     // Refused for collation data: they loaded, and the text needs it.
-    if (e.collation) return true;
-    if (e instanceof FennecError) return false;
-    throw e;
-  } finally {
-    trial.close();
+    if (e.collation) took = true;
+    // No room, a module that stopped: the copy is no less a database, and
+    // a false here empties it.
+    else if (e instanceof FennecError && e.message === NOT_AN_IMAGE) took = false;
+    else {
+      quietly(() => trial.close());
+      throw e;
+    }
+  }
+  trial.close();
+  return took;
+}
+
+/**
+ * `loads` of the copy a rewrite left beside `name`, which may be the one
+ * whole database left: a copy that cannot be tried -- no room in the
+ * module, a module that stopped -- is kept, and the error names it, every
+ * `openFile` of `name` refused so until it is dealt with (the docs'
+ * "Keeping a database" says how). Thrown as it came, it named neither.
+ */
+function copyLoads(fennec, copy, name) {
+  try {
+    return loads(fennec, copy);
+  } catch (e) {
+    throw new FennecError(
+      `${name}~, the copy a rewrite of ${name} left beside it, could not be tried (${e?.message ?? e}): ` +
+        `it is kept, since it may hold the database's last writes; save its bytes and open them where there is room, then remove it`,
+      { cause: e },
+    );
   }
 }
 
@@ -1480,7 +1742,9 @@ function loads(fennec, bytes) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it. A file held elsewhere is waited for 3 s first.
+ * corrupt it. A file held elsewhere is waited for 3 s first; one another
+ * database of this worker keeps is refused at once, or taken from it,
+ * nothing written, once its module stopped (a trap).
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`
@@ -1499,15 +1763,18 @@ async function openFileNow(fennec, name, opts) {
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
   if (!dir) throw new FennecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
   const where = opts.dir ?? null;
-  const ours = holding.get(where)?.has(name) ?? false;
-  const main = await syncAccess(dir, name, ours);
+  // Asked only once a handle is refused: a database of this worker that
+  // keeps the file holds both handles until its file's close, and a handle
+  // granted is no file anyone holds.
+  const mine = () => FennecFile.here(where, name);
+  const main = await syncAccess(dir, name, mine);
   let aside = null;
   // Closed while the file was asked for, its handles are let go of below,
   // and closed while collation data was fetched or the schema checked: the
   // load called the file corrupt, the check the handle not found.
   const live = () => alive(fennec, 'openFile');
   try {
-    aside = await syncAccess(dir, `${name}~`, ours);
+    aside = await syncAccess(dir, `${name}~`, mine);
     live();
     const beside = aside.getSize();
     if (beside > 0) {
@@ -1516,7 +1783,7 @@ async function openFileNow(fennec, name, opts) {
       // when it is not.
       const end = imageEnd(readAt(aside, Math.min(beside, HEAD)));
       const copy = end > 0 && end <= beside ? readAt(aside, beside) : null;
-      if (copy && loads(fennec, copy)) overwrite(main, copy);
+      if (copy && copyLoads(fennec, copy, name)) overwrite(main, copy);
       aside.truncate(0);
       aside.flush();
     }
@@ -1550,7 +1817,7 @@ async function openFileNow(fennec, name, opts) {
     try {
       await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').finally(live);
     } catch (e) {
-      file.close();
+      quietly(() => file.close());
       throw e;
     }
     return file;

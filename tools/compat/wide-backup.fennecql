@@ -1,0 +1,5 @@
+-- A database past a mebibyte, its rows bytes no compressor shrinks.
+get blobs count
+get blobs where n = 7 select n
+get blobs order n desc limit 2 select n
+collections

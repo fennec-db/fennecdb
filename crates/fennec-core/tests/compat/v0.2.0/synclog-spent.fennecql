@@ -1,0 +1,9 @@
+-- The statements every later build answers over synclog.fennec and
+-- synclog-torn.fennec with the sync log beside each: the writes the log
+-- holds and the file lost, and in synclog-torn the last of them lost too.
+get events count
+get events order n
+get events where n = 2
+get events order at desc limit 2 select n, at
+get bulk count
+get bulk where n = 1 select n

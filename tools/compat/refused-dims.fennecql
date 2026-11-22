@@ -1,0 +1,6 @@
+-- A list of vectors of 1 000 000 001 dimensions, SQL's array of them,
+-- which the release reads and a later build refuses at the open.
+collections
+get plain order n
+get plain count
+get wide count

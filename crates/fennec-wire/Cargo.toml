@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # No external dependency of its own: the framing is written by hand, and
 # SCRAM's hashing is fennec-http's. TLS (`sslmode`) is fennec-tls's, behind

@@ -1,0 +1,4 @@
+{"kind":"schemas","collections":[{"name":"plain","fields":[{"name":"n","type":"int","index":"hash"},{"name":"s","type":"text","index":"none"}]},{"name":"lists","fields":[{"name":"l","type":"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]","index":"none"}]}]}
+{"kind":"rows","result":{"columns":["id","n","s"],"rows":[{"id":1,"n":1,"s":"beside it"}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":1}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":0}]}}

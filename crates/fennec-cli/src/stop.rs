@@ -32,6 +32,10 @@ pub fn on_signals() {
     extern "C" fn stop(_sig: i32) {
         stop_once_more();
     }
+    // SAFETY: `stop` is an `extern "C" fn(i32)`, the `void (*)(int)`
+    // `signal` takes as its address, and lives as long as the process; it
+    // stores to an atomic and nothing else, which is async-signal-safe.
+    // No memory is passed.
     unsafe {
         for sig in [2, 15] {
             signal(sig, stop as *const () as usize);

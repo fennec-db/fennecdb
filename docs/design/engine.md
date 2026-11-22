@@ -66,11 +66,18 @@ process's lock go. The lock, the naming, `--read-only` and `.save`'s
 rename are 10.2 KB of code in the smallest `fennec` (`make small`, 16.7 KB
 of file on arm64 macOS, whose pages are 16 KB). A tool that only looks takes none and
 writes nothing: `fennec --read-only`, `fennec mcp --read-only` and `fennec
-types` open with `fs::open_read_only`, which maps the file at its length
+types` open with `fs::open_read_only`, which reads the file at its length
 at the open, passes a record a server is in the middle of appending over
 as a torn tail, cuts nothing and plays no sync log -- the file only grows
 and is replaced only by rename, so the bytes it read are never written
-under it; it reads the file as it stood at the open. The shell refuses a
+under it; it reads the file as it stood at the open. The one exception is
+a server opening the file after a crash, which cuts a torn tail: the
+reader maps the file only up to where no such cut reaches, found by
+reading it, and holds what lies past that in memory of its own, so neither
+its open's walk nor a slice it takes after meets the cut
+([storage.md](storage.md#file-format), *What a reader maps*); on Windows
+the reader's view refuses the cut, the server's open failing by name
+until the reader is gone ([conventions.md](conventions.md#unsafe-code)). The shell refuses a
 write there before the engine sees it: handed over, the read-only sink's
 refusal was a storage error, after which every write said so.
 

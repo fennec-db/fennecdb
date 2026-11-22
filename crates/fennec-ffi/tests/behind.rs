@@ -38,6 +38,9 @@ fn scratch(name: &str) -> PathBuf {
 fn taken(code: i32, out: *mut c_char) -> (i32, String) {
     let text = match out.is_null() {
         true => String::new(),
+        // SAFETY: `out` is not NULL: the text the call just wrote through it,
+        // a NUL-ended `CString`, read once and then freed once, as fennec.h
+        // says.
         false => unsafe {
             let s = CStr::from_ptr(out).to_str().unwrap().to_string();
             fennec_free_string(out);
@@ -50,6 +53,9 @@ fn taken(code: i32, out: *mut c_char) -> (i32, String) {
 fn open(path: &Path, flags: u32) -> u64 {
     let p = path.to_str().unwrap();
     let (mut h, mut out) = (0, std::ptr::null_mut());
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_open(
             p.as_ptr(),
@@ -77,6 +83,9 @@ fn open_with(path: &Path, hook: Hook) -> u64 {
 
 fn query_with(h: u64, sql: &str, params: &str, vectors: &[u8]) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -104,6 +113,8 @@ fn by_handle(
     h: u64,
 ) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: `f` is one of the C ABI's calls taking a handle and the out
+    // pointers: `out` a local to write, `out_len` NULL, as fennec.h allows.
     let code = unsafe { f(h, &mut out, std::ptr::null_mut()) };
     taken(code, out)
 }
@@ -416,6 +427,9 @@ fn what_a_sync_applies_is_written_behind_the_lock_too() {
     );
     let config = r#"{"url":"https://example.test","token":"tk","seed":"ab","shapes":[{"collection":"tasks","key":"key"}]}"#;
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_sync_start(
             h,
@@ -428,6 +442,9 @@ fn what_a_sync_applies_is_written_behind_the_lock_too() {
     assert_eq!(taken(code, out).0, FENNEC_OK);
     let feed = |kind: u32, status: i32, bytes: &[u8]| {
         let mut out = std::ptr::null_mut();
+        // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+        // fennec.h's *Pointers and lengths* allows; the out pointers locals'
+        // or NULL.
         let code = unsafe {
             fennec_sync_feed(
                 h,

@@ -63,9 +63,13 @@ and read exactly (`Database::exactly`).
 
 **[`alter collection` rewrites no document; positions are not
 places.](../../docs/design/fennecql.md#alter-collection)** A drop keeps its place
-until `compact`; `read_fields` takes places (`Schema::place`), never
-positions, and wherever the schema changes the store is told its dropped
-places (`Store::set_dropped`).
+for the collection's life: `compact` makes its values `null`s
+(`schema::reclaim`) and renumbers nothing, in memory, in the file or on a
+copy, which no record tells of a compact
+([storage.md](../../docs/design/storage.md#dropped-places)); a field past
+`schema::MAX_PLACES` places, dropped ones counted, is refused. `read_fields`
+takes places (`Schema::place`), never positions, and wherever the schema
+changes the store is told its dropped places (`Store::set_dropped`).
 
 **[A `json` field holds any value, and a path is a
 name.](../../docs/design/fennecql.md#json-fields-and-paths)** A field name holds

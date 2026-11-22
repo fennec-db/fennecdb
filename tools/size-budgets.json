@@ -18,8 +18,8 @@
     },
     "small": {
       "build": "make small TARGET=x86_64-unknown-linux-musl",
-      "measured": 2972160,
-      "budget": 2988000
+      "measured": 2988544,
+      "budget": 3004000
     }
   }
 }

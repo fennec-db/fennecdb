@@ -42,6 +42,14 @@ changed (`Tails::all_changed`).
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by
 `Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.
+A compact renumbers no place and is refused for nothing a document holds:
+one it cannot read is copied as it is, a graph it cannot rebuild kept
+([dropped places](../../../../docs/design/storage.md#dropped-places)); a
+copy reads each primary's write as it was made (`Schema::read_written`),
+refusing one made by other places. From the first store it changes until
+each points at the new file, a panic, a store refusing or a file the sink
+cannot map fails the database (`compact_unwound`, `repoint`); a refusal the
+server's compaction meets again is logged once and counted.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room

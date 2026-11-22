@@ -39,6 +39,19 @@ test('the client reaches the builder and the HTTP client, and nothing of the eng
   assert.deepEqual([...(await graph('fennec.js')).keys()].sort(), ['builder.js', 'fennec.js', 'http.js']);
 });
 
+test("fennec.js's one static block is Fennec's, so an app bundling connect through it drops the rest", async () => {
+  // A static block runs as the module loads: a bundler keeps it, its class
+  // and all that reaches. FennecFile's look at a name its worker keeps was
+  // one, which kept the class in an app that opens no file (esbuild: 2.0 KB).
+  const code = (await readFile(new URL('./fennec.js', import.meta.url), 'utf8'))
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  // Each block by the class declared last before it.
+  const blocks = [...code.matchAll(/^\s*static\s*\{/gm)].map(
+    (m) => [...code.slice(0, m.index).matchAll(/^(?:export\s+)?class\s+(\w+)/gm)].at(-1)?.[1],
+  );
+  assert.deepEqual(blocks, ['Fennec']);
+});
+
 test('the client exports what fennec.js does of it, the same objects', () => {
   assert.deepEqual(Object.keys(client).sort(), [
     'Call', 'FennecError', 'FennecHttp', 'Param', 'Query', 'and', 'bucket', 'call', 'connect', 'countDistinct', 'distance', 'expr', 'first', 'from', 'inc', 'last', 'not', 'or', 'param', 'raw', 'sseEvents',

@@ -274,7 +274,9 @@ fn a_crash_after_spills_loses_the_block_alone() {
     drop(a);
     let a = open_mapped(&a_path).unwrap();
     same(&a, &b);
-    assert_eq!(std::fs::metadata(&a_path).unwrap().len(), before);
+    // Cut where the spills began, and a close's mark after the cut
+    // (`fs::FileSink::cut`), 8 bytes.
+    assert_eq!(std::fs::metadata(&a_path).unwrap().len(), before + 8);
     drop(a);
     let _ = std::fs::remove_file(&a_path);
     let _ = std::fs::remove_file(&b_path);
