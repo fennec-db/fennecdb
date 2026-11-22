@@ -805,8 +805,10 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let io = |e: std::io::Error| Error::Io(e.to_string());
     let mut r = std::io::BufReader::with_capacity(1 << 20, input);
     let mut magic = [0u8; MAGIC.len()];
-    r.read_exact(&mut magic)
-        .map_err(|_| Error::Corrupt("invalid fennecdb signature".into()))?;
+    r.read_exact(&mut magic).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => Error::Corrupt("invalid fennecdb signature".into()),
+        _ => io(e),
+    })?;
     if magic != MAGIC[..] {
         return Err(Error::Corrupt("invalid fennecdb signature".into()));
     }
@@ -814,6 +816,13 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let mut chunk = vec![0u8; 1 << 16];
     let short =
         |at: u64| Error::Corrupt(format!("the record at {at} runs past the end of the file"));
+    // A record cut short by the bytes' end; any other error of the reader
+    // as it came -- a replica's stream halted or cut, a disk's read -- which
+    // read as damage of the image had a replica take a halt for a torn one.
+    let cut = |e: std::io::Error, at: u64| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => short(at),
+        _ => io(e),
+    };
     loop {
         let mut kind = [0u8; 1];
         if r.read(&mut kind).map_err(io)? == 0 {
@@ -823,7 +832,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         // The counter's head is at the front alone ([`whole_record`]).
         if byte == REC_SEQ && at == MAGIC.len() as u64 {
             let mut h = [0u8; REC_SEQ_LEN - 1];
-            r.read_exact(&mut h).map_err(|_| short(at))?;
+            r.read_exact(&mut h).map_err(|e| cut(e, at))?;
             at += REC_SEQ_LEN as u64;
             n += 1;
             continue;
@@ -839,7 +848,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
             let mut shift = 0;
             loop {
                 let mut b = [0u8; 1];
-                r.read_exact(&mut b).map_err(|_| short(at))?;
+                r.read_exact(&mut b).map_err(|e| cut(e, at))?;
                 head.push(b[0]);
                 if shift > 63 {
                     return Err(Error::Corrupt(format!(
@@ -869,7 +878,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         let mut left = summed;
         while left > 0 {
             let take = left.min(chunk.len() as u64) as usize;
-            r.read_exact(&mut chunk[..take]).map_err(|_| short(at))?;
+            r.read_exact(&mut chunk[..take]).map_err(|e| cut(e, at))?;
             if is_checked {
                 crc = crc32c(crc, &chunk[..take]);
             }
@@ -877,7 +886,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         }
         if is_checked {
             let mut sum = [0u8; SUM];
-            r.read_exact(&mut sum).map_err(|_| short(at))?;
+            r.read_exact(&mut sum).map_err(|e| cut(e, at))?;
             if u32::from_le_bytes(sum) != crc {
                 return Err(Error::Corrupt(format!(
                     "the record at {at} fails its checksum"
@@ -2872,6 +2881,16 @@ pub trait Sink: Send {
     /// rewrite then holds the write lock ([`Self::rewrite_with`]).
     #[cfg(not(target_arch = "wasm32"))]
     fn side(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Where an image taken from elsewhere -- a replica's of its primary --
+    /// is written as it arrives, before it takes this file's place
+    /// ([`Self::adopt`], [`Database::adopt_side`]): a name of its own, never
+    /// [`Self::side`]'s, which a `compact` beside the database may be
+    /// writing meanwhile. `None` for every sink but a file's, and the image
+    /// is then taken in memory.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_side(&self) -> Option<std::path::PathBuf> {
         None
     }
     /// Puts the file at `side`, an image of every write so far and fsynced,
@@ -9136,6 +9155,92 @@ impl Database {
         *self.appended.get_mut() = image.len() as u64;
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_landed();
+        self.take_contents(fresh);
+        // The image is the file now: a mapped database reads the documents
+        // from there rather than holding the copy it was handed. Written
+        // elsewhere, it is walked to find them.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint(None, &[])?;
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// Whether the documents are read where they lie in the file mapped,
+    /// rather than held in memory (`fs::open_in_memory`, a server's
+    /// `--no-mmap`): how an image taken for this database is loaded
+    /// ([`Self::from_side`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_mapped(&self) -> bool {
+        self.mapped
+    }
+
+    /// Where an image taken for this database from elsewhere is written as
+    /// it arrives ([`Sink::image_side`]): `None` where its sink has no file,
+    /// and the image is taken in memory ([`Self::adopt`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .image_side()
+    }
+
+    /// The database an image written whole into `side` holds -- a replica's
+    /// of its primary, its follow record after it, synced -- loaded as a
+    /// database held as `mapped` says: its documents read where they lie in
+    /// the file, which is the database's own once [`Self::adopt_side`]
+    /// renames it in, what is derived from them alone built in memory; or
+    /// read into memory, where the database is held there. An image cut
+    /// short of a whole record is refused: one is whole, or none.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn from_side(side: &mut crate::fs::SideFile, mapped: bool) -> Result<Database> {
+        let len = ImageOut::at(side);
+        let mut fresh = Database::new();
+        let whole = match mapped {
+            true => fresh.load_mapped(side.map()?)?,
+            false => fresh.load(&side.read_back()?)?,
+        };
+        if (whole as u64) < len {
+            return Err(Error::Corrupt(format!(
+                "the image is cut short: the record at byte {whole} runs past its end, {len}"
+            )));
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::adopt`] of an image taken into the file beside this one
+    /// ([`Self::image_side`]) as it arrived and loaded from there
+    /// ([`Self::from_side`]): the sink renames it into the file's place
+    /// ([`Sink::adopt`], as a `compact` beside the database puts its file
+    /// there: held to its handle's name, the file's mode, the sync log
+    /// forgotten, the directory synced), and the stores `fresh` read from it
+    /// stand, their file the database's now. Nothing is written under the
+    /// lock but the rename, and nothing walked: taken in memory, the image
+    /// was written to disk here whole and every record head walked again.
+    /// Refused, the file is as it was, and `side` goes as it drops.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn adopt_side(&mut self, fresh: Database, mut side: crate::fs::SideFile) -> Result<()> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().adopt(side.path());
+        self.storage(r)?;
+        side.adopted();
+        *self.appended.get_mut() = ImageOut::at(&side);
+        self.forget_landed();
+        self.take_contents(fresh);
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// What [`Self::adopt`] and [`Self::adopt_side`] take of `fresh`: its
+    /// collections, history and statements, its change ring under this
+    /// one's size; the sink, the watcher and the plugins stay.
+    fn take_contents(&mut self, fresh: Database) {
         let cap = self.changes.capacity();
         self.collections = fresh.collections;
         self.order = fresh.order;
@@ -9164,16 +9269,6 @@ impl Database {
         {
             self.kept = 0;
         }
-        // The image is the file now: a mapped database reads the documents
-        // from there rather than holding the copy it was handed. Written
-        // elsewhere, it is walked to find them.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.repoint(None, &[])?;
-        self.dirty = false;
-        if let Some(w) = &self.watcher {
-            w.notify(self.changes.seq());
-        }
-        Ok(())
     }
 
     // ---------------------------------------------------------------- blocks

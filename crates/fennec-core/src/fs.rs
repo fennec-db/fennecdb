@@ -1273,6 +1273,11 @@ impl Sink for FileSink {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn image_side(&self) -> Option<PathBuf> {
+        Some(beside(&self.path, "taking"))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn adopt(&mut self, side: &Path) -> Result<()> {
         let mut disk = lock(&self.disk);
         if let Some(e) = &disk.failed {
@@ -1847,6 +1852,12 @@ impl SideFile {
         &self.path
     }
 
+    /// The file written, open: what a rename of it by its name is held to
+    /// first ([`still_named`]) -- a tenant's import (fennec-http).
+    pub fn file(&self) -> &File {
+        self.out.w.get_ref()
+    }
+
     /// Has what is written from here on kept out of the page cache, where
     /// the system lets a file ask: a compact whose new file would not fit
     /// in memory beside the old one ([`crate::cache::room`]). Written
@@ -1903,6 +1914,43 @@ impl SideFile {
     /// Taken in place of the database's file: not to be removed.
     pub fn adopted(&mut self) {
         self.adopted = true;
+    }
+
+    /// What is written so far, read back through the handle that wrote it:
+    /// an image taken for a database held in memory (`--no-mmap`), which
+    /// reads its file whole as its open would.
+    pub fn read_back(&mut self) -> Result<Vec<u8>> {
+        self.out.w.flush()?;
+        let f = self.out.w.get_mut();
+        let mut bytes = Vec::new();
+        f.seek(SeekFrom::Start(0))?;
+        f.read_to_end(&mut bytes)?;
+        f.seek(SeekFrom::End(0))?;
+        Ok(bytes)
+    }
+}
+
+/// `file` mapped whole, read-only: a database written beside and opened
+/// through the handle that wrote it, never by its name -- an archive's end
+/// as a consolidating round assembles it (fennec-http's `end_image`),
+/// whose documents are then read where they lie rather than read into
+/// memory.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+pub fn mapped(file: &File) -> Result<crate::store::Base> {
+    let len = file.metadata()?.len() as usize;
+    Ok(Arc::new(Mapping::of(file, len)?))
+}
+
+/// A side file as a byte stream: what a replica's image arriving off its
+/// stream is copied into as it is checked (fennec-http's `take_image`).
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+impl std::io::Write for SideFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        ImageOut::write(self, bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.w.flush()
     }
 }
 

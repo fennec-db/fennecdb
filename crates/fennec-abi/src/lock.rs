@@ -117,6 +117,9 @@ impl Sink for Holding {
     fn side(&self) -> Option<std::path::PathBuf> {
         self.sink.side()
     }
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink.image_side()
+    }
     fn adopt(&mut self, side: &std::path::Path) -> CoreResult<()> {
         self.sink.adopt(side)
     }
