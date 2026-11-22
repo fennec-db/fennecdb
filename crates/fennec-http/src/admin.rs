@@ -151,7 +151,7 @@ fn admitted(cfg: &Config, req: &Request) -> Option<Response> {
 /// (docs/design/replication.md#an-image-sent-as-it-is-read). The answer's
 /// status, and whether the connection may go on.
 pub(crate) fn export(
-    out: &mut impl Write,
+    out: &mut &crate::conn::Conn,
     tenants: &Tenants,
     cfg: &Config,
     req: &Request,
@@ -159,7 +159,7 @@ pub(crate) fn export(
 ) -> (u16, bool) {
     let mut answer = |resp: Response| {
         let status = resp.status;
-        let sent = crate::cors(resp, cfg).write(&mut *out, keep_alive, false);
+        let sent = crate::cors(resp, cfg).write(out, keep_alive, false);
         (status, sent.is_ok())
     };
     if let Some(no) = admitted(cfg, req) {
@@ -172,7 +172,7 @@ pub(crate) fn export(
     };
     let mut head = String::with_capacity(256);
     head.push_str("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ");
-    head.push_str(&image.len().to_string());
+    crate::http::push_number(&mut head, image.len());
     head.push_str("\r\nConnection: ");
     head.push_str(if keep_alive { "keep-alive" } else { "close" });
     head.push_str("\r\n");
@@ -190,8 +190,9 @@ pub(crate) fn export(
     crate::audit::push_verified(&mut head);
     head.push_str("\r\n");
     // A store's records go out a document at a time: through a buffer, as
-    // a replica's stream sends them.
-    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, &mut *out);
+    // a replica's stream sends them -- the same one, a writer of the same
+    // type, whose code the binary holds once.
+    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, *out);
     let sent = (w.write_all(head.as_bytes()))
         .and_then(|_| image.write_to(&mut w))
         .and_then(|_| w.flush());
