@@ -618,7 +618,31 @@ buffers are most of it: the stream's (1 MiB), the check's (1 MiB and 64
 KiB), the side file's writer, the primary's own (1 MiB), a sealed frame and
 its seal (2 MiB). On the receivers before this each failed at the first
 size: the replica held 19.5 MB, the backup 26.5, the archive's end 32.5,
-the move 24.5. FIGURES_FOLLOW
+the move 24.5.
+
+A follow of 250 000 rows of a kilobyte, a 253 MB file, timed from the
+replica's start to its first image, three rounds each (Linux, aarch64,
+musl, release, in a container of 3 CPUs; macOS's loopback, 49.7 days up,
+stalled every transfer past 16 KB): round 1's replica took it in 1.31-1.48
+s and 0.77-1.00 s of CPU, its resident set peaking at 770 MB, 514 MB of it
+anonymous; this one in 0.74-0.88 s and 0.34-0.40 s of CPU, peaking at
+9.2-9.8 MB, 4.2-5.3 MB anonymous. The image is written once, into its
+file as it comes, and opened there by its offset index, where it was read
+whole, checked, loaded, written over the file again and every record's
+head walked to point the stores at it.
+
+fennec-server's code grows 30.7 KB for it (macOS arm64, release, its text
+against round 1's), `fennec` 13.2 KB: the import read as it comes and
+checked beside the tenant's file (`Tenants::import_from`,
+`admin::import`, about 6.5 KB), `check_reader` now linked where only the
+copy's in-memory check was (4.1 KB), the copy's contents taken by one
+path for both adoptions (`take_contents`, `from_side`), the follower's
+image path, the streaming sealer, and the readers the check reads through.
+The copying reader is one type over a `dyn Read` and a copy with no file
+takes its image into a plain `Vec`: a reader type per stream, and a
+writer of its own for the in-memory image, were each a reader's or a
+writer's every method made again. The browser module is the same size,
+none of it reaching wasm32.
 
 Still read whole: a sealed archive's base image as a restore or a
 consolidating round assembles its end (`read_whole`, then `open_whole`),
