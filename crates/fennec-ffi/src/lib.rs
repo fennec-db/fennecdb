@@ -71,7 +71,9 @@ use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
-#[cfg(feature = "jni")]
+// Built for the unit tests too, which hold its answers' lengths without a
+// JVM: CI's runs build the library without the feature.
+#[cfg(any(feature = "jni", test))]
 mod jni;
 
 /// The codes a call returns: 0, an `Error`'s kind, or one of the boundary's.
@@ -320,6 +322,19 @@ impl Native {
 
 // ----------------------------------------------------------- the boundary
 
+/// What a caught panic answers as: `FENNEC_PANIC`'s JSON, its message in it.
+fn panicked(panic: &(dyn std::any::Any + Send)) -> String {
+    let why = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into());
+    let mut text = String::from("{\"kind\":\"error\",\"message\":");
+    json::escape_into(&mut text, &format!("internal error: {why}"));
+    text.push('}');
+    text
+}
+
 /// Runs a call under `catch_unwind` and writes what it answered, or failed
 /// with, through the out pointers.
 ///
@@ -333,17 +348,7 @@ unsafe fn call(
     let (code, text) = match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(text)) => (FENNEC_OK, text),
         Ok(Err((code, text))) => (code, Some(text)),
-        Err(panic) => {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic".into());
-            let mut text = String::from("{\"kind\":\"error\",\"message\":");
-            json::escape_into(&mut text, &format!("internal error: {why}"));
-            text.push('}');
-            (FENNEC_PANIC, Some(text))
-        }
+        Err(panic) => (FENNEC_PANIC, Some(panicked(&*panic))),
     };
     let (ptr, len) = match text.map(CString::new) {
         Some(Ok(c)) => {
