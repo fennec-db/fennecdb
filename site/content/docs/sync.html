@@ -767,8 +767,10 @@ await unpersist(`tasks:${userId}`);   // refused while a replica keeps it in thi
 <p><code>unpersist</code> asks <code>navigator.locks</code> whether a
 replica keeps the key, or the lock manager it is given
 (<code>unpersist(key, { locks })</code>, the one the replicas were given).
-It deletes that key's records alone -- never another key's whose name
-begins with it and <code>#</code>. Every database's next
+It deletes that key's records alone; its chunks are stored under the key,
+<code>#</code> and nine digits, so another key whose name is
+<code>&lt;key&gt;#</code> followed by nine digits is read as this key's
+chunk -- avoid such names. Every database's next
 <code>persist</code> in this page stores its image whole; another page's
 plain <code>persist</code> of the key is not reached, and goes on in chunks
 that a <code>restore</code> does not find, so a key one page persists is

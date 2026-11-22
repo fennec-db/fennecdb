@@ -1771,16 +1771,17 @@ export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOp
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /**
  * Deletes what `persist` stored under `key` -- its image and its chunks, a
- * replica's unsent writes among them -- and nothing else, not another
- * key's whose name begins with `key#`: a replica whose store does not
- * restore is seeded anew after it. Refused while a replica
- * (`sync`'s `persist`) keeps the key in this browser, asked of `locks` --
- * the lock manager the replicas were given -- or `navigator.locks`; one
- * this page closed is waited for. With neither, a replica that keeps the
- * key stores nothing there from then on (`status()`'s `unkept`). Every
- * database's next `persist` in this page stores its image whole; another
- * page's plain `persist` of the key is not reached, and goes on in chunks
- * its `restore` does not find.
+ * replica's unsent writes among them -- and nothing else: a replica whose
+ * store does not restore is seeded anew after it. Its chunks are stored
+ * under `key#` and nine digits: another key whose name is `key#` followed
+ * by nine digits is read as this key's chunk; avoid such names. Refused
+ * while a replica (`sync`'s `persist`) keeps the key in this browser,
+ * asked of `locks` -- the lock manager the replicas were given -- or
+ * `navigator.locks`; one this page closed is waited for. With neither, a
+ * replica that keeps the key stores nothing there from then on
+ * (`status()`'s `unkept`). Every database's next `persist` in this page
+ * stores its image whole; another page's plain `persist` of the key is
+ * not reached, and goes on in chunks its `restore` does not find.
  */
 export function unpersist(key: string, opts?: { locks?: SyncOptions['locks'] }): Promise<void>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */

@@ -496,10 +496,12 @@ nothing of fennecdb's holds either up. Deleted under the page, or with the
 site's data cleared, the database is stored whole by the next
 <code>persist</code>, which a <code>restore</code> then finds.
 <code>unpersist(key)</code> deletes one key's image and chunks and nothing
-else, not another key's whose name begins with <code>key#</code>, refused
-while a replica keeps the key (<a href="sync.html#one-writer">Sync</a>);
-every database's next <code>persist</code> in this page then stores its
-image. A
+else, refused while a replica keeps the key
+(<a href="sync.html#one-writer">Sync</a>); every database's next
+<code>persist</code> in this page then stores its image. A key's chunks are
+stored under <code>key#</code> and nine digits: another key whose name is
+<code>key#</code> followed by nine digits is read as this key's chunk;
+avoid such names. A
 <code>persist</code> or
 <code>putState</code> past the quota is refused with
 <code>QuotaExceededError</code>, what was stored before standing. Over 32.4 MB (61 000 rows with a

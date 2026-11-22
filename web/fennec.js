@@ -1178,7 +1178,9 @@ const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
  * The range `key`'s chunks are in. Other keys can be too -- `notes#1` is
  * between `notes#000000000` and `notes#999999999` -- so what it holds is
  * read as `isChunk` says: the range alone, `key#` to `key#\uffff`, took
- * another key's records, `notes#archive` and its chunks among them.
+ * another key's records, `notes#archive` and its chunks among them. A key
+ * named `key#` and nine digits is read as one of its chunks all the same:
+ * the docs say to avoid such names, `persist` taking any.
  */
 const chunkRange = (key) => IDBKeyRange.bound(chunkKey(key, 0), `${key}#999999999`);
 const isChunk = (key, k) => /^\d{9}$/.test(k.slice(key.length + 1));
