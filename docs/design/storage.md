@@ -763,12 +763,12 @@ what the open knows -- "a torn tail: no whole record after it says a sync
 covered it" -- where it said "none of it a write answered as durable",
 which those two make false.
 
-*What a cut leaves.* The open that cuts appends a close's mark after the
-cut (`REC_SYNCED`, its claim its own start) and fsyncs the two together
-(`FileSink::cut`, `Database::cut_to`): every byte before the mark was
-read by that open -- below D unchecked, past it held to its sums -- and is
-durable once the fsync returns, and the mark says so, so the next open
-finds D at the cut and reads the file as the open that cut it did. The
+*What a cut leaves.* The open that cuts leaves a close's mark after what
+it keeps (`REC_SYNCED`, its claim its own start; `FileSink::cut`,
+`Database::cut_to`): every byte before the mark was read by that open --
+below D unchecked, past it held to its sums -- and is durable before the
+mark is, and the mark says so, so the next open finds D at the cut and
+reads the file as the open that cut it did. The
 records claiming D are most often the newest whole ones, past the damage,
 and they go with the tail: unmarked, as every version from v0.2.0, which
 brought the claims, cut until the fix (2026-11-22), the next open found
@@ -786,32 +786,98 @@ train). Only where a record the open keeps carries a sum
 past the counter in a file this version wrote): in a file of no sums --
 a version before checksums wrote it, its torn tail cut -- no claim decides
 what an open reads, and the mark would be the first record that version
-refuses. The mark is the record v0.2.0's closes write, and its survey
-takes the mark's claim for D as this one's does, so a v0.2.0 binary reads
-a cut file as this build does. It is written after the cut and before
-the fsync: a crash before that fsync returns leaves the file as it was,
-cut and marked, or cut with the mark lost or torn -- read as an unmarked
-cut was, the one window left. An open that cuts nothing runs none of it.
+refuses. Nor where a mark whole by its sum already ends the records kept
+-- a close's, or the one a cut a crash stopped left (below): it claims
+them as the cut's would, and the cut is the length's alone. The mark is
+the record v0.2.0's closes write, and its survey takes the mark's claim
+for D as this one's does, so a v0.2.0 binary reads a cut file as this
+build does. An open that cuts nothing runs none of it.
 The browser module reads no claim, checking every record past the image,
 so its own cut (`openFile`'s truncate) needs no mark and makes none: it
 reads a file a native open cut and marked as it read the file before the
 cut (refused, both, where a whole record claims past a row failing its
 sum; unmarked, it took the cut file by cutting the two synced rows too).
-Measured (rusage's instruction counter, arm64 macOS, a release build of
-each tree, 3 rounds of 15 opens, medians, 2026-11-22): an open cutting
-a torn tail off a file of 24 rows takes 602 k -> 736 k instructions
-mapped (576 k -> 709 k read into memory), of 10 024 rows 2.53 M ->
-2.68 M (3.78 M -> 3.92 M); the same files without a tail open in the
-same count either side (392 k -> 390 k, 2.258 M -> 2.269 M mapped, the
-least of each run overlapping). The 133 k-145 k is the kernel's: a cut
-and fsync alone, with and without the 8 bytes written between, differ
-by 63 k on a file just written and by 128 k-147 k on an APFS clone,
-as the measured copies were. `fennec-server`'s `__text` +512 bytes (the
-release build, arm64 macOS; the file the same size, page-padded); the
-browser module the same bytes, none of it built there.
-Held by `a_file_an_open_cut_opens_again_as_that_open_read_it` (a
-file torn as `torn-wide` is, cut by each way an open writes and opened
-again by every way, read-only too) and
+
+*The cut's order.* Three fsyncs, each before what would claim more than
+the disk holds without it: the pages one fsync covers reach the disk in
+no set order, the file's length among them. 1. The file is fsynced: the
+pages the earlier process never synced, which the open read from the
+page cache after a crash of the process alone, and the torn tail with
+them. 2. The mark is written over the first eight bytes the cut takes --
+the torn record's head, in place -- and fsynced. 3. The file is cut after
+the mark (`set_len`, which grows it where the tail was shorter than the
+mark) and fsynced. A power cut leaves, before step 1 returns, the file
+the earlier crash left, nothing of the cut on the disk; after step 1, the
+torn file the open read, durable, which the next open cuts as this one
+did; inside step 2, that, or the mark over the torn record's head, or
+its length alone where it grew the file (zeros at the cut, a torn tail);
+after step 2, the mark and the rest of the torn record after it, which
+the next open reads with D at the cut, as this open read it, cutting the
+rest after the mark and marking nothing (a whole mark ends what it
+keeps); inside step 3, that or the file cut and marked; after it, the
+file cut and marked. Each opens, every way a file opens, as the open
+that cut it read it, cutting nothing it kept, and every open that
+writes leaves it as the uninterrupted cut does, the bytes kept and one
+mark. The cut's first form (00a72b47) wrote the mark after the cut under
+one fsync, the only one: that fsync was also what made the earlier
+process's pages durable, so a power cut could keep the mark and lose
+one of those pages, which the next open read below D unchecked -- a row
+as the zeros the disk held, silently, or the open refused ("the record
+at 3097 fails its checksum, and the whole record at 12259 says the file
+was durable past it", the review's file) -- or keep the cut and lose the
+mark, the unmarked cut again. The review's order -- the mark over the
+torn record's head, the cut, one fsync -- left the second: a file's
+shorter length can reach the disk before an overwrite inside it, so the
+mark is fsynced before the cut is made.
+
+One window is left, inside step 2: the mark's eight bytes written in
+part, which a power cut leaves where they cross a sector's end (the cut
+in the last seven bytes before a 512-byte boundary). The next open finds
+no frame at the cut and stops its walk there, so D is the claim of the
+records kept alone. Where that is D -- the torn record did not frame, or
+nothing past it claimed more -- it reads the file as the open that cut
+it did. Where the records past the cut raised D, and a row between the
+two points fails its sum (`torn-wide`'s shape), the records past the
+cut, still on the disk until step 3, claim past that row, and the open
+is refused naming it; it is never read otherwise, nor anything kept cut.
+Closing it too needs a frame at the cut that a torn write leaves whole,
+which no eight bytes written over the torn record's head are.
+
+On Windows a view another process maps of the file refuses the cut itself
+(step 3; `cut_refused`, `SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`, the
+message naming the views): marked, the mark is on the disk by then over
+the torn record's head, the length kept, and the open once the views go
+reads that file as above; unmarked, nothing was written.
+
+Measured (rusage's instruction counter and the wall clock, arm64 macOS,
+a release build of each tree, 3 rounds of 15 opens of an APFS clone of
+each file, the two binaries alternating, medians of the rounds' medians,
+the 1-minute load 2.4, 2026-11-22), against the cut's first form: an
+open cutting a torn last row off a file of 24 rows takes 1.191 M ->
+1.417 M instructions mapped (1.165 M -> 1.383 M read into memory), of
+10 024 rows 4.210 M -> 4.468 M (4.681 M -> 4.949 M) -- +218 k-268 k, the
+kernel's two fsyncs more -- and 5.6 ms -> 13.6 ms of wall time on the 24
+rows mapped (7.2 ms -> 15.4 ms on the 10 024), each `F_FULLFSYNC` about
+4 ms here, on an open only a crash leaves a tail for; one cutting a torn
+record right after a close's mark, which now claims what it keeps, takes
+1.205 M -> 1.086 M (4.173 M -> 4.049 M), one fsync either side; the
+files without a tail open in the same count (561 k -> 562 k, 3.251 M ->
+3.250 M mapped). The first form had cost 133 k-145 k over no mark (602 k
+-> 736 k on its own files of 24 rows). `fennec-server`'s `__text`
+4 974 016 -> 4 974 592 bytes (+576; +1 088 over no mark; the release
+build, arm64 macOS; the file +16 bytes); the browser module the same
+862 018 bytes, none of it built there.
+Held by `a_cut_a_power_cut_stops_at_any_step_opens_as_the_cutting_open_read_it`
+(fs.rs: from the steps each way an open writes took, every file a power
+cut after each may leave -- each write after the last fsync lost, whole,
+its length alone or half of it either way, and before the first fsync
+bytes the earlier process never synced lost too -- of a file torn as
+`torn-wide` is and of one whose kept rows no fsync covered, torn long and
+short, opened every way, read-only too; on the cut's first form it read
+the lost bytes as zeros and cut the synced rows),
+`a_file_an_open_cut_opens_again_as_that_open_read_it` (a file torn as
+`torn-wide` is, cut by each way an open writes and opened again by every
+way, read-only too) and
 `torn_wide_cut_by_an_open_opens_again_as_that_open_read_it` (the fixture
 itself, answering as v0.2.0 did after each).
 

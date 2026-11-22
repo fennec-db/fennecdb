@@ -349,7 +349,7 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
         run(&mut db, "put other {x: 1}");
         db.sync().unwrap();
     }
-    let whole = std::fs::metadata(&path).unwrap().len();
+    let whole = std::fs::read(&path).unwrap();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -358,8 +358,14 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
     drop(f);
     {
         let mut db = open_mapped(&path).unwrap();
-        // Cut, and a close's mark after the cut (`fs::FileSink::cut`).
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 8);
+        // Cut, and no mark of its own: the close's ends what it keeps, and
+        // claims it (`fs::FileSink::cut`).
+        let mark = fennec_core::engine::record_claiming(14, 0, &[], 4096, 4096);
+        assert!(whole.ends_with(&mark), "no close's mark");
+        assert!(
+            std::fs::read(&path).unwrap() == whole,
+            "not cut where it was"
+        );
         run(&mut db, "put other {x: 2}");
         db.sync().unwrap();
         assert_eq!(answer(&db, "get other select x", &[]).rows.len(), 2);

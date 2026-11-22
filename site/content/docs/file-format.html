@@ -125,9 +125,13 @@ file is cut there, and the server logs how many bytes and records went
 (<code>a torn tail: no whole record after it says a sync covered
 it</code>). A write answered as durable is among them only where the disk
 damaged the last record it had synced, which no record after it can
-vouch for. The open syncs the cut with a mark after it (kind 14), which
+vouch for. The open leaves a mark after what it keeps (kind 14), which
 says everything it kept was durable: the records that said so may have
-gone with the tail, and the next open reads the file as this one did.
+gone with the tail, and the next open reads the file as this one did. It
+syncs the file first, then the mark, written where the cut begins, then
+the cut, so the next open reads the file the same way wherever a power
+cut stops it; a mark half written across a disk sector can at worst have
+it refuse the file, naming the damaged record, never read it otherwise.
 v0.2.0 made no mark there, and the open after its cut could cut again,
 synced records the first had kept among them.</p>
 

@@ -468,23 +468,14 @@ pub(super) fn cut_and_open(
     // The mappings this process let go of before, whose views a thread
     // may still be letting go ([`map::unmapped`]).
     map::unmapped();
-    // Through the sink's handle, as its `cut` does after, for the error's
-    // number: the system's words for it name no view.
-    let cut = super::lock(&sink.disk).file.set_len(whole as u64);
-    if let Err(e) = cut {
-        return Err(match e.raw_os_error() {
-            Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
-                "the file's last record was cut short, and Windows cuts no file a view \
-                 maps: another process maps it, or a stream or a pinned read of this one \
-                 still reads it, and it opens once they let it go ({e})"
-            )),
-            _ => e.into(),
-        });
-    }
     // Marked, the open after the cut finds nothing to cut. Unmarked, the
     // records claiming how far the file was durable gone with the tail, it
     // found a synced record this open read unchecked a tail to cut again,
-    // and failed (`CUTTING`; `FileSink::cut`).
+    // and failed (`CUTTING`; `FileSink::cut`). A view refuses the cut
+    // itself, the last step but its fsync ([`cut_refused`]): marked, the
+    // mark is on the disk by then, over the torn record's first bytes, and
+    // the open once the views go reads the file as this one did, cutting
+    // the rest of that record after the mark, which it does not mark again.
     sink.cut(whole, marked)?;
     let path = sink.path().to_path_buf();
     drop(sink);
@@ -507,8 +498,20 @@ pub(super) fn cut_and_open(
 }
 
 /// `SetEndOfFile`'s refusal of a file a view maps.
-#[cfg(target_pointer_width = "64")]
 const ERROR_USER_MAPPED_FILE: i32 = 1224;
+
+/// A cut's refusal (`fs::cut_file`), said by name where a view refused it:
+/// the system's words for it name no view.
+pub(super) fn cut_refused(e: io::Error) -> crate::error::Error {
+    match e.raw_os_error() {
+        Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
+            "the file's last record was cut short, and Windows cuts no file a view \
+             maps: another process maps it, or a stream or a pinned read of this one \
+             still reads it, and it opens once they let it go ({e})"
+        )),
+        _ => e.into(),
+    }
+}
 
 #[cfg(target_pointer_width = "64")]
 thread_local! {
@@ -1305,13 +1308,19 @@ pub(super) mod tests {
         let mut db = super::super::open(&path).unwrap();
         db.fork(7).unwrap();
         drop(db);
-        let whole = std::fs::metadata(&path).unwrap().len();
+        let kept = std::fs::read(&path).unwrap();
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
         drop(f);
         let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
-        // Cut, and a close's mark after the cut (`FileSink::cut`).
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 8);
+        // Cut, and a close's mark after the cut unless one ends what it
+        // keeps (`FileSink::cut`).
+        let mark = crate::engine::synced_mark();
+        let want = match kept.ends_with(&mark) {
+            true => kept,
+            false => [&kept[..], &mark[..]].concat(),
+        };
+        assert!(std::fs::read(&path).unwrap() == want, "not cut, marked");
         assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);

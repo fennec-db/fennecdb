@@ -183,7 +183,7 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
             run(&mut db, r#"put t {a: "before"}"#);
             db.sync().expect("sync");
         }
-        let whole = std::fs::metadata(&path).unwrap().len();
+        let kept = std::fs::read(&path).unwrap();
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -193,9 +193,11 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
         {
             let mut db = fennec_core::fs::open(&path).expect("the open after the crash");
             assert_eq!(ids(&mut db, "t"), vec![1], "{tag}");
-            // Cut, and marked after the cut (`fs::FileSink::cut`).
-            let len = std::fs::metadata(&path).unwrap().len();
-            assert_eq!(len, whole + mark().len() as u64, "{tag}");
+            // Cut, the close's mark ending what it keeps
+            // (`fs::FileSink::cut`).
+            let file = std::fs::read(&path).unwrap();
+            assert!(kept.ends_with(&mark()), "{tag}: no close's mark");
+            assert!(file == cut_to(&kept), "{tag}: {} bytes", file.len());
             run(&mut db, r#"put t {a: "after"}"#);
             db.sync().expect("sync");
         }
@@ -233,7 +235,8 @@ fn zeros_to_the_end_are_cut_as_a_torn_tail() {
                 db.sync().expect("sync");
             }
             let rows: Vec<u64> = (1..=1 + tail as u64).collect();
-            let whole = std::fs::metadata(&path).unwrap().len();
+            let kept = std::fs::read(&path).unwrap();
+            let whole = kept.len() as u64;
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
@@ -249,7 +252,12 @@ fn zeros_to_the_end_are_cut_as_a_torn_tail() {
             {
                 let mut db = open(&path).expect("the open after the cut");
                 assert_eq!(ids(&mut db, "t"), rows, "{tag}");
-                assert_eq!(len(), whole + mark().len() as u64, "{tag}: cut, marked");
+                // Cut, and marked unless a close's mark ends what it keeps
+                // (`fs::FileSink::cut`): after the tail's write, not the
+                // checkpoint's image.
+                let file = std::fs::read(&path).unwrap();
+                assert!(file == cut_to(&kept), "{tag}: {} bytes", file.len());
+                assert_eq!(kept.ends_with(&mark()), tail, "{tag}");
                 run(&mut db, r#"put t {a: "after"}"#);
                 db.sync().expect("sync");
             }
@@ -308,7 +316,7 @@ fn zeros_inside_the_image_or_before_a_claim_past_them_refuse_the_open() {
                 "said"
             );
         }
-        assert_eq!(std::fs::read(&path).unwrap(), cut_to(&good), "cut, marked");
+        assert_eq!(std::fs::read(&path).unwrap(), cut_to(&good), "cut");
         let mut bad = good.clone();
         bad.resize(good.len() + zeros, 0);
         let at = bad.len() as u64;
@@ -517,11 +525,15 @@ fn mark() -> Vec<u8> {
 }
 
 /// A file cut by an open to write it, `kept` the bytes before the cut: the
-/// open marks the cut, synced with it, where a record it keeps carries a
-/// sum (`fs::FileSink::cut`).
+/// open marks the cut where a record it keeps carries a sum, and no close's
+/// mark ends them already, which claims them as one would
+/// (`fs::FileSink::cut`).
 #[cfg(feature = "std-fs")]
 fn cut_to(kept: &[u8]) -> Vec<u8> {
-    [kept, &mark()[..]].concat()
+    match kept.ends_with(&mark()) {
+        true => kept.to_vec(),
+        false => [kept, &mark()[..]].concat(),
+    }
 }
 
 /// Each row of `collection`, its id and its text field `a`.
@@ -834,7 +846,7 @@ fn a_hole_in_an_unsynced_record_before_a_whole_one_is_cut() {
 /// power cut lost, past it, where the open cuts the file -- the records
 /// claiming the point going with the tail. Opened again, every way a file
 /// opens, it cuts nothing and answers as the open that cut it did: the cut
-/// leaves a close's mark after it, synced with it (`fs::FileSink::cut`).
+/// leaves a close's mark after it, synced before the cut (`fs::FileSink::cut`).
 /// Without one, the rows left claimed only the fsync before the flipped
 /// row, the next open held that row to its sum and cut it with the synced
 /// row after it -- silently on a Unix; on Windows, whose open cuts and

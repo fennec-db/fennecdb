@@ -184,7 +184,7 @@ const SCHEMA: &str =
 /// cut short. It is cut off the file on the way back up -- no replica was
 /// sent it, since no fsync covered it -- rather than read back later with
 /// the first write after the restart as the rest of it, and the cut
-/// marked, synced with it (`fs::FileSink::cut`): a close's mark, 8 bytes.
+/// marked where no close's mark ends what it keeps (`fs::FileSink::cut`).
 #[test]
 fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     let d = dir("torn");
@@ -199,7 +199,7 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
         run(&mut db, "put t {x: 1}");
         db.sync().unwrap();
     }
-    let whole = std::fs::metadata(&file).unwrap().len();
+    let whole = std::fs::read(&file).unwrap();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&file)
@@ -208,7 +208,13 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     drop(f);
     {
         let (mut db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), whole + 8);
+        // Cut, marked unless a close's mark ends what it keeps.
+        let mark = fennec_core::engine::record_claiming(14, 0, &[], 4096, 4096);
+        let want = match whole.ends_with(&mark) {
+            true => whole.clone(),
+            false => [&whole[..], &mark[..]].concat(),
+        };
+        assert!(std::fs::read(&file).unwrap() == want, "not cut, marked");
         run(&mut db, "put t {x: 2}");
         db.sync().unwrap();
     }

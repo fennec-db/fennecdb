@@ -200,13 +200,16 @@ meanwhile claiming the point before it; a failed one stores nothing. No
 fsync is added for it, and a durability that covers nothing appended runs
 none still. A close after it appended something and everything was
 covered appends the 8-byte mark (`REC_SYNCED`) unsynced: a durable point the next open need not look for,
-lost harmlessly. An open that cuts a torn tail appends the same mark after
-the cut, before the cut's fsync, where a record it keeps carries a sum
-(`FileSink::cut`): every byte before the mark is durable once that fsync
-returns, and the mark says so, so the next open reads the file as the one
-that cut it did -- the records that claimed how far it was durable may
-have gone with the tail ([storage.md](storage.md#file-format), *What a cut
-leaves*). An open hands its durable point to the sink
+lost harmlessly. An open that cuts a torn tail leaves the same mark after
+what it keeps, where a record it keeps carries a sum and no whole mark
+ends them already (`FileSink::cut`), in three fsyncs: the file's first --
+the earlier process's pages, which only it makes durable -- then the
+mark's, written over the first bytes the cut takes, then the cut's. Each
+comes before what would claim more than the disk holds without it, so the
+next open reads the file as the one that cut it did whatever step a power
+cut stops -- the records that claimed how far it was durable may have
+gone with the tail ([storage.md](storage.md#file-format), *What a cut
+leaves*, *The cut's order*). An open hands its durable point to the sink
 (`Sink::set_durable`), the appends after it claiming it until an fsync of
 their own covers more.
 

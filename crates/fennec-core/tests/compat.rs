@@ -592,7 +592,7 @@ fn every_claim_a_release_wrote_reads_as_its_bytes() {
 /// written between, every way a file opens: the second open cuts nothing
 /// and answers as the release did, as the first did. The records claiming
 /// the last fsync go with the torn tail, and the cut leaves a close's mark
-/// after it, synced with it (`fs::FileSink::cut`). Without one, the second
+/// after it, synced before the cut (`fs::FileSink::cut`). Without one, the second
 /// open found the file durable only as far as the rows left claimed, held
 /// the synced row the disk flipped a bit of to its sum and cut it with the
 /// row after it -- 5 358 bytes of v0.2.0's file, silently on a Unix; on
