@@ -511,6 +511,10 @@ enum Reclaimed {
     /// Not judged: the node refused, did not answer, or is from before
     /// identities -- or nothing names the file by one.
     Kept(String),
+    /// Not judged yet: the node said to come back after the wait it named
+    /// (503) -- an install of the name under way there, which may put the
+    /// file noted there yet ([`ComeBack`]) -- and what it said.
+    Later(Duration, String),
     /// No file is noted as left there ([`Router::reclaim_noted`]).
     Unnoted,
 }
@@ -538,6 +542,63 @@ fn instances_at(fields: &[(String, Value)]) -> Vec<u64> {
         .and_then(fennec_http::instance::parse)
         .into_iter()
         .collect()
+}
+
+/// The longest a router waits between two asks of a node that answered
+/// one of its operations with a 503 naming its wait ([`ComeBack`]).
+const COME_BACK_MOST: Duration = Duration::from_secs(8);
+
+/// A node's 503s naming their wait, met by one operation of the router on
+/// one node -- a move's install, the reclaim clearing a move's or an
+/// attach's target: an install of the tenant's name under way there
+/// (`Tenants::claim`), the node going down. Nothing it was asked ran, so it
+/// is asked again after the wait it named, never sooner, each wait after
+/// twice the one before, to [`COME_BACK_MOST`], while the first ask's
+/// `--upstream-timeout` lasts; then the last answer stands. The node's
+/// install refusal was a 409, a file there, until the image review's
+/// second round: a move whose own install had gone unanswered had the
+/// target's reclaim judge a place no file was in yet, forgot its note of
+/// that install, and failed, and the file the install then put there was
+/// no router's to take back.
+struct ComeBack {
+    until: Option<Instant>,
+    next: Duration,
+}
+
+impl ComeBack {
+    fn new() -> ComeBack {
+        ComeBack {
+            until: None,
+            next: Duration::ZERO,
+        }
+    }
+
+    /// The wait before the next ask, where a node named `named` at `now`:
+    /// none once it would end past `within` from the first.
+    fn after(&mut self, named: Duration, now: Instant, within: Duration) -> Option<Duration> {
+        let until = *self.until.get_or_insert(now + within);
+        let wait = named.max(self.next).min(COME_BACK_MOST);
+        if now + wait > until {
+            return None;
+        }
+        self.next = (wait * 2).min(COME_BACK_MOST);
+        Some(wait)
+    }
+}
+
+/// The wait a node's answer names where it is a 503 saying when to come
+/// back (`retry_after`, as `Response::retry_after` writes it), a second at
+/// the least: none otherwise.
+fn named_wait(answer: &std::io::Result<(u16, Vec<u8>)>) -> Option<Duration> {
+    let Ok((503, body)) = answer else {
+        return None;
+    };
+    fields_of(body).into_iter().find_map(|(k, v)| match v {
+        Value::Int(secs) if k == "retry_after" => {
+            Some(Duration::from_secs(secs.clamp(1, 60) as u64))
+        }
+        _ => None,
+    })
 }
 
 /// Why [`Router::place_replica`] gave a tenant no replica.
@@ -4693,6 +4754,9 @@ impl Router {
         let body = format!("{{\"instances\":[{}]}}", named.join(","));
         let target = format!("/_admin/tenants/{tenant}/reclaim");
         let answer = self.as_holder(&n, "POST", &target, None, body.as_bytes());
+        if let Some(wait) = named_wait(&answer) {
+            return Reclaimed::Later(wait, said(node, &answer));
+        }
         match &answer {
             Ok((200, _)) => Reclaimed::Gone,
             // The node's judgment, naming what the file carries: another
@@ -4714,8 +4778,20 @@ impl Router {
     /// its flip left, an old primary a failover took the tenant off, or one
     /// no row of this router's names -- is kept, reported for an operator,
     /// and the call fails.
+    ///
+    /// A node that says to come back -- an install of the name under way
+    /// there, which may be the very file noted, its answer lost -- is asked
+    /// again after its wait ([`ComeBack`]), the note kept meanwhile.
     pub(crate) fn clear_target(&self, tenant: &str, to: &str, by: &str) -> Outcome<()> {
-        match self.reclaim_noted(tenant, to) {
+        let mut asks = ComeBack::new();
+        let mut judged = self.reclaim_noted(tenant, to);
+        while let Reclaimed::Later(wait, _) = &judged {
+            if !self.come_back(&mut asks, Some(*wait)) {
+                break;
+            }
+            judged = self.reclaim_noted(tenant, to);
+        }
+        match judged {
             Reclaimed::Gone => Ok(()),
             Reclaimed::Unnoted => {
                 self.left_on(
@@ -4739,6 +4815,27 @@ impl Router {
                 409,
                 format!("`{to}` holds a file of `{tenant}` noted as left there, kept: {why}"),
             )),
+            Reclaimed::Later(_, why) => Err(Fail(
+                409,
+                format!(
+                    "`{to}` did not judge the file of `{tenant}` noted as left there within \
+                     --upstream-timeout, kept: {why}"
+                ),
+            )),
+        }
+    }
+
+    /// Waits out a node's 503 naming its wait, `named`, within
+    /// [`ComeBack`]'s bounds: whether to ask again. Under the operation's
+    /// claim of its tenant, never a lock.
+    fn come_back(&self, asks: &mut ComeBack, named: Option<Duration>) -> bool {
+        let now = Instant::now();
+        match named.and_then(|n| asks.after(n, now, self.cfg.upstream_timeout)) {
+            Some(wait) => {
+                std::thread::sleep(wait);
+                true
+            }
+            None => false,
         }
     }
 
@@ -4786,7 +4883,7 @@ impl Router {
                     &[],
                 );
             }
-            Reclaimed::Kept(_) | Reclaimed::Unnoted => {}
+            Reclaimed::Kept(_) | Reclaimed::Later(..) | Reclaimed::Unnoted => {}
         }
         got
     }
@@ -5092,12 +5189,16 @@ impl Router {
     /// Forgets each file of `leftovers` -- read before the look `holding`
     /// is what each node answered -- that the directory gives its tenant now
     /// ([`Self::records_file`]), that the look found gone, or whose node is
-    /// no more; has its node take back each the node still lists that was
-    /// noted under an identity, under the tenant's claim, the node judging
-    /// ([`Self::reclaim_noted`]); and answers every file still noted as
-    /// `{tenant, node, why}`, for an operator. A file noted again since it
-    /// was read is not forgotten by this look, which may have missed it
-    /// ([`directory::Directory::forget_leftover`]).
+    /// no more; has its node take back each noted under an identity, under
+    /// the tenant's claim, the node judging ([`Self::reclaim_noted`]); and
+    /// answers every file still noted as `{tenant, node, why}`, for an
+    /// operator. A file noted again since it was read is not forgotten by
+    /// this look, which may have missed it
+    /// ([`directory::Directory::forget_leftover`]). One noted under an
+    /// identity that its node did not list is forgotten only once the node
+    /// says it is gone, or cannot judge it: an install of the name under
+    /// way there -- the noted one, its answer lost -- lists nothing yet, and
+    /// forgotten by the look, its file then landed no router's to take back.
     fn look_at_leftovers(
         &self,
         leftovers: Vec<directory::Leftover>,
@@ -5106,19 +5207,23 @@ impl Router {
         let mut kept: Vec<(String, String, String)> = Vec::new();
         for left in leftovers {
             let (tenant, node) = (left.tenant.as_str(), left.node.as_str());
+            let unlisted = holding
+                .iter()
+                .any(|(n, names)| n == node && !names.iter().any(|t| t == tenant));
             let gone = {
                 let dir = self.read_dir();
                 dir.node(node).is_none() || Self::records_file(&dir, tenant, node)
-            } || holding
-                .iter()
-                .any(|(n, names)| n == node && !names.iter().any(|t| t == tenant));
-            if gone {
+            } || (unlisted && left.instances.is_empty());
+            let forget = |left: &directory::Leftover| {
                 if let Err(e) = self
                     .write_dir()
                     .forget_leftover(tenant, node, Some(left.noted))
                 {
                     fennec_http::log!("tenant `{tenant}`'s file on `{node}` stays noted: {e}");
                 }
+            };
+            if gone {
+                forget(&left);
                 continue;
             }
             // Its node silent at the look, or nothing to name it by: an
@@ -5139,8 +5244,14 @@ impl Router {
             if Self::records_file(&self.read_dir(), tenant, node) {
                 continue;
             }
-            if let Reclaimed::Kept(why) = self.reclaim_noted(tenant, node) {
-                kept.push((tenant.into(), node.into(), format!("not taken back: {why}")));
+            match self.reclaim_noted(tenant, node) {
+                // Not listed, and a node that cannot judge it -- one from
+                // before identities -- says no more: gone, as the look said.
+                Reclaimed::Kept(_) if unlisted => forget(&left),
+                Reclaimed::Kept(why) | Reclaimed::Later(_, why) => {
+                    kept.push((tenant.into(), node.into(), format!("not taken back: {why}")));
+                }
+                Reclaimed::Gone | Reclaimed::Other(_) | Reclaimed::Unnoted => {}
             }
         }
         let still = match self.read_dir().leftovers() {
@@ -6456,10 +6567,22 @@ impl Router {
             bytes = len;
             Ok(self.as_holder_streamed(&dst, &file, proposed, len, &mut image))
         };
-        let mut installed = put().map_err(thaw)?;
+        // A target that says to come back -- an install of the name under
+        // way there, the node going down -- is asked again after its wait
+        // ([`ComeBack`]), the source frozen meanwhile.
+        let mut asks = ComeBack::new();
+        let mut install = || -> Outcome<std::io::Result<(u16, Vec<u8>)>> {
+            loop {
+                let installed = put()?;
+                if !self.come_back(&mut asks, named_wait(&installed)) {
+                    return Ok(installed);
+                }
+            }
+        };
+        let mut installed = install().map_err(thaw)?;
         if matches!(installed, Ok((409, _))) {
             self.clear_target(tenant, to, "a move").map_err(thaw)?;
-            installed = put().map_err(thaw)?;
+            installed = install().map_err(thaw)?;
         }
         // Unanswered, the image may be there all the same, under the
         // identity proposed.
