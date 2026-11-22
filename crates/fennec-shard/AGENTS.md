@@ -15,7 +15,8 @@ never while its follower or anything beside it holds the database: no two
 opened, its follower running or not, and the node's scrape counts it
 (`fennec_copies_disconnected`). A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
-the export), copy, install, the flip in one statement, the source
+the export), copy (relayed as it comes, never held: `Pool::call_streamed`),
+install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A create or an
 install answers once the file and its name in the directory are durable
 (`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the

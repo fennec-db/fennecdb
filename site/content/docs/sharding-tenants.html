@@ -105,7 +105,12 @@ writes are asked to retry for the moment the copy takes.</p>
     the source.</li>
   <li>The source freezes it: writes in flight finish, new ones get
     <b>503 with <code>Retry-After: 1</code></b>. Reads go on being served.</li>
-  <li>The image is copied from the source and installed on the target.</li>
+  <li>The image is copied from the source and installed on the target: the
+    router relays it as it comes and the target writes it beside the
+    tenant's file, checking every record's checksum, so no machine holds it
+    in memory: a tenant larger than a node's memory moves, up to the 1 GiB
+    an image may be. The target puts it in place only once it is
+    whole.</li>
   <li>The directory points the tenant at the target, in one statement.</li>
   <li>The source copy is deleted — once every <a href="sharding-failover.html#standby-router">standby
     router</a> keeping up has been sent the new placement, a second at most,

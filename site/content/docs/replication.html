@@ -66,12 +66,16 @@ its own file. Only writes already on the primary's disk are sent.</p>
   <li><b>A restarted replica</b> asks only for what it missed.</li>
   <li><b>A replica far behind</b> (past 64 MiB of writes) is sent a whole
     copy of the database instead.</li>
-  <li><b>A whole copy is read from the primary's file as it is sent</b> —
-    a new replica's, a backup's, an archive's, a moved tenant's — never
-    gathered in the primary's memory first, and with no lock held while it
-    goes: a database larger than the primary's memory follows and backs up.
-    What takes the copy — the replica, <code>fennec backup</code>, a move's
-    router and target — still reads it whole.</li>
+  <li><b>A whole copy is read from the primary's file as it is sent, and
+    written to disk as it arrives</b> — a new replica's, a backup's, an
+    archive's, a moved tenant's — never gathered in memory on either side,
+    and with no lock held while it goes. The replica, <code>fennec
+    backup</code> and an archiver check every record's checksum as the copy
+    streams in; a replica puts it in place of its file only once it is
+    whole, so a copy cut off or damaged on the way leaves the replica as it
+    was. A database larger than the memory of either machine follows and
+    backs up, and a tenant moves between the nodes of a region up to the 1
+    GiB an image installed on a node may be.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
   <li><b>A <code>compact</code></b>, the primary's or the replica's own, is
@@ -382,6 +386,10 @@ fennec restore /backups/archive before.fennec --to-change 41873
     writes after it as the primary did, from an image taken before it too: a
     compact keeps every field's place (<a href="#upgrading-from-0-2-0">from
     0.2.0</a>).</li>
+  <li><b>A backup is written to its file as it arrives</b>, sealed as it
+    goes, and every record's checksum is checked on the way: a database
+    damaged in transit is refused, its file never put in place, and a
+    database larger than the backing-up machine's memory backs up.</li>
   <li>A <b>backup or a restore into a file</b> holds the file while it is
     written, as the shell does: one a running server has open is refused, its
     holder named, rather than renamed over under it. A file there already is
