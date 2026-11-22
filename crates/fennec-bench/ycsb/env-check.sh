@@ -608,9 +608,9 @@ case "$1 ${2:-}" in
 esac
 case " $* " in
 *" --peak "*)
-    # A soak stopped on the harness's own fault, as `ycsb soak` exits 4.
+    # A soak stopped at once, as `ycsb soak` exits 4.
     if [ -n "${TOY_STOP:-}" ]; then
-        echo "soak: STOPPED, the harness's fault: a toy's" >&2
+        echo "soak: STOPPED: a toy's" >&2
         exit 4
     fi
     echo "peak 1000"
@@ -737,17 +737,17 @@ env_self_test() {
         st_s=0
         grep -- 'volume rm' "$st_dir/docker.log" | grep -q -- '-tools' || st_s=1
         st "$st_s" "the run's tools volume removed, past a failing docker call"
-        # A soak stopped on the harness's own fault: the run ends there in
-        # words, no fraction after it started.
+        # A soak stopped at once: the run ends there in words, no fraction
+        # after it started.
         rm -f "$st_dir/toy.pid" "$st_dir/toy.out"
         : >"$st_dir/ycsb.log"
         TOY_STOP=1 env_toy_run "$st_dir" "$st_script" "$@"
         st_s=0
         env_toy_ended 60 "the stopped run's end" || st_s=1
         [ "$st_rc" = 4 ] || st_s=1
-        grep -q "stopped on the harness's own fault" "$st_dir/run.log" || st_s=1
+        grep -q "stopped at once, its STOPPED line above saying why" "$st_dir/run.log" || st_s=1
         grep -q -- '--rate' "$st_dir/ycsb.log" && st_s=1
-        st "$st_s" "a soak stopped on the harness's fault ends the run, nothing after it started"
+        st "$st_s" "a soak stopped at once ends the run, nothing after it started"
         rm -f "$st_dir/toy.pid" "$st_dir/toy.out"
         TOY_SILENT=1 ENV_SILENT=3 ENV_EVERY=2 env_toy_run "$st_dir" "$st_script" "$@"
         st_s=0

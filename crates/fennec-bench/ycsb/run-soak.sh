@@ -47,12 +47,13 @@
 # cannot take ends the run with a line `<sync>:<fraction>:env env_failed 1`
 # -- the environment's failure, never a pass and never the server's -- and
 # a soak silent ten minutes is stopped and marked `<sync>:<fraction>:hung`.
-# A soak that meets the harness's own fault -- a server refusing the run's
-# token or its address (401, 403), the replica not following within its
-# bound -- stops at once, its STOPPED line saying which, its volumes kept,
-# and the script after it with exit 4: nothing after it runs, never hours
-# carried on a setting every minute meets again. The servers ask a token,
-# the run's own, each container handed it in its environment.
+# A soak that meets what every minute after would meet again -- a server
+# refusing the run's token or its address (401, 403), the replica not
+# following within its bound, a server gone before the load began --
+# stops at once, its STOPPED line saying why, its volumes kept, and the
+# script after it with exit 4: nothing after it runs, never hours carried
+# on it. The servers ask a token, the run's own, each container handed it
+# in its environment.
 #
 # Everything it starts is named after the run, its process id in the name
 # (p6-250-<pid>-80-server), so that no run removes another's, and removed
@@ -259,16 +260,16 @@ guarded $awake "$YCSB" soak $common --peak --minutes "$PEAK_MINUTES" --name "$NA
 [ -s "$ENV_MARKER" ] &&
     env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$(cat "$ENV_MARKER")"
 [ -s "$ENV_MARKER.hung" ] && hung "$RUN-s$sync-peak" "$sync:peak:hung" "$(cat "$ENV_MARKER.hung")"
-# A soak stopped on the harness's own fault (`ycsb soak`'s exit 4, its
-# STOPPED line saying which): the next one would meet it again.
-harness_stopped() {
+# A soak stopped at once (`ycsb soak`'s exit 4, its STOPPED line saying
+# why): the next one would meet it again.
+stopped_at_once() {
     if [ "$rc" = 4 ]; then
         rm -f "$peaks"
-        echo "$(date '+%F %H:%M') $1 stopped on the harness's own fault, its STOPPED line above saying which: nothing after it is run" >&2
+        echo "$(date '+%F %H:%M') $1 stopped at once, its STOPPED line above saying why: nothing after it is run" >&2
         exit 4
     fi
 }
-harness_stopped "$RUN-s$sync-peak"
+stopped_at_once "$RUN-s$sync-peak"
 peak=$(awk '$1 == "peak" {print $2}' "$peaks")
 rm -f "$peaks"
 [ -n "$peak" ] || {
@@ -299,7 +300,7 @@ for f in $FRACTIONS; do
     [ -s "$ENV_MARKER" ] && env_failed "$run" "$sync:$f:env" "$(cat "$ENV_MARKER")"
     [ -s "$ENV_MARKER.hung" ] && hung "$run" "$sync:$f:hung" "$(cat "$ENV_MARKER.hung")"
     "$YCSB" soak report "$OUT" "$run" || status=1
-    harness_stopped "$run"
+    stopped_at_once "$run"
 done
 echo "$(date '+%F %H:%M') done"
 exit "$status"

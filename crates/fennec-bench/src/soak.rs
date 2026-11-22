@@ -11,7 +11,8 @@
 //! replica. Both ask a token, the run's own, as a server reached past
 //! loopback must (`Kit::start`), and a fault of the harness's own -- a
 //! server refusing the run's token or its name, the replica not following
-//! -- stops the run at once (`stop_run`), never carried for hours. The load is open loop (`--rate`, a schedule a connection, an
+//! -- stops the run at once (`stop_run`), never carried for hours. The
+//! load is open loop (`--rate`, a schedule a connection, an
 //! operation's time from when it was due: a stall counts the wait of every
 //! one queued behind it), or as fast as answered for the peak (`--peak`).
 //! Its mix, over a fixed set of connections:
@@ -500,8 +501,9 @@ struct Kit {
     tools: String,
     memory: String,
     sync: String,
-    /// The servers' `--replication-token` and `--http-token`, the run's own
-    /// (`secret`), handed to each container in its environment (`secrets`).
+    /// The servers' `--replication-token`, and below their `--http-token`:
+    /// the run's own (`secret`), handed to each container in its
+    /// environment (`secrets`).
     token: String,
     http_token: String,
     /// The servers' `--replication-buffer`, in MiB: what the report holds
@@ -3714,8 +3716,9 @@ fn refused(text: &str) -> Option<String> {
     })
 }
 
-/// Ends the run at once on the harness's fault (`why`), never carrying for
-/// hours what every minute meets again: the load stopped, the run's
+/// Ends the run at once on `why` -- the harness's own fault, or a server
+/// gone before the load began -- never carrying for hours what every
+/// minute meets again: the load stopped, the run's
 /// volumes kept for whoever reads why (`--kept`), its containers removed,
 /// a `:stopped` line beside its others, and exit 4 -- the script's word for
 /// the harness's own failure, apart from a report's (1) and the
@@ -3724,9 +3727,9 @@ fn stop_run(bench: &Kit, sh: Option<&Shared>, o: &Opts, why: &str) -> ! {
     if let Some(sh) = sh {
         sh.stop.store(true, Ordering::SeqCst);
     }
-    bench.keep_data(&format!("the harness stopped the run: {why}"));
+    bench.keep_data(&format!("the run stopped at once: {why}"));
     say(format!(
-        "STOPPED, the harness's fault: {why} -- no run counts until it is fixed"
+        "STOPPED: {why} -- every minute after would meet it again, and no run counts until it is fixed"
     ));
     append_values(
         &o.out,
@@ -3949,9 +3952,14 @@ fn run(o: &Opts) {
             .map(|at| st[at + 8..].trim_end_matches('}').to_string());
         (refused(&st), error)
     };
-    let caught_up = |within: Duration, what: &str| -> Option<f64> {
+    // `setup`, the first follow: a server gone then -- the short run of
+    // 2026-11-22's primary, OOM-killed the moment its replica first asked
+    // it for an image -- ends the run at once, as no load has begun; the
+    // end's catch-up waits its bound and says what it found.
+    let caught_up = |within: Duration, what: &str, setup: bool| -> Option<f64> {
         let t = Instant::now();
         let mut said = Instant::now();
+        let mut looked = Instant::now();
         loop {
             let (p, r) = (seq(&addr), seq(&raddr));
             if p.is_some() && p == r {
@@ -3969,6 +3977,28 @@ fn run(o: &Opts) {
                     &format!("{what}: the replica's primary {why}"),
                 );
             }
+            if setup && looked.elapsed() >= Duration::from_secs(5) {
+                looked = Instant::now();
+                for (who, c) in [("primary", bench.server()), ("replica", bench.replica())] {
+                    let (up, oom) = bench.state(&c);
+                    if !up {
+                        stop_run(
+                            &bench,
+                            None,
+                            o,
+                            &format!(
+                                "{what}: the {who} is not running{}{}",
+                                if oom {
+                                    ", OOM-killed under --memory "
+                                } else {
+                                    ""
+                                },
+                                if oom { o.memory.as_str() } else { "" }
+                            ),
+                        );
+                    }
+                }
+            }
             if said.elapsed() >= Duration::from_secs(60) {
                 say(format!(
                     "{what}: the replica at change {r:?}, the primary at {p:?}, {:.0} s{}",
@@ -3983,7 +4013,7 @@ fn run(o: &Opts) {
     // The replica's first follow copies the loaded file: bounded by half
     // an hour, which a gigabyte over the VM's network takes a fraction of.
     let follow_max = 1_800;
-    let follow = caught_up(Duration::from_secs(follow_max), "the first follow");
+    let follow = caught_up(Duration::from_secs(follow_max), "the first follow", true);
     say(format!(
         "the replica {}; {} connections at {}, {} subscriptions, --sync {}, --memory {}",
         match follow {
@@ -4661,7 +4691,11 @@ fn run(o: &Opts) {
     let swept_s = t.elapsed().as_secs_f64();
     let late = checker.mismatches - before;
     let catchup = match env_failed {
-        None => caught_up(Duration::from_secs(o.catchup_max), "the end's catch-up"),
+        None => caught_up(
+            Duration::from_secs(o.catchup_max),
+            "the end's catch-up",
+            false,
+        ),
         Some(_) => None,
     };
     let replica = match (catchup, &primary) {
@@ -5259,11 +5293,10 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     let planned = settings.map_or(0, |s| s.minutes);
-    // Stopped on the harness's own fault (`stop_run`): its log's STOPPED
-    // line says which.
+    // Stopped at once (`stop_run`): its log's STOPPED line says why.
     let stopped = find(":stopped").is_some_and(|m| get(m, "stopped") == Some(1.0));
     let why_short = match (end.is_none(), stopped) {
-        (_, true) => ", STOPPED by the harness's fault (its log's STOPPED line says which)",
+        (_, true) => ", STOPPED at once (its log's STOPPED line says why)",
         (true, false) => ", no end line",
         (false, false) => "",
     };
