@@ -6,7 +6,12 @@
 
 #![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
+// The test taking an image beside a copy runs on a Unix alone, where a
+// file or a link can be put at its name: on Windows these went unused,
+// which `-D warnings` refused (CI's clippy, its Windows line).
+#[cfg(unix)]
 use fennec_core::engine::ImageOut;
+#[cfg(unix)]
 use fennec_core::fs::SideFile;
 use fennec_core::prelude::*;
 use std::path::{Path, PathBuf};
