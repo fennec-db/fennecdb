@@ -1923,6 +1923,17 @@ struct Shared {
     /// The latest change a write was answered as: what a read through the
     /// replica is sent after.
     max_seq: AtomicU64,
+    /// The primary's lives: turned once a killed or dead server is gone,
+    /// before it is started again (`restart`). A kill takes the writes
+    /// answered from its buffer (`--loss-ms`), and the server started again
+    /// gives their change numbers to the writes after it: the checker
+    /// knows a change by its life and number (`in_life`), each read off
+    /// the connection it came on -- one made while the life turned is made
+    /// again. The short run of 2026-11-22 held a stream's change from
+    /// before a kill to the write that took its number after it -- a read
+    /// spanning back in time, "field9 holds no value written to it" -- and
+    /// counted 7 writes after the kill missing from the events before it.
+    life: AtomicU64,
     /// Whether reads may go through the replica: not from a kill until the
     /// replica says it is connected again and past the newest change
     /// answered before it (`restart`) -- before that it waits out the
@@ -1981,6 +1992,7 @@ impl Shared {
             compact_from: AtomicU64::new(u64::MAX),
             compact_to: AtomicU64::new(u64::MAX),
             max_seq: AtomicU64::new(0),
+            life: AtomicU64::new(0),
             replica_ok: AtomicBool::new(true),
             replica_target: AtomicU64::new(0),
             compact_since: AtomicU64::new(u64::MAX),
@@ -2117,6 +2129,8 @@ struct Worker<'a> {
     sh: &'a Shared,
     slot: &'a Slot,
     c: Option<http::Http>,
+    /// The primary's life `c` was made in (`Shared::life`).
+    life: u64,
     rc: Option<http::Http>,
     rng: Rng,
 }
@@ -2146,7 +2160,17 @@ impl Worker<'_> {
             };
             let c = if replica { &mut self.rc } else { &mut self.c };
             if c.is_none() {
+                let life = self.sh.life.load(Ordering::SeqCst);
                 *c = http::Http::try_connect(addr, Duration::from_secs(60)).ok();
+                // Made across a restart's turn of the life, it could reach
+                // either server: made again.
+                if !replica && self.sh.life.load(Ordering::SeqCst) != life {
+                    *c = None;
+                    continue;
+                }
+                if !replica {
+                    self.life = life;
+                }
             }
             let got = match c.as_mut() {
                 Some(c) => match c.try_query_with(text, params, headers) {
@@ -2282,7 +2306,9 @@ impl Worker<'_> {
                 if let Some(q) = seq {
                     self.sh.max_seq.fetch_max(q, Ordering::SeqCst);
                 }
-                Some((false, affected(&body), seq))
+                // The checker's change: the server's, of the life that
+                // answered it.
+                Some((false, affected(&body), seq.map(|q| in_life(self.life, q))))
             }
             Answer::Unknown => Some((true, 1, None)),
             Answer::Refused(status) => {
@@ -2597,6 +2623,7 @@ fn work(sh: &Shared, w: usize) {
         sh,
         slot,
         c: None,
+        life: 0,
         rc: None,
         rng: Rng::new(SEED ^ 0x534F_414B ^ (w as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
     };
@@ -2651,6 +2678,14 @@ fn work(sh: &Shared, w: usize) {
 }
 
 /// An SSE `data:` line of a subscription: its change, rows and deletions.
+/// A change as the checker knows it: the primary's life (`Shared::life`)
+/// above the server's own number, which a server started after a kill
+/// gives out again from where its file ends -- 2^40 changes a life, some
+/// 300 years at the soak's rates.
+fn in_life(life: u64, seq: u64) -> u64 {
+    (life << 40) | seq
+}
+
 fn stream_data(data: &str, seed: bool) -> Option<SEv> {
     let seq = json_num(data, "seq")?;
     let list = |key: &str| -> Option<&str> {
@@ -2686,6 +2721,7 @@ fn subscribe(sh: &Shared, i: usize) {
         me.from + 64
     );
     while !sh.stop.load(Ordering::Relaxed) {
+        let life = sh.life.load(Ordering::SeqCst);
         let opened = (|| -> std::io::Result<std::net::TcpStream> {
             let to = sh.addr.parse().map_err(std::io::Error::other)?;
             let mut s = std::net::TcpStream::connect_timeout(&to, Duration::from_secs(10))?;
@@ -2715,6 +2751,12 @@ fn subscribe(sh: &Shared, i: usize) {
                         break;
                     }
                     Ok(_) if head => {
+                        // Answered across a restart's turn of the life, by
+                        // either server: opened again.
+                        if sh.life.load(Ordering::SeqCst) != life {
+                            ended = "opened as the server restarted".into();
+                            break;
+                        }
                         if !line.contains(" 200") {
                             ended = line.trim().to_string();
                             if line.contains(" 401") || line.contains(" 403") {
@@ -2731,6 +2773,7 @@ fn subscribe(sh: &Shared, i: usize) {
                             let e = sh.ns();
                             match stream_data(data.trim(), event == "seed") {
                                 Some(mut ev) => {
+                                    ev.seq = in_life(life, ev.seq);
                                     ev.conn = conn;
                                     ev.opened = at;
                                     ev.e = e;
@@ -3187,9 +3230,12 @@ impl Side {
             .map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"));
         // The token from the container's environment (`fennec backup`
         // reads FENNEC_REPLICATION_TOKEN), never the script's words: `ps`
-        // shows them.
+        // shows them. The archive's directory made first: into a path that
+        // is none, a backup writes a database file of its own, which
+        // `fennec restore` takes for a sealed one and refuses without its
+        // key -- the short run of 2026-11-22's backup.
         let script = format!(
-            "rm -rf /data/archive /data/restored.fennec; \
+            "rm -rf /data/archive /data/restored.fennec; mkdir /data/archive && \
              /tools/fennec backup http://{}:8080 /data/archive && echo BACKUP-OK && \
              /tools/fennec restore /data/archive /data/restored.fennec && echo RESTORE-OK && \
              /tools/fennec verify /data/restored.fennec && echo VERIFY-OK; \
@@ -4873,6 +4919,9 @@ fn restart(
         sh.note(format!("docker wait at minute {m}: {out}"));
     }
     let killed = sh.ns();
+    // Gone: nothing answers in its life from here, and the next is not
+    // started yet.
+    sh.life.fetch_add(1, Ordering::SeqCst);
     say(format!(
         "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
         (killed - k) as f64 / 1e9
@@ -6376,6 +6425,70 @@ mod tests {
     }
 
     #[test]
+    fn a_change_number_a_kill_gave_out_again_is_known_by_its_life() {
+        // The write to 10 was answered 5 ns before the kill (`--loss-ms`
+        // 10): its change, 5, went out to the stream, read as the kill
+        // landed, and the kill took it. The server started again gave 5 to
+        // the write to 11, and the event from before the kill is judged
+        // once both are logged.
+        let range = [(10, 12)];
+        let lost = || Kills {
+            at: vec![(45, 60)],
+            loss: 10,
+        };
+        let run = |old: u64, new: u64| {
+            let mut c = Checker::new(100, lost(), 60, 5, &range);
+            // After the restart 10 is written again, before 11.
+            c.take(vec![
+                write(10, 0, 42, 20, 40, Some(in_life(old, 5))),
+                write(10, 0, 55, 62, 68, Some(in_life(new, 3))),
+                write(11, 0, 77, 70, 80, Some(in_life(new, 5))),
+            ]);
+            c.spending.push((
+                0,
+                SEv {
+                    conn: 1,
+                    seed: true,
+                    seq: in_life(old, 4),
+                    opened: 9,
+                    e: 10,
+                    rows: vec![(10, base_digests(10)), (11, base_digests(11))],
+                    ..SEv::default()
+                },
+            ));
+            c.spending.push((
+                0,
+                change(1, in_life(old, 5), 50, vec![(10, with(10, 0, 42))]),
+            ));
+            c.spending.push((
+                0,
+                SEv {
+                    conn: 2,
+                    seed: true,
+                    seq: in_life(new, 4),
+                    opened: 64,
+                    e: 65,
+                    rows: vec![(10, base_digests(10)), (11, base_digests(11))],
+                    ..SEv::default()
+                },
+            ));
+            let mut ch = change(2, in_life(new, 5), 85, vec![(11, with(11, 0, 77))]);
+            ch.opened = 64;
+            c.spending.push((0, ch));
+            c.hold(100, 0, 100, &[(64, in_life(new, 5))]);
+            (c.faults, c.mismatches)
+        };
+        // Known by its life alone, each event holds its own write.
+        assert_eq!(run(0, 1), (StreamFaults::default(), 0));
+        // By its number, the event before the kill owed the write after
+        // it, and was read back from that write's start: the short run's
+        // missing writes and its read "holding no value written".
+        let (faults, mismatches) = run(0, 0);
+        assert_eq!(faults.missing, 1);
+        assert!(mismatches > 0);
+    }
+
+    #[test]
     fn the_schedule_queues_a_backup_beside_a_compact_and_owes_its_counts() {
         let s = Settings {
             minutes: 480,
@@ -7253,6 +7366,7 @@ mod tests {
             sh: &sh,
             slot: &sh.slots[0],
             c: None,
+            life: 0,
             rc: None,
             rng: Rng::new(1),
         };
@@ -7396,6 +7510,7 @@ mod tests {
                 sh: &sh,
                 slot: &sh.slots[0],
                 c: None,
+                life: 0,
                 rc: None,
                 rng: Rng::new(1),
             };
