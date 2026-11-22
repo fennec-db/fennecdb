@@ -625,11 +625,24 @@ pub fn mode_like(new: &File, like: &Path) -> std::io::Result<()> {
 /// writer of its directory since -- and is not renamed into a database's
 /// place. An `fstat` and an `lstat`, a rewrite: `swap_in`'s, and before
 /// each rename of fennec-http's archive, a backup and an unseal.
-#[cfg(unix)]
+///
+/// On Windows the name is opened as no link, for no access and sharing
+/// everything, and its volume's serial number and file index compared with
+/// the handle's (`GetFileInformationByHandle`): until the image review's
+/// second round a rename there went by the name alone, held by nothing but
+/// `<file>.lock` -- `Sink::adopt` was handed the follower's handle and let
+/// it be.
+#[cfg(any(unix, windows))]
 pub fn still_named(file: &File, path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
-    if (open.dev(), open.ino()) != (there.dev(), there.ino()) {
+    #[cfg(unix)]
+    let same = {
+        use std::os::unix::fs::MetadataExt;
+        let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
+        (open.dev(), open.ino()) == (there.dev(), there.ino())
+    };
+    #[cfg(windows)]
+    let same = windows::named(file, path)?;
+    if !same {
         return Err(std::io::Error::other(format!(
             "{} is no longer the file written: another was put at its name, which is not \
              renamed into the database's place",
@@ -807,6 +820,10 @@ impl FileSink {
         &self,
         disk: &mut Disk,
         #[cfg(not(windows))] image: File,
+        // On Windows, whether `from` still named the file written as its
+        // handle was let go ([`still_named`]), which fails the sink here as
+        // a Unix's look below does.
+        #[cfg(windows)] named: std::io::Result<()>,
         from: &Path,
     ) -> Result<()> {
         let swapped = (|| -> Result<File> {
@@ -835,6 +852,8 @@ impl FileSink {
             // On Windows the rename is tried again while another handle
             // refuses it, and the file flushed through the handle opened
             // here before its directory is (docs/design/windows.md).
+            #[cfg(windows)]
+            named?;
             #[cfg(windows)]
             let mut f = windows::swap(from, &self.path)?;
             f.seek(SeekFrom::End(0))?;
@@ -1264,11 +1283,13 @@ impl Sink for FileSink {
         // by its name (`swap_in`).
         #[cfg(not(windows))]
         self.swap_in(&mut disk, written, &tmp)?;
-        // Windows' swap opens it again itself, once this handle is closed.
+        // Windows' swap opens it again itself, once this handle is closed:
+        // the name held to it first.
         #[cfg(windows)]
         {
+            let named = still_named(&written, &tmp);
             drop(written);
-            self.swap_in(&mut disk, &tmp)?;
+            self.swap_in(&mut disk, named, &tmp)?;
         }
         drop(disk);
         self.rewritten();
@@ -1295,11 +1316,14 @@ impl Sink for FileSink {
         // was put at `side`'s name since -- a link, or a file, which an
         // open by the name (`O_NOFOLLOW`) took and renamed in -- is not the
         // one written, and `swap_in`'s `still_named` refuses it, the
-        // database as it was.
+        // database as it was. On Windows, whose swap opens the file again
+        // by its name, the name is held to that handle's file the same way
+        // (by its file index), which until the image review's second round
+        // nothing did.
         #[cfg(not(windows))]
         let image = written.try_clone()?;
         #[cfg(windows)]
-        let _ = written;
+        let named = still_named(written, side);
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
         {
             self.mapping = None;
@@ -1307,7 +1331,7 @@ impl Sink for FileSink {
         #[cfg(not(windows))]
         self.swap_in(&mut disk, image, side)?;
         #[cfg(windows)]
-        self.swap_in(&mut disk, side)?;
+        self.swap_in(&mut disk, named, side)?;
         drop(disk);
         self.rewritten();
         Ok(())

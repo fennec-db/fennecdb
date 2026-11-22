@@ -6,12 +6,7 @@
 
 #![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
-// The test taking an image beside a copy runs on a Unix alone, where a
-// file or a link can be put at its name: on Windows these went unused,
-// which `-D warnings` refused (CI's clippy, its Windows line).
-#[cfg(unix)]
 use fennec_core::engine::ImageOut;
-#[cfg(unix)]
 use fennec_core::fs::SideFile;
 use fennec_core::prelude::*;
 use std::path::{Path, PathBuf};
@@ -49,9 +44,16 @@ fn image() -> Vec<u8> {
     db.snapshot()
 }
 
-#[cfg(unix)]
+/// A file's inode, which a rename over it changes; on Windows none, and
+/// its bytes alone are compared.
 fn inode(path: &Path) -> u64 {
-    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+    #[cfg(unix)]
+    return std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap());
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
 }
 
 /// An image a replica took beside its file is renamed in only from the
@@ -61,8 +63,10 @@ fn inode(path: &Path) -> u64 {
 /// they were, and the copy takes writes after, its disk not failed. Opened
 /// again by its name, the file put there was renamed in -- the copy's file
 /// another than the one its stores read -- and a link failed the copy for
-/// good. A copy mapped and one read into memory alike.
-#[cfg(unix)]
+/// good. A copy mapped and one read into memory alike. On Windows, a file
+/// put there alone -- a link asks a privilege a test does not have -- held
+/// off by its file index (`fs::still_named`): there the rename went by the
+/// name, held by nothing, until the image review's second round.
 #[test]
 fn an_image_is_adopted_only_from_the_file_its_follower_wrote() {
     let d = dir("adopted");
@@ -76,7 +80,11 @@ fn an_image_is_adopted_only_from_the_file_its_follower_wrote() {
         exec(&mut db, "create collection c (x int)");
         exec(&mut db, "put c {x: 1}");
         db.sync().unwrap();
-        for (n, planted) in ["a file", "a link"].into_iter().enumerate() {
+        let planted_by: &[&str] = match cfg!(unix) {
+            true => &["a file", "a link"],
+            false => &["a file"],
+        };
+        for (n, &planted) in planted_by.iter().enumerate() {
             let what = format!("mapped {mapped}, {planted}");
             let held = rows(&db);
             let before = (std::fs::read(&path).unwrap(), inode(&path));
@@ -94,6 +102,7 @@ fn an_image_is_adopted_only_from_the_file_its_follower_wrote() {
                 "a file" => std::fs::rename(&other, &at).unwrap(),
                 _ => {
                     std::fs::remove_file(&at).unwrap();
+                    #[cfg(unix)]
                     std::os::unix::fs::symlink(&other, &at).unwrap();
                 }
             }
@@ -113,11 +122,10 @@ fn an_image_is_adopted_only_from_the_file_its_follower_wrote() {
         }
         drop(db);
         let db = fennec_core::fs::open(&path).unwrap();
-        assert_eq!(
-            rows(&db),
-            ["[Int(1)]", "[Int(2)]", "[Int(3)]"],
-            "mapped {mapped}"
-        );
+        let written: Vec<String> = (1..=1 + planted_by.len())
+            .map(|x| format!("[Int({x})]"))
+            .collect();
+        assert_eq!(rows(&db), written, "mapped {mapped}");
     }
     let _ = std::fs::remove_dir_all(d);
 }

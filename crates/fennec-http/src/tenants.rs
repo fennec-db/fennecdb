@@ -2579,7 +2579,7 @@ impl Tenants {
                 .and_then(|_| instance::put_away(&self.dir, name))
                 .and_then(|_| self.hooks.put_away(name))
                 .and_then(|_| {
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     fennec_core::fs::still_named(side.file(), &tmp)?;
                     std::fs::rename(&tmp, &target)
                 })
