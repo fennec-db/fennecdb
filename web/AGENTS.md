@@ -91,9 +91,17 @@ new version beside the old, the old read as before: the page's stored data
 is a frozen surface. A `FennecSync` seeds only a key holding nothing: a
 store there that does not restore refuses its start, kept as it stands
 with its unsent writes (`#loadPersist`), and a tab taking the lead from
-one stores nothing there (`#unkept`); one taking the lead from a store
-another tab wrote since it read it stores an image first (`sameStore`).
-`web/fennec.persist.test.js` and `web/fennec.sync.test.js` hold each.
+one stores nothing there (`#unkept`, `status()`'s `unkept`), reading it
+again at its next persist only where IndexedDB failed the read (`unread`);
+one taking the lead from a store another tab wrote since it read it stores
+an image first (`sameStore`). A replica stores its key only holding the
+key's lock (`storeLock`), whatever its url, shapes or `leader`, and takes
+the store over (`#takeStore`) before it leads; `close` lets go of it once
+the persist out has settled, or after `LET_GO_MS`, past which that
+persist's write is refused (`#fence`, asked after its last await:
+IndexedDB runs a transaction before any made after it). `unpersist` deletes one
+key's store, under its lock. `web/fennec.persist.test.js` and
+`web/fennec.sync.test.js` hold each.
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
