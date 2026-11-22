@@ -347,6 +347,57 @@ four minutes; then the soak open loop at 50% and at 80% of it, a run each
 -- the second only where the first's report passed, unless `KEEP_GOING=1`:
 eight hours on a known failure tell nothing more.
 
+**The servers ask a token.** Both, and the backup's read-only server, run
+with `--http-token` and `--replication-token`, two secrets of the run's
+own (32 bytes of `/dev/urandom` each, held in memory), handed to each
+container in its environment -- `-e FENNEC_HTTP_TOKEN` with no value, the
+docker CLI's own environment carrying it -- never as an argument, which
+`ps` shows on the host and in the VM, nor in the log; every request the
+harness sends carries the first (`http::bearer`), `fennec backup` reads
+the second from its container's environment. A server that asks for no
+token answers only a `Host` of this machine's (fennec-http's
+`open_refusal`): the replica's follow and `fennec backup` reach the primary
+by its container's name on the run's network, and the two-hour dry run of
+2026-11-22, its servers open under `--insecure`, had both refused 403 from
+the first second -- the replica at change 0 for two hours, every read sent
+through it waiting out its wait and answering 504, the backup failed --
+while the harness only waited. The servers' `--replication-buffer` is
+passed too (64 MiB, the server's default), for the report's memory line.
+
+**The harness's own faults stop the run.** What every minute after would
+meet again is not carried for hours: the replica not following within the
+first follow's bound (1 800 s), its status naming a refusal by its primary
+(`the primary answered 401` or `403`) during that follow or at any
+minute's look, an operation or a subscription answered 401 or 403, a
+backup refused so (`refused`, `Shared::fault`), and a server not running
+during the first follow (both containers looked at every 5 s, an OOM kill
+named), before any load has begun. The run stops at once
+(`stop_run`): its STOPPED line says why, its volumes are kept and named,
+its containers removed, a `:stopped` line written (the report's "ran its
+planned minutes" says it), and `ycsb soak` exits 4, on which the script
+stops after the peak or the fraction it ran -- `KEEP_GOING` or not --
+with exit 4 itself. The script's cleanup goes on past a failing call
+(`|| true` on each): under `set -e` the first to fail ended the trap, and
+`docker network rm` of the network the soak had removed itself fails, so
+the dry run's cleanup named the first soak's kept volumes, then stopped,
+leaving the second's unsaid and the tools' volume behind; the self-test's
+toy docker fails that call as Docker does, and holds the tools' volume
+removed and a stopped soak ending the run with nothing after it.
+
+**What no run of the script passes yet.** A replica's first follow, and a
+backup, are sent an image, which the primary builds whole in its heap
+under its read lock (fennec-http's replication `stream`:
+`Database::snapshot`), and the replica receives whole and loads beside it
+(`Follower::session`): under a `--memory` below the file's size -- the
+soak's premise -- the primary is OOM-killed the moment its replica first
+asks. The first short run after the token, 250 000 records (259 MB of
+file) under `--memory 256m`, lost its primary 0.7 s after the replica
+started (exit 137, OOM-killed), and the script stopped 30 s into the
+peak; the soak itself was run through `ycsb soak` alone at 100 000
+records under `--memory 512m` to hold the rest. Until the image is
+streamed as a checkpoint's is (`Sink::rewrite_with`), the long runs wait
+for it.
+
 **One checker.** `soak.rs` is the driver -- the mix, the schedule, the
 kills, the minute's line and the report -- and decides no answer: whether
 a read could have been answered so is `src/register.rs`'s alone, the rule
@@ -458,7 +509,28 @@ its change -- a write that may not have landed aside -- and no key is in an
 event without a write to it in the changes the event covers; a stream open
 past a write in its range for 10 s without reporting it is silent. Each
 event's rows are held to the registers over the span from the write that
-took its change to when it was read. A reconnect -- the server killed --
+took its change to when it was read. A deletion of a key outside the
+range is passed over: a plain stream judges each id written since its
+cursor by its filter alone, as the row stands, and tells one that does
+not match as deleted whether or not it ever did (fennec-core's
+`Database::changes_since`, "a deliberate looseness": a client deleting a
+row it lacks does nothing), so every write outside a range reaches its
+stream as one -- the dry run counted each as a key sent twice and a
+mismatch, 23.5 million of both in two hours. A row put outside the range
+is still a mismatch. A change is known by its number in the primary's
+life (`in_life`), turned as a killed server, gone and its file verified,
+is started again, each the life of the connection that brought it, read
+as that connection was first answered (not at the connect: Docker's
+forwarded port takes a connection before the server behind it is there
+to answer) -- the connection a worker makes waiting for the server too,
+whose life left as the one before counted 4 148 and 4 464 events a key
+sent twice in two runs: a kill takes the writes answered from the
+server's buffer, and the server started again gives their numbers to the
+writes after it. Known by its number alone, an event from
+before a kill was held from the start of the write that took its number
+after it, and owed that write -- a read ending before it began, "holds no
+value written to it", and 7 writes missing in the run that verified the
+token. A reconnect -- the server killed --
 may replay one thing, the seed: the whole range again, every record of it
 there and as written. Each minute a sample of three `match` and three
 `near` queries is held to a scan of the same rows: every doc read, `match`
@@ -474,7 +546,9 @@ it lands, before its fsync and its answer.
 
 **The schedule.** `compact usertable` every 20 minutes; every 120 from
 minute 50 a backup over the replication stream (`fennec backup` into an
-archive), restored (`fennec restore`), the restored file verified and then
+archive, its directory made first: into a path that is none it writes a
+database file of its own, which `fennec restore` takes for a sealed backup
+and refuses without a key), restored (`fennec restore`), the restored file verified and then
 served read-only beside the run, its change number held to the primary's
 at the backup's start and 1 000 of the records written so far read from it
 and held to the registers as reads over the backup's span (an empty or
@@ -539,9 +613,9 @@ those due while a compact ran and until back on schedule after it;
 length alone, read through `/proc/1/root` (never the image a compact
 writes beside it), and `live`, `fennec_data_bytes`; `compactions` so far,
 `auto_compacts`, `r_auto_compacts`, `compacting`, `r_compacting`;
-`rss_anon`, `memory_bytes`, `cg_anon`, `cg_file`, `cg_current`, `majflt`,
+`rss_anon`, `memory_bytes`, `seq` (`fennec_change_sequence`), `cg_anon`, `cg_file`, `cg_current`, `majflt`,
 `threads`, `fds` and `connections` (`fennec_connections`) of the primary,
-`r_rss_anon`, `r_threads`, `r_fds` and `r_connections` of the replica;
+`r_rss_anon`, `r_memory_bytes`, `r_threads`, `r_fds` and `r_connections` of the replica;
 `lag` (`/_replication/status`'s `behind`), `lag_s` (those writes at the
 minute's write rate) and `r_connected`; the sample's `match_n`,
 `match_differs`, `near_n`, `exact_differs`, `recall_sum` and
@@ -560,8 +634,8 @@ cores, by `ps` -- on macOS a decaying average of about the minute, every
 process but the run's and Docker's) and `others_vm` (what the VM's CPUs did
 beside the two servers' cgroups, from `/proc/stat` and their `cpu.stat`;
 the run's own look, verify and backup containers among it). `:start` says
-the run's settings and the load before it (`load_before`), `:end` closes a
-finished run: totals, `swept` against `keys`, the replica's `catchup_s`,
+the run's settings (`replication_buffer` among them) and the load before it (`load_before`), `:end` closes a
+finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
 `p99_restart` and `restart_ms_max` over the run, both files verified after
 both stopped as a supervisor stops them, and `replica_differs`: the same
 read of `usertable`, `counters` and `docs` in id order (`order id`: a page
@@ -581,13 +655,32 @@ hour: lines 61-120 of an 8-hour run, against 421-480 (`same_hour`), so
 that neither a restart's backlog nor a compact's tail weighs more in one
 than in the other; a two-hour run has no such hour and is not judged on
 it; the file at most 2.2 times the live bytes every minute; the primary's
-`rss_anon` grown less than 5% within each life (it is killed every 30
+`rss_anon` beyond what the server holds by its own account grown less
+than 5% of its `rss_anon` within each life (it is killed every 30
 minutes), from the median of its first five quiet looks from its fifth
-line to the median of its last five, and the replica's, never killed, from
-the median of its first five quiet looks from minute 60 to the median of
-every five after -- a quiet look being none in a minute a compact ran or
-was writing at the look (`begin_beside` clones each store), so that one
-look in a compaction never decides. A life with fewer than ten quiet looks
+line to the median of its last five -- what it holds being its engine's
+tables and indexes (`memory_bytes`) and its replication feed
+(`feed_held`): the records appended since the open, up to
+`--replication-buffer`, and the feed's index of them (three `u64`s a
+record in vectors grown by doubling, 48 bytes at most, the records counted
+by `seq`), a minute's appends its file's growth and a compacted minute the
+life's median, the life the records were loaded in full from its first
+line -- and the replica's, never killed and its feed full by the first
+hour's end, beyond its engine's own (`r_memory_bytes`), from the median of
+its first five quiet looks from minute 60 to the median of every five
+after, against 5% of its `r_rss_anon` at the first five -- a quiet look
+being none in a minute a compact ran or was writing at the look
+(`begin_beside` clones each store), so that one look in a compaction never
+decides. Judged on `rss_anon` alone, the dry run of 2026-11-22 failed
+every life of the primary, the most +75.9%: the feed starts empty at each
+open and fills to its 64 MiB at the file's append rate, 3 MB a minute at
+80% of the peak (over 20 minutes of a 30-minute life, longer at 50%), its
+index some 6% more; with the replica never connected it filled all the
+same. Beyond the feed's bytes and the engine's own, the memory was flat
+within a megabyte in each life once the feed was full (lives 1-3 at 16.5,
+18 and 24 MB, the last a step of 6.7 MB at the compact of minute 100),
+growing before that some 0.25 MB a minute with the feed, its index not
+counted then (no `seq` on the dry run's lines). A life with fewer than ten quiet looks
 is not judged, and a run none of whose lives has ten -- the server's own
 compactions taking most minutes, which depends on the data and the memory
 -- fails the line as "NOT JUDGED, too few quiet looks", each life's quiet
