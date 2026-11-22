@@ -1923,13 +1923,14 @@ struct Shared {
     /// The latest change a write was answered as: what a read through the
     /// replica is sent after.
     max_seq: AtomicU64,
-    /// The primary's lives: turned once a killed or dead server is gone,
-    /// before it is started again (`restart`). A kill takes the writes
-    /// answered from its buffer (`--loss-ms`), and the server started again
-    /// gives their change numbers to the writes after it: the checker
-    /// knows a change by its life and number (`in_life`), each read off
-    /// the connection it came on -- one made while the life turned is made
-    /// again. The short run of 2026-11-22 held a stream's change from
+    /// The primary's lives: turned as a killed or dead server, gone and
+    /// its file verified, is started again (`restart`). A kill takes the
+    /// writes answered from its buffer (`--loss-ms`), and the server started
+    /// again gives their change numbers to the writes after it: the checker
+    /// knows a change by its life and number (`in_life`), the life of the
+    /// connection it came on, read as that connection was first answered
+    /// -- no server answers between the death and the start, and a reader
+    /// waits on its first answer. The short run of 2026-11-22 held a stream's change from
     /// before a kill to the write that took its number after it -- a read
     /// spanning back in time, "field9 holds no value written to it" -- and
     /// counted 7 writes after the kill missing from the events before it.
@@ -2129,8 +2130,9 @@ struct Worker<'a> {
     sh: &'a Shared,
     slot: &'a Slot,
     c: Option<http::Http>,
-    /// The primary's life `c` was made in (`Shared::life`).
-    life: u64,
+    /// The primary's life `c` answers in (`Shared::life`): read at its
+    /// first answer, `None` before it.
+    life: Option<u64>,
     rc: Option<http::Http>,
     rng: Rng,
 }
@@ -2160,16 +2162,9 @@ impl Worker<'_> {
             };
             let c = if replica { &mut self.rc } else { &mut self.c };
             if c.is_none() {
-                let life = self.sh.life.load(Ordering::SeqCst);
                 *c = http::Http::try_connect(addr, Duration::from_secs(60)).ok();
-                // Made across a restart's turn of the life, it could reach
-                // either server: made again.
-                if !replica && self.sh.life.load(Ordering::SeqCst) != life {
-                    *c = None;
-                    continue;
-                }
                 if !replica {
-                    self.life = life;
+                    self.life = None;
                 }
             }
             let got = match c.as_mut() {
@@ -2183,6 +2178,13 @@ impl Worker<'_> {
                 None => Err(std::io::Error::other("no connection")),
             };
             let t = self.sh.ns();
+            // A connection's server is the one that answered it first,
+            // whose life is the one turning at that answer -- not at the
+            // connect: Docker's forwarded port takes a connection before
+            // the server behind it is there to answer.
+            if !replica && got.is_ok() && self.life.is_none() {
+                self.life = Some(self.sh.life.load(Ordering::SeqCst));
+            }
             match got {
                 Ok((status, body, seq, _)) if status < 300 => return Answer::Ok(body, seq),
                 Ok((503, body, _, true)) => {
@@ -2244,6 +2246,11 @@ impl Worker<'_> {
                     c.try_request("GET", "/_health", "text/plain", b""),
                     Ok((200, _))
                 ) {
+                    // Its first answer, the server's life with it: kept
+                    // from the connection before, every write after the
+                    // first kill was the life before's (4 148 and 4 464
+                    // events counted a key sent twice, in two runs).
+                    self.life = Some(self.sh.life.load(Ordering::SeqCst));
                     self.c = Some(c);
                     return;
                 }
@@ -2308,7 +2315,8 @@ impl Worker<'_> {
                 }
                 // The checker's change: the server's, of the life that
                 // answered it.
-                Some((false, affected(&body), seq.map(|q| in_life(self.life, q))))
+                let life = self.life.unwrap_or(0);
+                Some((false, affected(&body), seq.map(|q| in_life(life, q))))
             }
             Answer::Unknown => Some((true, 1, None)),
             Answer::Refused(status) => {
@@ -2623,7 +2631,7 @@ fn work(sh: &Shared, w: usize) {
         sh,
         slot,
         c: None,
-        life: 0,
+        life: None,
         rc: None,
         rng: Rng::new(SEED ^ 0x534F_414B ^ (w as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
     };
@@ -2721,7 +2729,7 @@ fn subscribe(sh: &Shared, i: usize) {
         me.from + 64
     );
     while !sh.stop.load(Ordering::Relaxed) {
-        let life = sh.life.load(Ordering::SeqCst);
+        let mut life = 0;
         let opened = (|| -> std::io::Result<std::net::TcpStream> {
             let to = sh.addr.parse().map_err(std::io::Error::other)?;
             let mut s = std::net::TcpStream::connect_timeout(&to, Duration::from_secs(10))?;
@@ -2751,12 +2759,9 @@ fn subscribe(sh: &Shared, i: usize) {
                         break;
                     }
                     Ok(_) if head => {
-                        // Answered across a restart's turn of the life, by
-                        // either server: opened again.
-                        if sh.life.load(Ordering::SeqCst) != life {
-                            ended = "opened as the server restarted".into();
-                            break;
-                        }
+                        // Its server's life, the one turning as it answers
+                        // (`Worker::life`).
+                        life = sh.life.load(Ordering::SeqCst);
                         if !line.contains(" 200") {
                             ended = line.trim().to_string();
                             if line.contains(" 401") || line.contains(" 403") {
@@ -4919,9 +4924,6 @@ fn restart(
         sh.note(format!("docker wait at minute {m}: {out}"));
     }
     let killed = sh.ns();
-    // Gone: nothing answers in its life from here, and the next is not
-    // started yet.
-    sh.life.fetch_add(1, Ordering::SeqCst);
     say(format!(
         "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
         (killed - k) as f64 / 1e9
@@ -4972,6 +4974,9 @@ fn restart(
     }
     doings.verifies.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
+    // A connection first answered from here is the next server's: the
+    // last was gone, and nothing answered since.
+    sh.life.fetch_add(1, Ordering::SeqCst);
     let (ok, out) = docker(&["start", &bench.server()]);
     assert!(ok, "docker start after the kill at minute {m}: {out}");
     // A line between docker's start and the wait for an answer: the two
@@ -7366,7 +7371,7 @@ mod tests {
             sh: &sh,
             slot: &sh.slots[0],
             c: None,
-            life: 0,
+            life: None,
             rc: None,
             rng: Rng::new(1),
         };
@@ -7510,7 +7515,7 @@ mod tests {
                 sh: &sh,
                 slot: &sh.slots[0],
                 c: None,
-                life: 0,
+                life: None,
                 rc: None,
                 rng: Rng::new(1),
             };
