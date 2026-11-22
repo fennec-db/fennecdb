@@ -1453,6 +1453,138 @@ pub(crate) fn image_message(
     image.write_to(out)
 }
 
+/// The least an image a server sends -- a follow's, a backup's, an
+/// archive's, a node stream's, a move's -- goes out at, in bytes a second,
+/// past [`SILENCE`]: its time is that and a second more for every 64 KiB
+/// its receiver took ([`Pace`]), and past it the server ends the stream.
+/// A pin holds the image until it is out -- each collection's id index (12
+/// bytes a row), up to 8 MB of the open segment copied, and the disk of a
+/// file a compact renamed over since -- and the socket's write timeout
+/// alone bounds only a receiver taking nothing: one taking a few bytes
+/// within each held it for as long as it liked. 512 kbit/s is far below a
+/// receiver that can keep a copy -- a replica, a backup, an archiver or a
+/// move's target, each writing to a disk; a 254 MB image went out in 40 ms
+/// on loopback and is taken in under a second -- and holds a 1 GiB image,
+/// a node's largest, to some 4.6 hours. A bound nearer a working link's
+/// rate would end a slow replica's image for good, sent again and pinned
+/// again at every try, which costs the primary more than one slow send.
+const IMAGE_RATE: u64 = 64 << 10;
+
+/// [`Pace`]'s grace in milliseconds and its bytes a second: [`SILENCE`]
+/// and [`IMAGE_RATE`], but where a test set its own ([`set_image_pace`]).
+static PACE: [AtomicU64; 2] = [
+    AtomicU64::new(SILENCE.as_millis() as u64),
+    AtomicU64::new(IMAGE_RATE),
+];
+
+/// Holds every image this process sends or takes to `grace` and `rate`
+/// bytes a second ([`Pace`]): a test's, whose receiver reads slower than
+/// it in seconds rather than hours.
+#[doc(hidden)]
+pub fn set_image_pace(grace: Duration, rate: u64) {
+    PACE[0].store(grace.as_millis() as u64, Ordering::Relaxed);
+    PACE[1].store(rate.max(1), Ordering::Relaxed);
+}
+
+/// An image going out: when it began, and how many of its bytes its
+/// connection took.
+pub(crate) struct Pace {
+    began: Instant,
+    sent: u64,
+}
+
+impl Pace {
+    pub(crate) fn new() -> Pace {
+        Pace {
+            began: Instant::now(),
+            sent: 0,
+        }
+    }
+
+    /// Whether `sent` bytes in `took` kept the pace: [`IMAGE_RATE`] past
+    /// [`SILENCE`]. What the sender ends an image by, and what its receiver
+    /// says a cut came from.
+    fn kept(sent: u64, took: Duration) -> bool {
+        let (grace, rate) = (
+            PACE[0].load(Ordering::Relaxed),
+            PACE[1].load(Ordering::Relaxed),
+        );
+        let earned = grace.saturating_add(sent.saturating_mul(1000) / rate);
+        took.as_millis() as u64 <= earned
+    }
+
+    /// Before each write of the image to `conn`, in the writer under the
+    /// stream's buffer, where a slow receiver's write blocks: past its
+    /// pace, the image is ended, said in the log, and the stream with it.
+    fn check(&self, conn: &crate::conn::Conn) -> io::Result<()> {
+        let took = self.began.elapsed();
+        if Pace::kept(self.sent, took) {
+            return Ok(());
+        }
+        let peer = conn.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let words = slower();
+        crate::log!(
+            "replication: the image to {peer} ended, {} of its bytes taken in {} s: {words}",
+            self.sent,
+            took.as_secs(),
+        );
+        Err(io::Error::new(io::ErrorKind::TimedOut, words))
+    }
+
+    /// `n` more of the image's bytes taken.
+    fn took(&mut self, n: usize) {
+        self.sent += n as u64;
+    }
+}
+
+/// What an image taken too slowly is ended with: the sender's log line, and
+/// its receiver's words for the cut ([`taken_of`]).
+fn slower() -> String {
+    let rate = PACE[1].load(Ordering::Relaxed);
+    format!(
+        "a server ends an image taken slower than {} KiB a second",
+        rate >> 10
+    )
+}
+
+/// A stream's connection as its buffer writes it: an image held to its
+/// pace while one goes out (`image`), each write of it looked at before it
+/// may block. The follow's stream and a move's export write through it --
+/// one writer type, whose code the binary holds once -- and the node's
+/// stream through its own (`node_stream`'s `Out`).
+pub(crate) struct Sending<'a> {
+    pub(crate) conn: &'a crate::conn::Conn,
+    pub(crate) image: Option<Pace>,
+}
+
+impl Write for Sending<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut conn = self.conn;
+        paced(&mut self.image, conn, || conn.write(buf))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.conn)
+    }
+}
+
+/// [`Pace::check`] and [`Pace::took`] around a write of `pace`'s image
+/// through `write`: the node stream's.
+pub(crate) fn paced(
+    pace: &mut Option<Pace>,
+    conn: &crate::conn::Conn,
+    write: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    if let Some(p) = pace {
+        p.check(conn)?;
+    }
+    let n = write()?;
+    if let Some(p) = pace {
+        p.took(n);
+    }
+    Ok(n)
+}
+
 pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -1570,14 +1702,21 @@ fn stream(
     let mut hello = vec![VERSION, image.is_some() as u8];
     hello.extend_from_slice(&u64s(&[seq, feed.durable(), now_ms()]));
     hello.extend_from_slice(&lineage.encode());
-    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, *out);
+    let sending = Sending {
+        conn: out,
+        image: None,
+    };
+    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, sending);
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {
+            // Held to its pace until it is out, its last bytes flushed.
+            w.get_mut().image = Some(Pace::new());
             image_message(&mut w, b'I', &[], image)?;
         }
         w.flush()
     });
+    w.get_mut().image = None;
     drop(image);
     if opened.is_err() {
         return;
@@ -1989,6 +2128,7 @@ pub(crate) fn taken_of(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> (io::
             Ok(n)
         }
     }
+    let began = Instant::now();
     let mut copied = Copied {
         r,
         left: len,
@@ -1998,11 +2138,17 @@ pub(crate) fn taken_of(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> (io::
     let checked = fennec_core::engine::check_reader(&mut copied);
     let left = copied.left;
     if copied.ended {
-        let e = io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!("an image cut short of its {len} bytes"),
+        // Taken slower than a sender holds an image to, the cut is said to
+        // be its end ([`Pace`]), which the sender's log says too.
+        let (got, took) = (len - left, began.elapsed());
+        let mut words = format!("an image cut short of its {len} bytes");
+        if !Pace::kept(got, took) {
+            words = format!("{words}, {got} taken in {} s: {}", took.as_secs(), slower());
+        }
+        return (
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, words)),
+            left,
         );
-        return (Err(e), left);
     }
     let r = match checked {
         Ok(_) => Ok(()),

@@ -191,8 +191,14 @@ pub(crate) fn export(
     head.push_str("\r\n");
     // A store's records go out a document at a time: through a buffer, as
     // a replica's stream sends them -- the same one, a writer of the same
-    // type, whose code the binary holds once.
-    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, *out);
+    // type, whose code the binary holds once -- held to an image's pace
+    // (`replication::Pace`), as the tenant's freeze and its pin are held
+    // until the router took it.
+    let sending = crate::replication::Sending {
+        conn: out,
+        image: Some(crate::replication::Pace::new()),
+    };
+    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, sending);
     let sent = (w.write_all(head.as_bytes()))
         .and_then(|_| image.write_to(&mut w))
         .and_then(|_| w.flush());

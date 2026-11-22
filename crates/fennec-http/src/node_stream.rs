@@ -571,7 +571,14 @@ fn serve(
     let mut s = Session {
         tenants,
         l: &l,
-        w: BufWriter::with_capacity(MESSAGE + 64, Out { s: out, l: &l }),
+        w: BufWriter::with_capacity(
+            MESSAGE + 64,
+            Out {
+                s: out,
+                l: &l,
+                image: None,
+            },
+        ),
         greeted: HashSet::new(),
         lineages: HashMap::new(),
         hello_at: HashMap::new(),
@@ -598,11 +605,14 @@ fn serve(
 struct Out<'a> {
     s: &'a crate::conn::Conn,
     l: &'a Listener,
+    /// An image going out, held to its pace (`replication::Pace`).
+    image: Option<crate::replication::Pace>,
 }
 
 impl Write for Out<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.s.write_or_hold(buf, || self.l.hold())
+        let (s, l) = (self.s, self.l);
+        crate::replication::paced(&mut self.image, s, || s.write_or_hold(buf, || l.hold()))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -1003,7 +1013,12 @@ impl Session<'_> {
         // Taken plain where the client reads no sums (`judge`).
         if let Some(image) = image {
             let len = [name.len() as u8];
-            image_message(&mut self.w, b'I', &[&len, name.as_bytes()], image)?;
+            // Held to its pace until it is out, its last bytes flushed.
+            self.w.get_mut().image = Some(crate::replication::Pace::new());
+            let sent = image_message(&mut self.w, b'I', &[&len, name.as_bytes()], image)
+                .and_then(|_| self.w.flush());
+            self.w.get_mut().image = None;
+            sent?;
             self.quiet = Instant::now();
         }
         self.w.flush()

@@ -569,3 +569,68 @@ fn an_archive_takes_an_image_of_its_end_holding_a_constant_however_large_the_dat
         );
     }
 }
+
+/// An image whose receiver takes it slower than a server holds one to is
+/// ended -- the pin let go of -- in words the receiver's cut is given (and
+/// the sender's log line); one keeping the pace is taken whole. The pace
+/// here is a second's grace and 4 MiB a second (`set_image_pace`), a
+/// server's 10 s and 64 KiB, so that a receiver reading 512 KiB a second is
+/// cut within seconds of an image of 16 MB. Without it the primary sent the
+/// image for as long as the receiver took, holding its pin: the receiver
+/// here took it whole in some 30 s, and this fails as its reads end, a
+/// minute in.
+#[test]
+fn an_image_taken_slower_than_its_pace_is_ended_and_said_so() {
+    use fennec_http::replication;
+    use std::io::{BufReader, Read, Write};
+    use std::time::Duration;
+    /// The stream read 32 KiB at most every 60 ms, its end a minute in:
+    /// past the half minute the image takes whole at that rate, which only
+    /// an image never ended lets it reach -- the stream after it, its
+    /// keep-alives, never ends on its own.
+    struct Slow(std::net::TcpStream, std::time::Instant);
+    impl Read for Slow {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(60));
+            if self.1.elapsed() > Duration::from_secs(60) {
+                return Ok(0);
+            }
+            let n = buf.len().min(32 << 10);
+            self.0.read(&mut buf[..n])
+        }
+    }
+    /// The server's pace again, however the test ends.
+    struct Paced;
+    impl Drop for Paced {
+        fn drop(&mut self) {
+            replication::set_image_pace(Duration::from_secs(10), 64 << 10);
+        }
+    }
+    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let (port, len) = primary(16_000);
+    replication::set_image_pace(Duration::from_secs(1), 4 << 20);
+    let _paced = Paced;
+
+    // Kept: taken as fast as the socket goes.
+    let (image, _) = followed(port, true);
+    assert_eq!(image, len as u64, "an image taken at its pace, whole");
+
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "GET /_replication?since=0&sums=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+         Authorization: Bearer {TOKEN}\r\n\r\n"
+    )
+    .unwrap();
+    let mut r = BufReader::with_capacity(32 << 10, Slow(s, std::time::Instant::now()));
+    let mut copy = fennec_core::engine::Database::new();
+    let (n, end) = replication::read_answer(&mut r, Some(&mut copy));
+    let end = end.to_string();
+    assert_eq!(n, 1, "the image was taken whole at 512 KiB a second: {end}");
+    assert!(
+        end.contains("cut short") && end.contains("slower than 4096 KiB a second"),
+        "{end}"
+    );
+    eprintln!("an image of {len} bytes taken at 512 KiB a second: {end}");
+}
