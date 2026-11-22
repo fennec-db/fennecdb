@@ -1136,11 +1136,10 @@ test('a tab taking the lead from a store it cannot restore stores nothing there'
     await a.ready();
     await until(() => idb.records.has('mixed'), 'the leader stored its replica');
     a.close();
-    // Every persist of the leader's started by now has settled: a restore
-    // waits its turn behind them, and finds nothing under this name.
-    assert.equal(await restore(a.local, 'nothing here'), false);
-    const stored = asStored(idb);
+    // It leads once the closed one let go of the store, what that one had
+    // to store stored.
     await until(() => b.status()[0].leader, 'the follower leads');
+    const stored = asStored(idb);
     assert.match(errors.map((e) => e.message).join('\n'), /mixed is kept as it is, and this tab stores nothing there: mixed: record 0 does not open/);
     const unkept = /^mixed is kept as it is, and this tab stores nothing there: mixed: record 0 does not open/;
     assert.match(b.status()[0].unkept, unkept, 'the status says so');
@@ -1194,6 +1193,29 @@ async function restoresAs(key, cryptoKey, d, get = 'get tasks select key, title 
   }
 }
 
+/**
+ * Closes `replica`, holding the timer its close bounds the wait for its
+ * persist by (`LET_GO_MS`): the bound passes when the test says, by
+ * `pass()`, never by the clock -- a run on a slow machine waited out a real
+ * one before its persist was let through, or a test waited 5 s for it.
+ */
+function closeHeld(replica) {
+  const bounds = [];
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (ms !== 5000) return real(fn, ms, ...args);
+    bounds.push(fn);
+    return { unref() {} };
+  };
+  try {
+    replica.close();
+  } finally {
+    globalThis.setTimeout = real;
+  }
+  assert.equal(bounds.length, 1, "the close bounds its wait for the persist out, by LET_GO_MS's 5 s");
+  return { pass: () => bounds[0]() };
+}
+
 // A leader closed while its own persist was out let go of the lock at once:
 // the next tab read the store and went on in chunks from it, then the
 // closed tab's chunk landed in the place of the next tab's first, and its
@@ -1215,7 +1237,8 @@ test('a leader closed while it stores lets go of the store once its write landed
     a.setOnline(false);
     a.from('tasks').where('key', 'a').update({ title: 'A' }).catch(() => {});
     await seal.hit;
-    a.close();
+    // The bound never passes: the write lets go of the store.
+    closeHeld(a);
     await until(() => b.status()[0].unkept || b.status()[0].leader, 'the follower is elected');
     assert.equal(b.status()[0].leader, false, 'no tab leads while the store is being written');
     assert.match(b.status()[0].unkept, /^closing is stored by another replica/);
@@ -1237,10 +1260,49 @@ test('a leader closed while it stores lets go of the store once its write landed
   }
 });
 
+// A write made while the closing leader's persist was out was never
+// stored: the persist went on only while the replica was open, and the
+// close ended its sends, so the next tab took over a store without it (the
+// review's probe: the server got A1, not A2). Closed, a replica stores what
+// was written before its close, then lets go of the store.
+test('a leader closed while it stores stores the writes made meanwhile before it lets go, and the next sends them', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  await s.run('put tasks $1', [filler]);
+  const locks = fakeLocks();
+  const cryptoKey = await aes();
+  const a = await open(s.url, { leader: 'auto', locks, persist: 'pair', cryptoKey });
+  await a.ready();
+  await until(() => idb.records.has('pair'), 'the leader stored its replica');
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'pair', cryptoKey });
+  const seal = holdSeal();
+  try {
+    await b.ready();
+    a.setOnline(false);
+    a.from('tasks').where('key', 'a').update({ title: 'A1' }).catch(() => {});
+    await seal.hit;
+    // Written while A1's persist is out.
+    a.from('tasks').where('key', 'b').update({ title: 'A2' }).catch(() => {});
+    closeHeld(a);
+    seal.release();
+    await until(() => b.status()[0].leader, 'the follower leads once both landed');
+    await b.pushed();
+    const titles = await s.run('get tasks where key in ["a", "b"] select title order key');
+    assert.deepEqual(titles.map((r) => r.title), ['A1', 'A2']);
+    await until(() => restoresAs('pair', cryptoKey, b), "the store restores as the new leader's copy");
+  } finally {
+    seal.undo();
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
 // Past the bound the lock is let go of all the same, and the persist still
-// out stores nothing it had not begun to: the store as the next tab keeps
-// it, never one of its chunks replaced.
-test('a leader whose persist outlasts its close stores nothing once it let go of the store', { ...opts, timeout: 60000 }, async () => {
+// out stores nothing once the next tab claimed the store: the store as that
+// tab keeps it, never one of its chunks replaced.
+test('a leader whose persist outlasts its close stores nothing once it let go of the store', opts, async () => {
   const idb = installIndexedDB();
   const s = await server();
   await s.run('put tasks $1', [filler]);
@@ -1257,19 +1319,21 @@ test('a leader whose persist outlasts its close stores nothing once it let go of
     a.setOnline(false);
     a.from('tasks').where('key', 'a').update({ title: 'A' }).catch(() => {});
     await seal.hit;
-    a.close();
-    // The 5 s the closed tab waits for its persist.
-    await until(() => b.status()[0].leader, 'the follower leads', 30000);
+    const bound = closeHeld(a);
+    await until(() => b.status()[0].unkept, 'the follower is elected, and waits for the store');
+    assert.equal(b.status()[0].leader, false);
+    // The 5 s the closed tab waits for its persist pass, the persist still out.
+    bound.pass();
+    await until(() => b.status()[0].leader, 'the follower leads');
     await b.from('tasks').where('key', 'b').update({ title: 'B1' });
     await b.pushed();
     await until(() => restoresAs('late', cryptoKey, b), "the store restores as the new leader's copy");
-    const kept = asStored(idb);
     seal.release();
-    // Every persist of its database started by now has settled: a restore
-    // waits its turn behind them, and finds nothing under this name.
-    assert.equal(await restore(a.local, 'nothing here'), false);
-    assert.deepEqual(asStored(idb), kept, 'the store as the new leader keeps it');
-    assert.match(errors.map((e) => e.message).join('\n'), /late: what was written since the last persist is not stored: the replica was closed/);
+    // Its write found the next one's claim, and stored nothing: the store
+    // restores as the new leader keeps it, every record of it in its place.
+    await until(() => errors.length, 'the closed one told what it did not store');
+    assert.match(errors.map((e) => e.message).join('\n'), /late: what was written since the last persist is not stored: another replica claimed the store since/);
+    await until(() => restoresAs('late', cryptoKey, b), "the store restores as the new leader's copy still");
     await b.from('tasks').where('key', 'c').update({ title: 'B2' });
     await b.pushed();
     await until(() => restoresAs('late', cryptoKey, b), 'the store restores after the next chunk');
@@ -1285,7 +1349,8 @@ test('a leader whose persist outlasts its close stores nothing once it let go of
 // Two replicas under one persist key with other shapes, each its tabs'
 // leader, both stored there, each chunk after its own: the store spliced,
 // then never restored. One holds the key's lock; the other stores nothing
-// there, says so, and takes the store over once the first lets go.
+// there, says so, and takes the store over once the first lets go. Its
+// followers said nothing while it waited to lead: they say it too.
 test('replicas of other shapes under one persist key store it one at a time', opts, async () => {
   const idb = installIndexedDB();
   const s = await server();
@@ -1296,7 +1361,9 @@ test('replicas of other shapes under one persist key store it one at a time', op
   const a = await open(s.url, { leader: 'auto', locks, persist: 'shared', cryptoKey });
   await a.ready();
   await until(() => idb.records.has('shared'), 'the first stored its replica');
-  const b = await open(s.url, { leader: 'auto', locks, persist: 'shared', cryptoKey, shapes: [{ collection: 'notes', key: 'key' }] });
+  const notes = { leader: 'auto', locks, persist: 'shared', cryptoKey, shapes: [{ collection: 'notes', key: 'key' }] };
+  const b = await open(s.url, notes);
+  let c = null;
   try {
     await until(() => b.status()[0].unkept || b.status()[0].leader, 'the second is elected');
     assert.equal(await restore(a.local, 'nothing here'), false);
@@ -1305,6 +1372,11 @@ test('replicas of other shapes under one persist key store it one at a time', op
     assert.equal(await restore(b.local, 'nothing here'), false);
     assert.deepEqual(asStored(idb), kept, "the first's store as it stood");
     assert.match(b.status()[0].unkept ?? 'it leads', /^shared is stored by another replica/);
+    // A tab of the second's election, which waits to lead.
+    c = await open(s.url, notes);
+    await until(() => c.status()[0].unkept, "the second's follower says it stores nothing");
+    assert.match(c.status()[0].unkept, /^the tab elected to lead stores nothing: shared is stored by another replica/);
+    assert.equal(c.status()[0].leader, false);
     await a.from('tasks').where('key', 'a').update({ title: 'A' });
     await a.pushed();
     await until(() => restoresAs('shared', cryptoKey, a), "the store restores as the first's copy");
@@ -1313,10 +1385,12 @@ test('replicas of other shapes under one persist key store it one at a time', op
     await b.ready();
     await b.pushed();
     assert.equal(b.status()[0].unkept, null);
+    await until(() => c.status()[0].unkept === null, 'and its follower says it stores');
     await until(() => restoresAs('shared', cryptoKey, b, 'get notes select key, title order key'), "the store restores as the second's copy");
   } finally {
     a.close();
     b.close();
+    c?.close();
     s.close();
     delete globalThis.indexedDB;
   }
@@ -1335,12 +1409,16 @@ test('with leader: false a second tab stores nothing under the key till the firs
   const b = await open(s.url, { locks, persist: 'solo', cryptoKey });
   try {
     await b.ready();
-    assert.equal(await restore(a.local, 'nothing here'), false);
-    const kept = asStored(idb);
+    // The first is told nothing of the second's write: what it stores is its own.
+    a.setOnline(false);
     await b.from('tasks').where('key', 'b').update({ title: 'B' });
     await b.pushed();
     assert.equal(await restore(b.local, 'nothing here'), false);
-    assert.deepEqual(asStored(idb), kept, "the first's store as it stood");
+    await until(() => restoresAs('solo', cryptoKey, a), "the store restores as the first's copy");
+    const r = await Fennec.open(wasm);
+    await restore(r, 'solo', { cryptoKey });
+    assert.equal(r.rows('get tasks where key = "b"')[0].title, 'two', "the second's write is not in it");
+    r.close();
     assert.equal(a.status()[0].unkept, null);
     assert.match(b.status()[0].unkept ?? 'it stores', /^solo is stored by another replica/);
     a.close();
@@ -1349,6 +1427,49 @@ test('with leader: false a second tab stores nothing under the key till the firs
   } finally {
     a.close();
     b.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+// Without a lock manager -- an http:// origin, Safari before 15.4, Firefox
+// before 96 -- nothing kept two tabs from storing one key: each stored its
+// chunks after its own, and a sealed store never restored again, an
+// unsealed one losing writes (the review's probe). Each claims the store as
+// it starts, and a write finds the last claim in its own transaction or
+// stores nothing: the last tab started stores the key, the others say they
+// do not.
+test('with no lock manager two tabs on one key leave a store that restores, the last one started storing it', opts, async () => {
+  const idb = installIndexedDB();
+  const s = await server();
+  // Node's own `navigator.locks`, hidden as a browser without it has none.
+  const nav = globalThis.navigator;
+  if (nav) Object.defineProperty(nav, 'locks', { value: undefined, configurable: true });
+  const started = [];
+  try {
+    for (const cryptoKey of [await aes(), null]) {
+      const key = cryptoKey ? 'bare-sealed' : 'bare';
+      const a = await open(s.url, { persist: key, cryptoKey, onError: () => {} });
+      started.push(a);
+      await a.ready();
+      await until(() => idb.records.has(key), 'the first stored its replica');
+      const b = await open(s.url, { persist: key, cryptoKey });
+      started.push(b);
+      await b.ready();
+      await a.from('tasks').where('key', 'a').update({ title: `A ${key}` });
+      await b.from('tasks').where('key', 'b').update({ title: `B ${key}` });
+      // The first's write reaches the second through the server, which stores it.
+      await until(async () => (await b.from('tasks').where('key', 'a').first())?.title === `A ${key}`, "the second holds the first's write");
+      await until(() => restoresAs(key, cryptoKey, b), "the store restores as the second's copy");
+      await until(() => a.status()[0].unkept, 'the first stores nothing once the second claimed the store');
+      assert.match(a.status()[0].unkept, new RegExp(`^${key}: what was written since the last persist is not stored: another replica claimed the store since`));
+      assert.equal(b.status()[0].unkept, null);
+      a.close();
+      b.close();
+    }
+  } finally {
+    for (const r of started) r.close();
+    if (nav) delete nav.locks;
     s.close();
     delete globalThis.indexedDB;
   }
@@ -1392,21 +1513,29 @@ test('a tab whose take-over read IndexedDB failed reads the store again at its n
 test("unpersist deletes one key's store, refused while a replica keeps it", opts, async () => {
   const idb = installIndexedDB();
   const s = await server();
+  // An image a write's chunk is small beside: one is never folded into another image.
+  await s.run('put tasks $1', [filler]);
   const [right, wrong] = [await aes(), await aes()];
+  // The replica's own lock manager, which `unpersist` is handed: it asked
+  // `navigator.locks` alone, and with none -- or another -- deleted a store
+  // a replica kept.
+  const locks = fakeLocks();
   const started = [];
   try {
-    const first = await open(s.url, { persist: 'mine', cryptoKey: right });
+    const first = await open(s.url, { persist: 'mine', cryptoKey: right, locks });
     started.push(first);
     await first.ready();
+    await until(() => idb.records.has('mine'), 'the image stored');
     await first.from('tasks').where('key', 'a').update({ title: 'ONE' });
     await until(() => [...idb.records.keys()].some((k) => k.startsWith('mine#')), 'a chunk stored');
     await putState('mine:cursor', 7);
-    await assert.rejects(unpersist('mine'), (e) => e instanceof FennecError && /^mine is kept by a replica that runs in this browser/.test(e.message));
+    await assert.rejects(unpersist('mine', { locks }), (e) => e instanceof FennecError && /^mine is kept by a replica that runs in this browser/.test(e.message));
     first.close();
-    await assert.rejects(open(s.url, { persist: 'mine', cryptoKey: wrong }), /or delete it with unpersist\("mine"\), those writes with it, to seed anew/);
-    await unpersist('mine');
+    await assert.rejects(open(s.url, { persist: 'mine', cryptoKey: wrong, locks }), /or delete it with unpersist\("mine"\), those writes with it, to seed anew/);
+    await unpersist('mine', { locks });
     assert.deepEqual([...idb.records.keys()], ['mine:cursor'], 'the key and its chunks gone, nothing else');
-    const second = await open(s.url, { persist: 'mine', cryptoKey: wrong });
+    assert.equal(idb.arrays.size, 0, "and the replica's claim on it");
+    const second = await open(s.url, { persist: 'mine', cryptoKey: wrong, locks });
     started.push(second);
     await second.ready();
     await until(() => idb.records.has('mine'), 'seeded anew, and stored');

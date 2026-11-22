@@ -1661,7 +1661,7 @@
   "unpersist": {
    "kind": "function",
    "declarations": [
-    "function unpersist(key: string): Promise<void>"
+    "function unpersist(key: string, opts?: {locks?: SyncOptions['locks']}): Promise<void>"
    ]
   }
  }

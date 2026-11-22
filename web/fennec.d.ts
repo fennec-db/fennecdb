@@ -1771,12 +1771,18 @@ export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOp
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /**
  * Deletes what `persist` stored under `key` -- its image and its chunks, a
- * replica's unsent writes among them -- and nothing else: a replica whose
- * store does not restore is seeded anew after it. Refused while a replica
- * (`sync`'s `persist`) keeps the key in this browser; one this page closed
- * is waited for. Every database's next `persist` stores its image whole.
+ * replica's unsent writes among them -- and nothing else, not another
+ * key's whose name begins with `key#`: a replica whose store does not
+ * restore is seeded anew after it. Refused while a replica
+ * (`sync`'s `persist`) keeps the key in this browser, asked of `locks` --
+ * the lock manager the replicas were given -- or `navigator.locks`; one
+ * this page closed is waited for. With neither, a replica that keeps the
+ * key stores nothing there from then on (`status()`'s `unkept`). Every
+ * database's next `persist` in this page stores its image whole; another
+ * page's plain `persist` of the key is not reached, and goes on in chunks
+ * its `restore` does not find.
  */
-export function unpersist(key: string): Promise<void>;
+export function unpersist(key: string, opts?: { locks?: SyncOptions['locks'] }): Promise<void>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
@@ -1917,8 +1923,12 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * another -- other shapes or another url under the same key, a second
    * tab with `leader: false` -- stores nothing there until it lets go,
    * then takes the store over, and `status()`'s `unkept` says so meanwhile.
-   * `close()` lets go of it once the persist it has out has landed, or
-   * after 5 s, past which that persist stores nothing.
+   * Each claims the store as it takes it over, and a write finding another's
+   * claim stores nothing: with no lock manager the last replica started
+   * stores the key, and the others nothing from then on. `close()` stores
+   * what was written before it, then lets go of the key; past 5 s it lets
+   * go all the same, and its persist out stores nothing once another
+   * replica claimed the store, `onError` told what was not stored.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
@@ -1932,7 +1942,8 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /**
    * Lock manager (defaults to `navigator.locks`). With `persist`, its
    * `request` is asked with `ifAvailable`, calling `fn(null)` where the
-   * lock is held.
+   * lock is held, and with a `signal` that ends a wait: one that waits
+   * instead holds a second replica's start until the first lets go.
    */
   locks?: { request(name: string, opts: unknown, fn: () => unknown): Promise<unknown> };
   onError?: (e: unknown) => void;
@@ -1977,10 +1988,12 @@ export interface ShapeStatus {
   leader: boolean;
   /**
    * Why this tab stores nothing under `persist`, null where it stores it,
-   * another tab leads, or there is none: another replica keeps the key
-   * until it lets go, or the store did not restore as this tab took it
-   * over -- read again at the next write where IndexedDB failed the read,
-   * kept as it stands where it does not open.
+   * another tab leads and stores it, or there is none: another replica
+   * keeps the key until it lets go, another claimed the store since or it
+   * was deleted, or the store did not restore as this tab took it over --
+   * read again at the next write where IndexedDB failed the read, kept as
+   * it stands where it does not open. A follower says why the tab elected
+   * to lead stores nothing, as that tab waits to lead or leads.
    */
   unkept: string | null;
 }
@@ -2093,8 +2106,8 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
   flush(): Promise<void>;
   /**
    * Closes the subscriptions and gives up the lead, and the `persist` key's
-   * store once the persist it has out has landed, or after 5 s, past which
-   * that persist stores nothing; the local database stays open.
+   * store once what was written before it is stored, or after 5 s, past
+   * which nothing more is, `onError` told; the local database stays open.
    */
   close(): void;
 }

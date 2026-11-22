@@ -389,6 +389,8 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   openFile(db, 'app.fennec', { dir: 'data' });
   expect<boolean>(await restore(db, 'app'));
   expect<void>(await unpersist('app'));
+  // Asked of the lock manager the replicas were given.
+  expect<void>(await unpersist('app', { locks: navigator.locks }));
   // @ts-expect-error -- a key's store is dropped by its key, never a database
   void unpersist(db);
   db.close();
