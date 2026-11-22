@@ -72,7 +72,21 @@ sink, at which `tests/behind.rs` holds the write behind or fails it, and
 the library's code grew 512 bytes. The Kotlin binding's JNI
 functions are the library's (feature `jni`), four entries of the JNI table
 by hand, a call one `byte[]` -- its code, its JSON -- and text as UTF-8
-bytes, since JNI's modified UTF-8 splits an emoji. Each binding runs its
+bytes, since JNI's modified UTF-8 splits an emoji. A `byte[]`'s length is
+a Java `int`: an answer it cannot hold, 2 GiB or more with its code, is a
+query error naming its length (`array_len`), what the statement wrote
+standing. Up to 0.2.0 (from 0.1.8) the length was cast to the `int`
+unchecked, so such an answer went over as a negative length -- an
+exception the VM threw where Kotlin reads a code -- or, from 4 GiB, as its length past a multiple of 4
+GiB, the answer cut to it (1.0's review); the unit test holds the check on
+the length, as no test allocates 2 GiB. The JNI functions' own work --
+reading their arrays, making the answer -- ran outside `call`'s
+`catch_unwind`, and a panic leaving an `extern "system"` function aborts
+the process: each now runs under one (`guarded`), a panic answered as
+`call` answers one, `FENNEC_PANIC` and its message; a stand-in `JNIEnv` of
+the two table entries an answer takes holds both without a JVM
+(`crates/fennec-ffi/src/jni.rs`'s tests, which `cargo test -p fennec-ffi`
+builds without the feature). Each binding runs its
 calls off the main thread (a dispatch queue, `Dispatchers.IO`, a worker
 isolate a database), sends a vector as its `f32` bytes and a json field's
 `exact` refusal again as JSON, holds its builder to every golden case, and

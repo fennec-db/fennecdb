@@ -78,6 +78,23 @@ one whose module stopped (`here`), refusing it from one that runs on
 ([js-client.md](../docs/design/js-client.md#persistence-in-the-page),
 `web/fennec.file.test.js`).
 
+**[A sealed chunk opens only after its own, and a replica keeps a store it
+cannot restore.](../docs/design/js-client.md#sealed-chunks-in-a-chain)** A
+sealed record's tag covers the name it is stored under, its image's
+generation, its place and the tag of the record before it (`aad`, version
+2, the image's `v`): a page going on from a store cut short never opens
+with a chunk it cut, and what remains is a store cut at a record's edge. A
+store sealed as version 1 (0.2.0's) restores as it was sealed and the next
+`persist` stores an image over it; nothing is sealed so any more, and a
+later version is refused by its number. A change to what a tag covers is a
+new version beside the old, the old read as before: the page's stored data
+is a frozen surface. A `FennecSync` seeds only a key holding nothing: a
+store there that does not restore refuses its start, kept as it stands
+with its unsent writes (`#loadPersist`), and a tab taking the lead from
+one stores nothing there (`#unkept`); one taking the lead from a store
+another tab wrote since it read it stores an image first (`sameStore`).
+`web/fennec.persist.test.js` and `web/fennec.sync.test.js` hold each.
+
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
 server as JSON -- `FennecHttp`'s bodies, the sync layer's lines -- writes

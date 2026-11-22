@@ -174,10 +174,13 @@ IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
 `<name>~` and is flushed before the file is written over, so a crash leaves
 one of the two whole; `openFile` takes the copy when its image is whole.
 `persist(db, key, { cryptoKey })` seals the image and each chunk with
-AES-GCM (WebCrypto), a tag over the key, the image's random generation and
-the chunk's number, so one moved, dropped from the middle or kept from an
-image before is refused; a row persists in 0.16 ms either way, the 32 MB
-image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
+AES-GCM (WebCrypto), a tag over the key, the image's random generation,
+the chunk's number and the tag of the record before it -- the image's, for
+the first chunk -- so one moved, dropped from the middle, kept from an
+image before or put after another chunk than the one it was sealed after is
+refused ([below](#sealed-chunks-in-a-chain)); a row persists in 0.16 ms
+either way, the 32 MB image in 129 ms against 76. The OPFS file stays
+plain: it is `fennec-server`'s.
 A database's `persist`, `restore` and `openFile` calls run one after another
 in call order (`inTurn`), each once the one before has settled, refused or
 not: a `persist` called while another is out stores what was written by its
@@ -223,6 +226,80 @@ the database it lets go of after `release`: thrown there, the retiring
 promise rejected, and every call queued on it with "the module stopped";
 it now restores, and they run on the database restored from storage
 (`integrations/cloudflare/example.test.js`).
+
+### Sealed chunks in a chain
+
+A sealed record's tag covers the tag of the record before it: version 2 of
+the seal, the image's `v` (1.0's review, G14). Version 1 -- 0.2.0's, and
+this tree's before it -- covered the key, the generation and the place
+alone, and a page goes on from a store cut short: it restores what is left
+and seals its next chunks at the places of those cut, under the same
+generation, so a chunk it cut opened after one it had kept, or one it
+sealed since after one it cut, writes dropped or doubled in the middle of
+the store. Chained, a store cut short opens only as it stood or as the page
+went on from it, never spliced (`web/fennec.persist.test.js`, `a sealed
+store cut short opens as it stood or as the page went on, never spliced`).
+What remains is a store cut at a record's edge -- the page's latest writes
+lost, as in a store whose latest writes were never persisted -- and an
+older store put back whole, which nothing a page keeps can tell from the
+one it holds. The tags are read off the records as stored, before any
+opens, so a restore still opens them side by side; a chunk's AAD grows by
+the 16 bytes of the tag. With the replica's refusals below, the client grew
+4.0 KB, half of it comments, 1.3 KB gzipped and 1.1 KB brotli (271, 84 and
+71 KB where the docs quote it, `site/build.py`). A chunk's seal and open
+take one GHASH block more and a 16-byte copy. In Node over the tests'
+IndexedDB, twelve rounds a side taken in turns at a load of 4.5 (another
+agent's build), a sealed row persisted in 0.023 ms p50 against main's
+0.022 and an image of 20 000 rows with 300 chunks restored in 3.9 ms
+against 4.1; in headless Chrome (`make file-bench`, at 3.7 to 3.9) a row
+took 0.14 ms against 0.13 and the 32 MB image 132 ms against 128, its
+restore moving between 37 and 74 ms either way over three rounds, two of
+them at loads of 6.8 to 7.1. A quiet machine's `make file-bench` in Chrome
+and Firefox is owed before this lands. The AAD's prefix (`fennecdb/2\0`) differs from
+version 1's (`fennecdb\0`) from its ninth byte, so neither reads as the
+other whatever the key's name holds, and the image's `v` is in its own AAD:
+changed, the image does not open, and a version past 2 is refused by its
+number, never read as this one.
+
+The page's stored data is a frozen surface
+([compatibility.md](compatibility.md#the-frozen-surfaces)): a store sealed
+as version 1 restores, read as it was sealed -- 0.2.0's own store in
+`web/fennec.compat.test.js`, one sealed here as 0.2.0 sealed it in `a
+store sealed as version 1 restores, and its next persist stores an image
+of version 2` -- and the next `persist` stores an image sealed as version 2
+over it, its chunks with it: one image more, once, since a chunk sealed
+after a version 1 record would cover a tag that record was not sealed to
+be followed by. Nothing is sealed as version 1 any more. A client before
+this one refuses a store sealed as version 2, its image's tag not opening
+under version 1's AAD; what is frozen is a later client reading an earlier
+one's store, not the layout.
+
+A replica (`sync({ persist })`) seeds only a key that holds nothing. A
+store that is there and does not restore -- sealed with another `cryptoKey`
+or none, in the clear where one is given, its bytes changed, a later
+client's, an image the module or the code's schema refuses, a read
+IndexedDB failed -- refuses the sync, kept as it stands with the writes it
+holds unsent (`#loadPersist`). It once took such a store for a cache and
+seeded, and its first `persist` stored the seed's image over the store and
+the writes in it, which the right key would have sent (1.0's review). No
+refusal marks a store replaceable: what cannot be read here cannot be told
+to hold nothing -- an image the module refuses under the key that opened
+it is a later client's, or a module's bug, never an attacker's, and
+collation data a page offline could not fetch is there the next time. A
+tab that takes the lead restores the store again for the queue the tab
+before it kept; refused, it tells `onError`, leads, and stores nothing
+there (`#unkept`). Where the store it restores is another than the one it
+read at its start (`sameStore`: the generation, the sizes, the count of
+chunks and the last one's tag), its first `persist` stores an image:
+before, its chunk took the place of the leader's next, the leader's after
+it stayed, and read after it a row the leader had written came back over
+this tab's write of it -- chained, that store no longer restored at all. A
+tab that reads the store as it stands goes on in chunks, as before
+(`web/fennec.sync.test.js`: `a store that does not open under the key
+given is kept with its writes, and the right key sends them`, `a tab
+taking the lead stores over a store the tab before it wrote since it read
+it`, `a tab taking the lead from a store it cannot restore stores nothing
+there`).
 
 ### In real browsers
 
