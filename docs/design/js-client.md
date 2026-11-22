@@ -306,20 +306,45 @@ A leader closed while its own persist was out let go of the lead at once
 chunks from it, then the closed tab's chunk landed in the place of the
 next tab's first, and every chunk after it, sealed after a record gone,
 refused the store for good -- both tabs' unsent writes lost with it, and
-nothing told. `close` now lets go of the store only once the persist out
-has settled (`#letGo`), and starts none. A hung IndexedDB call cannot hold
-the store for good: past `LET_GO_MS`, 5 s -- a 32 MB image is sealed and
-stored in 129 ms in Chrome, 418 ms in Safari unsealed -- it is let go of
-all the same, and the persist still out stores nothing, its write refused
-(`#fence`) where it would make its transaction, after its last await, and
-`onError` told that what it held is not stored. IndexedDB runs a
-transaction before any made after it, in any tab, so a write that passed
-the check was made before the lock was let go of and before the next tab's
-read, which sees it. Either way the store restores: with the closed tab's
-write, which the next tab sends, or without it (`a leader closed while it
-stores lets go of the store once its write landed, and the next sends it`,
-`a leader whose persist outlasts its close stores nothing once it let go
-of the store`).
+nothing told. `close` now lets go of the store only once what was written
+before it is stored (`#letGo`): the persist out, then one for the writes
+made while it was out. The second review found those never stored -- the
+persist went on again only while the replica was open, and the close ended
+its sends, so the next tab took over a store with the first write and not
+the second, which no tab sent. A hung IndexedDB call cannot hold the store
+for good: past `LET_GO_MS`, 5 s -- a 32 MB image is sealed and stored in
+129 ms in Chrome, 418 ms in Safari unsealed -- it is let go of all the
+same, no persist is started after the one out, and `onError` is told what
+is not stored (`a leader closed while it stores lets go of the store once
+its write landed, and the next sends it`, `a leader closed while it stores
+stores the writes made meanwhile before it lets go, and the next sends
+them`, `a leader whose persist outlasts its close stores nothing once it
+let go of the store`). The tests hold the close's timer (`closeHeld`) and
+say when the bound passes: the first assumed the persist was let through
+within 5 s of real time, and the last waited them out.
+
+What keeps a write from landing after the next replica read the store is a
+claim, not the lock. A replica claims the store before it reads it
+(`claim`): a random token under `['fennecdb/owner', key]`, an array key, so
+no `persist` or `putState` key is it and no key's range of strings reaches
+it. Every write a replica makes reads the token in its own read/write
+transaction and writes its record only where the token is its own
+(`persistNow`'s `owner`); one finding another's, or none, stores nothing,
+and the replica stores nothing there from then on, `unkept` and `onError`
+saying why (`taken`). IndexedDB runs the read/write transactions over one
+store one at a time, each seeing those before it (IndexedDB 3.0, *transaction
+scheduling*), so a write runs before a claim -- and the claimer's read,
+after its claim, sees it -- or after, and finds the claim: nothing depends
+on when a lock manager grants a lock. The fence this replaces asked a flag
+where the write made its transaction, after its last await, and held
+because every engine registers a transaction as it is made, before a lock
+granted later in another tab -- which no specification says (the second
+review). The claim costs one small transaction as a replica takes a store
+over, and each of its writes one read before its record in the same
+transaction, made in the background of the write that made it: in headless
+Chrome 158 a chunk's transaction took 0.11 ms p50 alone and 0.14 ms with the
+read before it (1 200 of each, in turns, at a load of 4 another agent
+made). A plain `persist` reads nothing more.
 
 The election's lock is named by the url and the collections, so two
 replicas under one `persist` key -- other shapes, another url, or two tabs
@@ -333,34 +358,90 @@ it before it leads and takes the store over first (`#takeStore`, the
 restore its lead made before), so the queue the tab before kept is sent
 before its own writes. One that finds the lock held stores nothing there,
 `status()`'s `unkept` saying so -- a tab with no election leading all the
-same, an elected one waiting to lead, its tabs with it -- and takes the
-store over once it is let go of. The election's lock is always asked for
-first, so no two tabs wait on each other. A replica of this page that
-closed is waited for (`letting`) before the lock is asked for as it
-stands: let go of, a lock is free a few microtasks later, and a sign-out
-and sign-in under one key found it held. A lock asked for costs 16 µs in
-Node, granted and let go of (p50), beside a restore's milliseconds; a
-persist pays one function call, the fence (`replicas of other shapes under
-one persist key store it one at a time`, `with leader: false a second tab
-stores nothing under the key till the first lets go`).
+same, an elected one waiting to lead -- and takes the store over once it
+is let go of. The tabs an elected one leads, or will, said nothing while
+it waited, their writes reaching no server (the second review): it tells
+them why it stores nothing (`#unkeptBy`, an `unkept` message, again to a tab
+that says hello or hands it a write), and their `unkept` says it. The
+election's lock is always asked for first, so no two tabs wait on each
+other. A replica of this page that closed is waited for (`letting`) before
+the lock is asked for as it stands: let go of, a lock is free a few
+microtasks later, and a sign-out and sign-in under one key found it held.
+A lock asked for costs 16 µs in Node, granted and let go of (p50), beside a
+restore's milliseconds (`replicas of other shapes under one persist key
+store it one at a time`, `with leader: false a second tab stores nothing
+under the key till the first lets go`).
+
+Without a lock manager -- outside a secure context, in Safari before 15.4
+and Firefox before 96 -- every tab held the key: two tabs on one key each
+stored their chunks after their own, a sealed store ended refused for good
+and an unsealed one lost writes, while the docs said one at a time stored
+it (the second review). The claim holds there too: each tab claims the
+store as it starts, so the last one started stores the key and the others
+store nothing from then on, their writes still sent (`with no lock manager
+two tabs on one key leave a store that restores, the last one started
+storing it`). No tab takes the store back once the last one closes: with
+nothing to say it closed, one taking a store it found claimed would take
+it from a tab still running. A store deleted under a running replica --
+`unpersist` with no lock to ask, `indexedDB.deleteDatabase`, the site's
+data cleared -- is not stored again by it, its token gone: before, its next
+persist stored its image there again. A lock manager given as `locks` must
+answer `ifAvailable` with `fn(null)` where the lock is held, as the Web
+Locks API does; one that waits instead, written to 0.2.0's contract, holds
+a second replica's start until the first lets go
+([compatibility.md](compatibility.md#changed-on-purpose-before-10)). A
+0.2.0 tab beside this client on one key asks for no lock and reads no
+claim, and can still store over this client's chunks.
 
 `#unkept` reached `onError` alone: without one, a leader stored nothing
 for the rest of its session, after a one-off IndexedDB failure too.
-`status()` says it (`unkept`), and a take-over whose read IndexedDB itself
-failed -- `unread`, its error marked where `restoreNow` reads, never a
-record that does not open -- reads the store again at the next persist;
-one that does not open is kept as it stands, never read again by that tab
-(`a tab whose take-over read IndexedDB failed reads the store again at its
-next persist`). The start's refusal said to delete the store, and the only
-way documented, `indexedDB.deleteDatabase('fennecdb')`, deleted every
-account's. `unpersist(key)` deletes one key's image and chunks under the
-key's lock, refused while a replica keeps it, and lets go of the shared
-connection, so every database's next `persist` stores an image rather than
-a chunk after one deleted (`unpersist deletes one key's store, refused
-while a replica keeps it`). These grew the client by 7.8 KB, nearly half
-of it comments, 2.2 KB gzipped and 1.8 KB brotli (279, 86 and 73 KB where
-the docs quote it, `site/build.py`); minified by esbuild, as an app bundles
-it, by 2.2 KB, 0.8 KB gzipped.
+`status()` says it (`unkept`), and a take-over whose read or claim
+IndexedDB itself failed -- `unread`, its error marked where `restoreNow`
+reads or `claim` writes, never a record that does not open -- reads the
+store again at the next persist; one that does not open is kept as it
+stands, never read again by that tab (`a tab whose take-over read
+IndexedDB failed reads the store again at its next persist`). The start's
+refusal said to delete the store, and the only way documented,
+`indexedDB.deleteDatabase('fennecdb')`, deleted every account's.
+`unpersist(key)` deletes one key's image, chunks and claim under the key's
+lock -- asked of the `locks` the replicas were given, or
+`navigator.locks` -- refused while a replica keeps it, and lets go of the
+shared connection, so every database's next `persist` in this page stores
+an image rather than a chunk after one deleted (`unpersist deletes one
+key's store, refused while a replica keeps it`). Another page's plain
+`persist` of the key is not reached: its connection is its own, and its
+next chunk follows an image deleted, which `restore` does not find. A
+check that the image is there before each chunk would reach it, at a read
+more on every `persist` of every page, for a key one page deletes under
+another that writes it; the docs say so instead.
+
+A key's chunks were the records from `key#` to `key#\uffff`: another key
+named `key#` and anything -- `notes#archive`, its chunks, a `putState` key
+`notes#cursor` -- was among them, so an image stored under `notes` deleted
+them, `unpersist('notes')` too, and a restore of `notes` read them as its
+chunks (the second review). A chunk's key is `key#` and nine digits
+(`chunkKey`); the range is now from `key#000000000` to `key#999999999`, and
+what it holds is read as `isChunk` says, since another key's can still be
+in it (`notes#1`, `notes#2024`'s chunks). An image reads the range's keys
+before it deletes them, one delete where they are all its own, as they
+nearly always are, a delete a key otherwise; a restore reads the keys
+beside the records (`getAllKeys`). In headless Chrome 158 (load 2.5 to 4,
+the two in turns, p50 of eight), a 4 MB image's transaction took 4.0 ms
+either way over no chunks, 7.7 ms with one delete and 9.9 ms with the keys
+read first over 300, 32.3 and 36.8 ms over 3 000, 73.5 and 77.5 ms over
+10 000 -- paid once a fold, a microsecond or two a chunk before it; a
+restore's read of 300 chunks took 1.0 ms and 1.4 (forty each).
+Deleting at once, the keys read beside to undo the transaction where
+another's were among them, took as long: the read is the cost, not the
+wait for it. A row's chunk reads nothing more (`a key's image, chunks,
+restore and unpersist reach no other key's records`).
+
+The first review's answers grew the client by 7.8 KB, nearly half of it
+comments, 2.2 KB gzipped and 1.8 KB brotli, and by 2.2 KB, 0.8 KB gzipped,
+minified by esbuild as an app bundles it. The second's grew it by 4.6 KB
+more, half of it comments, 1.4 KB gzipped and 1.1 KB brotli (283, 88 and
+74 KB where the docs quote it, `site/build.py`), and by 1.3 KB, 0.4 KB
+gzipped, minified.
 
 ### In real browsers
 

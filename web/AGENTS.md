@@ -95,12 +95,18 @@ one stores nothing there (`#unkept`, `status()`'s `unkept`), reading it
 again at its next persist only where IndexedDB failed the read (`unread`);
 one taking the lead from a store another tab wrote since it read it stores
 an image first (`sameStore`). A replica stores its key only holding the
-key's lock (`storeLock`), whatever its url, shapes or `leader`, and takes
-the store over (`#takeStore`) before it leads; `close` lets go of it once
-the persist out has settled, or after `LET_GO_MS`, past which that
-persist's write is refused (`#fence`, asked after its last await:
-IndexedDB runs a transaction before any made after it). `unpersist` deletes one
-key's store, under its lock. `web/fennec.persist.test.js` and
+key's lock (`storeLock`), whatever its url, shapes or `leader`, claims the
+store before it reads it (`claim`, a token under an array key) and takes
+it over (`#takeStore`) before it leads. Each of its writes reads the token
+in its own read/write transaction and stores nothing where it finds
+another's or none (`taken`, `unkept`): IndexedDB runs a store's read/write
+transactions one at a time, so this holds with no lock manager, where the
+last replica started stores the key, and asks nothing of when a lock is
+granted. `close` stores what was written before it, then lets go of the
+lock, or after `LET_GO_MS`, past which no persist starts and `onError` is
+told. A key's chunks are `key#` and nine digits (`isChunk`): nothing reads
+or deletes another key's records. `unpersist` deletes one key's store,
+under its lock (`locks`). `web/fennec.persist.test.js` and
 `web/fennec.sync.test.js` hold each.
 
 **[A number from 2^53 on goes out as every
