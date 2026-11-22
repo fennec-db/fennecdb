@@ -276,6 +276,24 @@ thread_local! {
     static FAILS: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
+/// An import's side file as its image is written into it, noting whether
+/// a write failed: the disk's refusal is a 500, the image's a 400.
+struct Noted<'a> {
+    side: &'a mut fennec_core::fs::SideFile,
+    failed: bool,
+}
+
+impl std::io::Write for Noted<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let r = self.side.write(bytes);
+        self.failed |= r.is_err();
+        r
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.side.flush()
+    }
+}
+
 /// Notes `what` among a test build's [`STEPS`], or fails it where the test
 /// asked ([`FAILS`]); nothing otherwise, an `Ok` the optimiser drops.
 #[inline(always)]
@@ -2325,9 +2343,10 @@ impl Tenants {
         image.map_err(|e| Refused(500, e.to_string()))
     }
 
-    /// Installs an image as a new tenant. It is replayed in memory first, so
-    /// a truncated or corrupt transfer is refused before it reaches the
-    /// directory; the file then appears by rename, never half-written.
+    /// Installs an image as a new tenant: written beside its file and
+    /// checked there ([`Self::import_from`]), so a truncated or corrupt
+    /// transfer is refused before it reaches the directory; the file then
+    /// appears by rename, never half-written.
     pub fn import(&self, name: &str, image: &[u8]) -> std::result::Result<(), Refused> {
         self.import_as(name, image, None).map(|_| ())
     }
@@ -2341,14 +2360,55 @@ impl Tenants {
         image: &[u8],
         proposed: Option<u64>,
     ) -> std::result::Result<Option<u64>, Refused> {
+        self.import_from(name, &mut &image[..], image.len() as u64, proposed)
+    }
+
+    /// [`Self::import_as`] of an image of `len` bytes read off `body` as it
+    /// comes -- a move's, off the router's connection (`admin::import`):
+    /// written into a file beside the tenant's (`<file>.importing`, made as
+    /// `fs::SideFile` makes one) as its bytes arrive, every record held to
+    /// its sum as it streams (`replication::take_image`), synced, and
+    /// opened from there as the node opens its tenants -- mapped, or read
+    /// into memory under `--no-mmap` -- to check it: a record cut short or one
+    /// that does not read refused, the file gone -- before it is renamed
+    /// into place under the tenant's slot and lock. Read whole as the
+    /// request's body and replayed in memory, an image was the tenant twice
+    /// in the node's memory, and one larger than it never moved.
+    pub fn import_from(
+        &self,
+        name: &str,
+        body: &mut dyn std::io::Read,
+        len: u64,
+        proposed: Option<u64>,
+    ) -> std::result::Result<Option<u64>, Refused> {
         check_name(name)?;
-        let mut check = Database::new();
-        let whole = check
-            .load(image)
-            .map_err(|e| Refused(400, format!("the image does not load: {e}")))?;
-        if whole < image.len() {
-            return Err(Refused(400, "the image is cut short".into()));
+        let unwritten = |e: &dyn std::fmt::Display| {
+            Refused(500, format!("could not write tenant `{name}`: {e}"))
+        };
+        // Through a link, the file it leads to, as the open writes it, and
+        // the image written beside that one: renamed over, the link would
+        // be a file of its own.
+        let target = fennec_core::fs::resolved(&self.path(name));
+        let tmp = fennec_core::fs::beside(&target, "importing");
+        let mut side = fennec_core::fs::SideFile::create(&tmp).map_err(|e| unwritten(&e))?;
+        let mut out = Noted {
+            side: &mut side,
+            failed: false,
+        };
+        if let Err(e) = crate::replication::take_image(body, len, &mut out) {
+            return Err(match e.kind() {
+                _ if out.failed => unwritten(&e),
+                std::io::ErrorKind::UnexpectedEof => Refused(400, "the image is cut short".into()),
+                _ => Refused(400, format!("the image does not load: {e}")),
+            });
         }
+        side.sync()
+            .map_err(|e| unwritten(&e))
+            .and_then(|_| step("image synced").map_err(|e| unwritten(&e)))?;
+        let check = Database::from_side(&mut side, self.mapped).map_err(|e| match e {
+            fennec_core::error::Error::Io(_) => unwritten(&e),
+            _ => Refused(400, format!("the image does not load: {e}")),
+        })?;
         // An image holding a schedule -- an install, a move's target -- enters
         // the tenant in the scheduler's hint, synced, before its file is in
         // place, so a start finds it whatever opens it first; its first look
@@ -2394,37 +2454,27 @@ impl Tenants {
             // A tenant installed here is its primary: a record left by a
             // replica of the same name deleted before would have it follow.
             let _ = std::fs::remove_file(self.follows_path(name));
-            // Through a link, the file it leads to, as the open writes it,
-            // and the image written beside that one: renamed over, the link
-            // would be a file of its own.
-            let target = fennec_core::fs::resolved(&path);
-            let tmp = fennec_core::fs::beside(&target, "importing");
-            let written = fennec_core::fs::create_private(&tmp)
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    f.write_all(image)?;
-                    f.sync_all()
-                })
-                .and_then(|_| step("image synced"));
             // A log a tenant of this name left (`fennec_core::fs`) is not
             // this image's: gone, durably, before the rename.
             // Nor is an identity one left, a binary from before this one
             // deleting it ([`instance`]): it names another file, and is
             // unlinked before the rename where a file system that keeps no
-            // birth time could give this one its inode.
-            let written = written
-                .and_then(|_| fennec_core::fs::forget_sync_log(&target))
+            // birth time could give this one its inode. The rename goes by
+            // the name, held to the handle that wrote it first: another
+            // file put there since is renamed into no tenant's place.
+            let written = fennec_core::fs::forget_sync_log(&target)
                 .and_then(|_| step("log forgotten"))
                 .and_then(|_| instance::put_away(&self.dir, name))
                 .and_then(|_| self.hooks.put_away(name))
-                .and_then(|_| std::fs::rename(&tmp, &target))
+                .and_then(|_| {
+                    #[cfg(unix)]
+                    fennec_core::fs::still_named(side.file(), &tmp)?;
+                    std::fs::rename(&tmp, &target)
+                })
+                .map(|_| side.adopted())
                 .and_then(|_| step("renamed"));
             if let Err(e) = written {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Refused(
-                    500,
-                    format!("could not write tenant `{name}`: {e}"),
-                ));
+                return Err(unwritten(&e));
             }
             // The rename durable before the answer says the tenant is here,
             // as every rename into a database's place is (`fs::sync_dir`):

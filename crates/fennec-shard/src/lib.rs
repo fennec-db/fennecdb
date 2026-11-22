@@ -1466,6 +1466,27 @@ impl Router {
             .call_with(&n.addr, method, target, &n.token, &headers[..named], body)
     }
 
+    /// [`Self::as_holder`]'s `PUT` of a tenant's image of `len` bytes read
+    /// off `image` as it goes out ([`upstream::Pool::call_streamed`]): a
+    /// move's, relayed from its source as it comes.
+    fn as_holder_streamed(
+        &self,
+        n: &Node,
+        target: &str,
+        id: u64,
+        len: u64,
+        image: &mut dyn std::io::Read,
+    ) -> std::io::Result<(u16, Vec<u8>)> {
+        let holder = self.holder_header();
+        let id = fennec_http::instance::text(id);
+        let headers = [
+            (fennec_http::lease::HOLDER_HEADER, holder.as_str()),
+            (fennec_http::instance::HEADER, id.as_str()),
+        ];
+        self.pool
+            .call_streamed(&n.addr, "PUT", target, &n.token, &headers, len, image)
+    }
+
     /// Grants `node` its lease at once, over what the directory places there
     /// now: after a create or a move, so a tenant takes writes on the node it
     /// was placed on before the next round.
@@ -6406,21 +6427,39 @@ impl Router {
         // will not go once the move is done.
         let frozen = expect(freeze, 200, &from).map_err(thaw)?;
         let source = instances_at(&fields_of(&frozen));
-        let image = expect(
-            self.pool
-                .call(&src.addr, "GET", &format!("{base}/file"), &src.token, b""),
-            200,
-            &from,
-        )
-        .map_err(thaw)?;
 
         let proposed = fennec_http::replication::fresh_id();
         let file = format!("{base}/file");
-        let put = || self.as_holder(&dst, "PUT", &file, Some(proposed), &image);
-        let mut installed = put();
+        // The image relayed as it comes, the source's answer into the
+        // target's install, never in the router's memory: read whole, a
+        // move held the tenant there, and one larger than what was left of
+        // it killed the router. Asked of the frozen source again where the
+        // target refused it as holding a file of the tenant (409), the
+        // image the same.
+        let mut bytes = 0;
+        let mut put = || -> Outcome<std::io::Result<(u16, Vec<u8>)>> {
+            let bearer = format!("Bearer {}", src.token);
+            let asked = [("Authorization", bearer.as_str())];
+            let image = match self.pool.send(&src.addr, "GET", &file, &asked, b"") {
+                Ok(a) if a.status == 200 => a.body_reader(),
+                Ok(a) => {
+                    let status = a.status;
+                    let body = a.read_body(&self.pool, false);
+                    let refused = expect(body.map(|b| (status, b)), 200, &from);
+                    return refused
+                        .and_then(|_| Err(Fail(502, format!("node `{from}`: no image"))));
+                }
+                Err(e) => Err(e),
+            };
+            let (len, mut image) =
+                image.map_err(|e| Fail(502, format!("node `{from}` did not answer: {e}")))?;
+            bytes = len;
+            Ok(self.as_holder_streamed(&dst, &file, proposed, len, &mut image))
+        };
+        let mut installed = put().map_err(thaw)?;
         if matches!(installed, Ok((409, _))) {
             self.clear_target(tenant, to, "a move").map_err(thaw)?;
-            installed = put();
+            installed = put().map_err(thaw)?;
         }
         // Unanswered, the image may be there all the same, under the
         // identity proposed.
@@ -6583,7 +6622,7 @@ impl Router {
                 quote(&from),
                 quote(to),
                 region_field(&dst.region),
-                image.len(),
+                bytes,
                 started.elapsed().as_millis(),
                 !left,
                 replica_field(&own)

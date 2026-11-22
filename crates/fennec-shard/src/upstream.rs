@@ -1646,6 +1646,101 @@ impl Pool {
         self.call_with(addr, method, target, token, &[], body)
     }
 
+    /// [`Pool::call_with`] of a body of `len` bytes read off `body` as it
+    /// goes out -- a move's image, from its source's answer
+    /// ([`Answer::body_reader`]) into its target's install -- never held
+    /// whole: on a fresh connection, since a request whose body is read as
+    /// it goes cannot go again, its answer's head read as any request's and
+    /// its body, an admin's few bytes, whole. An answer in before the body
+    /// went out whole is the node's refusal, read and answered as it is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_streamed(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        token: &str,
+        extra: &[(&str, &str)],
+        len: u64,
+        body: &mut dyn Read,
+    ) -> io::Result<(u16, Vec<u8>)> {
+        let (tls, host_at) = scheme_of(addr);
+        let host = &addr[host_at..];
+        let mut req = String::with_capacity(256);
+        for part in [method, " ", target, " HTTP/1.1\r\nHost: ", host, "\r\n"] {
+            req.push_str(part);
+        }
+        for part in ["Authorization: Bearer ", token, "\r\n"] {
+            req.push_str(part);
+        }
+        for (k, v) in extra {
+            for part in [k, ": ", v, "\r\n"] {
+                req.push_str(part);
+            }
+        }
+        // The request's id and its trace go on as every call's do
+        // ([`Pool::send`]).
+        fennec_http::request_id::with(|id| {
+            if !id.is_empty() {
+                for part in [fennec_http::request_id::HEADER, ": ", id, "\r\n"] {
+                    req.push_str(part);
+                }
+            }
+        });
+        fennec_http::trace::outgoing(|parent, state| {
+            for part in [fennec_http::trace::TRACEPARENT, ": ", parent, "\r\n"] {
+                req.push_str(part);
+            }
+            if let Some(state) = state {
+                for part in [fennec_http::trace::TRACESTATE, ": ", state, "\r\n"] {
+                    req.push_str(part);
+                }
+            }
+        });
+        req.push_str(&format!(
+            "Content-Length: {len}\r\nConnection: keep-alive\r\n\r\n"
+        ));
+        let answer = match tls {
+            false => self.streamed_over::<TcpStream>(addr, host, req.as_bytes(), len, body),
+            true => self.streamed_over::<Stream>(addr, host, req.as_bytes(), len, body),
+        }?;
+        let status = answer.status;
+        Ok((status, answer.read_body(self, method == "HEAD")?))
+    }
+
+    /// [`Pool::call_streamed`] over the transport `S`.
+    fn streamed_over<S: Wire>(
+        &self,
+        addr: &str,
+        host: &str,
+        head: &[u8],
+        len: u64,
+        body: &mut dyn Read,
+    ) -> io::Result<Answer> {
+        let mut s = self.connect::<S>(addr, host, self.timeout, self.timeout)?;
+        s.stream.socket().set_read_timeout(Some(self.timeout))?;
+        let sent = (|| -> io::Result<()> {
+            s.stream.write_all(head)?;
+            if io::copy(&mut body.take(len), &mut s.stream)? < len {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("a body cut short of its {len} bytes"),
+                ));
+            }
+            s.stream.flush()
+        })();
+        // The node's refusal of a request it never read whole -- a name it
+        // takes no tenant by, a body past its ceiling -- is its answer.
+        if let Err(e) = sent {
+            if !s.stream.answer_waiting() {
+                return Err(e);
+            }
+        }
+        let want = (self.timeout, self.timeout);
+        self.head(addr, s, want, true, Flying::NONE)
+            .map_err(|Failure(_, e)| e)
+    }
+
     /// [`Pool::call`] with headers of its own besides the token.
     pub fn call_with(
         &self,
@@ -2209,6 +2304,24 @@ impl Answer {
             Reader::Plain(r) => self.body_over(pool, r, len, due(deadline)),
             Reader::Tls(r) => self.body_over(pool, r, len, due(deadline)),
         }
+    }
+
+    /// The body's length and the body itself, read as it comes with the
+    /// read timeout each read of the answer had: what a move relays from
+    /// its source into its target's install ([`Pool::call_streamed`]),
+    /// never held whole. Its connection goes once it is read, never back to
+    /// the pool. An answer with no length is refused, as
+    /// [`Answer::read_body`] refuses one.
+    pub fn body_reader(mut self) -> io::Result<(u64, impl Read)> {
+        let Some(len) = self.content_length() else {
+            return Err(bad(
+                "an answer with no length, where a body of one is asked for",
+            ));
+        };
+        let Some(reader) = self.reader.take() else {
+            return Err(read_already());
+        };
+        Ok((len as u64, reader.take(len as u64)))
     }
 
     /// The rest of the answer as a byte stream, with no read timeout: an SSE

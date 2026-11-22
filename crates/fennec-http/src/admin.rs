@@ -199,6 +199,63 @@ pub(crate) fn export(
     (200, sent.is_ok())
 }
 
+/// `PUT /_admin/tenants/<t>/file`, an image installed as a new tenant, its
+/// `len` bytes of body read off `body` as they come into a file beside the
+/// tenant's (`Tenants::import_from`), every refusal as [`handle`] answers
+/// it. Read whole as the request's body -- to `max_import`, 1 GiB -- and
+/// replayed in memory, a move's image was the tenant twice in the target
+/// node's memory, and a tenant larger than what was left of it killed the
+/// node (docs/design/replication.md#an-image-taken-as-it-arrives). The
+/// answer's status, whether it went out, and whether the body was read
+/// whole: refused before its end, the connection ends with the answer.
+pub(crate) fn import(
+    out: &mut &crate::conn::Conn,
+    body: &mut impl std::io::Read,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    len: usize,
+    keep_alive: bool,
+) -> (u16, bool, bool) {
+    let mut rest = std::io::Read::take(body, len as u64);
+    let resp = match admitted(cfg, req) {
+        Some(no) => no,
+        None => {
+            let segs = req.segments();
+            let t = segs.get(2).copied().unwrap_or("");
+            installed(tenants, t, req, &mut rest, len as u64).unwrap_or_else(Refused::response)
+        }
+    };
+    let whole = rest.limit() == 0;
+    let status = resp.status;
+    let sent = crate::cors(resp, cfg).write(out, keep_alive && whole, false);
+    (status, sent.is_ok(), whole)
+}
+
+/// An image of `len` bytes off `body` installed as tenant `t`
+/// ([`Tenants::import_from`]), and the answer saying so.
+fn installed(
+    tenants: &Tenants,
+    t: &str,
+    req: &Request,
+    body: &mut dyn std::io::Read,
+    len: u64,
+) -> Result<Response, Refused> {
+    proposed(req)
+        .and_then(|id| tenants.import_from(t, body, len, id))
+        .and_then(|id| tenants.get(t).map(|tenant| (tenant, id)))
+        .map(|(tenant, id)| {
+            Response::json(
+                201,
+                format!(
+                    "{{\"imported\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
+                    lineage_json(&tenant),
+                    instance::json(id)
+                ),
+            )
+        })
+}
+
 pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
     if let Some(no) = admitted(cfg, req) {
         return no;
@@ -333,19 +390,12 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 ),
             )
         }),
-        (Method::Put, ["tenants", t, "file"]) => proposed(req)
-            .and_then(|id| tenants.import_as(t, &req.body, id))
-            .and_then(|id| tenants.get(t).map(|tenant| (tenant, id)))
-            .map(|(tenant, id)| {
-                Response::json(
-                    201,
-                    format!(
-                        "{{\"imported\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
-                        lineage_json(&tenant),
-                        instance::json(id)
-                    ),
-                )
-            }),
+        // A body with a length, on a tenant node, is read as it comes by
+        // `import`; a chunked one is read whole first, to `max_import`.
+        (Method::Put, ["tenants", t, "file"]) => {
+            let len = req.body.len() as u64;
+            installed(tenants, t, req, &mut &req.body[..], len)
+        }
         // The failover, tenant by tenant: what a replica's file needs to
         // take writes. It goes through the admin token the router already
         // holds rather than the replication one, which the router does not.
