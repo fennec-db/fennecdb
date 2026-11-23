@@ -61,7 +61,7 @@ pub use stored::{Statements, Stored, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
-pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
+pub use pinned::{Pinned, PinnedImage, PIN_AT, PIN_BUDGET};
 #[cfg(not(target_arch = "wasm32"))]
 mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
@@ -805,8 +805,10 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let io = |e: std::io::Error| Error::Io(e.to_string());
     let mut r = std::io::BufReader::with_capacity(1 << 20, input);
     let mut magic = [0u8; MAGIC.len()];
-    r.read_exact(&mut magic)
-        .map_err(|_| Error::Corrupt("invalid fennecdb signature".into()))?;
+    r.read_exact(&mut magic).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => Error::Corrupt("invalid fennecdb signature".into()),
+        _ => io(e),
+    })?;
     if magic != MAGIC[..] {
         return Err(Error::Corrupt("invalid fennecdb signature".into()));
     }
@@ -814,6 +816,13 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let mut chunk = vec![0u8; 1 << 16];
     let short =
         |at: u64| Error::Corrupt(format!("the record at {at} runs past the end of the file"));
+    // A record cut short by the bytes' end; any other error of the reader
+    // as it came -- a replica's stream halted or cut, a disk's read -- which
+    // read as damage of the image had a replica take a halt for a torn one.
+    let cut = |e: std::io::Error, at: u64| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => short(at),
+        _ => io(e),
+    };
     loop {
         let mut kind = [0u8; 1];
         if r.read(&mut kind).map_err(io)? == 0 {
@@ -823,7 +832,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         // The counter's head is at the front alone ([`whole_record`]).
         if byte == REC_SEQ && at == MAGIC.len() as u64 {
             let mut h = [0u8; REC_SEQ_LEN - 1];
-            r.read_exact(&mut h).map_err(|_| short(at))?;
+            r.read_exact(&mut h).map_err(|e| cut(e, at))?;
             at += REC_SEQ_LEN as u64;
             n += 1;
             continue;
@@ -839,7 +848,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
             let mut shift = 0;
             loop {
                 let mut b = [0u8; 1];
-                r.read_exact(&mut b).map_err(|_| short(at))?;
+                r.read_exact(&mut b).map_err(|e| cut(e, at))?;
                 head.push(b[0]);
                 if shift > 63 {
                     return Err(Error::Corrupt(format!(
@@ -869,7 +878,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         let mut left = summed;
         while left > 0 {
             let take = left.min(chunk.len() as u64) as usize;
-            r.read_exact(&mut chunk[..take]).map_err(|_| short(at))?;
+            r.read_exact(&mut chunk[..take]).map_err(|e| cut(e, at))?;
             if is_checked {
                 crc = crc32c(crc, &chunk[..take]);
             }
@@ -877,7 +886,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         }
         if is_checked {
             let mut sum = [0u8; SUM];
-            r.read_exact(&mut sum).map_err(|_| short(at))?;
+            r.read_exact(&mut sum).map_err(|e| cut(e, at))?;
             if u32::from_le_bytes(sum) != crc {
                 return Err(Error::Corrupt(format!(
                     "the record at {at} fails its checksum"
@@ -1155,6 +1164,32 @@ pub(crate) fn synced_mark() -> Vec<u8> {
     framed_claiming(REC_SYNCED, 0, &[], 1)
 }
 
+/// The head of a block record 2^63 - 1 bytes long, whose length runs past
+/// the end of any file: what an open's cut writes right after its mark
+/// (`fs::FileSink::cut`), over the torn record's next bytes, which the cut
+/// then takes away with the rest of them. A walk stops there as at any torn
+/// tail, nothing after it read or judged ([`whole_record`]), so a power cut
+/// after the write and before the cut leaves a file every open cuts right
+/// after the mark, whatever the torn record went on to hold. A single zero there stopped the walk too, but as
+/// a head no record reads from, which the open judges by what follows
+/// ([`judge_after`]): a record past it whole by its sum and claiming past
+/// it -- a client's text so made, or a later spill of a dead block that an
+/// fsync covered -- refused the open.
+#[cfg(feature = "std-fs")]
+pub(crate) const CUT_SHORT: [u8; 11] = [
+    CHECKED | REC_BLOCK,
+    0,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0x7f,
+];
+
 /// `records` as a version before checksums wrote them: each record's claim
 /// and sum taken off, its kind's bits too and its length its body's. What
 /// a primary sends a replica, an archiver or a `restore` that does not say
@@ -1301,23 +1336,65 @@ fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
 pub(crate) struct Summed<'a> {
     out: &'a mut dyn ImageOut,
     sum: u32,
+    /// How `out` frames the record ([`ImageOut::framing`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    framing: Framing,
 }
 
 impl<'a> Summed<'a> {
     /// The head of a record whose body is `len` bytes, written.
     pub(crate) fn begin(out: &'a mut dyn ImageOut, kind: u8, cid: u32, len: usize) -> Result<Self> {
-        let (h, n) = head(checked_kind(kind, 1), cid, len + 1 + SUM);
+        #[cfg(not(target_arch = "wasm32"))]
+        let framing = out.framing();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (kind, len) = match framing {
+            Framing::Summed => (checked_kind(kind, 1), len + 1 + SUM),
+            Framing::Later => {
+                out.later(Later::Record)?;
+                (checked_kind(kind, 1), len + 1 + SUM)
+            }
+            // As `plain_records` frames a checked record anew.
+            Framing::Plain => (kind, len),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (kind, len) = (checked_kind(kind, 1), len + 1 + SUM);
+        let (h, n) = head(kind, cid, len);
         out.write(&h[..n])?;
         Ok(Summed {
             out,
             sum: crc32c(0, &h[..n]),
+            #[cfg(not(target_arch = "wasm32"))]
+            framing,
         })
     }
 
     /// The claim, none, and the sum, written: the record is whole.
     pub(crate) fn end(mut self) -> Result<()> {
+        // The sum the out makes as it writes the record out, of the bytes
+        // from its head; a plain record ends with its body.
+        #[cfg(not(target_arch = "wasm32"))]
+        match self.framing {
+            Framing::Summed => {}
+            Framing::Later => {
+                self.out.write(&[0])?;
+                return self.out.later(Later::Sum);
+            }
+            Framing::Plain => return Ok(()),
+        }
         self.write(&[0])?;
         self.out.write(&self.sum.to_le_bytes())
+    }
+
+    /// `store`'s live records, `len` bytes, as the record's body
+    /// ([`Store::write_live`]): written, or held by an out that writes
+    /// them as it writes the image out ([`Later::Live`]).
+    pub(crate) fn write_live(&mut self, store: &Store, len: usize) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.framing != Framing::Summed {
+            return self.out.later(Later::Live(store, len));
+        }
+        let _ = len;
+        store.write_live(self)
     }
 }
 
@@ -1400,13 +1477,20 @@ impl Rec<'_> {
     /// the image.
     #[cfg(not(target_arch = "wasm32"))]
     fn claimed(&self, bytes: &[u8]) -> Option<usize> {
+        self.claimed_at(bytes, self.at)
+    }
+
+    /// [`Self::claimed`] of a record read out of the file on its own, its
+    /// first byte `at` in the file ([`surveyed`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn claimed_at(&self, bytes: &[u8], at: usize) -> Option<usize> {
         let c = self.claim_at?;
         let raw = bytes.get(c..self.sum_at)?;
         let mut v = [0u8; 4];
         v[..raw.len()].copy_from_slice(raw);
         match u32::from_le_bytes(v) as u64 {
             0 => None,
-            v => self.at.checked_sub(((v - 1) * CLAIM_UNIT) as usize),
+            v => at.checked_sub(((v - 1) * CLAIM_UNIT) as usize),
         }
     }
 
@@ -2183,7 +2267,8 @@ fn unknown_kind(kind: u8, at: usize) -> Error {
 /// What an open cut off a file's end ([`Database::cut_on_open`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cut {
-    /// Where the file now ends.
+    /// Where the file now ends -- but for the close's mark an open that
+    /// writes the file puts after the cut (`fs::FileSink::cut`).
     pub at: u64,
     /// How many bytes went.
     pub bytes: u64,
@@ -2220,13 +2305,29 @@ fn records_from(bytes: &[u8], at: usize) -> u64 {
     n
 }
 
+/// Whether a record of `kept` -- the whole records an open keeps of a file,
+/// up to where it cuts -- carries a sum (`Database::marks_cut`): looked for
+/// from the front, the first one does in a file this version wrote; in one
+/// a version before checksums began, the first this version appended to
+/// it, after its plain ones.
+#[cfg(feature = "std-fs")]
+fn sums_before(kept: &[u8]) -> bool {
+    let mut walk = Walk::new(kept, MAGIC.len());
+    while let Ok(Some(r)) = walk.next() {
+        if r.kind != REC_SEQ && r.checked() {
+            return true;
+        }
+    }
+    false
+}
+
 /// What a walk over a file's heads finds before a load reads it: where the
 /// last graph record of each index starts, by collection id and field --
 /// the one a load restores -- and the point the file was durable to, which
 /// the load checks the records from. The walk reads record heads alone and
 /// stops where the load would, so the load says what is wrong.
 #[cfg(not(target_arch = "wasm32"))]
-struct Survey {
+pub(crate) struct Survey {
     graphs: Vec<(u32, String, usize)>,
     durable: usize,
 }
@@ -2310,6 +2411,238 @@ fn survey(bytes: &[u8]) -> Result<Survey> {
     Ok(Survey { graphs, durable })
 }
 
+/// The file's bytes a window at a time, read rather than mapped
+/// ([`surveyed`]).
+#[cfg(not(target_arch = "wasm32"))]
+struct Window<'r> {
+    read: &'r mut dyn FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+    /// The bytes from `at` on, as many as were read.
+    buf: Vec<u8>,
+    at: usize,
+    /// The file's length when it was asked for: nothing past it is read.
+    len: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Window<'_> {
+    /// What a window reads at once: a walk over records of a few dozen
+    /// bytes asks the system once a mebibyte.
+    const STEP: usize = 1 << 20;
+
+    /// The file's bytes from `from`, `want` of them, or as many as it holds:
+    /// fewer where it ended sooner, cut meanwhile.
+    fn bytes(&mut self, from: usize, want: usize) -> Result<&[u8]> {
+        if from >= self.len {
+            return Ok(&[]);
+        }
+        let end = from.saturating_add(want).min(self.len);
+        if from < self.at || end > self.at + self.buf.len() {
+            let n = (end - from).max(Self::STEP).min(self.len - from);
+            self.buf.resize(n, 0);
+            let mut got = 0;
+            while got < n {
+                match (self.read)(&mut self.buf[got..], (from + got) as u64) {
+                    Ok(0) => break,
+                    Ok(k) => got += k,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    // Mapped here: a build without `std-fs` -- fennec-ql's
+                    // corpus, its own -- has no `From` for it.
+                    Err(e) => return Err(Error::Io(e.to_string())),
+                }
+            }
+            self.buf.truncate(got);
+            self.at = from;
+        }
+        let have = (end - from).min(self.at + self.buf.len() - from);
+        Ok(&self.buf[from - self.at..from - self.at + have])
+    }
+}
+
+/// A file of `len` bytes read through `read` -- its bytes at an offset, 0
+/// at its end -- never a mapping: its [`Survey`], and how far into it no
+/// open to write it cuts. What a reader that takes no lock may map of it
+/// (`fs::open_read_only`), the rest read into memory, since a page of a
+/// mapping wholly past a file's end is the process's end to read
+/// (`SIGBUS`) and a server opening the file after a crash cuts its torn
+/// tail while the reader walks it; the load then takes this survey for
+/// its own ([`Database::load_surveyed`]).
+///
+/// A load cuts where its walk stops, at a record failing its sum that ends
+/// past the durable point its survey found, or where the spills it ends
+/// with start (`load_records`' `whole`): never before the record holding
+/// that point, nor before a run of spills -- the close's marks among them --
+/// reaching it. This is [`survey`]'s walk over the same heads, stopping
+/// where it stops, finding the same graphs and the same point, a window of
+/// the file at a time, and it keeps where each record starts every 64 KiB
+/// and the runs of spills: the answer is the last kept start at or before
+/// that point, or a run reaching it -- up to 64 KiB and a record more read
+/// into memory than a cut could take -- and never before the image's end,
+/// where no cut lands: a file with nothing past its image is its length.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn surveyed(
+    read: &mut dyn FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+    len: usize,
+) -> Result<(Survey, usize)> {
+    const MARK: usize = 64 << 10;
+    let mut w = Window {
+        read,
+        buf: Vec::new(),
+        at: 0,
+        len,
+    };
+    if w.bytes(0, MAGIC.len())? != &MAGIC[..] {
+        return Err(Error::Corrupt("invalid fennecdb signature".into()));
+    }
+    let mut graphs: Vec<(u32, String, usize)> = Vec::new();
+    let mut pos = MAGIC.len();
+    let mut body_end = pos;
+    let mut checked = false;
+    let mut recent = [(0usize, 0usize); RECENT];
+    let mut n = 0;
+    let mut samples: Vec<(usize, usize)> = Vec::new();
+    let mut marks = vec![pos];
+    // Runs of spills, the marks after them counted in, by where each
+    // starts and where it ended: the one a walk stops at is cut.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut run: Option<usize> = None;
+    while pos < len {
+        let head = w.bytes(pos, 1 + 2 * 10)?;
+        let Some(&byte) = head.first() else { break };
+        if byte == REC_SEQ && pos == MAGIC.len() {
+            // The image's head; its records are walked as the survey walks
+            // them, past the image the tail's.
+            let body = head
+                .get(9..REC_SEQ_LEN)
+                .ok_or_else(|| Error::Corrupt("truncated counter header".into()))?;
+            let mut v = [0u8; 8];
+            v.copy_from_slice(body);
+            pos += REC_SEQ_LEN;
+            body_end = pos.saturating_add(u64::from_le_bytes(v) as usize);
+            continue;
+        }
+        // Where the survey's walk stops ([`whole_record`]): a kind it does
+        // not know, zeros, a head or a length running past the end.
+        if !known(byte) {
+            break;
+        }
+        let mut q = 1;
+        let (Ok(cid), Ok(blen)) = (get_uvarint(head, &mut q), get_uvarint(head, &mut q)) else {
+            break;
+        };
+        let start = pos + q;
+        if cid >= u64::from(u32::MAX) || blen > (len.saturating_sub(start)) as u64 {
+            break;
+        }
+        let end = start + blen as usize;
+        let sums = byte & CHECKED != 0;
+        let kind = if sums { byte & KIND } else { byte };
+        let plain_after = checked && !sums;
+        checked |= sums;
+        let mut counts = sums;
+        if kind == REC_GRAPH && !plain_after {
+            // Its field, read as the survey reads `r.body`'s.
+            let body = match sums {
+                true => (blen as usize).saturating_sub((((byte & WIDTH) >> 5) + 1) as usize + SUM),
+                false => blen as usize,
+            };
+            let mut at = 0;
+            let need = match get_uvarint(w.bytes(start, body.min(10))?, &mut at) {
+                Ok(k) => at.saturating_add(k as usize).min(body),
+                Err(_) => body.min(10),
+            };
+            match crate::codec::decode_str(w.bytes(start, need)?, &mut 0) {
+                Ok(field) => match graphs
+                    .iter_mut()
+                    .find(|(c, f, _)| *c == cid as u32 && *f == field)
+                {
+                    Some(l) => l.2 = pos,
+                    None => graphs.push((cid as u32, field, pos)),
+                },
+                Err(_) if sums => counts = false,
+                Err(e) => return Err(e),
+            }
+        }
+        if pos >= body_end && counts {
+            recent[n % RECENT] = (pos, end);
+            n += 1;
+            if samples.last().is_none_or(|&(s, _)| pos - s >= SAMPLE) {
+                samples.push((pos, end));
+            }
+        }
+        run = match kind {
+            REC_SPILL => run.or(Some(pos)),
+            REC_SYNCED => run,
+            _ => {
+                if let Some(s) = run {
+                    runs.push((s, pos));
+                }
+                None
+            }
+        };
+        if pos - marks[marks.len() - 1] >= MARK {
+            marks.push(pos);
+        }
+        pos = end;
+    }
+    if let Some(s) = run {
+        runs.push((s, pos));
+    }
+    let newest = (0..n.min(RECENT)).map(|k| recent[(n - 1 - k) % RECENT]);
+    let mut durable = body_end;
+    for (at, end) in newest.chain(samples.into_iter().rev()) {
+        let r = w.bytes(at, end - at)?;
+        if r.len() < end - at {
+            continue;
+        }
+        let rec = record_at(r, &mut 0)?;
+        if let Some(d) = rec.claimed_at(r, at).filter(|_| rec.holds(r)) {
+            durable = durable.max(d);
+            break;
+        }
+    }
+    // No cut lands inside the image -- a walk stopping there refuses the
+    // open -- so never short of its end. A file with nothing past its
+    // image, as a compact, a checkpoint, `.save` and a backup leave one,
+    // has no mark after its last record's start, which was the answer: of
+    // a collection with no graph that record is its data, and the reader
+    // read about the whole file into memory.
+    let at = marks
+        .iter()
+        .rev()
+        .find(|&&m| m <= durable)
+        .map_or(MAGIC.len(), |&m| m)
+        .max(body_end.min(len));
+    let uncut = runs
+        .into_iter()
+        .filter(|&(_, e)| e >= at)
+        .fold(at, |at, (s, _)| at.min(s));
+    Ok((Survey { graphs, durable }, uncut))
+}
+
+/// What a survey found: the last graph record of each index, by
+/// collection id, field and where it starts, and the durable point.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub type Found = (Vec<(u32, String, usize)>, usize);
+
+/// [`surveyed`] of a file's bytes in hand, with the point no open cuts the
+/// file before, beside [`survey`]'s walk of them: what `tests/reader.rs`
+/// holds a reader's survey to, over files torn at every point.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reader_survey(file: &[u8]) -> (Result<(Found, usize)>, Result<Found>) {
+    let read = &mut |buf: &mut [u8], at: u64| {
+        let at = (at as usize).min(file.len());
+        let n = buf.len().min(file.len() - at);
+        buf[..n].copy_from_slice(&file[at..at + n]);
+        Ok(n)
+    };
+    (
+        surveyed(read, file.len()).map(|(s, uncut)| ((s.graphs, s.durable), uncut)),
+        survey(file).map(|s| (s.graphs, s.durable)),
+    )
+}
+
 /// Whether `r` is a graph record a later one of its index replaces, by the
 /// last of each that [`survey`] found: a load never reads it. `None`
 /// in the browser, which restores each graph it meets.
@@ -2368,6 +2701,51 @@ pub trait ImageOut {
     fn at(&self) -> u64;
     /// Overwrites bytes written earlier, in place.
     fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+    /// How the image's records are framed in it: [`Framing::Summed`] but
+    /// in an image a pin takes ([`PinnedImage`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn framing(&self) -> Framing {
+        Framing::Summed
+    }
+    /// What an out that frames otherwise is told besides the bytes
+    /// ([`Later`]); never asked of one that sums as it is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn later(&mut self, what: Later<'_>) -> Result<()> {
+        let _ = what;
+        Err(Error::Io(
+            "an image's out told of what it does not hold".into(),
+        ))
+    }
+}
+
+/// How an image's records go into an [`ImageOut`] ([`ImageOut::framing`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Framing {
+    /// Summed as they are written: a file's, a buffer's.
+    Summed,
+    /// Each one's sum made by the out as it writes the image out, and a
+    /// collection's live records held rather than written
+    /// ([`PinnedImage`]): summed as they were taken, every document was
+    /// read under the read lock.
+    Later,
+    /// As a version before checksums wrote them, no claim and no sum: the
+    /// image [`plain_image`] makes of one, for a follower that reads no
+    /// sums.
+    Plain,
+}
+
+/// What an out framing [`Framing::Later`] or [`Framing::Plain`] is told
+/// besides the bytes ([`ImageOut::later`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub enum Later<'a> {
+    /// A record begins: its sum is of the bytes from here.
+    Record,
+    /// The record's sum goes here, 4 bytes.
+    Sum,
+    /// A collection's live records, `len` bytes of a data record's body
+    /// ([`Store::write_live`]).
+    Live(&'a Store, usize),
 }
 
 /// A stretch of a store's bytes, held: the image a load kept, which never
@@ -2505,10 +2883,26 @@ pub trait Sink: Send {
     fn side(&self) -> Option<std::path::PathBuf> {
         None
     }
-    /// Puts the file at `side`, an image of every write so far and fsynced,
-    /// in place of this one, and appends to it from then on.
+    /// Where an image taken from elsewhere -- a replica's of its primary --
+    /// is written as it arrives, before it takes this file's place
+    /// ([`Self::adopt`], [`Database::adopt_side`]): a name of its own, never
+    /// [`Self::side`]'s, which a `compact` beside the database may be
+    /// writing meanwhile. `None` for every sink but a file's, and the image
+    /// is then taken in memory.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> Result<()> {
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Puts the file at `side`, an image of every write so far and fsynced,
+    /// in place of this one, and appends to it from then on: the file
+    /// `written` is open on, the handle that wrote it, and no other put at
+    /// `side`'s name since (`fs::still_named`, on Windows by its file
+    /// index), which is refused. Opened again by its name, as up to the image's review, a
+    /// file put at `.beside` or `.taking` meanwhile -- no link, which the
+    /// open refused -- was renamed into the database's place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &std::path::Path, written: &std::fs::File) -> Result<()> {
+        let _ = written;
         Err(Error::Io(format!(
             "{} has no file to take the place of",
             side.display()
@@ -3391,23 +3785,6 @@ impl Collection {
             return Taken::default();
         }
         taken
-    }
-
-    /// The documents written again without the places of dropped fields,
-    /// which `compact` takes out: the bytes of every value kept copied as
-    /// they stand, into a fresh store -- in memory until the rewrite that
-    /// follows points it at the new file.
-    fn strip_dropped(&mut self) -> Result<()> {
-        let mut fresh = Store::new();
-        fresh.raise_next_id(self.store.next_id());
-        fresh.reserve(self.store.len());
-        for id in self.store.iter_ids() {
-            let payload = self.store.raw(id)?.unwrap_or_default();
-            fresh.append(OP_PUT, id, &self.schema.without_dropped(payload)?);
-        }
-        self.store = fresh;
-        SchemaCell::make_mut(&mut self.schema).dropped.clear();
-        Ok(())
     }
 
     /// The other documents holding one of `doc`'s `@unique` values, each
@@ -5701,6 +6078,10 @@ pub struct Database {
     /// pointed at the file again.
     #[cfg(not(target_arch = "wasm32"))]
     mapped: bool,
+    /// The next load's [`Survey`], made by reading the file rather than
+    /// walking the mapping ([`Self::load_surveyed`]); `None`, it walks it.
+    #[cfg(not(target_arch = "wasm32"))]
+    surveyed: Option<Survey>,
     /// The writes a `create index` or `compact` running beside the database
     /// has to catch up with once it is built (see `maintenance`). A `Mutex`
     /// for the reason `sink` is one: it is registered under the read lock,
@@ -5729,6 +6110,10 @@ pub struct Database {
     /// What the load cut off a torn tail, for whoever opened the file to
     /// say ([`Self::cut_on_open`]).
     cut: Option<Cut>,
+    /// Whether the open's cut of a torn tail is marked: a record before it
+    /// carries a sum ([`Self::marks_cut`]).
+    #[cfg(feature = "std-fs")]
+    marks_cut: bool,
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
@@ -5961,6 +6346,8 @@ impl Database {
             history: History::default(),
             #[cfg(not(target_arch = "wasm32"))]
             mapped: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            surveyed: None,
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
             adoptions: 0,
@@ -5970,6 +6357,8 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             durable: None,
             cut: None,
+            #[cfg(feature = "std-fs")]
+            marks_cut: false,
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             statements: Arc::default(),
             #[cfg(feature = "statements")]
@@ -6084,6 +6473,25 @@ impl Database {
     #[cfg(windows)]
     pub(crate) fn said_cut(&mut self, cut: Option<Cut>) {
         self.cut = cut;
+    }
+
+    /// Whether the open that cuts the file where the load stopped marks the
+    /// cut (`fs::FileSink::cut`): where a record the load kept carries a
+    /// sum, and so the file one no version before checksums reads. In a
+    /// file of no sums no claim decides what an open reads, and a mark
+    /// would be the first record such a version refuses.
+    #[cfg(feature = "std-fs")]
+    pub(crate) fn marks_cut(&self) -> bool {
+        self.marks_cut
+    }
+
+    /// The file cut where the load stopped, and marked where
+    /// [`Self::marks_cut`] says: it ends at `end`, where the next record
+    /// goes, every byte before it durable.
+    #[cfg(feature = "std-fs")]
+    pub(crate) fn cut_to(&mut self, end: u64) {
+        *self.appended.get_mut() = end;
+        self.loaded_durable = end;
     }
 
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
@@ -6523,7 +6931,8 @@ impl Database {
     /// image is what a page persists, a replica or a moved tenant is sent
     /// and an archive keeps, and written with the versions every update
     /// left behind it grew with them -- a page's image by every write since
-    /// the page was first opened.
+    /// the page was first opened. A server sends it as a pin takes it
+    /// ([`Self::pin_image`]), written out with no lock held.
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
         self.image_into(out, &self.order, &mut Vec::new())
     }
@@ -6546,7 +6955,12 @@ impl Database {
         let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
+            #[cfg(target_arch = "wasm32")]
             out.write(&self.history.record())?;
+            // The bytes `History::record` makes, framed as every record of
+            // the image is: a plain one where the out is plain.
+            #[cfg(not(target_arch = "wasm32"))]
+            put_record(out, REC_HISTORY, 0, &self.history.encode())?;
         }
 
         for name in &self.order {
@@ -6575,7 +6989,7 @@ impl Database {
                 #[cfg(not(target_arch = "wasm32"))]
                 placed.push((c.id, data.at()));
                 match compact {
-                    true => c.store.write_live(&mut data)?,
+                    true => data.write_live(&c.store, bytes)?,
                     false => c.store.write_image(&mut data)?,
                 }
                 data.end()?;
@@ -6628,9 +7042,33 @@ impl Database {
         if !self.mapped {
             return Ok(());
         }
-        let Some(base) = self.sink_mut().remapped() else {
-            return Ok(());
+        let remapped = self.sink_mut().remapped();
+        #[cfg(test)]
+        let remapped = remapped.filter(|_| !unwinding::armed("remap"));
+        // Not mapped -- the file's length unread, a mapping refused -- the
+        // stores would read on from the old file, whose mapping they hold,
+        // and the next handover read the records appended to the new one
+        // at their places in the old: the database is failed instead, until
+        // it is opened again.
+        let Some(base) = remapped else {
+            return self.storage(Err(Error::Io(
+                "the rewritten file could not be mapped; open it again".into(),
+            )));
         };
+        // A walk of the new file that refuses leaves the stores as they
+        // were, at the old file's places: failed as well.
+        let r = self.repoint_at(base, placed, compacted);
+        self.storage(r)
+    }
+
+    /// [`Self::repoint`] once the rewritten file is mapped, at `base`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repoint_at(
+        &mut self,
+        base: crate::store::Base,
+        placed: Option<&[(u32, u64)]>,
+        compacted: &[String],
+    ) -> Result<()> {
         if let Some(placed) = placed {
             for (name, c) in self.collections.iter_mut() {
                 match placed.iter().find(|(cid, _)| *cid == c.id) {
@@ -6724,6 +7162,19 @@ impl Database {
             self.mapped = true;
         }
         self.load_from((*keep).as_ref(), Some(&file))
+    }
+
+    /// [`Self::load_mapped`] with the survey [`surveyed`] made of the file
+    /// by reading it, which the load takes in the place of its own walk of
+    /// the mapping: a reader taking no lock (`fs::open_read_only`), whose
+    /// mapping stops short of the bytes an open to write the file may cut.
+    /// A file's alone (`std-fs`).
+    #[cfg(all(feature = "std-fs", not(target_arch = "wasm32")))]
+    pub(crate) fn load_surveyed(&mut self, file: crate::store::Base, s: Survey) -> Result<usize> {
+        self.surveyed = Some(s);
+        let took = self.load_mapped(file);
+        self.surveyed = None;
+        took
     }
 
     /// With `base` the documents are read where they lie in it, and
@@ -6955,7 +7406,10 @@ impl Database {
         // record past the image.
         #[cfg(not(target_arch = "wasm32"))]
         let (last, durable) = {
-            let s = survey(bytes)?;
+            let s = match self.surveyed.take() {
+                Some(s) => s,
+                None => survey(bytes)?,
+            };
             (Some(s.graphs), s.durable)
         };
         #[cfg(target_arch = "wasm32")]
@@ -7000,6 +7454,10 @@ impl Database {
         // read as a plain record -- a newline is kind 10, a tab 9 -- and is
         // judged as a head no record reads from is.
         let mut checked = false;
+        // Where the last close's mark whole by its sum ends: a cut there is
+        // not marked again ([`Self::marks_cut`]).
+        #[cfg(feature = "std-fs")]
+        let (mut synced_to, mut synced_before_spills) = (0, 0);
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
             if r.kind != REC_SEQ {
@@ -7070,6 +7528,12 @@ impl Database {
                 REC_SYNCED => dead_tail,
                 _ => None,
             };
+            // A run of spills right after a whole mark: cut where they
+            // start, the mark ends what is kept.
+            #[cfg(feature = "std-fs")]
+            if dead_tail == Some(r.at) && synced_to == r.at {
+                synced_before_spills = r.at;
+            }
             let index = frames
                 .take()
                 .filter(|(cid, _)| r.kind == REC_DATA && *cid == r.cid && !tail)
@@ -7211,7 +7675,10 @@ impl Database {
                         ));
                     }
                 }
-                // Not a write: the close's mark is read by the survey alone.
+                // Not a write: the close's mark is read by the survey alone,
+                // and by the open that cuts after it.
+                #[cfg(feature = "std-fs")]
+                REC_SYNCED if r.checked() && r.holds(bytes) => synced_to = walk.pos,
                 REC_SYNCED => {}
                 other => return Err(unknown_kind(other, r.at)),
             }
@@ -7239,7 +7706,14 @@ impl Database {
                 // it is looked at: a big record's bytes, vectors' above all,
                 // read as heads by chance, and looking past one for a whole
                 // record refused a tear 1.2 MB into 2 MB of `vector<64>`.
-            } else if checked {
+            } else if checked
+                || (bytes[at] & CHECKED != 0
+                    && known(bytes[at])
+                    && matches!(
+                        framed_at(bytes, at),
+                        Ok(Some((_, end))) if zero_tail(bytes, end, end)
+                    ))
+            {
                 // In a file this version wrote to, a head no record reads
                 // from -- zeros with a byte after them, stale bytes -- is
                 // judged as a record failing its sum is, by whether a whole
@@ -7251,6 +7725,26 @@ impl Database {
                 // version before refused it. One of a kind this version
                 // knows whose sum fails is a record failing its sum, judged
                 // from its end, as a version before framed it.
+                //
+                // So too in a file whose records so far carry no sum -- the
+                // magic alone, the magic and the counter, or one a version
+                // before checksums wrote -- for a checked head of a kind
+                // this version knows that frames, which the walk stopped at
+                // for the collection it names, where it is the file's tail:
+                // its frame ends the file, or zeros run from its end to the
+                // file's (`zero_tail` from where its length says it ends).
+                // A version before read it as the file's first checked
+                // record and judged it by its sum, cutting it torn; refused
+                // by name, such a file a crash's stale bytes left did not
+                // open (the fuzz fix's third review). Anywhere else it is
+                // refused by name, whatever its sum: nothing in such a file
+                // tells a crash's tail from damage, and judged, one in the
+                // middle of an old file was cut with every plain record
+                // after it, as a version before cut it (the third review's
+                // check). So is a checked head whose varint does not read,
+                // or of a kind this version does not know whatever its sum
+                // -- a later version's, refused by its number -- as every
+                // version refused it there.
                 let head = whole_head(bytes, at);
                 if let (Some((_, _, true)), Some(e)) = (head, walk.refused) {
                     return Err(e);
@@ -7293,6 +7787,17 @@ impl Database {
             bytes: (bytes.len() - whole) as u64,
             records: records_from(bytes, whole),
         });
+        // Looked for at a cut alone, from the front: in a file this version
+        // wrote, the first record past the counter carries one. A whole
+        // mark ending the records kept claims them all already -- a close's,
+        // or the one a cut a crash stopped wrote over its torn record's
+        // first bytes (`fs::FileSink::cut`) -- and the next open reads them
+        // as this one did.
+        #[cfg(feature = "std-fs")]
+        {
+            let ends_synced = whole == synced_to || whole == synced_before_spills;
+            self.marks_cut = whole < bytes.len() && !ends_synced && sums_before(&bytes[..whole]);
+        }
         // Where appends after the load claim the file durable to until an
         // fsync of their own covers more: the image's end at least, which
         // was synced before it was renamed into place, and no further than
@@ -8433,6 +8938,9 @@ impl Database {
             let ch = FieldChange::decode(body)?;
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             let c = self.collections.get_mut(&name).unwrap();
+            if !keeps_places(&c.schema, &ch) {
+                return Err(crate::schema::places_moved(&name));
+            }
             let before = c.schema.clone();
             let taken = c.alter_fields(&ch);
             // Before the index of a field added is built, as `alter
@@ -8580,9 +9088,13 @@ impl Database {
                 None => None,
             };
             let new = match op {
+                // Read as a write made it: a value at every place up to the
+                // last field, and none past it -- one written by other
+                // places than this copy holds is refused before anything
+                // reads it a field off.
                 OP_PUT => {
                     crate::store::written_id(id)?;
-                    Some(c.schema.read_doc(id, payload)?)
+                    Some(c.schema.read_written(id, payload)?)
                 }
                 OP_DEL => None,
                 other => {
@@ -8649,6 +9161,99 @@ impl Database {
         *self.appended.get_mut() = image.len() as u64;
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_landed();
+        self.take_contents(fresh);
+        // The image is the file now: a mapped database reads the documents
+        // from there rather than holding the copy it was handed. Written
+        // elsewhere, it is walked to find them.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint(None, &[])?;
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// Whether the documents are read where they lie in the file mapped,
+    /// rather than held in memory (`fs::open_in_memory`, a server's
+    /// `--no-mmap`): how an image taken for this database is loaded
+    /// ([`Self::from_side`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_mapped(&self) -> bool {
+        self.mapped
+    }
+
+    /// Where an image taken for this database from elsewhere is written as
+    /// it arrives ([`Sink::image_side`]): `None` where its sink has no file,
+    /// and the image is taken in memory ([`Self::adopt`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .image_side()
+    }
+
+    /// The database an image written whole into `side` holds -- a replica's
+    /// of its primary, its follow record after it, synced -- loaded as a
+    /// database held as `mapped` says: its documents read where they lie in
+    /// the file, which is the database's own once [`Self::adopt_side`]
+    /// renames it in, what is derived from them alone built in memory; or
+    /// read into memory, where the database is held there. An image cut
+    /// short of a whole record is refused: one is whole, or none.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn from_side(side: &mut crate::fs::SideFile, mapped: bool) -> Result<Database> {
+        let len = ImageOut::at(side);
+        let mut fresh = Database::new();
+        let whole = match mapped {
+            true => fresh.load_mapped(side.map()?)?,
+            false => fresh.load(&side.read_back()?)?,
+        };
+        if (whole as u64) < len {
+            return Err(Error::Corrupt(format!(
+                "the image is cut short: the record at byte {whole} runs past its end, {len}"
+            )));
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::adopt`] of an image taken into the file beside this one
+    /// ([`Self::image_side`]) as it arrived and loaded from there
+    /// ([`Self::from_side`]): the sink renames it into the file's place
+    /// ([`Sink::adopt`], as a `compact` beside the database puts its file
+    /// there: held to its handle's name, the file's mode, the sync log
+    /// forgotten, the directory synced), and the stores `fresh` read from it
+    /// stand, their file the database's now. Nothing is written under the
+    /// lock but the rename, and nothing walked: taken in memory, the image
+    /// was written to disk here whole and every record head walked again.
+    /// Refused, the file is as it was, and `side` goes as it drops. The
+    /// file renamed in is the one the follower wrote, the stores `fresh`
+    /// read map: another put at its name since is refused before the sink
+    /// is asked, the database as it was and taking writes, and the sink
+    /// holds the rename to the side's own handle after ([`Sink::adopt`]) --
+    /// on Windows by its file index, until the image review's second round
+    /// held by nothing.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn adopt_side(&mut self, fresh: Database, mut side: crate::fs::SideFile) -> Result<()> {
+        self.refuse_if_failed()?;
+        crate::fs::still_named(side.file(), side.path())?;
+        let r = self.sink_mut().adopt(side.path(), side.file());
+        self.storage(r)?;
+        side.adopted();
+        *self.appended.get_mut() = ImageOut::at(&side);
+        self.forget_landed();
+        self.take_contents(fresh);
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// What [`Self::adopt`] and [`Self::adopt_side`] take of `fresh`: its
+    /// collections, history and statements, its change ring under this
+    /// one's size; the sink, the watcher and the plugins stay.
+    fn take_contents(&mut self, fresh: Database) {
         let cap = self.changes.capacity();
         self.collections = fresh.collections;
         self.order = fresh.order;
@@ -8677,16 +9282,6 @@ impl Database {
         {
             self.kept = 0;
         }
-        // The image is the file now: a mapped database reads the documents
-        // from there rather than holding the copy it was handed. Written
-        // elsewhere, it is walked to find them.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.repoint(None, &[])?;
-        self.dirty = false;
-        if let Some(w) = &self.watcher {
-            w.notify(self.changes.seq());
-        }
-        Ok(())
     }
 
     // ---------------------------------------------------------------- blocks
@@ -8935,6 +9530,18 @@ impl Database {
         let r = f(&mut *g.0);
         std::mem::forget(g);
         r
+    }
+
+    /// What a panic in a compact's rewrite leaves ([`Self::compact`]):
+    /// the stores compacted in memory, some perhaps pointed at a new file
+    /// and others at the old one. Stopped as a storage error stops writes,
+    /// which an open reads back as the file holds them.
+    #[cold]
+    #[inline(never)]
+    fn compact_unwound(&mut self) {
+        self.fail(&Error::Io(
+            "a panic as a compact rewrote the file: what the stores point at is unknown".into(),
+        ));
     }
 
     #[cold]
@@ -9507,6 +10114,12 @@ impl Database {
                 }
                 // Past the payload's end nothing is skipped: a field added
                 // after the document was written reads as `null`.
+                // A dropped place is passed as any value: a test here for
+                // its `null` (`codec::skip_passing`) cost every other
+                // collection's page of 100 rows 150 to 518 instructions,
+                // held across the rows or asked of the collection, where a
+                // page passing one pays 47 a row without it
+                // (docs/design/storage.md#dropped-places).
                 while at < want {
                     crate::codec::skip_field(doc, &mut pos)?;
                     at += 1;
@@ -10442,6 +11055,11 @@ impl Database {
             }
             return Err(Error::Exists(format!("collection `{}`", schema.name)));
         }
+        // Whoever built it: no read refuses what a write took. A schema
+        // whose fields were pushed past `Schema::new` was written as handed,
+        // and the file refused at its next open, a replica's apply too
+        // (the fuzz fix's third review).
+        schema.readable()?;
         // Every id below the last `u32`, which an open refuses
         // (`unmade_collection`): reached only from a file naming an id near
         // it, where `+= 1` overflowed, or wrapped to 0 in a release build.
@@ -10519,6 +11137,10 @@ impl Database {
                          value for it",
                         f.name
                     )));
+                }
+                // Every place a field ever had stays (`MAX_PLACES`).
+                if schema.width() >= crate::schema::MAX_PLACES {
+                    return Err(places_full(collection, &schema));
                 }
                 // The checks a `create collection` makes of its fields: a
                 // name taken or reserved, a collation or an index the type
@@ -13478,7 +14100,7 @@ impl Database {
             // at all. Elsewhere `order` has no such guarantee, which is why
             // the engine sorts in full there.
             kept.sort_unstable();
-            kept = order_ids(&child.store, &kept, keys, want)?;
+            kept = order_ids_of(&child.store, &kept, keys, want)?;
         }
         Ok(kept)
     }
@@ -13927,7 +14549,7 @@ impl Database {
                     };
                     format!("order: {by}, every key read, {} matches, {kept}", ids.len())
                 });
-                ids = order_ids(&c.store, &ids, &keys, k)?;
+                ids = order_ids_of(&c.store, &ids, &keys, k)?;
             }
             Ok((ids, facet_ids))
         }
@@ -14905,8 +15527,6 @@ impl Database {
     /// rebuilt here -- a compact beside the database has rebuilt them
     /// already, without the lock.
     fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let began = std::time::Instant::now();
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -14918,6 +15538,29 @@ impl Database {
             .iter()
             .map(|n| self.collections[n].store.dead_bytes())
             .sum();
+        // From the first store changed to the stores pointed at the new
+        // file, a panic fails the database, as one landing a block does: a
+        // server takes the lock it poisoned as it stands, and stores half
+        // pointed at the new file would read a later handover's records at
+        // the old one's places.
+        self.unwinding(
+            |db| db.compact_stores(&targets, graphs, reclaimed),
+            Self::compact_unwound,
+        )
+    }
+
+    /// [`Self::compact`] past its targets: every one of their stores
+    /// compacted, a dropped field's values reclaimed and its places kept,
+    /// the graphs holding tombstones rebuilt where `graphs` says, and the
+    /// file rewritten.
+    fn compact_stores(
+        &mut self,
+        targets: &[String],
+        graphs: bool,
+        reclaimed: usize,
+    ) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let began = std::time::Instant::now();
         // Over a mapped file the records never come into memory: the live
         // ones are written into the new file, and the stores are pointed at
         // it. The documents are the same ones, so no index is rebuilt.
@@ -14925,18 +15568,35 @@ impl Database {
         let mapped = self.mapped;
         #[cfg(target_arch = "wasm32")]
         let mapped = false;
-        // A dropped field's places are taken out of every document, which
-        // compacts the store besides; over a mapped file the documents come
-        // into memory for it, until the rewrite below points them at the new
-        // file.
-        for name in &targets {
+        // A dropped field's value becomes a `null` in each document, its
+        // place kept, as the compact copies the live records into fresh
+        // segments; over a mapped file only the documents holding one come
+        // into memory, written again, until the rewrite below points them
+        // at the new file. Nothing here is refused for what a document
+        // holds: one it cannot read is copied as it is. What refuses is a
+        // location outside its segment or the mapped file -- a damaged
+        // store, which the rewrite would meet copying that record and fail
+        // the database for -- and it fails it here too: the stores before
+        // it were compacted already, their counters and their records'
+        // places ahead of the file, and a compact refused there would be
+        // asked again every few seconds by a server, meeting it each time.
+        for name in targets {
             let c = self.collections.get_mut(name).unwrap();
-            match c.schema.dropped.is_empty() {
-                false => c.strip_dropped()?,
-                true if !mapped => c.store.compact()?,
-                true => {}
-            }
+            let r = match mapped {
+                false => c.store.compact(),
+                true => c.store.reclaim(),
+            };
+            // A damaged location, which no write makes, put where a test
+            // asks for one.
+            #[cfg(test)]
+            let r = r.and_then(|()| match unwinding::armed("refused") {
+                true => Err(Error::Corrupt("a test's location outside the file".into())),
+                false => Ok(()),
+            });
+            self.storage(r)?;
         }
+        #[cfg(test)]
+        unwinding::panic_at("compacted");
         // A compact drops dead records and moves the live ones; the
         // documents are the same, and every index is keyed by id, so none
         // needs rebuilding for that -- a graph without tombstones took 50 s
@@ -14945,7 +15605,7 @@ impl Database {
         // document with a vector leaves one, and they crowd the beam `near`
         // walks (a `limit 10` answered 4 rows once enough had gathered).
         if graphs {
-            for name in &targets {
+            for name in targets {
                 let c = self.collections.get_mut(name).unwrap();
                 // By position, not by collecting the names: the list of
                 // strings was 440 bytes of the browser module.
@@ -14954,14 +15614,17 @@ impl Database {
                         continue;
                     };
                     let field = &c.schema.fields[pos].name;
+                    // A document it cannot read leaves the graph as it
+                    // stands, tombstones and all, and answering as it did:
+                    // one built without it would not.
                     if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
-                        build_graph(c, pos, spec)?;
+                        let _ = build_graph(c, pos, spec);
                     }
                 }
             }
         }
         // After compaction the persisted image is rewritten from scratch.
-        let compacting: &[String] = if mapped { &targets } else { &[] };
+        let compacting: &[String] = if mapped { targets } else { &[] };
         let mut placed = Vec::new();
         let mut len = 0;
         let r = {
@@ -16954,16 +17617,63 @@ fn past_tombstones(
     Short::Exact
 }
 
+/// Whether `ch`, a primary's alter, leaves the dropped places the copy's
+/// `before` holds where they are, adding one for a drop alone. A compact
+/// of 0.2.0 or before took them out of the documents of the database it
+/// ran on, which no record says: the copy tells at the primary's next
+/// write of the collection ([`Schema::read_written`]) or, before any, at
+/// its next alter here (a `create index`'s schema, whole, is held to the
+/// copy's layout as well). Where no field followed a place taken out, it
+/// was last in every document, which a write leaves out: the writes agree
+/// and read alike, and the next alter alone tells.
+fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
+    let (was, now) = (&before.dropped, &ch.schema.dropped);
+    match ch.op {
+        FIELD_DROP => now.len() == was.len() + 1 && was.iter().all(|d| now.contains(d)),
+        _ => now == was,
+    }
+}
+
+/// The refusal of a field added to a collection holding
+/// [`crate::schema::MAX_PLACES`] places, and the way out where there is
+/// one: made again, a collection is rid of its dropped places, and holds
+/// its fields still -- a collection 0.2.0 made past the bound, which had
+/// none, has no way out but fewer fields. One message, its way out a
+/// `&str`: a second message was 195 bytes of the browser module.
+#[cold]
+#[inline(never)]
+fn places_full(collection: &str, schema: &Schema) -> Error {
+    let way = match schema.fields.len() < crate::schema::MAX_PLACES {
+        true => {
+            "make the collection again (create another and copy the rows into it) to be rid \
+             of the dropped places"
+        }
+        false => {
+            "its fields alone fill the places a collection holds, and making it again keeps them"
+        }
+    };
+    Error::Query(format!(
+        "`{collection}` holds {} places -- its {} fields and the {} its dropped fields left, \
+         which its documents keep -- and takes no field more: {way}",
+        schema.width(),
+        schema.fields.len(),
+        schema.dropped.len()
+    ))
+}
+
 /// The fields an alter of `collection` leaves, checked as `Schema::new`
-/// checks a `create`'s: one copy for `add` and `rename`. Every field it
-/// held was read within the language's ranges (`Schema::decode`), so a
-/// refusal is of the field the alter changes.
+/// checks a `create`'s but for their count: one copy for `add` and
+/// `rename`. An add is held to the bound before (`places_full`), and a
+/// rename adds no place, so it is taken on a collection past the bound --
+/// one 0.2.0 made, which had none, and which an open reads as it is. Every
+/// field the collection held was read within the language's ranges
+/// (`Schema::decode`), so a refusal is of the field the alter changes.
 #[inline(never)]
 fn altered(
     collection: &str,
     fields: Vec<crate::schema::Field>,
 ) -> Result<Vec<crate::schema::Field>> {
-    Schema::new(collection.to_string(), fields).map(|s| s.fields)
+    Schema::checked(collection.to_string(), fields, false).map(|s| s.fields)
 }
 
 /// The beam [`past_tombstones`] widens to: `ef`, at least the page, and
@@ -17053,6 +17763,20 @@ struct Filter<'q> {
     /// among them.
     positions: Vec<usize>,
     index_of: Vec<usize>,
+    /// The places of [`Self::positions`] where a dropped place comes
+    /// before one of them, and `positions` left empty: read out of line
+    /// with the paths (`Store::read_fields_passing`), a dropped place's
+    /// `null` passed by its byte. Read in line, each dropped place a row
+    /// passed was a call into the skip, 44 instructions of a 440-instruction
+    /// row of a scan by one field past one; a test in line telling the two
+    /// apart would be paid by every row of every other collection. Always
+    /// empty in the browser module, which holds one copy of the reader.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    passing: Vec<usize>,
+    /// Where the paths' values begin in `vals`: past the fields'.
+    paths_at: usize,
+    /// Whether a row is read out of line too: paths, or `passing`.
+    out_of_line: bool,
     /// The paths into json fields the filter reads, each its field's
     /// position and the keys past it: read a row after the fields, each
     /// its value off the bytes, into `vals` past theirs.
@@ -17447,11 +18171,24 @@ impl<'q> Filter<'q> {
             // query rather than once a row.
             *p = c.schema.place(*p);
         }
+        let paths_at = positions.len();
+        // Not in the browser module, which holds one copy of the reader.
+        let past_dropped = match (c.schema.dropped.first(), positions.iter().max()) {
+            (Some(d), Some(last)) => !cfg!(target_arch = "wasm32") && d < last,
+            _ => false,
+        };
+        let (positions, passing) = match past_dropped {
+            true => (Vec::new(), positions),
+            false => (positions, Vec::new()),
+        };
         Filter {
             c,
             root,
             positions,
             index_of,
+            out_of_line: !paths.is_empty() || !passing.is_empty(),
+            passing,
+            paths_at,
             paths,
             vals: std::cell::RefCell::new(Vec::new()),
             key: std::cell::RefCell::new(Vec::new()),
@@ -17796,8 +18533,10 @@ impl<'q> Filter<'q> {
         // A filter over no path reads none, and asks no more than this,
         // the reading out of line so that what is inlined into every scan
         // stays the size it was. Its paths' values go after its fields',
-        // which `read_fields` leaves where they are.
-        if !self.paths.is_empty() {
+        // which `read_fields` leaves where they are. A collection holding a
+        // dropped place before a field read has its fields read there too
+        // (`passing`).
+        if self.out_of_line {
             self.read_paths(id, &mut vals)?;
         }
         self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
@@ -17956,7 +18695,15 @@ impl<'q> Filter<'q> {
 
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
-        let n = self.positions.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.passing.is_empty() && !self.c.store.read_fields_passing(id, &self.passing, vals)? {
+            vals.clear();
+            vals.resize(self.passing.len(), Value::Null);
+        }
+        if self.paths.is_empty() {
+            return Ok(());
+        }
+        let n = self.paths_at;
         vals.resize(n + self.paths.len(), Value::Null);
         if !self.c.store.read_paths(id, &self.paths, &mut vals[n..])? {
             vals[n..].fill(Value::Null);
@@ -17975,7 +18722,7 @@ impl<'q> Filter<'q> {
         let get = |s: Slot| match s {
             Slot::Id => idv,
             Slot::At(p) => &vals[self.index_of[p]],
-            Slot::Path(n) => &vals[self.positions.len() + n],
+            Slot::Path(n) => &vals[self.paths_at + n],
         };
         Ok(match t {
             Test::And(a, b) => {
@@ -18674,6 +19421,61 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
             flat.push(match (pos, path) {
                 (None, _) => Value::Int(id as i64),
                 (Some(p), None) => store.read_field(id, *p)?.unwrap_or(Value::Null),
+                (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
+            });
+        }
+    }
+    let unfolded: Vec<OrderKey>;
+    let keys = match keys.iter().any(|k| k.2.fold.is_some()) {
+        false => keys,
+        true => {
+            unfolded = folded_keys(&mut flat, keys);
+            &unfolded
+        }
+    };
+    let idx = order_rows(&flat, n, ids.len(), keys, k);
+    Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// [`order_ids`], or [`order_ids_passing`] where a field an order reads is
+/// past a dropped place, picked once a query at the call. Not inside
+/// `order_ids`: any test or copy beside its loop there -- a loop of its
+/// own, a generic copy, a call out of line -- moved its registers and took
+/// 1 to 11 instructions a row from every other collection's order.
+#[inline(always)]
+fn order_ids_of(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Result<Vec<DocId>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if keys
+        .iter()
+        .any(|(p, _, _, path)| path.is_none() && p.is_some_and(|p| store.passes(p)))
+    {
+        return order_ids_passing(store, ids, keys, k);
+    }
+    order_ids(store, ids, keys, k)
+}
+
+/// [`order_ids`] where a field read is past a dropped place: each `null`
+/// passed by its byte ([`Store::read_field_in`]), a call into the skip a
+/// row saved. Not in the browser module, which holds one copy of the
+/// reader.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+fn order_ids_passing(
+    store: &Store,
+    ids: &[DocId],
+    keys: &[OrderKey],
+    k: usize,
+) -> Result<Vec<DocId>> {
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    let n = keys.len();
+    let mut flat: Vec<Value> = Vec::with_capacity(ids.len() * n);
+    for &id in ids {
+        for (pos, _, _, path) in keys {
+            flat.push(match (pos, path) {
+                (None, _) => Value::Int(id as i64),
+                (Some(p), None) => store.read_field_in::<true>(id, *p)?.unwrap_or(Value::Null),
                 (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
             });
         }

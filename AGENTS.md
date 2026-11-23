@@ -90,7 +90,7 @@ behind `std-fs`; the indexes are `vector`, `text`, `highlight`, `fuzzy`,
 `sparse`, `sorted`, `composite`, `geo`, `hll` and `maps`, and `off` stands
 in for one a build is made without.
 
-The browser client is `web/fennec.js` -- WASM glue (~636 lines),
+The browser client is `web/fennec.js` -- WASM glue (~693 lines),
 persistence and the sync layer -- re-exporting the query builder
 (`web/builder.js`) and the HTTP client (`web/http.js`), dependency-free ES
 modules; `web/fennec.d.ts`
@@ -222,7 +222,9 @@ Covers `crates/`.
 *Conventions*
 - Unit tests live inline
 - Every parser of untrusted bytes is fuzzed
+- Every `unsafe` block says why it is sound.
 - A secret is compared by `crypto::ct_eq` alone
+- A file is made by `fennec_core::fs`'s helpers, its owner's alone
 
 ### `crates/fennec-core/CLAUDE.md`
 
@@ -512,6 +514,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A live query learns what changed from the change ring.
 - A seed in parts lands in one task.
 - A page's IndexedDB calls share one connection, and let it go when asked.
+- A sealed chunk opens only after its own, and a replica keeps a store it cannot restore.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 

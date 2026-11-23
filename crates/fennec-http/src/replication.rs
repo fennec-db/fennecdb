@@ -56,11 +56,13 @@
 
 use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
+use fennec_core::engine::PinnedImage;
 use fennec_core::prelude::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -78,9 +80,31 @@ const CHUNK: usize = 1 << 20;
 /// It is also what a replica applies under one hold of its write lock.
 pub(crate) const MESSAGE: usize = 1 << 20;
 
+/// The longest message a stream carries, an image or writes: an image is
+/// the whole database, and a block's record goes alone however long it is
+/// -- a block past 16 MB spills into its primary's file, and the feed
+/// sends it whole ([`fennec_core::engine::landed_block`]). Past it is a
+/// stream that lost its place, or no primary.
+pub(crate) const LONGEST: u64 = 1 << 40;
+
+/// The longest of the other messages -- a hello, a keep-alive, an end, a
+/// node's word of a tenant's lineage or its leaving: a keep-alive is 24
+/// bytes, and a hello's lineage an entry of 18 bytes at the most for each
+/// promotion its database had, some 58 000 of them in this.
+pub(crate) const SHORT: u64 = MESSAGE as u64;
+
+/// What a message's body is given of memory before its bytes come: a
+/// stream's writes in one message where no record goes alone --
+/// [`MESSAGE`] of records and a time for each, fewer bytes than its record
+/// -- so a steady stream's message is one allocation of its length, as it
+/// always was. Past it the body grows as its bytes come.
+const FIRST: usize = 2 * MESSAGE + 16;
+
 /// A stream with nothing to send says so this often: the replica learns the
-/// primary is there, and how far it has got.
-pub(crate) const ALIVE: Duration = Duration::from_secs(2);
+/// primary is there, and how far it has got. A stream behind says how far
+/// its disk has got this often too, after the writes it sends. Public for a
+/// router, which reads a promoted copy's last contact against it.
+pub const ALIVE: Duration = Duration::from_secs(2);
 
 /// A replica that hears nothing for this long takes the primary for gone and
 /// connects again.
@@ -872,11 +896,21 @@ impl Sink for Tee {
     fn side(&self) -> Option<std::path::PathBuf> {
         self.file.side()
     }
+    /// Passed on, so a replica that has replicas of its own takes its
+    /// primary's image into a file beside its own as one without does.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.file.image_side()
+    }
     /// The side file holds every write, and is fsynced before it takes the
     /// file's place.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> fennec_core::error::Result<()> {
-        self.file.adopt(side)?;
+    fn adopt(
+        &mut self,
+        side: &std::path::Path,
+        written: &std::fs::File,
+    ) -> fennec_core::error::Result<()> {
+        self.file.adopt(side, written)?;
         self.feed.mark_durable(self.feed.seq());
         Ok(())
     }
@@ -1204,13 +1238,46 @@ impl Replication {
     }
 }
 
-/// `/_replication/...`, answered here. `None` means the request was a
-/// stream, which took the connection over and has ended.
+/// `/_replication/...` of a file's server or a router's directory,
+/// answered here: the stream, the status and the promotion. `None` means
+/// the request was a stream, which took the connection over and has
+/// ended.
 pub fn handle(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     repl: &Replication,
     req: &Request,
+) -> Option<Response> {
+    answer(out, db, repl, req, promoting)
+}
+
+/// `/t/<tenant>/_replication/...` of a node of tenants: the stream and the
+/// status, and no promotion. A tenant's copy is promoted by the node's
+/// admin alone (`POST /_admin/tenants/<t>/promote`, `Tenants::promote_as`),
+/// which a router's failover calls, held to the lease's fence and to the
+/// lineage and history the router knows, its `.follows` forgotten, its
+/// identity renewed, the node's stream told and the audit written. Here,
+/// with the replication token every node of a region and every archiver
+/// holds, the copy forked past all of it: the router counted it a standby
+/// still, and without `--lease` it took writes beside its primary. The
+/// path is 404 as any a node does not serve.
+pub fn handle_tenant(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+) -> Option<Response> {
+    answer(out, db, repl, req, |_, req| unknown(req))
+}
+
+/// The routes every replication answers, the token asked first; `rest`
+/// answers any other.
+fn answer(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+    rest: fn(&Replication, &Request) -> Response,
 ) -> Option<Response> {
     use crate::http::Method;
     if !repl.authorized(req) {
@@ -1225,7 +1292,16 @@ pub fn handle(
             None
         }
         (Method::Get, ["_replication", "status"]) => Some(status(db, repl)),
-        (Method::Post, ["_replication", "promote"]) => Some(match &repl.follower {
+        _ => Some(rest(repl, req)),
+    }
+}
+
+/// `POST /_replication/promote`: a file's server's and a router's
+/// directory's, never a tenant's ([`handle_tenant`]).
+fn promoting(repl: &Replication, req: &Request) -> Response {
+    use crate::http::Method;
+    match (req.method, req.segments().as_slice()) {
+        (Method::Post, ["_replication", "promote"]) => match &repl.follower {
             None => Response::error(409, "this server is not a replica"),
             Some(f) => match f.promote(fresh_id()) {
                 Ok((seq, id)) => Response::json(
@@ -1234,9 +1310,13 @@ pub fn handle(
                 ),
                 Err(e) => Response::error(500, &e.to_string()),
             },
-        }),
-        _ => Some(Response::error(404, &format!("path `{}`", req.path))),
+        },
+        _ => unknown(req),
     }
+}
+
+fn unknown(req: &Request) -> Response {
+    Response::error(404, &format!("path `{}`", req.path))
 }
 
 impl Replication {
@@ -1350,6 +1430,161 @@ pub(crate) fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Res
     Ok(())
 }
 
+/// An image's message: its head, `before`, then the image written as it
+/// is read ([`PinnedImage::write_to`]) -- its documents from the database's
+/// file and segments as they stood at the pin, never gathered. Built whole
+/// in the primary's memory, an image was a second copy of the database
+/// there, and one larger than that memory was killed at its first follow
+/// (docs/design/replication.md#an-image-sent-as-it-is-read).
+pub(crate) fn image_message(
+    out: &mut impl Write,
+    tag: u8,
+    before: &[&[u8]],
+    image: &PinnedImage,
+) -> io::Result<()> {
+    let len = before.iter().map(|p| p.len() as u64).sum::<u64>() + image.len();
+    let mut head = [0u8; 9];
+    head[0] = tag;
+    head[1..].copy_from_slice(&len.to_le_bytes());
+    out.write_all(&head)?;
+    for p in before {
+        out.write_all(p)?;
+    }
+    image.write_to(out)
+}
+
+/// The least an image a server sends -- a follow's, a backup's, an
+/// archive's, a node stream's, a move's -- goes out at, in bytes a second,
+/// past [`SILENCE`]: its time is that and a second more for every 64 KiB
+/// its receiver took ([`Pace`]), and past it the server ends the stream.
+/// A pin holds the image until it is out -- each collection's id index (12
+/// bytes a row), up to 8 MB of the open segment copied, and the disk of a
+/// file a compact renamed over since -- and the socket's write timeout
+/// alone bounds only a receiver taking nothing: one taking a few bytes
+/// within each held it for as long as it liked. 512 kbit/s is far below a
+/// receiver that can keep a copy -- a replica, a backup, an archiver or a
+/// move's target, each writing to a disk; a 254 MB image went out in 40 ms
+/// on loopback and is taken in under a second -- and holds a 1 GiB image,
+/// a node's largest, to some 4.6 hours. A bound nearer a working link's
+/// rate would end a slow replica's image for good, sent again and pinned
+/// again at every try, which costs the primary more than one slow send.
+const IMAGE_RATE: u64 = 64 << 10;
+
+/// [`Pace`]'s grace in milliseconds and its bytes a second: [`SILENCE`]
+/// and [`IMAGE_RATE`], but where a test set its own ([`set_image_pace`]).
+static PACE: [AtomicU64; 2] = [
+    AtomicU64::new(SILENCE.as_millis() as u64),
+    AtomicU64::new(IMAGE_RATE),
+];
+
+/// Holds every image this process sends or takes to `grace` and `rate`
+/// bytes a second ([`Pace`]): a test's, whose receiver reads slower than
+/// it in seconds rather than hours.
+#[doc(hidden)]
+pub fn set_image_pace(grace: Duration, rate: u64) {
+    PACE[0].store(grace.as_millis() as u64, Ordering::Relaxed);
+    PACE[1].store(rate.max(1), Ordering::Relaxed);
+}
+
+/// An image going out: when it began, and how many of its bytes its
+/// connection took.
+pub(crate) struct Pace {
+    began: Instant,
+    sent: u64,
+}
+
+impl Pace {
+    pub(crate) fn new() -> Pace {
+        Pace {
+            began: Instant::now(),
+            sent: 0,
+        }
+    }
+
+    /// Whether `sent` bytes in `took` kept the pace: [`IMAGE_RATE`] past
+    /// [`SILENCE`]. What the sender ends an image by, and what its receiver
+    /// says a cut came from.
+    fn kept(sent: u64, took: Duration) -> bool {
+        let (grace, rate) = (
+            PACE[0].load(Ordering::Relaxed),
+            PACE[1].load(Ordering::Relaxed),
+        );
+        let earned = grace.saturating_add(sent.saturating_mul(1000) / rate);
+        took.as_millis() as u64 <= earned
+    }
+
+    /// Before each write of the image to `conn`, in the writer under the
+    /// stream's buffer, where a slow receiver's write blocks: past its
+    /// pace, the image is ended, said in the log, and the stream with it.
+    fn check(&self, conn: &crate::conn::Conn) -> io::Result<()> {
+        let took = self.began.elapsed();
+        if Pace::kept(self.sent, took) {
+            return Ok(());
+        }
+        let peer = conn.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let words = slower();
+        crate::log!(
+            "replication: the image to {peer} ended, {} of its bytes taken in {} s: {words}",
+            self.sent,
+            took.as_secs(),
+        );
+        Err(io::Error::new(io::ErrorKind::TimedOut, words))
+    }
+
+    /// `n` more of the image's bytes taken.
+    fn took(&mut self, n: usize) {
+        self.sent += n as u64;
+    }
+}
+
+/// What an image taken too slowly is ended with: the sender's log line, and
+/// its receiver's words for the cut ([`taken_of`]).
+fn slower() -> String {
+    let rate = PACE[1].load(Ordering::Relaxed);
+    format!(
+        "a server ends an image taken slower than {} KiB a second",
+        rate >> 10
+    )
+}
+
+/// A stream's connection as its buffer writes it: an image held to its
+/// pace while one goes out (`image`), each write of it looked at before it
+/// may block. The follow's stream and a move's export write through it --
+/// one writer type, whose code the binary holds once -- and the node's
+/// stream through its own (`node_stream`'s `Out`).
+pub(crate) struct Sending<'a> {
+    pub(crate) conn: &'a crate::conn::Conn,
+    pub(crate) image: Option<Pace>,
+}
+
+impl Write for Sending<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut conn = self.conn;
+        paced(&mut self.image, conn, || conn.write(buf))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.conn)
+    }
+}
+
+/// [`Pace::check`] and [`Pace::took`] around a write of `pace`'s image
+/// through `write`: the node stream's.
+pub(crate) fn paced(
+    pace: &mut Option<Pace>,
+    conn: &crate::conn::Conn,
+    write: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    if let Some(p) = pace {
+        p.check(conn)?;
+    }
+    let n = write()?;
+    if let Some(p) = pace {
+        p.took(n);
+    }
+    Ok(n)
+}
+
 pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -1406,7 +1641,9 @@ fn stream(
     // the image or the cursor one record off.
     let (seq, lineage, epoch, image) = {
         // An image of what has landed: a block's writes reach the replica
-        // as the record it lands as, or never.
+        // as the record it lands as, or never. Pinned, and written out
+        // once the lock is let go ([`image_message`]); plain where the
+        // follower reads no sums.
         let g = crate::held::read(db);
         let now = g.change_seq();
         let epoch = feed.epoch();
@@ -1414,10 +1651,10 @@ fn stream(
         if go_on {
             (since, g.history().clone(), epoch, None)
         } else {
-            (now, g.history().clone(), epoch, Some(g.snapshot()))
+            (now, g.history().clone(), epoch, Some(g.pin_image(!sums)))
         }
     };
-    let image = match image.map(|i| plain_unless(sums, i)).transpose() {
+    let image = match image.transpose() {
         Ok(i) => i,
         Err(e) => {
             let _ = Response::error(500, &e.to_string()).write(out, false, false);
@@ -1465,14 +1702,21 @@ fn stream(
     let mut hello = vec![VERSION, image.is_some() as u8];
     hello.extend_from_slice(&u64s(&[seq, feed.durable(), now_ms()]));
     hello.extend_from_slice(&lineage.encode());
-    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, *out);
+    let sending = Sending {
+        conn: out,
+        image: None,
+    };
+    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, sending);
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {
-            message(&mut w, b'I', &[image])?;
+            // Held to its pace until it is out, its last bytes flushed.
+            w.get_mut().image = Some(Pace::new());
+            image_message(&mut w, b'I', &[], image)?;
         }
         w.flush()
     });
+    w.get_mut().image = None;
     drop(image);
     if opened.is_err() {
         return;
@@ -1489,6 +1733,9 @@ fn stream(
         let feed = Arc::clone(feed);
         move || feed.nudge()
     });
+    // When the replica was last told where this disk stands: the hello
+    // told it.
+    let mut told = Instant::now();
     loop {
         if crate::conn::ending() {
             return;
@@ -1511,18 +1758,40 @@ fn stream(
                 if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
                     s.sent = cursor;
                 }
-            }
-            Next::Nothing => {
-                feed.sent(key, cursor, true);
-                feed.wait_unless(cursor, epoch, ALIVE, crate::conn::ending);
-                if feed.durable() <= cursor {
-                    let alive = u64s(&[feed.seq(), feed.durable(), now_ms()]);
-                    if message(&mut w, b'K', &[&alive])
+                // Behind, a stream says where the disk stands every
+                // `ALIVE` too, after the writes it sends: said only once
+                // it had caught up, a replica up to the feed's buffer
+                // behind -- its reads slower than the writes, its socket
+                // full -- heard of no write it had not been sent, and its
+                // `behind`, a node's `fennec_copies_behind`, a promotion's
+                // answer and the router's line read 0. A replica of every
+                // release reads a keep-alive between any two messages.
+                // Asked once `feed.sent` let the writes waiting on this one
+                // go, and sent in a flush of its own: in the `W`'s flush,
+                // a `--sync always` write waited on the clock and, every
+                // `ALIVE`, on the keep-alive's bytes too. A stream that has
+                // sent every write on disk is not behind and says nothing.
+                if told.elapsed() >= ALIVE && feed.durable() > cursor {
+                    if message(&mut w, b'K', &[&alive(feed)])
                         .and_then(|_| w.flush())
                         .is_err()
                     {
                         return;
                     }
+                    told = Instant::now();
+                }
+            }
+            Next::Nothing => {
+                feed.sent(key, cursor, true);
+                feed.wait_unless(cursor, epoch, ALIVE, crate::conn::ending);
+                if feed.durable() <= cursor {
+                    if message(&mut w, b'K', &[&alive(feed)])
+                        .and_then(|_| w.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
+                    told = Instant::now();
                 }
             }
             Next::Behind => {
@@ -1546,6 +1815,12 @@ fn stream(
             }
         }
     }
+}
+
+/// A keep-alive's body: the feed's last write, the last on disk -- what a
+/// replica's `behind` is counted to -- and the time.
+fn alive(feed: &Feed) -> Vec<u8> {
+    u64s(&[feed.seq(), feed.durable(), now_ms()])
 }
 
 /// Takes a finished stream off what durable writes wait for.
@@ -1591,7 +1866,12 @@ pub enum Message {
         durable: u64,
         lineage: Vec<(u64, u64)>,
     },
-    Image(Vec<u8>),
+    /// An image of this many bytes, which follow on the stream unread: the
+    /// receiver takes them as they come ([`Receiver::take_image`]) before
+    /// it reads another message. Read whole, an image was the database in
+    /// the memory of whatever took it -- a replica, `fennec backup`, an
+    /// archiver -- and one larger than that memory never followed.
+    Image(u64),
     /// Writes numbered on from `first`, each with the time it was appended.
     Writes {
         first: u64,
@@ -1651,11 +1931,12 @@ impl Upstream {
     /// Opens the stream for a database `since` changes in on `history`;
     /// `image` asks for one whatever the positions say.
     pub fn open(&self, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
-        self.request(connect(&self.addr)?, since, history, image, false)
+        self.request(connect(&self.addr)?, since, history, image, false, None)
     }
 
     /// [`Upstream::open`] over `s`, a connection to the primary made
-    /// already: the request, and the answer's head.
+    /// already: the request, and the answer's head. Where `stop` is given,
+    /// every read of the socket looks at it first ([`Watched`]).
     fn request(
         &self,
         mut s: crate::dial::Stream,
@@ -1663,6 +1944,7 @@ impl Upstream {
         history: u64,
         image: bool,
         reading: bool,
+        stop: Option<Arc<AtomicBool>>,
     ) -> io::Result<Receiver> {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
@@ -1682,23 +1964,96 @@ impl Upstream {
         s.write_all(request.as_bytes())?;
         s.flush()?;
         let conn = s.socket().try_clone()?;
-        let mut r = BufReader::with_capacity(MESSAGE + 64, s);
+        let mut r = BufReader::with_capacity(MESSAGE + 64, Watched { s, stop });
         let (status, length) = read_head(&mut r)?;
-        if status != 200 {
-            let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
-            r.read_exact(&mut body)?;
-            return Err(io::Error::other(format!(
-                "the primary answered {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
-        }
+        answered(&mut r, status, length, "primary")?;
         Ok(Receiver { r, conn })
+    }
+}
+
+/// Past an answer's head: nothing where it is the stream's 200, the
+/// refusal in its own words otherwise -- `who`'s, 64 KiB of them read at
+/// most, shown as a peer's words are ([`peer_words`]).
+pub(crate) fn answered(
+    r: &mut impl Read,
+    status: u16,
+    length: Option<usize>,
+    who: &str,
+) -> io::Result<()> {
+    if status == 200 {
+        return Ok(());
+    }
+    let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
+    r.read_exact(&mut body)?;
+    Err(io::Error::other(format!(
+        "the {who} answered {status}: {}",
+        peer_words(&body)
+    )))
+}
+
+/// The most of a peer's words a log line or `/_replication/status`'s
+/// `error` shows ([`peer_words`]): a refusal's sentence whole, a JSON
+/// error's with its braces.
+pub(crate) const SHOWN: usize = 200;
+
+/// A peer's bytes as a log line and `/_replication/status`'s `error` show
+/// them: the first [`SHOWN`] characters, escaped as Rust writes a string --
+/// a newline `\n`, an escape character `\u{1b}`, a quote `\"` -- inside
+/// quotes, and how many bytes there were where that is not all of them.
+/// An `E` message's text (up to [`SHORT`], any bytes) and a refusal's body
+/// (64 KiB) went in as they came: whoever answers at a primary's address,
+/// or stands on a plain-HTTP hop before it, wrote lines of its own into
+/// the log -- a newline and the next line's prefix, a terminal's escapes --
+/// and a mebibyte into it and into the status at every reconnect. The one
+/// way every reader of a peer's stream shows its words: a replica's, an
+/// archiver's, a backup's and a node archiver's -- and a router its nodes'
+/// answers, in a log line and the errors it answers with
+/// ([`peer_words_within`]).
+pub fn peer_words(bytes: &[u8]) -> String {
+    peer_words_within(bytes, SHOWN)
+}
+
+/// [`peer_words`], showing the first `most` characters: a router shows a
+/// node's refusal whole, whose sentence runs past [`SHOWN`] to what an
+/// operator does about it -- cut at 200, a failover's refusal of a copy of
+/// another lineage lost its last 113 bytes and the `force` it names.
+pub fn peer_words_within(bytes: &[u8], most: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut chars = text.chars();
+    let shown: String = chars.by_ref().take(most).collect();
+    let mut out = format!("{shown:?}");
+    if chars.next().is_some() {
+        out.push_str(&format!(
+            " (the first {most} characters of {} bytes)",
+            bytes.len()
+        ));
+    }
+    out
+}
+
+/// The primary's connection, a follower's read only while it is not
+/// halted: on Windows a halt's cut ends a read already waiting but not one
+/// begun after it, and a primary sending a byte at a time -- each in
+/// `SILENCE` -- kept that read, and the halt, going for as long as it
+/// liked. Looked at before each read of the socket: an atomic's load
+/// beside a system call.
+struct Watched {
+    s: crate::dial::Stream,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl Read for Watched {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.stop.as_ref().is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err(io::Error::other("halted"));
+        }
+        self.s.read(out)
     }
 }
 
 /// An open stream, and its socket, which a halt shuts down.
 pub struct Receiver {
-    r: BufReader<crate::dial::Stream>,
+    r: BufReader<Watched>,
     conn: TcpStream,
 }
 
@@ -1711,42 +2066,276 @@ impl Receiver {
     }
 
     pub fn receive(&mut self) -> io::Result<Message> {
-        let bad = || io::Error::other("the primary sent a message it should not");
-        let (tag, body) = read_message(&mut self.r)?;
-        Ok(match tag {
-            b'H' => {
-                if body.len() < 26 || body[0] != VERSION {
-                    return Err(io::Error::other("the primary speaks another protocol"));
-                }
-                Message::Hello {
-                    image: body[1] == 1,
-                    seq: u64_at(&body, 2),
-                    durable: u64_at(&body, 10),
-                    lineage: History::decode(&body[26..])
-                        .map_err(|e| io::Error::other(e.to_string()))?
-                        .lineage,
-                }
+        let (tag, len) = kind_head(&mut self.r, primary_sends)?;
+        if tag == b'I' {
+            return Ok(Message::Image(len));
+        }
+        decode(tag, kind_body(&mut self.r, tag, len)?)
+    }
+
+    /// The image a [`Message::Image`] announced, its `len` bytes copied
+    /// into `out` as they come, every record held to its sum as it streams
+    /// past ([`take_image`]).
+    pub fn take_image(&mut self, len: u64, out: &mut dyn Write) -> io::Result<()> {
+        take_image(&mut self.r, len, out)
+    }
+}
+
+/// An image's `len` bytes off `r`, each written into `out` as it comes, and
+/// every record held to its sum as it streams past
+/// (`fennec_core::engine::check_reader`, `fennec verify`'s check, a stretch
+/// held at a time): what a replica, `fennec backup` and an archiver take an
+/// image with, and a node a move's (`Tenants::import_from`). Read into
+/// memory whole and checked after (`check_records`), an image was the
+/// database in the taker's memory, twice and more for a replica, which
+/// loaded it into a database of its own there too: one larger than that
+/// memory never followed, never backed up, never moved. A stream that ends
+/// before `len` is cut short (`UnexpectedEof`), the reader's other errors
+/// -- a halt, a timeout -- and `out`'s as they came, damage refused in
+/// words; what went into `out` before a refusal is no image.
+pub(crate) fn take_image(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> io::Result<()> {
+    taken_of(r, len, out).0
+}
+
+/// [`take_image`], and how many of the image's bytes it left on the
+/// stream unread: a node's archiver passes them over before the next
+/// message where a tenant's image is refused part way (`node_archive`).
+/// Over a `dyn Read`, one type of its own whatever the stream: as a `dyn
+/// Read` for the check, each type copying from was a reader's every
+/// method made again, some 2.5 KB of fennec-server's code a type.
+pub(crate) fn taken_of(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> (io::Result<()>, u64) {
+    /// The stream, the image's `left` bytes of it alone, copied into
+    /// `out` as they are read; `ended` where it ran out before them.
+    struct Copied<'a> {
+        r: &'a mut dyn Read,
+        left: u64,
+        out: &'a mut dyn Write,
+        ended: bool,
+    }
+    impl Read for Copied<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let most = usize::try_from(self.left).map_or(buf.len(), |l| l.min(buf.len()));
+            if most == 0 {
+                return Ok(0);
             }
-            b'I' => Message::Image(body),
-            b'W' => {
-                let n = body.get(8..16).ok_or_else(bad)?;
-                let n = u64::from_le_bytes(n.try_into().unwrap()) as usize;
-                let at = 16 + 8 * n;
-                if body.len() < at {
-                    return Err(bad());
-                }
-                Message::Writes {
-                    first: u64_at(&body, 0),
-                    times: (0..n).map(|i| u64_at(&body, 16 + 8 * i)).collect(),
-                    records: body[at..].to_vec(),
-                }
+            let n = self.r.read(&mut buf[..most])?;
+            if n == 0 {
+                self.ended = true;
+                return Ok(0);
             }
-            b'K' if body.len() >= 24 => Message::Alive {
-                durable: u64_at(&body, 8),
-            },
-            b'E' => Message::End(String::from_utf8_lossy(&body).into_owned()),
-            _ => return Err(bad()),
-        })
+            self.left -= n as u64;
+            self.out.write_all(&buf[..n])?;
+            Ok(n)
+        }
+    }
+    let began = Instant::now();
+    let mut copied = Copied {
+        r,
+        left: len,
+        out,
+        ended: false,
+    };
+    let checked = fennec_core::engine::check_reader(&mut copied);
+    let left = copied.left;
+    if copied.ended {
+        // Taken slower than a sender holds an image to, the cut is said to
+        // be its end ([`Pace`]), which the sender's log says too.
+        let (got, took) = (len - left, began.elapsed());
+        let mut words = format!("an image cut short of its {len} bytes");
+        if !Pace::kept(got, took) {
+            words = format!("{words}, {got} taken in {} s: {}", took.as_secs(), slower());
+        }
+        return (
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, words)),
+            left,
+        );
+    }
+    let r = match checked {
+        Ok(_) => Ok(()),
+        Err(fennec_core::error::Error::Io(e)) => Err(io::Error::other(e)),
+        Err(e) => Err(io::Error::other(format!(
+            "the image of {len} bytes does not hold: {e}"
+        ))),
+    };
+    (r, left)
+}
+
+/// An image's `len` bytes off `r`, read and let go of: a stream read for
+/// its messages alone ([`read_answer`] with no copy).
+pub(crate) fn passed_over(r: &mut impl Read, len: u64) -> io::Result<()> {
+    if io::copy(&mut r.take(len), &mut io::sink())? < len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("a `I` message cut short of its {len} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// An image arrived: written into the file beside the copy's own, its
+/// follow record after it, synced; or, for a copy whose sink has no file,
+/// in memory.
+enum Arrived {
+    Side(fennec_core::fs::SideFile),
+    Whole(Vec<u8>),
+}
+
+/// An image a hello promised at change `seq` on `lineage`, its `len` bytes
+/// off `r`, taken for a copy whose image side is `side`
+/// (`Database::image_side`): written into a file there as it comes and
+/// checked as it streams ([`take_image`]), then the record saying the copy
+/// follows `lineage` appended and the file synced -- the image the copy's
+/// file becomes, whole, before anything of the copy changes. Its heap a
+/// constant: the stream's buffer and the check's. Refused, the file goes
+/// as it drops. A copy whose sink has no file takes it in memory, grown as
+/// it comes: the fuzzer's, and a test's -- a server's copy is a file's, a
+/// tenant's too.
+fn arrived(
+    r: &mut dyn Read,
+    len: u64,
+    lineage: &[(u64, u64)],
+    side: Option<std::path::PathBuf>,
+) -> io::Result<Arrived> {
+    let follows = History {
+        lineage: lineage.to_vec(),
+        following: true,
+    }
+    .record();
+    match side {
+        Some(path) => {
+            let mut side = fennec_core::fs::SideFile::create(&path).map_err(io::Error::other)?;
+            take_image(r, len, &mut side)?;
+            side.write_all(&follows)?;
+            side.sync().map_err(io::Error::other)?;
+            Ok(Arrived::Side(side))
+        }
+        None => {
+            let mut bytes = Vec::new();
+            take_image(r, len, &mut bytes)?;
+            bytes.extend_from_slice(&follows);
+            Ok(Arrived::Whole(bytes))
+        }
+    }
+}
+
+/// A primary's message, from its kind and its body: a replica's, an
+/// archiver's and a backup's reading alike.
+fn decode(tag: u8, body: Vec<u8>) -> io::Result<Message> {
+    let bad = || io::Error::other("the primary sent a message it should not");
+    Ok(match tag {
+        b'H' => {
+            if body.len() < 26 || body[0] != VERSION {
+                return Err(io::Error::other("the primary speaks another protocol"));
+            }
+            Message::Hello {
+                image: body[1] == 1,
+                seq: u64_at(&body, 2),
+                durable: u64_at(&body, 10),
+                lineage: History::decode(&body[26..])
+                    .map_err(|e| io::Error::other(e.to_string()))?
+                    .lineage,
+            }
+        }
+        b'W' => {
+            let n = body.get(8..16).ok_or_else(bad)?;
+            let n = u64::from_le_bytes(n.try_into().unwrap());
+            // Its times before its records, held to the bytes the message
+            // holds: `16 + 8 * n` wrapped in a release build for a count of
+            // 2^61, and the times were collected 2^61 of them -- a panic of
+            // the follower's thread, and of `fennec archive`, which aborts
+            // on one, the process.
+            let records = usize::try_from(n)
+                .ok()
+                .and_then(|n| n.checked_mul(8))
+                .and_then(|b| b.checked_add(16))
+                .filter(|&at| at <= body.len())
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "the primary's message counts {n} writes, more than its {} bytes hold",
+                        body.len()
+                    ))
+                })?;
+            Message::Writes {
+                first: u64_at(&body, 0),
+                times: (16..records)
+                    .step_by(8)
+                    .map(|at| u64_at(&body, at))
+                    .collect(),
+                records: body[records..].to_vec(),
+            }
+        }
+        b'K' if body.len() >= 24 => Message::Alive {
+            durable: u64_at(&body, 8),
+        },
+        // Its words go into a log line and the status's `error`: cut and
+        // escaped, never as they came.
+        b'E' => Message::End(peer_words(&body)),
+        _ => return Err(bad()),
+    })
+}
+
+/// A primary's answer read off `r` as a replica reads it -- [`read_head`],
+/// then each message held to its kind's bound ([`kind_head`]) and
+/// decoded as [`Receiver::receive`] decodes it -- until one is refused or
+/// the bytes end: how many messages it read, and what ended it. Given a
+/// `copy`, an image its hello promised is taken as a follower takes one:
+/// checked and loaded ([`loaded`]), then adopted by the copy -- its file
+/// rewritten, its stores pointed at it (`Database::repoint`), its
+/// statements bound again (`rebind`) -- and the copy made to follow the
+/// hello's lineage. The fuzzer's `stream` target (`crates/fennec-fuzz`),
+/// which hands it what a stand-in at a primary's address could send, and a
+/// copy mapped as a server's is.
+#[doc(hidden)]
+pub fn read_answer(r: &mut impl BufRead, copy: Option<&mut Database>) -> (usize, io::Error) {
+    let mut n = 0;
+    match read_each(r, &mut n, copy) {
+        Err(e) => (n, e),
+        Ok(never) => match never {},
+    }
+}
+
+fn read_each(
+    r: &mut impl BufRead,
+    n: &mut usize,
+    mut copy: Option<&mut Database>,
+) -> io::Result<std::convert::Infallible> {
+    let (status, length) = read_head(r)?;
+    answered(r, status, length, "primary")?;
+    let mut promised: Option<(u64, Vec<(u64, u64)>)> = None;
+    loop {
+        let (tag, len) = kind_head(r, primary_sends)?;
+        if tag == b'I' {
+            let Some(copy) = copy.as_deref_mut() else {
+                passed_over(r, len)?;
+                *n += 1;
+                continue;
+            };
+            let Some((seq, lineage)) = promised.take() else {
+                return Err(io::Error::other(
+                    "the primary sent an image it did not promise",
+                ));
+            };
+            let image = arrived(r, len, &lineage, copy.image_side())?;
+            *n += 1;
+            let fresh = loaded(image, copy.is_mapped(), seq)?;
+            fresh.adopt_by(copy).map_err(io::Error::other)?;
+            copy.follow(lineage).map_err(io::Error::other)?;
+            continue;
+        }
+        let message = decode(tag, kind_body(r, tag, len)?)?;
+        *n += 1;
+        if copy.is_none() {
+            continue;
+        }
+        if let Message::Hello {
+            image: true,
+            seq,
+            lineage,
+            ..
+        } = message
+        {
+            promised = Some((seq, lineage));
+        }
     }
 }
 
@@ -1772,8 +2361,11 @@ pub struct Follower {
     /// whose fsyncs happen on the write path the replica's writes bypass.
     sync_each: bool,
     state: Mutex<State>,
-    stop: AtomicBool,
+    /// Set by a halt; the session's reads look at it ([`Watched`]).
+    stop: Arc<AtomicBool>,
     conn: Mutex<Option<TcpStream>>,
+    /// Whether the thread has ended, set however it ends ([`Ends`]): what
+    /// a halt waits on.
     ended: (Mutex<bool>, Condvar),
     /// Told each time the primary has said hello and the replica holds a
     /// prefix of its history -- its image adopted, or its place in that
@@ -1793,6 +2385,11 @@ pub struct Follower {
     /// so, and no hook's answer waits for it, since no failover promotes
     /// one.
     reading: AtomicBool,
+    /// The look past a socket's reads ([`Follower::halted`]) at which a
+    /// test has the halt come: a halt set at that moment, which no event a
+    /// test can wait on otherwise marks.
+    #[cfg(test)]
+    halt_at: Mutex<Option<&'static str>>,
 }
 
 #[derive(Clone, Default)]
@@ -1820,7 +2417,7 @@ impl Follower {
             feed,
             sync_each,
             state: Mutex::new(State::default()),
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
             conn: Mutex::new(None),
             // Nothing to wait for until `run` starts.
             ended: (Mutex::new(true), Condvar::new()),
@@ -1828,7 +2425,35 @@ impl Follower {
             expect: Mutex::new(None),
             refused: AtomicBool::new(false),
             reading: AtomicBool::new(false),
+            #[cfg(test)]
+            halt_at: Mutex::new(None),
         }))
+    }
+
+    /// Whether a halt came, looked at past the socket's reads too ([`Watched`]
+    /// looks before each of them): as an image has arrived, and once it is
+    /// loaded, before the copy is changed. A halt during an image's check and
+    /// load -- seconds to minutes for gigabytes -- waited for them and the
+    /// adoption after them; a promotion, a release under the tenant's slot,
+    /// every `get` of the tenant behind it and the node's shutdown waited
+    /// with it. Walked away from, the copy holds what it held, and follows on
+    /// from there once started again. The check runs as the image streams,
+    /// a halt met at its next read ([`Watched`]); one that comes during the
+    /// load still waits for it -- nothing looks inside `load` -- and is met
+    /// at the second look, before the adoption.
+    fn halted(&self, _at: &'static str) -> bool {
+        #[cfg(test)]
+        self.halt_here(_at);
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// A test's halt, come at `at` (`halt_at`): the flag alone, the socket
+    /// not cut -- as a halt's cut is to a read begun after it on Windows.
+    #[cfg(test)]
+    fn halt_here(&self, at: &'static str) {
+        if *lock(&self.halt_at) == Some(at) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Marks this copy a read replica's, or not, from its next stream on:
@@ -1836,6 +2461,11 @@ impl Follower {
     /// its 2xx ([`Feed::standby_sent`]), a failover never promoting one.
     pub fn read_replica(&self, on: bool) {
         self.reading.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether this is a read replica's copy, which no failover promotes.
+    pub fn is_read_replica(&self) -> bool {
+        self.reading.load(Ordering::Relaxed)
     }
 
     /// Has `f` called each time the primary says hello and the replica
@@ -1862,14 +2492,20 @@ impl Follower {
     }
 
     /// Follows until promoted. Every stream that ends is connected again,
-    /// sooner after a clean end than after a failure.
+    /// sooner after a clean end than after a failure, a session's panic
+    /// among them ([`Self::session_caught`]); the thread's end is said
+    /// however it comes ([`Ends`]).
     pub fn run(&self) {
         *lock(&self.ended.0) = false;
+        let _ends = Ends(&self.ended);
         self.refused.store(false, Ordering::SeqCst);
+        // An image a crash or a kill left part taken beside the copy's file
+        // ([`arrived`]) went as the file was opened to be written
+        // (`fennec_core::fs`'s `FileSink::create`), a copy's or a primary's.
         let mut force_image = false;
         let mut pause = Duration::from_millis(100);
         while !self.stop.load(Ordering::SeqCst) {
-            let r = self.session(&mut force_image);
+            let r = self.session_caught(&mut force_image);
             {
                 let mut st = lock(&self.state);
                 st.connected = false;
@@ -1915,8 +2551,26 @@ impl Follower {
                 (pause * 2).min(Duration::from_secs(5))
             };
         }
-        *lock(&self.ended.0) = true;
-        self.ended.1.notify_all();
+    }
+
+    /// A session, a panic anywhere in it its failure in words: the framing,
+    /// an image's check and load, a hello's callback. Caught only around
+    /// `apply`, one elsewhere ended the thread with nothing set -- the copy
+    /// serving what it held for good, `running` saying it ran, and a halt
+    /// waiting for it for ever, a tenant's slot held meanwhile by a release
+    /// or a follow, and every `get` of the tenant, and the node's shutdown,
+    /// waiting behind it. One that changed nothing of the copy is a session
+    /// that failed, connected again after the back-off; one that left the
+    /// copy part way through a change -- an image's adoption, a flush --
+    /// failed the database first ([`Changing`]), and the loop stops on it.
+    fn session_caught(&self, force_image: &mut bool) -> io::Result<()> {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| self.session(force_image))) {
+            Ok(r) => r,
+            Err(p) => Err(io::Error::other(format!(
+                "a panic in the session: {}",
+                crate::schedule::panic_words(&*p)
+            ))),
+        }
     }
 
     fn session(&self, force_image: &mut bool) -> io::Result<()> {
@@ -1938,9 +2592,10 @@ impl Follower {
             return Ok(());
         }
         let reading = self.reading.load(Ordering::Relaxed);
+        let stop = Some(Arc::clone(&self.stop));
         let mut stream = self
             .upstream
-            .request(s, since, history, *force_image, reading)?;
+            .request(s, since, history, *force_image, reading, stop)?;
         let Message::Hello {
             image,
             seq,
@@ -1967,31 +2622,33 @@ impl Follower {
             }
         }
         if image {
-            let Message::Image(mut bytes) = stream.receive()? else {
+            let Message::Image(len) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
             };
-            // Every record held to its sum, which an open does not ask of an
-            // image's: one damaged on the way would be this file's whole.
-            fennec_core::engine::check_records(&bytes).map_err(io::Error::other)?;
-            // A follower's file in the bytes that replace it: the image's
-            // own history is its primary's, taking writes, and the record
-            // `follow` appends after the rename went with a kill before a
-            // write behind -- the restart opened the copy as a primary's
-            // file, following nothing (`Tenants::open_as`). `follow` below
-            // then appends nothing. Room for the record alone: grown as a
-            // `Vec` grows, a 40 MB image took 80.
-            let follows = fennec_core::history::History {
-                lineage: lineage.clone(),
-                following: true,
+            // Where the image goes and how the copy holds its documents,
+            // asked under the read lock, let go before a byte of it comes.
+            let (side, mapped) = {
+                let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+                (g.image_side(), g.is_mapped())
+            };
+            // Written into the file beside the copy's as it comes, checked
+            // as it streams, with no lock held: reads, and the copy's own
+            // upkeep, go on meanwhile ([`arrived`]).
+            let image = arrived(&mut stream.r, len, &lineage, side)?;
+            // A halt is looked at as the image has arrived and once it is
+            // loaded ([`Self::halted`]): what is left to wait for once the
+            // copy changes is the adoption, the file's rename.
+            if self.halted("an image arrived") {
+                return Ok(());
             }
-            .record();
-            bytes.reserve_exact(follows.len());
-            bytes.extend_from_slice(&follows);
             // Loaded before the lock is taken: reads go on meanwhile.
-            let mut fresh = Database::new();
-            fresh.load(&bytes).map_err(io::Error::other)?;
+            let fresh = loaded(image, mapped, seq)?;
+            if self.halted("an image loaded") {
+                return Ok(());
+            }
+            let _changing = Changing(&self.db, "adopted its primary's image");
             let mut g = crate::held::write(&self.db);
-            g.adopt(fresh, &bytes).map_err(io::Error::other)?;
+            fresh.adopt_by(&mut g).map_err(io::Error::other)?;
             g.follow(lineage).map_err(io::Error::other)?;
             if let Some(feed) = &self.feed {
                 // The image's history, which `follow` appends no record
@@ -1999,10 +2656,10 @@ impl Follower {
                 feed.set_lineage(&g.history().lineage);
                 feed.start(g.change_seq());
             }
-            debug_assert_eq!(g.change_seq(), seq);
             lock(&self.state).images += 1;
             *force_image = false;
         } else {
+            let _changing = Changing(&self.db, "took its primary's history");
             let mut g = crate::held::write(&self.db);
             if g.change_seq() != since {
                 return Err(io::Error::other("the replica moved while it connected"));
@@ -2030,15 +2687,23 @@ impl Follower {
             // a write, its fsync -- followed on for good, and the halt
             // waited for it for good: five runs of Windows CI hung so. One
             // that looked just before the cut ends after its next message.
-            if self.stop.load(Ordering::SeqCst) {
+            if self.halted("between messages") {
                 return Ok(());
             }
+            // A halt after the look, its cut missed by the read: met by the
+            // read's own look ([`Watched`]), which a test holds here.
+            #[cfg(test)]
+            self.halt_here("in a message");
             match stream.receive()? {
                 Message::Writes {
                     first,
                     times,
                     records,
                 } => {
+                    // The apply's own panic is caught below, the engine
+                    // having put back or failed what it held; one past it --
+                    // the times, the flush, the fsync -- fails the copy.
+                    let _changing = Changing(&self.db, "landed its primary's writes");
                     let mut g = crate::held::write(&self.db);
                     if first != g.change_seq() + 1 {
                         *force_image = true;
@@ -2151,10 +2816,43 @@ impl Follower {
         Ok((g.change_seq(), id))
     }
 
+    /// [`Self::promote`], and what the copy knew of its primary as it was
+    /// promoted ([`Heard`]): whether it was connected as the promotion
+    /// began, and, once its follower stopped, how far behind its primary's
+    /// disk it stood and how long before it last heard from it.
+    pub fn promote_heard(&self, fresh: u64) -> fennec_core::error::Result<(u64, u64, Heard)> {
+        let connected = lock(&self.state).connected;
+        let (seq, id) = self.promote(fresh)?;
+        let st = lock(&self.state).clone();
+        Ok((
+            seq,
+            id,
+            Heard {
+                connected,
+                behind: st.primary_durable.saturating_sub(seq),
+                last_contact_ms: st.contact.map(|t| t.elapsed().as_millis() as u64),
+            },
+        ))
+    }
+
     /// Stops following and stays a replica: started again, it follows on
-    /// from where it stopped. The cut ends a read waiting on the primary;
-    /// the session sees the flag at its next message whatever the socket
-    /// does with a read begun after the cut (`Follower::session`).
+    /// from where it stopped. Waits for the thread's end, which the thread
+    /// says however it ends ([`Ends`]), as an event. What bounds the wait
+    /// is what the thread does once the flag is set: a read of the primary
+    /// ends at the cut -- on Unix at once, on Windows at once where it
+    /// waited already, and one begun after it at its next byte, which the
+    /// read looks at the flag before ([`Watched`]), or `SILENCE` (10 s),
+    /// the deadline every read has, from a primary gone silent; a connect
+    /// is walked away from within 10 ms (`dial::connect_unless`), the
+    /// back-off within 20; an image that has arrived is walked away from
+    /// before its check and load and again before its adoption
+    /// ([`Self::halted`]), a check and load already under way waited for
+    /// -- minutes for many gigabytes -- and walked away from after; else
+    /// one message landing under the write lock, and its fsync, or an
+    /// adoption begun: the image's file, written and synced as it came,
+    /// renamed into the copy's place and its directory synced. A promotion and a tenant's release, which halt, end within that,
+    /// and so do a `get` of the tenant and the node's shutdown, which wait
+    /// for the tenant's slot a release holds as it halts.
     pub fn halt(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = lock(&self.conn).take() {
@@ -2162,12 +2860,7 @@ impl Follower {
         }
         let mut ended = lock(&self.ended.0);
         while !*ended {
-            ended = self
-                .ended
-                .1
-                .wait_timeout(ended, Duration::from_millis(50))
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            ended = self.ended.1.wait(ended).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -2189,31 +2882,188 @@ impl Follower {
     }
 }
 
+/// What a copy knew of its primary as it was promoted
+/// ([`Follower::promote_heard`]), by the names `/_replication/status`
+/// gives them: the admin's promotion answers them and a router's failover
+/// logs them. A failover promotes a copy where it stands: a durable write
+/// waits a [`SENT_WAIT`] at most for the streams keeping up and none for
+/// one lagging, reconnecting or failed, so what a copy promoted not
+/// connected, or behind, was never sent is lost -- a write its primary
+/// answered among it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// Connected to its primary as the promotion began: true until a read
+    /// of the stream fails. A primary's process killed ends the stream with
+    /// it; its machine lost or cut off leaves the copy connected until
+    /// `SILENCE` (10 s) passes with nothing heard, which a lease's lapse
+    /// comes before: `last_contact_ms` past a keep-alive's [`ALIVE`] says
+    /// it was not hearing from it.
+    pub connected: bool,
+    /// Writes on its primary's disk, as its primary last said, it had not
+    /// applied: each of them lost to the promotion. A stream says so every
+    /// [`ALIVE`], behind or caught up.
+    pub behind: u64,
+    /// How long before the promotion its primary was last heard from, a
+    /// keep-alive's every [`ALIVE`] included; `None` where it was not since
+    /// the copy was opened.
+    pub last_contact_ms: Option<u64>,
+}
+
+impl Heard {
+    /// Its fields as an answer's JSON writes them, each after a comma:
+    /// `last_contact_ms` -1 for never, as the status gives it.
+    pub fn json(&self) -> String {
+        format!(
+            ",\"connected\":{},\"behind\":{},\"last_contact_ms\":{}",
+            self.connected,
+            self.behind,
+            self.last_contact_ms.map_or(-1, |ms| ms as i64)
+        )
+    }
+}
+
+/// A primary's image made the database a copy adopts: every record held
+/// to its sum as it arrived ([`take_image`]), which an open does not ask
+/// of an image's -- one damaged on the way would be this file's whole --
+/// with the record saying it follows on its lineage after it
+/// ([`arrived`]), loaded, and held to the change its hello said, `seq`.
+/// The image's own history is its primary's, taking writes, and the record
+/// `follow` appends after the rename went with a kill before a write
+/// behind: the restart opened the copy as a primary's file, following
+/// nothing (`Tenants::open_as`); with it in the bytes that replace the
+/// file, `follow` appends nothing. Taken into the file beside the copy's,
+/// it is loaded from there as the copy is held (`Database::from_side`):
+/// mapped, its documents stay in the file, which the adoption renames into
+/// the copy's place, and the load builds only what an open of it would.
+/// An image at another change than its hello said is no primary's: refused
+/// before it replaces anything, where a `debug_assert` stood, a panic in a
+/// debug build that a peer's bytes reached. The follower's path and the
+/// `stream` fuzz target's ([`read_answer`]).
+fn loaded(image: Arrived, mapped: bool, seq: u64) -> io::Result<Loaded> {
+    let loaded = match image {
+        Arrived::Side(mut side) => {
+            let fresh = Database::from_side(&mut side, mapped).map_err(io::Error::other)?;
+            Loaded::Side(fresh, side)
+        }
+        Arrived::Whole(bytes) => {
+            let mut fresh = Database::new();
+            fresh.load(&bytes).map_err(io::Error::other)?;
+            Loaded::Whole(fresh, bytes)
+        }
+    };
+    let at = match &loaded {
+        Loaded::Side(fresh, _) | Loaded::Whole(fresh, _) => fresh.change_seq(),
+    };
+    if at != seq {
+        return Err(io::Error::other(format!(
+            "the primary's image is at change {at}, its hello at {seq}"
+        )));
+    }
+    Ok(loaded)
+}
+
+/// An image loaded ([`loaded`]), to be adopted.
+enum Loaded {
+    Side(Database, fennec_core::fs::SideFile),
+    Whole(Database, Vec<u8>),
+}
+
+impl Loaded {
+    /// Adopted by `copy`: the file it was taken into renamed into the
+    /// copy's place (`Database::adopt_side`), or the bytes written there
+    /// (`Database::adopt`).
+    fn adopt_by(self, copy: &mut Database) -> fennec_core::error::Result<()> {
+        match self {
+            Loaded::Side(fresh, side) => copy.adopt_side(fresh, side),
+            Loaded::Whole(fresh, bytes) => copy.adopt(fresh, &bytes),
+        }
+    }
+}
+
+/// Says a follower's thread ended as it drops: at the loop's end and in a
+/// panic's unwinding alike, where a line at the end of `run` was skipped
+/// and a halt waited for ever on a thread gone.
+struct Ends<'a>(&'a (Mutex<bool>, Condvar));
+
+impl Drop for Ends<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0 .0) = true;
+        self.0 .1.notify_all();
+    }
+}
+
+/// Held while a session changes the copy past what the engine puts back
+/// on its own: an image adopted and its history followed, this server's
+/// feed started on it, a message's times, its flush and its fsync. A panic
+/// unwinding through it -- after the write lock it was made before -- left
+/// the file, the memory and the feed not known to agree, and fails the
+/// database in words ([`Database::fail`]): no write lands on the copy and
+/// no promotion forks it, its status says why, and the follower stops, as
+/// after its disk failed. Opened again, the copy is its file's.
+struct Changing<'a>(&'a RwLock<Database>, &'static str);
+
+impl Drop for Changing<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let why = fennec_core::error::Error::Io(format!(
+                "a panic as the follower {}: the copy's file and memory may disagree, and it \
+                 takes nothing more until it is opened again",
+                self.1
+            ));
+            self.0.write().unwrap_or_else(|p| p.into_inner()).fail(&why);
+        }
+    }
+}
+
 /// A connection to a primary's address, `https://` dialed over TLS, its
 /// handshake within [`CONNECT`] too.
 pub(crate) fn connect(addr: &str) -> io::Result<crate::dial::Stream> {
     crate::dial::connect(addr, CONNECT)
 }
 
-/// The status line and the length of the body, when it has one.
+/// The status line and the length of the body, when it has one. The head
+/// is held to the bound the server holds a request's to
+/// ([`crate::http::MAX_HEADER_BYTES`], 64 KiB), its lines read by the
+/// server's own reader with what is left of it ([`crate::http::read_line`]):
+/// the status line, each header line and so the count of them -- a line
+/// two bytes at the least -- within it, a line past it refused as its
+/// bytes come, a buffer's fill past it at the most. The status line was
+/// read to its newline however long, and a header line measured only once
+/// its newline came: a stand-in sending a line with no end grew a
+/// replica's memory with every byte, for as long as it sent one in each
+/// `SILENCE`.
 pub(crate) fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
-    let mut line = String::new();
-    r.read_line(&mut line)?;
-    let status = line
+    use crate::http::{Line, MAX_HEADER_BYTES};
+    let mut left = MAX_HEADER_BYTES;
+    let long = || {
+        io::Error::other(format!(
+            "the answer's head ran past {MAX_HEADER_BYTES} bytes"
+        ))
+    };
+    let mut next = |line: &mut Vec<u8>| -> io::Result<usize> {
+        line.clear();
+        let n = crate::http::read_line(r, line, left).map_err(|e| match e {
+            Line::Io(e) => e,
+            Line::Long => long(),
+        })?;
+        left = left.checked_sub(n).ok_or_else(long)?;
+        Ok(n)
+    };
+    let mut line = Vec::new();
+    next(&mut line)?;
+    let first = String::from_utf8_lossy(&line);
+    let status = first
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| io::Error::other(format!("not an HTTP answer: {line:?}")))?;
+        .ok_or_else(|| io::Error::other(format!("not an HTTP answer: {}", peer_words(&line))))?;
     let mut length = None;
-    let mut total = 0;
     loop {
-        line.clear();
-        let n = r.read_line(&mut line)?;
-        total += n;
-        if n == 0 || total > crate::http::MAX_HEADER_BYTES {
+        if next(&mut line)? == 0 {
             return Err(io::Error::other("the answer's head did not end"));
         }
-        let l = line.trim_end();
+        let l = String::from_utf8_lossy(&line);
+        let l = l.trim_end();
         if l.is_empty() {
             return Ok((status, length));
         }
@@ -2225,19 +3075,123 @@ pub(crate) fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)
     }
 }
 
+/// What a primary sends of each kind of message, at the most ([`stream`]):
+/// an image and writes [`LONGEST`], a hello, a keep-alive and an end
+/// [`SHORT`]; `None` for a kind it never sends.
+fn primary_sends(tag: u8) -> Option<u64> {
+    match tag {
+        b'I' | b'W' => Some(LONGEST),
+        b'H' | b'K' | b'E' => Some(SHORT),
+        _ => None,
+    }
+}
+
+/// A primary's message off its stream, held to its kind's bound
+/// ([`read_kind`]).
+#[cfg(test)]
 pub(crate) fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+    read_kind(r, primary_sends)
+}
+
+/// A message off a stream, its kind and its body: held to the bound
+/// `longest` gives its kind before a byte of the body is read -- a kind it
+/// gives none refused -- and read into memory as it comes. The length is
+/// the peer's word: allocated whole before a byte came, a terabyte
+/// announced in nine bytes was asked of the allocator, which Linux's
+/// overcommit refuses, and a refused allocation aborts the process -- a
+/// node with every tenant it holds, its supervisor's restart following the
+/// same stream. The body is first given [`FIRST`] at the most, a steady
+/// stream's message whole in one allocation of its length, and doubles,
+/// to its length and no further, as its bytes fill it: memory follows what
+/// came. A growth holds the bytes that came and the buffer twice as long
+/// the allocator moves them into, three times what came at the most, and
+/// a message read whole has held twice its length at the most: measured
+/// (`tests/message_peak.rs`, a growth counted as the move it may be), the
+/// allocator's high-water mark for writes of 40 MiB was 80 MiB, twice it,
+/// the records decoded beside the body, for one a byte past [`FIRST`]
+/// doubled twice twice it less a byte, and for a terabyte announced and 3
+/// MiB sent 6 MiB, three times the [`FIRST`] that had come as it grew. An
+/// image is read so by none: it is taken as it comes ([`take_image`],
+/// [`kind_head`] its head alone). Each allocation is asked with
+/// `try_reserve_exact`, a refusal an error naming the kind, the length and
+/// the bytes asked for: a refused allocation aborts the process -- a node
+/// with every tenant it holds, `fennec archive` and `fennec backup`, which
+/// abort on a panic too -- and a stand-in sends what it likes, the length
+/// its kind allows.
+pub(crate) fn read_kind(
+    r: &mut impl Read,
+    longest: fn(u8) -> Option<u64>,
+) -> io::Result<(u8, Vec<u8>)> {
+    let (tag, len) = kind_head(r, longest)?;
+    Ok((tag, kind_body(r, tag, len)?))
+}
+
+/// [`read_kind`]'s first half: a message's kind and its length, held to
+/// the bound `longest` gives its kind, its body not read -- an image's,
+/// which is taken as it comes ([`take_image`]).
+pub(crate) fn kind_head(
+    r: &mut impl Read,
+    longest: fn(u8) -> Option<u64>,
+) -> io::Result<(u8, u64)> {
     let mut head = [0u8; 9];
     r.read_exact(&mut head)?;
-    let len = u64::from_le_bytes(head[1..].try_into().unwrap());
-    // The primary is trusted -- the replica presented it the token -- but
-    // a stream that lost its place reads a length out of the middle of an
-    // image: that one is not allocated.
-    if len > 1 << 40 {
-        return Err(io::Error::other("a message longer than any database"));
+    let (tag, len) = (head[0], u64::from_le_bytes(head[1..].try_into().unwrap()));
+    let Some(most) = longest(tag) else {
+        return Err(io::Error::other(format!(
+            "a message of a kind none is sent of ({tag})"
+        )));
+    };
+    if len > most {
+        return Err(io::Error::other(format!(
+            "a `{}` message of {len} bytes, past the {most} one of its kind holds",
+            tag as char
+        )));
     }
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body)?;
-    Ok((head[0], body))
+    Ok((tag, len))
+}
+
+/// [`read_kind`]'s second half: the body of a `tag` message of `len` bytes,
+/// read into memory as it comes.
+pub(crate) fn kind_body(r: &mut impl Read, tag: u8, len: u64) -> io::Result<Vec<u8>> {
+    let kind = tag as char;
+    let cut = |e: io::Error| match e.kind() {
+        io::ErrorKind::UnexpectedEof => io::Error::new(
+            e.kind(),
+            format!("a `{kind}` message cut short of its {len} bytes"),
+        ),
+        _ => e,
+    };
+    let len = usize::try_from(len).map_err(|_| {
+        io::Error::other(format!(
+            "a `{kind}` message of {len} bytes, more than this machine addresses"
+        ))
+    })?;
+    let mut body = Vec::new();
+    grown(&mut body, len.min(FIRST), kind, len)?;
+    r.read_exact(&mut body).map_err(cut)?;
+    while body.len() < len {
+        let have = body.len();
+        grown(&mut body, len.min(have.saturating_mul(2)), kind, len)?;
+        r.read_exact(&mut body[have..]).map_err(cut)?;
+    }
+    Ok(body)
+}
+
+/// `body` made `to` bytes long, zeroed past what it held, the allocator
+/// asked for no more than that and its refusal an error in words: a
+/// `kind` message of `len` bytes, and the bytes asked for.
+fn grown(body: &mut Vec<u8>, to: usize, kind: char, len: usize) -> io::Result<()> {
+    body.try_reserve_exact(to - body.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!(
+                "a `{kind}` message of {len} bytes: the allocator refused the {to} asked for \
+                 it"
+            ),
+        )
+    })?;
+    body.resize(to, 0);
+    Ok(())
 }
 
 pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
@@ -2496,5 +3450,395 @@ mod tests {
         let before = now_ms();
         let times = fed(None);
         assert!(times.iter().all(|&t| t >= before), "{times:?}");
+    }
+
+    /// A stand-in's stream: a message's head announcing `len` bytes, then
+    /// `given` bytes of its body and the stream's end. It notes the longest
+    /// read asked of it: the most of the body held in memory at once.
+    struct Announcing {
+        head: Vec<u8>,
+        given: usize,
+        read: usize,
+        longest: usize,
+    }
+
+    impl Announcing {
+        fn new(tag: u8, len: u64, given: usize) -> Announcing {
+            let mut head = vec![tag];
+            head.extend_from_slice(&len.to_le_bytes());
+            Announcing {
+                head,
+                given,
+                read: 0,
+                longest: 0,
+            }
+        }
+    }
+
+    impl Read for Announcing {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.longest = self.longest.max(out.len());
+            let all = self.head.len() + self.given;
+            let n = out.len().min(all - self.read);
+            for (i, b) in out[..n].iter_mut().enumerate() {
+                let at = self.read + i;
+                *b = self.head.get(at).copied().unwrap_or(0);
+            }
+            self.read += n;
+            Ok(n)
+        }
+    }
+
+    /// A message's body is held in memory as it comes, never as it was
+    /// announced: a write of a terabyte announced and three mebibytes sent
+    /// is refused as cut short, a few mebibytes held at the most. The
+    /// terabyte was asked of the allocator before a byte came, which
+    /// Linux's overcommit refuses -- and a refused allocation aborts the
+    /// process, a node with every tenant it holds.
+    /// A message's body is its length and no more: a steady stream's in
+    /// one allocation of it, as it always was, and one past [`FIRST`] grown
+    /// to it and no further. A kind no primary sends, and a length past its
+    /// kind's bound, are refused before a byte of the body is read.
+    #[test]
+    fn a_message_is_held_in_its_length_and_its_kind_bound() {
+        for len in [0, 24, MESSAGE + 4096, 2 * MESSAGE + 16, 5 * MESSAGE + 3] {
+            let mut bytes = vec![b'W'];
+            bytes.extend_from_slice(&(len as u64).to_le_bytes());
+            bytes.extend(std::iter::repeat_n(7u8, len));
+            let (tag, body) = read_message(&mut &bytes[..]).unwrap();
+            assert_eq!((tag, body.len(), body.capacity()), (b'W', len, len));
+            assert!(body.iter().all(|&b| b == 7));
+        }
+        let mut unknown = Announcing::new(b'Z', 8, 8);
+        let e = read_message(&mut unknown).unwrap_err().to_string();
+        assert!(e.contains("kind") && unknown.read == 9, "{e}");
+        let mut long = Announcing::new(b'K', SHORT + 1, 8);
+        let e = read_message(&mut long).unwrap_err().to_string();
+        assert!(e.contains(&SHORT.to_string()) && long.read == 9, "{e}");
+    }
+
+    #[test]
+    fn a_message_is_held_as_it_comes_not_as_it_was_announced() {
+        let mut r = Announcing::new(b'W', 1 << 40, 3 << 20);
+        let e = read_message(&mut r).unwrap_err();
+        assert!(
+            r.longest <= 8 << 20,
+            "a read of {} bytes asked for, {} sent: {e}",
+            r.longest,
+            3 << 20
+        );
+    }
+
+    /// A refused allocation is an error in words naming the message's
+    /// kind, its length and the bytes asked for, the body as it was: asked
+    /// with `reserve_exact`, the refusal aborted the process -- a node with
+    /// every tenant, `fennec archive`, `fennec backup`. 2^62 bytes is past
+    /// every machine's address space and within what a `Vec` may ask.
+    #[test]
+    fn a_refused_allocation_is_an_error_in_words() {
+        let mut body = vec![7u8; 16];
+        let asked = 1usize << 62;
+        let e = grown(&mut body, asked, 'I', asked).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::OutOfMemory, "{e}");
+        let words = e.to_string();
+        assert!(
+            words.contains("`I`") && words.contains(&asked.to_string()),
+            "{words}"
+        );
+        assert_eq!(body, [7u8; 16]);
+    }
+
+    /// A peer's words reach a log line and the status's `error` cut and
+    /// escaped: a text of a mebibyte holding a newline, an escape character
+    /// and a quote -- an `E` message's, a refusal's body, a status line --
+    /// is shown as its first [`SHOWN`] characters, escaped, and its length.
+    #[test]
+    fn a_peers_words_are_cut_and_escaped() {
+        let mut text = b"closing\nfennec-http: forged line \x1b[2J \"quoted\" ".to_vec();
+        text.resize(1 << 20, b'x');
+        let plain = |w: &str| {
+            assert!(!w.contains('\n') && !w.contains('\x1b'), "{w:?}");
+            assert!(w.len() < 2 * SHOWN, "{} bytes shown", w.len());
+            assert!(
+                w.contains(r"closing\nfennec-http")
+                    && w.contains(r"\u{1b}[2J")
+                    && w.contains(r#"\"quoted\""#),
+                "{w}"
+            );
+        };
+        let Ok(Message::End(why)) = decode(b'E', text.clone()) else {
+            panic!("an end");
+        };
+        plain(&why);
+        assert!(
+            why.contains(&(1usize << 20).to_string()),
+            "the length: {why}"
+        );
+        let e = answered(&mut &text[..], 403, Some(text.len()), "primary").unwrap_err();
+        plain(&e.to_string());
+        assert!(
+            e.to_string().starts_with("the primary answered 403: "),
+            "{e}"
+        );
+        // A status line of 60 KiB, within the head's bound, not an answer's.
+        let mut head = b"\x1b[2J HTTP/1.1 ".to_vec();
+        head.resize(60 << 10, b'x');
+        head.extend_from_slice(b"\r\n\r\n");
+        let e = read_head(&mut &head[..]).unwrap_err().to_string();
+        assert!(
+            !e.contains('\n')
+                && !e.contains('\x1b')
+                && e.len() < 2 * SHOWN
+                && e.contains(r"\u{1b}"),
+            "{e:?}"
+        );
+        // Short and plain, a peer's words are themselves, quoted.
+        assert_eq!(peer_words(b"invalid token"), r#""invalid token""#);
+    }
+
+    /// A stream's answer as a primary writes one: its head, a hello at
+    /// `seq` -- an image to follow or not -- and `then`.
+    fn answer(image: bool, seq: u64, then: &[u8]) -> Vec<u8> {
+        let mut hello = vec![VERSION, image as u8];
+        for v in [seq, seq, 0] {
+            hello.extend_from_slice(&v.to_le_bytes());
+        }
+        let lineage = History {
+            lineage: vec![((7u64 << 32) | 1, 0)],
+            following: false,
+        };
+        hello.extend_from_slice(&lineage.encode());
+        let mut out =
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/x-fennec-replication\r\n\r\n".to_vec();
+        out.extend_from_slice(&framed(b'H', &hello));
+        out.extend_from_slice(then);
+        out
+    }
+
+    /// A message as a primary frames one.
+    fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut m = vec![tag];
+        m.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        m.extend_from_slice(body);
+        m
+    }
+
+    /// A database's image with two rows, and the change it is at.
+    fn two_rows() -> (Vec<u8>, u64) {
+        let mut db = Database::new();
+        for q in [
+            "create collection c (x int)",
+            "put c {x: 1}",
+            "put c {x: 2}",
+        ] {
+            db.execute(&fennec_ql::parse_one(q).unwrap()).unwrap();
+        }
+        (db.snapshot(), db.change_seq())
+    }
+
+    /// A stand-in primary for one connection on a port of its own: the
+    /// request read to the end of its head, `answer` written, then `then`
+    /// handed the connection until it returns.
+    fn primary(answer: Vec<u8>, then: impl FnOnce(&mut TcpStream) + Send + 'static) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match s.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => return,
+                }
+            }
+            if s.write_all(&answer).is_ok() {
+                then(&mut s);
+            }
+        });
+        url
+    }
+
+    /// Holds a connection until `done`.
+    fn held(done: Arc<AtomicBool>) -> impl FnOnce(&mut TcpStream) + Send + 'static {
+        move |_: &mut TcpStream| {
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Set as it drops: what a stand-in's loop stops on, however the test
+    /// ends.
+    struct Done(Arc<AtomicBool>);
+
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// An empty database made to follow, and a follower of `url` for it.
+    fn copy_of(url: &str) -> (Arc<RwLock<Database>>, Arc<Follower>) {
+        copy_over(url, Database::new())
+    }
+
+    /// [`copy_of`] over `db`.
+    fn copy_over(url: &str, mut db: Database) -> (Arc<RwLock<Database>>, Arc<Follower>) {
+        let lineage = db.history().lineage.clone();
+        db.follow(lineage).unwrap();
+        let db = Arc::new(RwLock::new(db));
+        let f = Follower::new(url, "t".into(), Arc::clone(&db), None, false).unwrap();
+        (db, f)
+    }
+
+    /// Whether `f`'s thread ended within `within`, waited for as the event
+    /// its end is ([`Ends`]).
+    fn ended_within(f: &Follower, within: Duration) -> bool {
+        let g = lock(&f.ended.0);
+        let (g, _) = f
+            .ended
+            .1
+            .wait_timeout_while(g, within, |ended| !*ended)
+            .unwrap_or_else(|e| e.into_inner());
+        *g
+    }
+
+    /// A halt as an image has arrived, or once it is loaded, is walked away
+    /// from before the copy changes: the copy holds what it held, and the
+    /// thread ends without the check, the load or the adoption it had left.
+    /// Each look is held here by a halt come at that moment; without it the
+    /// follower went on to adopt the image, and a promotion, a release
+    /// under the tenant's slot and a node's shutdown waited for a check, a
+    /// load and a rewrite of the whole image. A copy with a file as a
+    /// server's has -- its image taken into `.taking` beside it, its follow
+    /// record after it, synced -- keeps its file to the byte, nothing left
+    /// beside it: without either look the image was renamed in.
+    #[test]
+    fn a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-repl-halt-look-{}-{}",
+            std::process::id(),
+            // Not an `Instant`'s `Debug`, whose `:` Windows takes in no
+            // file's name (`ERROR_DIRECTORY`, 267).
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for at in ["an image arrived", "an image loaded"] {
+            for filed in [false, true] {
+                let (image, seq) = two_rows();
+                let done = Arc::new(AtomicBool::new(false));
+                let _done = Done(Arc::clone(&done));
+                let url = primary(answer(true, seq, &framed(b'I', &image)), held(done));
+                let path = dir.join(format!("{}-{filed}.fennec", at.replace(' ', "-")));
+                let (db, f) = match filed {
+                    false => copy_of(&url),
+                    true => copy_over(&url, fennec_core::fs::open(&path).unwrap()),
+                };
+                let before = filed.then(|| {
+                    db.write().unwrap().sync().unwrap();
+                    std::fs::read(&path).unwrap()
+                });
+                *lock(&f.halt_at) = Some(at);
+                f.start("fennec-test-halt-look".into()).unwrap();
+                let ended = ended_within(&f, SILENCE);
+                assert!(
+                    ended && f.images() == 0,
+                    "{at}, a file {filed}: the follower took the image after its halt \
+                     (ended {ended}, images {})",
+                    f.images()
+                );
+                assert_eq!(db.read().unwrap().change_seq(), 0, "{at}");
+                if let Some(before) = before {
+                    assert!(
+                        std::fs::read(&path).unwrap() == before,
+                        "{at}: the copy's file changed"
+                    );
+                    let side = fennec_core::fs::beside(&path, "taking");
+                    assert!(!side.exists(), "{at}: the image left beside the copy");
+                }
+                f.halt();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A halt whose cut the read in flight misses -- on Windows, one begun
+    /// after the cut -- ends at the primary's next byte, the read looking at
+    /// the halt before each read of the socket ([`Watched`]): a primary
+    /// sending a message a byte at a time, each within `SILENCE`, kept that
+    /// read and the halt going for as long as it liked. The halt here is
+    /// the flag alone, come after the look between messages, so the read
+    /// in the message is all that can meet it, on every platform; without
+    /// `Watched`'s look the follower reads on and this fails at its bound.
+    #[test]
+    fn a_halt_a_read_in_a_message_missed_ends_at_the_next_byte() {
+        let done = Arc::new(AtomicBool::new(false));
+        let _done = Done(Arc::clone(&done));
+        let mut then = vec![b'W'];
+        then.extend_from_slice(&(MESSAGE as u64).to_le_bytes());
+        then.push(0);
+        let dribble = Arc::clone(&done);
+        let url = primary(answer(false, 0, &then), move |s| {
+            while !dribble.load(Ordering::SeqCst) && s.write_all(&[0]).is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (_db, f) = copy_of(&url);
+        *lock(&f.halt_at) = Some("in a message");
+        f.start("fennec-test-halt-in-a-message".into()).unwrap();
+        assert!(
+            ended_within(&f, SILENCE),
+            "the follower read on past its halt, the primary sending a byte every 20 ms"
+        );
+        f.halt();
+    }
+
+    /// A file's sink in memory, as the fuzzer's `stream` target makes one:
+    /// a rewrite's bytes kept and handed back as the file mapped.
+    struct Remapped(Option<fennec_core::store::Base>);
+
+    impl Sink for Remapped {
+        fn append(&mut self, _: &[u8]) -> fennec_core::error::Result<()> {
+            Ok(())
+        }
+
+        fn rewrite(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
+            self.0 = Some(Arc::new(bytes.to_vec()));
+            Ok(())
+        }
+
+        fn remapped(&mut self) -> Option<fennec_core::store::Base> {
+            self.0.take()
+        }
+    }
+
+    /// The `stream` target's reader, given a copy mapped as a server's, takes
+    /// an image its hello promised as a follower does: adopted, the copy's
+    /// stores pointed at the rewritten bytes, following -- `adopt`'s
+    /// `repoint` and `rebind`, which no target reached before. An image of
+    /// records without sums, as a primary sends one to a follower that does
+    /// not ask for them, is adopted too: the target's seed of one, whose
+    /// mutations pass `check_records` and reach the adoption.
+    #[test]
+    fn an_answers_image_is_adopted_by_a_mapped_copy() {
+        let (image, seq) = two_rows();
+        let plain = fennec_core::engine::plain_image(&image).unwrap();
+        assert_ne!(plain, image);
+        for image in [image, plain] {
+            let bytes = answer(true, seq, &framed(b'I', &image));
+            let mut copy = Database::with_sink(Box::new(Remapped(None)));
+            let empty: fennec_core::store::Base = Arc::new(Database::new().snapshot());
+            copy.load_mapped(empty).unwrap();
+            let (n, end) = read_answer(&mut &bytes[..], Some(&mut copy));
+            assert_eq!((n, end.kind()), (2, io::ErrorKind::UnexpectedEof), "{end}");
+            assert_eq!((copy.change_seq(), copy.adoptions()), (seq, 1));
+            assert!(copy.history().following);
+            let q = fennec_ql::parse_one("get c count").unwrap();
+            let r = fennec_core::json::response_to_string(&copy.query(&q, &[]).unwrap());
+            assert!(r.contains(r#""count":2"#), "{r}");
+        }
     }
 }

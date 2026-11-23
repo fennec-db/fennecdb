@@ -812,7 +812,9 @@ mod pty {
                 // SAFETY: plain calls on a descriptor this function owns.
                 let m = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
                 assert!(m >= 0, "{}", std::io::Error::last_os_error());
+                // SAFETY: as above, a call on `m` alone.
                 assert_eq!(unsafe { grantpt(m) }, 0);
+                // SAFETY: as above, a call on `m` alone.
                 assert_eq!(unsafe { unlockpt(m) }, 0);
                 // SAFETY: `ptsname` answers a C string, read before the
                 // next call under the lock.

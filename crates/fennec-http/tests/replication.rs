@@ -183,7 +183,8 @@ const SCHEMA: &str =
 /// A primary that died in the middle of an append left its last record
 /// cut short. It is cut off the file on the way back up -- no replica was
 /// sent it, since no fsync covered it -- rather than read back later with
-/// the first write after the restart as the rest of it.
+/// the first write after the restart as the rest of it, and the cut
+/// marked where no close's mark ends what it keeps (`fs::FileSink::cut`).
 #[test]
 fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     let d = dir("torn");
@@ -198,7 +199,7 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
         run(&mut db, "put t {x: 1}");
         db.sync().unwrap();
     }
-    let whole = std::fs::metadata(&file).unwrap().len();
+    let whole = std::fs::read(&file).unwrap();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&file)
@@ -207,7 +208,13 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     drop(f);
     {
         let (mut db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), whole);
+        // Cut, marked unless a close's mark ends what it keeps.
+        let mark = fennec_core::engine::record_claiming(14, 0, &[], 4096, 4096);
+        let want = match whole.ends_with(&mark) {
+            true => whole.clone(),
+            false => [&whole[..], &mark[..]].concat(),
+        };
+        assert!(std::fs::read(&file).unwrap() == want, "not cut, marked");
         run(&mut db, "put t {x: 2}");
         db.sync().unwrap();
     }
@@ -1819,5 +1826,171 @@ fn a_replica_and_an_archive_of_it_keep_the_times_its_primary_appended_at() {
     assert!(own[0].1 >= before, "{own:?} before {before}");
     assert_eq!(change_times_to(&r2, since, own[0].0), own);
     halt(r2.follower.as_ref().unwrap());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `x` with its field `b` dropped, holding a row written before the drop:
+/// its documents keep `b`'s place.
+const DROPPED: [&str; 3] = [
+    "create collection x (a int, b int, c int, d int)",
+    "put x {a: 1, b: 2, c: 3, d: 4}",
+    "alter collection x drop field b",
+];
+
+/// `x`'s rows, field by field.
+const XS: &str = "get x select a, c, d order id";
+
+fn ok(node: &Node, sql: &str) {
+    let (status, body) = query(node, sql);
+    assert_eq!(status, 200, "{sql}: {body}");
+}
+
+/// `x`'s rows as the primary holds them once a row is written after the
+/// drop and the compact.
+fn after_compact() -> Vec<(u64, Vec<Value>)> {
+    vec![
+        (1, vec![Value::Int(1), Value::Int(3), Value::Int(4)]),
+        (2, vec![Value::Int(10), Value::Int(30), Value::Int(40)]),
+    ]
+}
+
+/// A primary's compact keeps every place, so each copy reads the writes
+/// after it as the primary does: one caught up before it, one behind that
+/// catches up across it by the records, and one connecting after it, sent
+/// an image. A compact appends no record: while it took a dropped field's
+/// places out, a copy holding them read every later write of the
+/// collection one field early -- `[10, 40, null]` -- and no error said so.
+#[test]
+fn a_copy_reads_the_writes_after_its_primarys_compact_as_its_primary_does() {
+    let d = dir("compact-places");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    for sql in DROPPED {
+        ok(&p, sql);
+    }
+    let along = replica(&d.join("along.fennec"), p.port);
+    let behind = replica(&d.join("behind.fennec"), p.port);
+    caught_up(&along, &p);
+    caught_up(&behind, &p);
+    // The one behind stops before the compact and starts again after it.
+    halt(behind.follower.as_ref().unwrap());
+    drop(behind);
+    ok(&p, "compact");
+    ok(&p, "put x {a: 10, c: 30, d: 40}");
+    assert_eq!(rows(&p, XS), after_compact());
+    caught_up(&along, &p);
+    assert_eq!(rows(&along, XS), after_compact(), "caught up before");
+    let behind = replica(&d.join("behind.fennec"), p.port);
+    caught_up(&behind, &p);
+    assert_eq!(behind.follower.as_ref().unwrap().images(), 0);
+    assert_eq!(rows(&behind, XS), after_compact(), "behind across it");
+    let after = replica(&d.join("after.fennec"), p.port);
+    caught_up(&after, &p);
+    assert_eq!(rows(&after, XS), after_compact(), "connected after");
+    // Every place where it was: a write after a second compact, read alike.
+    ok(&p, "compact");
+    ok(&p, "set x {d: 5} where id = 1");
+    for (name, r) in [("along", &along), ("behind", &behind), ("after", &after)] {
+        caught_up(r, &p);
+        assert_eq!(rows(r, XS), rows(&p, XS), "{name}");
+        assert_eq!(
+            r.db.read().unwrap().collection("x").unwrap().schema.dropped,
+            [1],
+            "{name}"
+        );
+        halt(r.follower.as_ref().unwrap());
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A copy compacts itself -- a server's own compaction runs on a following
+/// database, whose file grows with every write sent -- and reads its
+/// primary's writes after it as the primary does. While the compact took
+/// a dropped field's places out, the copy read them one field late:
+/// `[10, null, 30]`.
+#[test]
+fn a_copy_that_compacts_first_reads_its_primarys_writes_as_its_primary_does() {
+    let d = dir("copy-compacts");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    for sql in DROPPED {
+        ok(&p, sql);
+    }
+    let r = replica(&d.join("r.fennec"), p.port);
+    caught_up(&r, &p);
+    let compact = fennec_ql::parse_one("compact").unwrap();
+    Database::maintain(&r.db, &compact).unwrap().unwrap();
+    ok(&p, "put x {a: 10, c: 30, d: 40}");
+    caught_up(&r, &p);
+    assert_eq!(rows(&p, XS), after_compact());
+    assert_eq!(rows(&r, XS), after_compact());
+    halt(r.follower.as_ref().unwrap());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A copy of a primary that took a dropped field's places out -- a compact
+/// of a release from 0.1.7 to 0.2.0, which no record says -- reads the
+/// primary's next write of the collection as it was made: it holds a value
+/// less than the copy's places, so the copy refuses it by name rather than
+/// read it one field early (`[10, 40, null]`, which it used to hold), takes
+/// an image of its primary and holds what the primary holds from there. No
+/// value misread reaches its file.
+#[test]
+fn a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write() {
+    let d = dir("stripped-primary");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    // The primary as a release's compact left it: `x` of three fields, its
+    // row of three values, and a third write to match the copy's count.
+    for sql in [
+        "create collection x (a int, c int, d int)",
+        "put x {a: 1, c: 3, d: 4}",
+        "create collection y (n int)",
+    ] {
+        ok(&p, sql);
+    }
+    // The copy as it stood before that compact: `b` dropped, its place
+    // kept in the row, the same three writes to the counter.
+    let tap = Tap::default();
+    let mut before = Database::with_sink(Box::new(tap.clone()));
+    for sql in DROPPED {
+        before.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let mut db = Database::new();
+    db.follow(p.db.read().unwrap().history().lineage.clone())
+        .unwrap();
+    db.apply(&tap.0.lock().unwrap().concat()).unwrap();
+    assert_eq!(db.change_seq(), seq(&p));
+    let db = Arc::new(RwLock::new(db));
+    let upstream = format!("http://127.0.0.1:{}", p.port);
+    let follower = Follower::new(&upstream, TOKEN.into(), Arc::clone(&db), None, false).unwrap();
+    follower.start("stripped-primary".into()).unwrap();
+    let copy_rows = || {
+        let g = db.read().unwrap();
+        let r = g.query(&fennec_ql::parse_one(XS).unwrap(), &[]).unwrap();
+        (r.rows().unwrap().rows.iter())
+            .map(|r| (r.id, r.values.clone()))
+            .collect::<Vec<_>>()
+    };
+    let at = || db.read().unwrap().change_seq();
+    let until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}: the copy is at {}", at());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    assert_eq!(follower.images(), 0);
+    // The write after the primary's compact: refused, and the copy seeded
+    // again.
+    ok(&p, "put x {a: 10, c: 30, d: 40}");
+    until("the image", &|| follower.images() == 1 && at() == seq(&p));
+    assert_eq!(copy_rows(), rows(&p, XS));
+    assert_eq!(copy_rows(), after_compact());
+    assert!(db.read().unwrap().failure().is_none());
+    // Followed on from there, write by write.
+    ok(&p, "alter collection x add field e int");
+    ok(&p, "put x {a: 100, c: 300, d: 400, e: 500}");
+    until("the writes after", &|| at() == seq(&p));
+    assert_eq!(copy_rows(), rows(&p, XS));
+    assert_eq!(follower.images(), 1);
+    halt(&follower);
     let _ = std::fs::remove_dir_all(&d);
 }

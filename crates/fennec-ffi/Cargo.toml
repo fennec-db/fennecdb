@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 # A shared library for Android, the JVM and Dart, a static one for an
 # XCFramework (an iOS app links what it ships), and an rlib for the tests

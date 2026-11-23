@@ -502,6 +502,18 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         "o-1",
     );
     assert_eq!(taken.status, 200, "{}", taken.body);
+    // A mode an operator set on the sidecar is kept when it is written
+    // again, as every file's is: renamed over, the new one took `0600`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let sidecar = n.dir.join("copy.hooks");
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let again = set_secret(n.port, "copy", "whsec_copy_again");
+        assert_eq!(again.status, 200, "{}", again.body);
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "a sidecar written again");
+    }
 
     // Taken away: a hook not held is 404; the last one takes the sidecar.
     let gone = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/nosuch", "");
@@ -733,6 +745,31 @@ fn a_read_replicas_stream_is_no_standby() {
     follow(true);
     let follows = std::fs::read_to_string(copy.dir.join("acme.follows")).unwrap();
     assert!(follows.lines().any(|l| l == "reader"), "{follows}");
+    // `.follows` is its owner's alone, and a mode an operator set on it is
+    // kept through the follow written again below. Looked at once the copy
+    // noted it heard, which writes it too, on the follower's thread.
+    #[cfg(unix)]
+    let follows_mode = || {
+        use std::os::unix::fs::PermissionsExt;
+        let path = copy.dir.join("acme.follows");
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = copy.dir.join("acme.follows");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .any(|l| l == "heard")
+        {
+            assert!(Instant::now() < deadline, "the copy never noted it heard");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(follows_mode(), 0o600, "a tenant's .follows");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
     assert!(
         feed().standby_sent(u64::MAX, Duration::ZERO),
         "a read replica's stream is no standby"
@@ -740,6 +777,8 @@ fn a_read_replicas_stream_is_no_standby() {
     follow(false);
     let follows = std::fs::read_to_string(copy.dir.join("acme.follows")).unwrap();
     assert!(!follows.lines().any(|l| l == "reader"), "{follows}");
+    #[cfg(unix)]
+    assert_eq!(follows_mode(), 0o640, "a .follows written again");
     assert!(
         !feed().standby_sent(u64::MAX, Duration::ZERO),
         "a standby's stream is waited for"

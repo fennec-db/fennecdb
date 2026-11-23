@@ -1,0 +1,9 @@
+{"kind":"schemas","collections":[{"name":"people","fields":[{"name":"n","type":"int","index":"hash"},{"name":"name","type":"text","index":"none"},{"name":"city","type":"text","index":"hash"},{"name":"note","type":"text","index":"none"},{"name":"age","type":"int","index":"none"}]}]}
+{"kind":"rows","result":{"columns":["id","n","name","city","note","age"],"rows":[{"id":1,"n":1,"name":"ada","city":"london","note":"before the drop","age":null},{"id":2,"n":2,"name":"bo","city":"lagos","note":"set after the drop","age":null},{"id":3,"n":3,"name":"cy","city":"paris","note":"after the drop, before the compact","age":null},{"id":4,"n":4,"name":"dee","city":"rome","note":"after the compact","age":null},{"id":5,"n":5,"name":"eve","city":"oslo","note":"after the field came back","age":29}]}}
+{"kind":"rows","result":{"columns":["n","name","age","city","note"],"rows":[{"n":1,"name":"ada","age":null,"city":"london","note":"before the drop"},{"n":2,"name":"bo","age":null,"city":"lagos","note":"set after the drop"},{"n":3,"name":"cy","age":null,"city":"paris","note":"after the drop, before the compact"},{"n":4,"name":"dee","age":null,"city":"rome","note":"after the compact"},{"n":5,"name":"eve","age":29,"city":"oslo","note":"after the field came back"}]}}
+{"kind":"rows","result":{"columns":["n","name","note"],"rows":[{"n":3,"name":"cy","note":"after the drop, before the compact"}]}}
+{"kind":"rows","result":{"columns":["n","note"],"rows":[{"n":2,"note":"set after the drop"}]}}
+{"kind":"rows","result":{"columns":["name","city","note"],"rows":[{"name":"dee","city":"rome","note":"after the compact"}]}}
+{"kind":"rows","result":{"columns":["n","name","city"],"rows":[{"n":5,"name":"eve","city":"oslo"}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1},{"n":2},{"n":3},{"n":4}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":5}]}}

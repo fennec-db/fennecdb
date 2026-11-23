@@ -1,0 +1,6 @@
+-- A field of 65 nested lists, which the release reads and a later build
+-- refuses at the open.
+collections
+get plain order n
+get plain count
+get lists count

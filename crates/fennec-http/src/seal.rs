@@ -44,7 +44,7 @@
 //! number, never read as a plain file.
 
 use crate::crypto;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// The magic a file is sealed under now: its id and what it is follow it.
@@ -615,6 +615,66 @@ pub fn seal_whole_by(
     Ok(out)
 }
 
+/// A file sealed as its plaintext comes, as [`seal_whole`] seals one --
+/// frames of [`FRAME`] bytes, the last flagged as the last -- each frame
+/// written into `out` once the next byte, or the end ([`Self::finish`]),
+/// says whether it is the last: a frame held at a time, never the file. An
+/// image off a stream into a sealed archive or backup, and one an archive
+/// writes from its end (`Archive::put_with`). Its head is written before
+/// it ([`begin`]), the frames it hands over sealing on from there.
+pub struct Sealing<W: Write> {
+    out: W,
+    frames: Frames,
+    plain: Vec<u8>,
+    sealed: Vec<u8>,
+}
+
+impl<W: Write> Sealing<W> {
+    /// The frames of a file whose head `out` holds already, sealed into it
+    /// as plaintext is written.
+    pub fn new(frames: Frames, out: W) -> Sealing<W> {
+        Sealing {
+            out,
+            frames,
+            plain: Vec::with_capacity(FRAME),
+            sealed: Vec::new(),
+        }
+    }
+
+    /// The last frame sealed -- an empty one where nothing was written, as
+    /// [`seal_whole`] seals no bytes -- and written: the file whole.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.seal(true)?;
+        Ok(self.out)
+    }
+
+    fn seal(&mut self, last: bool) -> io::Result<()> {
+        self.sealed.clear();
+        self.frames.seal(last, &self.plain, &mut self.sealed)?;
+        self.out.write_all(&self.sealed)?;
+        self.plain.clear();
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for Sealing<W> {
+    fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+        let n = bytes.len();
+        while !bytes.is_empty() {
+            if self.plain.len() == FRAME {
+                self.seal(false)?;
+            }
+            let take = (FRAME - self.plain.len()).min(bytes.len());
+            self.plain.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
 /// What [`open_frames`] found: the plaintext, where the last whole frame
 /// ends, the frames to go on with after it, whether the last was flagged
 /// as the last, and what the file says it is.
@@ -761,6 +821,34 @@ mod tests {
             time: 1_700_000_000_000,
             began: 1_600_000_000_000,
             tenant: "acme".into(),
+        }
+    }
+
+    /// A file sealed as its plaintext comes, written a few bytes at a time,
+    /// is a whole sealed file -- frames of `FRAME` bytes, the last flagged,
+    /// an empty one for no bytes -- that opens to what was written, as one
+    /// `seal_whole` seals: at a frame's edge and either side of it too.
+    #[test]
+    fn a_file_sealed_as_it_comes_opens_as_one_sealed_whole() {
+        let k = key(3);
+        for len in [0, 1, FRAME - 1, FRAME, FRAME + 1, 2 * FRAME, 2 * FRAME + 7] {
+            let plain: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+            let mut out = Vec::new();
+            let frames = begin(&k, &image(), &mut out).unwrap();
+            let mut sealing = Sealing::new(frames, &mut out);
+            for part in plain.chunks(65_537) {
+                sealing.write_all(part).unwrap();
+            }
+            sealing.finish().unwrap();
+            let (opened, bound) = open_whole(&k, &out).unwrap();
+            assert!(opened == plain, "{len} bytes");
+            assert_eq!(bound.map(|b| b.change), Some(41));
+            let whole = seal_whole(&k, &image(), &plain).unwrap();
+            assert_eq!(
+                out.len(),
+                whole.len(),
+                "{len} bytes: the frames seal_whole makes"
+            );
         }
     }
 

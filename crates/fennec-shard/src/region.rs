@@ -1077,7 +1077,7 @@ impl Router {
                     format!(
                         "{u} keeps another directory than {}'s: {}",
                         region_name(region),
-                        String::from_utf8_lossy(&body)
+                        crate::words(&body)
                     ),
                 ));
             }
@@ -1255,12 +1255,21 @@ impl Router {
             self.pool
                 .call(&dst.addr, "PUT", &format!("{base}/file"), &dst.token, image)
         };
-        let mut installed = put(image);
+        // A node that says to come back -- an install of the name under
+        // way there -- asked again after its wait, as a move's target is.
+        let mut asks = crate::ComeBack::new();
+        let install = |asks: &mut crate::ComeBack| loop {
+            let installed = put(image);
+            if !self.come_back(asks, crate::named_wait(&installed)) {
+                break installed;
+            }
+        };
+        let mut installed = install(&mut asks);
         // 409: a file of the tenant there, taken back only where this
         // router left it, the node judging (`clear_target`).
         if matches!(installed, Ok((409, _))) {
             self.clear_target(tenant, to, "a move")?;
-            installed = put(image);
+            installed = install(&mut asks);
         }
         let answer = expect(installed, 201, to)?;
         if let Some(w) = quota.and_then(|q| self.put_quota(tenant, to, q)) {
@@ -1676,11 +1685,7 @@ fn answered((status, hs, body): Whole, want: u16, region: &str) -> Outcome<Whole
     }
     Err(Fail(
         if status >= 500 { 502 } else { status },
-        format!(
-            "{}'s router: {}",
-            region_name(region),
-            String::from_utf8_lossy(&body).trim()
-        ),
+        format!("{}'s router: {}", region_name(region), crate::words(&body)),
     ))
 }
 

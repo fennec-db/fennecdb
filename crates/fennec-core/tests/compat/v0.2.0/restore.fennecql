@@ -1,0 +1,9 @@
+-- What a restore of server.fennec's archive to a moment answers: the rows
+-- of each collection its image holds that the writes after it touch, by
+-- the release's own `fennec restore --to` and by every later build's.
+get kinds select i, f, tag order i
+get shapes select req, b order req
+get orders select ref order ref
+get audit select ref, what order ref
+get ticks select k
+get issues select n, action

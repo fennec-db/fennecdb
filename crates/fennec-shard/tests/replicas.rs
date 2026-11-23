@@ -89,6 +89,18 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     (status, body.to_string())
 }
 
+/// The router's count of copies promoted, by `copy`: whether the copy was
+/// connected to its primary as its promotion began.
+fn promotions(port: u16, copy: &str) -> u64 {
+    let (status, text) = call(port, "GET", "/_metrics", "", None);
+    assert_eq!(status, 200, "{text}");
+    let line = format!("fennec_router_promotions_total{{copy=\"{copy}\"}} ");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&line))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no {line}in the router's scrape"))
+}
+
 fn query(port: u16, path: &str, sql: &str) -> (u16, String) {
     let mut body = String::from("{\"query\":");
     fennec_core::json::escape_into(&mut body, sql);
@@ -163,10 +175,15 @@ fn a_nodes_tenants_are_followed_by_its_standby_and_promoted_on_failover() {
     let (status, body) = query(n2.port, "/t/acme/query", r#"put notes {title: "no"}"#);
     assert_eq!(status, 403, "{body}");
 
-    // n1 is lost. Its tenants are promoted on n2 and routed there.
+    // n1 is lost. Its tenants are promoted on n2 and routed there. Its
+    // copy says what it knew of its primary, connected here, and the router
+    // counts it so (a count of the process's, which other tests' failovers
+    // add to).
+    let connected = promotions(port, "connected");
     let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "", None);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("\"promoted\":[\"acme\"]"), "{body}");
+    assert!(promotions(port, "connected") > connected);
     let (_, tenants) = call(port, "GET", "/_shard/tenants", "", None);
     assert!(tenants.contains("\"node\":\"n2\""), "{tenants}");
 
@@ -181,6 +198,97 @@ fn a_nodes_tenants_are_followed_by_its_standby_and_promoted_on_failover() {
     assert_eq!(status, 409, "{body}");
     assert!(body.contains("no standby"), "{body}");
 
+    drop(n1);
+    drop(n2);
+}
+
+/// A tenant's standby reads the writes after its primary's compact as the
+/// primary does, and promoted on a failover takes writes that its file
+/// holds as it answers them. A compact keeps every place: while it took a
+/// dropped field's places out, telling no copy, the standby read every
+/// later write of the collection a field early, and after a failover the
+/// values it misread were the tenant's.
+#[test]
+fn a_standby_reads_the_writes_after_a_compact_and_after_its_failover_as_written() {
+    let n1 = node("c1", None);
+    let n2 = node("c2", Some(&n1.addr));
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(5),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    for (name, nd) in [("n1", &n1), ("n2", &n2)] {
+        let body = format!(r#"{{"addr":"{}","token":"adm-c{}"}}"#, nd.addr, &name[1..]);
+        assert_eq!(
+            call(port, "PUT", &format!("/_shard/nodes/{name}"), &body, None).0,
+            201
+        );
+    }
+    let body = format!(
+        r#"{{"addr":"{}","token":"adm-c1","standby":"n2"}}"#,
+        n1.addr
+    );
+    assert_eq!(call(port, "PUT", "/_shard/nodes/n1", &body, None).0, 201);
+    assert_eq!(call(port, "PUT", "/_shard/tenants/acme", "", None).0, 201);
+    let ok = |at: u16, sql: &str| {
+        let (status, body) = query(at, "/t/acme/query", sql);
+        assert_eq!(status, 200, "{sql}: {body}");
+        body
+    };
+    for sql in [
+        "create collection x (a int, b int, c int, d int)",
+        "put x {a: 1, b: 2, c: 3, d: 4}",
+        "alter collection x drop field b",
+        "compact",
+        "put x {a: 10, c: 30, d: 40}",
+    ] {
+        ok(port, sql);
+    }
+    let xs = "get x select a, c, d order id";
+    let want = ok(port, xs);
+    assert!(want.contains(r#""a":10,"c":30,"d":40"#), "{want}");
+    until(n2.port, "/t/acme/query", xs, r#""a":10,"c":30,"d":40"#);
+    let copy = ok(n2.port, xs);
+    assert!(copy.contains(r#""a":1,"c":3,"d":4"#), "{copy}");
+
+    let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"promoted\":[\"acme\"]"), "{body}");
+    // Promoted, it takes writes, through the router, and holds them where
+    // its documents' places say.
+    ok(port, "put x {a: 100, c: 300, d: 400}");
+    ok(port, "compact");
+    ok(port, "put x {a: 1000, c: 3000, d: 4000}");
+    let now = ok(port, xs);
+    let (one, two) = (
+        r#""a":100,"c":300,"d":400"#,
+        r#""a":1000,"c":3000,"d":4000"#,
+    );
+    assert!(now.contains(one) && now.contains(two), "{now}");
+    // Its file read on its own holds the same.
+    let file = std::fs::read(n2.dir.join("acme.fennec")).unwrap();
+    let mut db = fennec_core::prelude::Database::new();
+    db.load(&file).unwrap();
+    let r = db.query(&fennec_ql::parse_one(xs).unwrap(), &[]).unwrap();
+    let held: Vec<Vec<fennec_core::prelude::Value>> = r
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.values.clone())
+        .collect();
+    assert_eq!(held.len(), 4);
+    assert_eq!(
+        held[3],
+        [1000, 3000, 4000].map(fennec_core::prelude::Value::Int)
+    );
+    assert_eq!(held[1], [10, 30, 40].map(fennec_core::prelude::Value::Int));
     drop(n1);
     drop(n2);
 }
@@ -433,6 +541,22 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
     });
     let (status, body) = query(n.port, "/t/acme/query", r#"put notes {title: "no"}"#);
     assert_eq!(status, 403, "{body}");
+    // A copy a failover may promote that nothing follows for: counted not
+    // connected, and kept open, idle or not -- closed, the scrape counted
+    // it no more while it followed nothing. Skipped for having no
+    // follower, it was never counted.
+    let disconnected = |n: &Node| {
+        let (status, text) = call(n.port, "GET", "/_metrics", "", Some("adm-orphan"));
+        assert_eq!(status, 200, "{text}");
+        text.lines()
+            .find_map(|l| l.strip_prefix("fennec_copies_disconnected "))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no fennec_copies_disconnected: {text}"))
+    };
+    assert_eq!(disconnected(&n), 1, "the orphan copy was not counted");
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 0);
+    assert!(is_open(&n, "acme"));
+    assert_eq!(disconnected(&n), 1);
     let (status, body) = call(
         n.port,
         "POST",
@@ -441,6 +565,13 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
         Some("adm-orphan"),
     );
     assert_eq!(status, 200, "{body}");
+    assert_eq!(disconnected(&n), 0, "a primary now");
+    // With no follower, it knew nothing of a primary: not connected, never
+    // heard from -- promoted where it stood.
+    assert!(
+        body.contains(r#""connected":false,"behind":0,"last_contact_ms":-1"#),
+        "{body}"
+    );
     let (status, body) = query(n.port, "/t/acme/query", r#"put notes {title: "yes"}"#);
     assert_eq!(status, 200, "{body}");
     let (status, body) = call(
@@ -451,6 +582,8 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
         Some("adm-orphan"),
     );
     assert_eq!(status, 409, "{body}");
+    // A primary closes as any idle tenant does.
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
 }
 
 // ---------------------------------------------------------- replicas of their own

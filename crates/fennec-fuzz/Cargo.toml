@@ -10,6 +10,9 @@ repository.workspace = true
 publish = false
 autotests = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # The crates whose parsers it runs, each without the features that take
 # anything from outside the workspace (fennec-http's and fennec-import's TLS):

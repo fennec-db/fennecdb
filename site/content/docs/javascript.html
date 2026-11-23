@@ -45,13 +45,13 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fennecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">12 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">285 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fennec.open('./fennec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">289 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 68 KB brotli as they are served with no build step; a bundler keeps
+imports, 74 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -82,7 +82,7 @@ re-exports the builder (<code>builder.js</code>) and the HTTP client
 its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
-12 KB brotli through it and to 14 KB through <code>@fennecdb/web</code>,
+12 KB brotli through it and to 15 KB through <code>@fennecdb/web</code>,
 whose <code>Fennec</code> class and its glue a bundler cannot drop (esbuild,
 minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
@@ -419,8 +419,10 @@ elsewhere is waited for 3 s first. A page loaded again finds its file in the
 hands of the worker of the page before until that worker has ended — at
 once when it was idle, but Chrome stops a busy worker only 2 s after its
 page is gone, and a page reloaded in the middle of a statement was refused
-for those 2 s. A second <code>openFile</code> of a file the same worker
-holds is refused at once.</p>
+for those 2 s. A file another database of the same worker keeps is refused
+at once, naming it (<code>notes.fennec is kept by another database of this
+worker</code>): close that database, or its file, first. Closing a database
+lets go of its file too, as the file's own <code>close()</code> does.</p>
 
 <p>A <code>compact</code>, and writes appended past half the image (and past
 64 KB), put a new image in the file. It is written into a copy beside the
@@ -437,6 +439,31 @@ refused too; the database has to be opened from the file again. A write past
 the origin's quota is refused so: Chrome's file system throws
 <code>QuotaExceededError</code>, Firefox's writes nothing, and either way the
 file opened again holds every write <code>run</code> answered.</p>
+
+<p>A copy the module cannot try — no room in it for the copy, or a module
+that stopped as it loaded it — is kept, since it may be the one whole
+database, and <code>openFile</code> is refused naming it
+(<code>notes.fennec~, the copy a rewrite of notes.fennec left beside it,
+could not be tried</code>, and why) until it is dealt with: save its bytes
+(<code>getFileHandle('notes.fennec~')</code> in the origin private file
+system, then <code>getFile()</code>), open them where there is room —
+<code>fennec</code>, a server, or a module opened again with
+<code>Fennec.open</code> — and once they are safe remove the copy
+(<code>removeEntry('notes.fennec~')</code>): the next <code>openFile</code>
+takes the file as it stands.</p>
+
+<p>A module that traps -- out of memory while it answers, say -- is left
+where it stopped, so every later call on any of its databases throws one
+<code>FennecError</code>: the module stopped, and the database has to be
+opened again (<code>Fennec.open</code>, then <code>openFile</code> or
+<code>restore</code>). The file holds every write <code>run</code> answered
+before; the writes of the statement that stopped are not in it, though the
+module may have landed them, since neither its answer nor the flush after
+it came. <code>persist</code>'s keys hold what its last call stored.
+<code>openFile</code> of the same name, in the same worker, takes the file
+from the database that stopped, writing nothing into it, so nothing needs
+closing first; <code>close()</code> on that database, or on its file,
+throws nothing, enters the module no more and lets the file go.</p>
 
 <p><code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, wherever a page runs: the image once, then only the writes since
@@ -467,7 +494,14 @@ as soon as a delete of the database
 (<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
 nothing of fennecdb's holds either up. Deleted under the page, or with the
 site's data cleared, the database is stored whole by the next
-<code>persist</code>, which a <code>restore</code> then finds. A
+<code>persist</code>, which a <code>restore</code> then finds.
+<code>unpersist(key)</code> deletes one key's image and chunks and nothing
+else, refused while a replica keeps the key
+(<a href="sync.html#one-writer">Sync</a>); every database's next
+<code>persist</code> in this page then stores its image. A key's chunks are
+stored under <code>key#</code> and nine digits: another key whose name is
+<code>key#</code> followed by nine digits is read as this key's chunk;
+avoid such names. A
 <code>persist</code> or
 <code>putState</code> past the quota is refused with
 <code>QuotaExceededError</code>, what was stored before standing. Over 32.4 MB (61 000 rows with a
@@ -511,15 +545,22 @@ await restore(db, 'notes', { cryptoKey });   // another key, or none, is refused
 <details class="deep"><summary>What the seal covers, and what it costs</summary>
 <p>With a <code>cryptoKey</code> (AES-GCM, from WebCrypto) the image and
 every chunk are sealed before they reach IndexedDB, each with a random nonce
-and a tag over the key it is stored under and its place. A chunk moved,
-dropped from the middle, or left from an image before is refused, as is one
-byte changed. A restore without the key refuses a sealed record, and a
+and a tag over the key it is stored under, its place and the record before
+it. A chunk moved, dropped from the middle, left from an image before, or put
+after another than the one it was sealed after is refused, as is one byte
+changed. A store cut short restores as the page left it there, and the chunks
+the page seals next open only after each other, never after one it cut; an
+older copy of the whole store put back restores as what it was. A store
+sealed by 0.2.0 restores too, and the next <code>persist</code> stores it
+over again, whole, as it seals now. A restore without the key refuses a sealed record, and a
 restore with one refuses a record stored in the clear. Where the key comes
 from is the page's decision: derived from a passphrase, as above, or handed
 over by the server after a login, so that what IndexedDB holds on the disk
 reads as nothing without it. A key kept in IndexedDB beside the data protects
 nothing. The sync layer takes it as <code>sync({ persist, cryptoKey })</code>.
-Its cursors and unsent writes are collections of the replica, sealed with it. The same 32.4 MB in
+Its cursors and unsent writes are collections of the replica, sealed with it;
+a replica given another key, or none, refuses to start and keeps the store
+(<a href="sync.html">Sync</a>). The same 32.4 MB in
 Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file
@@ -934,7 +975,7 @@ version's tables is refused: its ranks would mean something else.</p>
 the rest. The release ships <code>fennec.wasm</code> alone, with every
 feature; another set is a build option.</p>
 
-<pre data-lang="bash">make wasm                              # every feature: 285 KB brotli
+<pre data-lang="bash">make wasm                              # every feature: 289 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
 make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 213 KB

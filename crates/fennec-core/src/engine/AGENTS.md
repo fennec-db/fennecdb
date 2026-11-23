@@ -16,7 +16,9 @@ it.
 **[A long read is pinned, and read with no lock held](../../../../docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
-stray read reruns under the lock. A stream's seed is one (`sse::seed`), read
+stray read reruns under the lock. An image sent is one
+(`Database::pin_image`), each record's sum made as it is written out. A
+stream's seed is one (`sse::seed`), read
 a page at a time, its scope bound under the pin's lock and its inner `get`s
 answered on the pin (`Pinned::answer_subqueries`), the ring held back to it
 till the first look (`hold_changes`); it reads again under the lock where
@@ -42,6 +44,14 @@ changed (`Tails::all_changed`).
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by
 `Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.
+A compact renumbers no place and is refused for nothing a document holds:
+one it cannot read is copied as it is, a graph it cannot rebuild kept
+([dropped places](../../../../docs/design/storage.md#dropped-places)); a
+copy reads each primary's write as it was made (`Schema::read_written`),
+refusing one made by other places. From the first store it changes until
+each points at the new file, a panic, a store refusing or a file the sink
+cannot map fails the database (`compact_unwound`, `repoint`); a refusal the
+server's compaction meets again is logged once and counted.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room

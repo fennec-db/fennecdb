@@ -432,14 +432,15 @@ SMALL_CODES=(
 )
 # The replication stream's message tags (`[tag: u8][length][payload]`,
 # crates/fennec-http/src/replication.rs): `b'X'` literals the primary
-# writes (`message(.., b'X', ..)`) and the replica reads (`b'X' =>`), the
+# writes (`message(.., b'X', ..)`) and the replica reads (`b'X' =>`, or
+# `tag == b'X'` for the image it takes as it arrives), the
 # two to be one list and the table to be it. The stream is the primary's
 # answer to a replica, the one place a tag crosses releases.
 STREAM=(
     "H|- the hello opens every stream: a1's and a2's, each way"
     "I|- a1's and a2's replicas take their image in it, each way"
     "W|- the writes after the image, each way: a1's and a2's histories"
-    "K|- a primary with nothing to send says it is there (ALIVE, 2 s): a3's replica waits steady at its primary's counter, the old primary to the new replica; the other way no case waits two seconds idle"
+    "K|- a primary says where its disk stands every 2 s (ALIVE): with nothing to send, and after a W while its replica is behind, which a replica of every release reads between any two messages; a3's replica waits steady at its primary's counter, the old primary to the new replica; the other way no case waits two seconds idle"
     "E|- the stream's end, text only: e's primary node closing sends it to its standby, the old to the new; the new primary's to the old replica is not driven (a2's primary is stopped after its replica)"
 )
 READS=(
@@ -1648,12 +1649,18 @@ arm_codes() {
 
 # stream_tags ROOT written|read: the tags the replication stream's primary
 # writes (`b'X',` as an argument of `message`) or its replica matches
-# (`b'X' =>`), sorted, one a line.
+# (`b'X' =>`) or compares a message's tag to (`tag == b'X'`: the image,
+# `I`, taken as it arrives, before any message is decoded), sorted, one a
+# line. The file's code alone, its `mod tests` left out: a test frames a
+# tag no primary sends (`b'Z'`, refused) to hold the replica's refusal of
+# it.
 stream_tags() {
-    local f=$1/crates/fennec-http/src/replication.rs
+    local f=$1/crates/fennec-http/src/replication.rs code
+    code=$(awk '/^mod tests \{/ { exit } { print }' "$f")
     case $2 in
-    written) grep -oE "b'[A-Z]'," "$f" | sed -E "s/^b'(.).*/\1/" | sort -u ;;
-    read) grep -oE "b'[A-Z]'( if .*)? =>" "$f" | sed -E "s/^b'(.).*/\1/" | sort -u ;;
+    written) grep -oE "b'[A-Z]'," <<<"$code" | sed -E "s/^b'(.).*/\1/" | sort -u ;;
+    read) grep -oE "b'[A-Z]'( if .*)? =>|tag == b'[A-Z]'" <<<"$code" |
+        sed -E "s/^(tag == )?b'(.).*/\2/" | sort -u ;;
     esac
 }
 
@@ -1983,7 +1990,10 @@ self_test() {
     mutant "a collation code SMALL_CODES does not name" $CORE_SRC/collate.rs \
         '{ print } /^            2 => Some\(Collation::Root\),$/ { print "            3 => Some(Collation::Root)," }' 'collation:3 has no line in SMALL_CODES'
     mutant "a message tag the replica reads and the primary does not write" crates/fennec-http/src/replication.rs \
-        '{ print } /^            b.E. => Message::End/ { print "            b'"'"'Z'"'"' => Message::End(String::new())," }' 'not its first: Z'
+        '{ print } /^        b.E. => Message::End/ { print "        b'"'"'Z'"'"' => Message::End(String::new())," }' 'not its first: Z'
+    mutant "a message tag the replica compares before it decodes and the primary does not write" \
+        crates/fennec-http/src/replication.rs \
+        '{ print } /^        if tag == b.I. \{$/ { print "        if tag == b'"'"'Y'"'"' {}" }' 'not its first: Y'
     for t in FORMAT GRAPHS INDEX_KINDS SMALL_CODES STREAM; do
         # The table with a line more, for a code the tree has not.
         if out=$(eval "$t=(\"\${$t[@]}\" \"ZZ_NEXT_ONE|put nothing\")" && check_tables "$ROOT"); then

@@ -282,7 +282,13 @@ IO_FLOORS = {
 #   {"workload": "io-compact", "metric": "fsyncs", "file": ".", "call": "fsync", "most": "+1",
 #    "reason": "the directory is synced after the rename too, or a power
 #               cut could bring the old file back: one fsync a compact"}
-PERF_ACCEPTED = []
+PERF_ACCEPTED = [
+    {"workload": "io-compact", "metric": "truncates", "most": "-1",
+     "reason": "the compact's side file is made new with create_private (O_EXCL, following no link at its "
+               "name) once a leftover is unlinked, where an O_TRUNC open of the old name stood: one truncate "
+               "a compact fewer, its fsyncs, renames, writes and bytes unchanged (CI's perf (instructions) on "
+               "pull request #678, io-compact truncated 1 -> 0)"},
+]
 
 # What an entry must say, what it may, and how long its reason is at the
 # least: a written justification, not a word.

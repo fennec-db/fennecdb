@@ -28,6 +28,7 @@ use crate::node_stream::NodeStreams;
 use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
 use crate::replication::{fresh_id, Follower, Replication, Said};
 use crate::sse::Hub;
+use fennec_core::engine::PinnedImage;
 use fennec_core::history::History;
 use fennec_core::prelude::*;
 use std::collections::HashMap;
@@ -91,8 +92,8 @@ pub enum Kept {
     /// place, or the file made something else since -- or none (`None`):
     /// one this node cannot vouch for.
     Other(Option<u64>),
-    /// Refused as anything else is: the node going down (503), the file
-    /// still in use (409).
+    /// Refused as anything else is: the node going down or an install of
+    /// the name under way (503), the file still in use (409).
     Refused(Refused),
 }
 
@@ -198,7 +199,7 @@ const READER: &str = "reader";
 fn write_follows(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
     let tmp = dir.join(format!("{name}.follows.writing"));
     let path = dir.join(format!("{name}.follows"));
-    std::fs::File::create(&tmp)
+    fennec_core::fs::create_like(&tmp, &path)
         .and_then(|mut f| {
             use std::io::Write;
             f.write_all(text.as_bytes())?;
@@ -243,6 +244,82 @@ fn hold_tenant(
     })
 }
 
+/// A claim of a tenant's name in this process -- an install's, through the
+/// whole take of its image, or a create's, from its look for a file to the
+/// file made ([`Tenants::claim`]) -- given up as it drops.
+struct Claim<'a>(&'a Tenants, String);
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut claims = self.0.claims.lock().unwrap_or_else(|e| e.into_inner());
+        claims.retain(|(n, _)| *n != self.1);
+    }
+}
+
+/// The refusal of a request for a name another request's install or create
+/// holds (`by`: "installed", "made"): 503, come back in a second, as every
+/// 503 says -- nothing of this request ran, and what holds the name ends.
+/// Never a 409, which says a file is there: a router read the install's as
+/// one, had a reclaim judge the place -- no file yet, so "gone" -- forgot
+/// its note of the install that then put a file there, and failed the move,
+/// the file no router's to take back.
+fn claimed(name: &str, by: &str) -> Refused {
+    Refused(
+        503,
+        format!("tenant `{name}` is being {by} by another request: come back once it is done"),
+    )
+}
+
+/// What an install or a copy's image left beside a tenant's file as the
+/// node's last process ended in the middle of it -- `<t>.fennec.importing`
+/// ([`Tenants::import_from`]), `<t>.fennec.taking` (a follower's, which the
+/// tenant's open removes too) -- each as large as the tenant and never
+/// read: removed as the node starts, each under the tenant's lock taken
+/// without waiting, so one another process holds the lock of -- its own
+/// install under way, a shell's open -- stays. Before, a crash's
+/// `.importing` stayed until an install of the name came again. A tenant
+/// whose file is a link had both written beside the file the link leads
+/// to (`fs::resolved`), as its open writes that one and its lock is taken
+/// there: looked for there, under the same lock. Looked for in the
+/// directory alone, as until the image review's second round, they stayed
+/// beside a linked tenant's file for good.
+fn sweep_left(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".fennec") {
+            if e.file_type().is_ok_and(|t| t.is_symlink()) {
+                let linked = e.path();
+                let file = fennec_core::fs::resolved(&linked);
+                if file != linked {
+                    if let Ok(_held) = fennec_abi::lock::hold(&linked) {
+                        for side in ["importing", "taking"] {
+                            let _ = std::fs::remove_file(fennec_core::fs::beside(&file, side));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(file) = name
+            .strip_suffix(".importing")
+            .or_else(|| name.strip_suffix(".taking"))
+        else {
+            continue;
+        };
+        if file.ends_with(".fennec") {
+            if let Ok(_held) = fennec_abi::lock::hold(dir.join(file)) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 /// [`fennec_core::fs::sync_dir`] as an I/O error.
 fn dir_synced(path: &Path) -> std::io::Result<()> {
     fennec_core::fs::sync_dir(path).map_err(|e| std::io::Error::other(e.to_string()))
@@ -273,6 +350,24 @@ thread_local! {
     /// error the answer: what takes a failed fsync's path, which no disk
     /// here fails on demand.
     static FAILS: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// An import's side file as its image is written into it, noting whether
+/// a write failed: the disk's refusal is a 500, the image's a 400.
+struct Noted<'a> {
+    side: &'a mut fennec_core::fs::SideFile,
+    failed: bool,
+}
+
+impl std::io::Write for Noted<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let r = self.side.write(bytes);
+        self.failed |= r.is_err();
+        r
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.side.flush()
+    }
 }
 
 /// Notes `what` among a test build's [`STEPS`], or fails it where the test
@@ -517,6 +612,12 @@ pub struct Tenants {
     /// The threads syncing its tenants under `--sync <ms>`
     /// ([`Tenants::sync_each`]).
     syncs: syncs::Syncs,
+    /// The names an install is taking an image for, or a create making a
+    /// file for, in this process, and which ([`Tenants::claim`]): an
+    /// install, a create or a reclaim of one is refused at once (503),
+    /// never left waiting on the holder's `<file>.lock` nor answered as if
+    /// the file it may yet put in place were gone.
+    claims: Mutex<Vec<(String, &'static str)>>,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -589,7 +690,8 @@ impl Tenants {
     /// A registry over `dir`, created when missing. Nothing is opened yet.
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Tenants> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        fennec_core::fs::create_dir_private(&dir)?;
+        sweep_left(&dir);
         let hooks = Arc::new(crate::tenant_hooks::Store::open(&dir)?);
         Ok(Tenants {
             dir,
@@ -614,6 +716,7 @@ impl Tenants {
             scheduler: std::sync::OnceLock::new(),
             hooks,
             syncs: syncs::Syncs::default(),
+            claims: Mutex::new(Vec::new()),
         })
     }
 
@@ -904,6 +1007,17 @@ impl Tenants {
         (lineage, text.lines().any(|l| l.trim() == READER))
     }
 
+    /// Whether an open tenant is a copy a failover may promote: its file
+    /// `following`, and no read replica's -- told by its follower, or by its
+    /// `.follows` where none runs for it ([`Self::followed`]).
+    fn promotable(&self, t: &Tenant, following: bool) -> bool {
+        following
+            && !match t.repl.as_ref().and_then(|r| r.follower()) {
+                Some(f) => f.is_read_replica(),
+                None => self.followed(&t.name).1,
+            }
+    }
+
     /// Whether a tenant's copy has heard from the node it follows since it
     /// was last told to follow it (`.follows`' `heard` line, [`mark_heard`]):
     /// `None` where it was never told, a standby's copy made with its node
@@ -1148,6 +1262,18 @@ impl Tenants {
         name: &str,
         want: &Expected,
     ) -> std::result::Result<(u64, u64), Refused> {
+        self.promote_heard(name, want).map(|(seq, id, _)| (seq, id))
+    }
+
+    /// [`Tenants::promote_as`], and what the copy knew of its primary as
+    /// it was promoted ([`crate::replication::Heard`]): what the admin's
+    /// promotion answers and a router's failover logs. A copy with no
+    /// follower running knew nothing of it: not connected, never heard.
+    pub fn promote_heard(
+        &self,
+        name: &str,
+        want: &Expected,
+    ) -> std::result::Result<(u64, u64, crate::replication::Heard), Refused> {
         // Its identity goes with its `.follows`, which the promotion
         // removes, synced: a copy a router noted as left and a failover
         // promotes is a live tenant from here, and a reclaim naming what it
@@ -1173,7 +1299,7 @@ impl Tenants {
         &self,
         name: &str,
         want: &Expected,
-    ) -> std::result::Result<(u64, u64), Refused> {
+    ) -> std::result::Result<(u64, u64, crate::replication::Heard), Refused> {
         let t = self.get(name)?;
         // A copy that is not its tenant as the primary has it is refused:
         // promoted, a copy that never took its primary's image was an empty
@@ -1221,7 +1347,7 @@ impl Tenants {
         };
         if let Some(follower) = t.repl.as_ref().and_then(|r| r.follower()) {
             let done = follower
-                .promote(fresh_id())
+                .promote_heard(fresh_id())
                 .map_err(|e| Refused(500, e.to_string()))?;
             return forget(done);
         }
@@ -1238,7 +1364,7 @@ impl Tenants {
         g.fork(id)
             .and_then(|_| g.sync())
             .map_err(|e| Refused(500, e.to_string()))?;
-        forget((g.change_seq(), id))
+        forget((g.change_seq(), id, Default::default()))
     }
 
     /// Has a tenant follow `from`, the node its primary is on -- or, with
@@ -1426,6 +1552,13 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
+            // Claimed as an install claims it, the look and the claim one
+            // step: an install under way refuses the create at once (503),
+            // and one coming after meets this claim. Only looked for, an
+            // install claiming the name between the look and the open's
+            // `<file>.lock` had the create wait the lock out under the slot,
+            // every request for the name with it, then answered 500.
+            let _claim = self.claim(name, "made")?;
             self.refuse_if_shutting_down()?;
             // An identity a file of the name left -- a binary from before
             // this one deleting it -- names another file, and goes before
@@ -1919,7 +2052,7 @@ impl Tenants {
                 },
                 false => {
                     let tmp = self.dir.join(format!("{name}.quota.writing"));
-                    std::fs::File::create(&tmp)
+                    fennec_core::fs::create_like(&tmp, &path)
                         .and_then(|mut f| {
                             use std::io::Write;
                             f.write_all(set.json().as_bytes())?;
@@ -2025,6 +2158,21 @@ impl Tenants {
             .and_then(|r| r.follower())
             .is_some_and(|f| f.running())
         {
+            return false;
+        }
+        // And a copy a failover may promote stays open with no follower
+        // running for it -- its database failed, or nothing follows for it:
+        // closed, nothing opened it again but a request or that failover,
+        // and a scrape, which reads the open tenants alone, counted it no
+        // more (`fennec_copies_disconnected`), the alert resolving while it
+        // followed nothing. A follow, a release or a delete closes it. A
+        // restart opens only the copies a `.follows` names, or every tenant
+        // on a standby (`resume_following`): one nothing follows for is
+        // counted once something opens it -- a request, the failover --
+        // since only an open reads whether a file follows, and opening
+        // every tenant at a start to look was not worth it.
+        let following = t.read().history().following;
+        if self.promotable(t, following) {
             return false;
         }
         // The node's stream holds a tenant open until it has sent what the
@@ -2269,16 +2417,27 @@ impl Tenants {
     }
 
     /// The tenant's whole image, graph included -- what a checkpoint would
-    /// write, so the receiving node opens it without rebuilding anything.
+    /// write, so the receiving node opens it without rebuilding anything --
+    /// in memory: what a test reads. A move's is written out as it is read
+    /// ([`Self::export_pinned`]).
     pub fn export(&self, name: &str) -> std::result::Result<Vec<u8>, Refused> {
-        let t = self.get(name)?;
-        let image = crate::held::read(&t.db).snapshot();
-        Ok(image)
+        self.export_pinned(name).map(|image| image.to_vec())
     }
 
-    /// Installs an image as a new tenant. It is replayed in memory first, so
-    /// a truncated or corrupt transfer is refused before it reaches the
-    /// directory; the file then appears by rename, never half-written.
+    /// [`Self::export`] pinned under the tenant's read lock, for
+    /// `admin::export` to write out with none held ([`PinnedImage`]): taken
+    /// whole, a move's image was a second copy of the tenant in the node's
+    /// memory.
+    pub fn export_pinned(&self, name: &str) -> std::result::Result<PinnedImage, Refused> {
+        let t = self.get(name)?;
+        let image = crate::held::read(&t.db).pin_image(false);
+        image.map_err(|e| Refused(500, e.to_string()))
+    }
+
+    /// Installs an image as a new tenant: written beside its file and
+    /// checked there ([`Self::import_from`]), so a truncated or corrupt
+    /// transfer is refused before it reaches the directory; the file then
+    /// appears by rename, never half-written.
     pub fn import(&self, name: &str, image: &[u8]) -> std::result::Result<(), Refused> {
         self.import_as(name, image, None).map(|_| ())
     }
@@ -2292,14 +2451,78 @@ impl Tenants {
         image: &[u8],
         proposed: Option<u64>,
     ) -> std::result::Result<Option<u64>, Refused> {
+        self.import_from(name, &mut &image[..], image.len() as u64, proposed)
+    }
+
+    /// [`Self::import_as`] of an image of `len` bytes read off `body` as it
+    /// comes -- a move's, off the router's connection (`admin::import`):
+    /// written into a file beside the tenant's (`<file>.importing`, made as
+    /// `fs::SideFile` makes one, under the tenant's lock and this install's
+    /// claim of the name) as its bytes arrive, every record held to
+    /// its sum as it streams (`replication::take_image`), synced, and
+    /// opened from there as the node opens its tenants -- mapped, or read
+    /// into memory under `--no-mmap` -- to check it: a record cut short or one
+    /// that does not read refused, the file gone -- before it is renamed
+    /// into place under the tenant's slot. Read whole as the
+    /// request's body and replayed in memory, an image was the tenant twice
+    /// in the node's memory, and one larger than it never moved.
+    pub fn import_from(
+        &self,
+        name: &str,
+        body: &mut dyn std::io::Read,
+        len: u64,
+        proposed: Option<u64>,
+    ) -> std::result::Result<Option<u64>, Refused> {
         check_name(name)?;
-        let mut check = Database::new();
-        let whole = check
-            .load(image)
-            .map_err(|e| Refused(400, format!("the image does not load: {e}")))?;
-        if whole < image.len() {
-            return Err(Refused(400, "the image is cut short".into()));
+        let unwritten = |e: &dyn std::fmt::Display| {
+            Refused(500, format!("could not write tenant `{name}`: {e}"))
+        };
+        let path = self.path(name);
+        let there = || Refused(409, format!("tenant `{name}` already exists"));
+        if path.exists() {
+            return Err(there());
         }
+        // The file beside the tenant's is this install's own: the name
+        // claimed in this process, then `<file>.lock` held -- across the
+        // image's take, its check and the rename -- before it is made, and
+        // it goes before either is let go (dropped in turn). Made before
+        // the slot was taken, as up to the image's review, two installs of
+        // one name each made `.importing` anew, removing the other's, and
+        // each removed it by its name as it went; on Windows, where no
+        // rename is held to its writer's handle, one could rename the
+        // other's half-written image into the tenant's place. The lock
+        // also keeps another process's install of the name -- whose file
+        // it is -- from this one's, and from a node's sweep as it starts
+        // ([`sweep_left`]).
+        let _claim = self.claim(name, "installed")?;
+        let _held = hold_tenant(name, &path)?;
+        if path.exists() {
+            return Err(there());
+        }
+        // Through a link, the file it leads to, as the open writes it, and
+        // the image written beside that one: renamed over, the link would
+        // be a file of its own.
+        let target = fennec_core::fs::resolved(&path);
+        let tmp = fennec_core::fs::beside(&target, "importing");
+        let mut side = fennec_core::fs::SideFile::create(&tmp).map_err(|e| unwritten(&e))?;
+        let mut out = Noted {
+            side: &mut side,
+            failed: false,
+        };
+        if let Err(e) = crate::replication::take_image(body, len, &mut out) {
+            return Err(match e.kind() {
+                _ if out.failed => unwritten(&e),
+                std::io::ErrorKind::UnexpectedEof => Refused(400, "the image is cut short".into()),
+                _ => Refused(400, format!("the image does not load: {e}")),
+            });
+        }
+        side.sync()
+            .map_err(|e| unwritten(&e))
+            .and_then(|_| step("image synced").map_err(|e| unwritten(&e)))?;
+        let check = Database::from_side(&mut side, self.mapped).map_err(|e| match e {
+            fennec_core::error::Error::Io(_) => unwritten(&e),
+            _ => Refused(400, format!("the image does not load: {e}")),
+        })?;
         // An image holding a schedule -- an install, a move's target -- enters
         // the tenant in the scheduler's hint, synced, before its file is in
         // place, so a start finds it whatever opens it first; its first look
@@ -2334,48 +2557,36 @@ impl Tenants {
         drop(check);
 
         let id = self.with_slot(name, |held| {
-            let path = self.path(name);
             if matches!(held, Held::Open(_)) || path.exists() {
-                return Err(Refused(409, format!("tenant `{name}` already exists")));
+                return Err(there());
             }
-            // Its lock across the rename: a file put in place under a
-            // shell or an app that has the name open would be written by
-            // both.
-            let _held = hold_tenant(name, &path)?;
+            // Its lock, held since before the image was taken, across the
+            // rename: a file put in place under a shell or an app that has
+            // the name open would be written by both.
             // A tenant installed here is its primary: a record left by a
             // replica of the same name deleted before would have it follow.
             let _ = std::fs::remove_file(self.follows_path(name));
-            // Through a link, the file it leads to, as the open writes it,
-            // and the image written beside that one: renamed over, the link
-            // would be a file of its own.
-            let target = fennec_core::fs::resolved(&path);
-            let tmp = fennec_core::fs::beside(&target, "importing");
-            let written = std::fs::File::create(&tmp)
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    f.write_all(image)?;
-                    f.sync_all()
-                })
-                .and_then(|_| step("image synced"));
             // A log a tenant of this name left (`fennec_core::fs`) is not
             // this image's: gone, durably, before the rename.
             // Nor is an identity one left, a binary from before this one
             // deleting it ([`instance`]): it names another file, and is
             // unlinked before the rename where a file system that keeps no
-            // birth time could give this one its inode.
-            let written = written
-                .and_then(|_| fennec_core::fs::forget_sync_log(&target))
+            // birth time could give this one its inode. The rename goes by
+            // the name, held to the handle that wrote it first: another
+            // file put there since is renamed into no tenant's place.
+            let written = fennec_core::fs::forget_sync_log(&target)
                 .and_then(|_| step("log forgotten"))
                 .and_then(|_| instance::put_away(&self.dir, name))
                 .and_then(|_| self.hooks.put_away(name))
-                .and_then(|_| std::fs::rename(&tmp, &target))
+                .and_then(|_| {
+                    #[cfg(any(unix, windows))]
+                    fennec_core::fs::still_named(side.file(), &tmp)?;
+                    std::fs::rename(&tmp, &target)
+                })
+                .map(|_| side.adopted())
                 .and_then(|_| step("renamed"));
             if let Err(e) = written {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Refused(
-                    500,
-                    format!("could not write tenant `{name}`: {e}"),
-                ));
+                return Err(unwritten(&e));
             }
             // The rename durable before the answer says the tenant is here,
             // as every rename into a database's place is (`fs::sync_dir`):
@@ -2412,6 +2623,30 @@ impl Tenants {
         let id = id?;
         self.touch(name);
         Ok(id)
+    }
+
+    /// Claims `name` for an install ([`Self::import_from`]) or a create
+    /// ([`Self::create_as`]), `by` saying which, until the claim drops:
+    /// refused (503) where another request holds it.
+    fn claim(&self, name: &str, by: &'static str) -> std::result::Result<Claim<'_>, Refused> {
+        let mut claims = self.claims.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, held)) = claims.iter().find(|(n, _)| n == name) {
+            return Err(claimed(name, held));
+        }
+        claims.push((name.to_string(), by));
+        Ok(Claim(self, name.to_string()))
+    }
+
+    /// 503 where an install or a create holds `name` ([`Self::claim`]):
+    /// a reclaim judging the place meanwhile found no file and answered it
+    /// gone, and the router forgot its note of the file the install then
+    /// put there.
+    fn refuse_if_claimed(&self, name: &str) -> std::result::Result<(), Refused> {
+        let claims = self.claims.lock().unwrap_or_else(|e| e.into_inner());
+        match claims.iter().find(|(n, _)| n == name) {
+            Some((_, by)) => Err(claimed(name, by)),
+            None => Ok(()),
+        }
     }
 
     /// Where a tenant whose file goes or is replaced stood is no more.
@@ -2484,6 +2719,10 @@ impl Tenants {
         let mut frozen = false;
         let out = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
+            // An install of the name under way may put a file there yet --
+            // the very one a router noted, its answer lost -- so nothing is
+            // judged meanwhile: the router waits and asks again.
+            self.refuse_if_claimed(name)?;
             let path = self.path(name);
             if matches!(held, Held::Closed) && !path.exists() {
                 return Ok(false);
@@ -2642,6 +2881,27 @@ impl Tenants {
             .map(|t| (t.name.clone(), t.read().memory_bytes(), t.is_frozen()))
             .collect();
         open.sort();
+        // The copies a failover may promote -- a standby's, a tenant's own
+        // replica, never a read replica's -- each still following: one not
+        // connected, or with no follower running -- its database failed, or
+        // none follows for it -- and the most writes one trails its
+        // primary's disk by. Every such copy a node holds is open, its
+        // follower running or not ([`Self::close`]).
+        let mut copies = Copies::default();
+        for t in self.open_tenants() {
+            let (seq, following) = {
+                let g = t.read();
+                (g.change_seq(), g.history().following)
+            };
+            if !self.promotable(&t, following) {
+                continue;
+            }
+            let f = t.repl.as_ref().and_then(|r| r.follower());
+            let (connected, primary_durable) = f.map_or((false, 0), |f| f.progress());
+            let running = f.is_some_and(|f| f.running());
+            copies.disconnected += usize::from(!connected || !running);
+            copies.behind = copies.behind.max(primary_durable.saturating_sub(seq));
+        }
         let unlinked = self
             .open_tenants()
             .iter()
@@ -2655,6 +2915,7 @@ impl Tenants {
             open,
             unlinked,
             node_streams: self.streams.as_ref().map(|s| s.connected()),
+            copies,
         }
     }
 
@@ -2972,6 +3233,20 @@ pub struct Stats {
     /// The node's streams of every tenant connected now, on a node that
     /// replicates its tenants: its archivers.
     pub node_streams: Option<usize>,
+    /// The copies here a failover may promote, as their followers stand.
+    pub copies: Copies,
+}
+
+/// The copies of tenants a node holds that a failover may promote -- a
+/// standby's, a tenant's own replica -- as a scrape reads them, never by
+/// tenant: how many are not connected to their primary now, and the most
+/// writes on its primary's disk any of them has not applied. A failover
+/// promotes a copy where it stands: what it was not sent is lost
+/// ([`crate::replication::Heard`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Copies {
+    pub disconnected: usize,
+    pub behind: u64,
 }
 
 /// What a tenant uses of its quota, as `quota_report` writes it.

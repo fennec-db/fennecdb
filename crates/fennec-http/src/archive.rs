@@ -44,9 +44,10 @@
 use crate::replication::{fresh_id, Message, Upstream};
 use crate::seal::{self, Binding, Frames, Key, Role};
 use fennec_core::codec::get_uvarint;
+use fennec_core::engine::PinnedImage;
 use fennec_core::history::History;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read as _, Seek, SeekFrom, Write};
+use std::io::{self, Read as _, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -574,6 +575,15 @@ pub(crate) struct Writer {
     latest: u64,
 }
 
+/// An image a hello brings, taken as it comes ([`Archive::hello_with`]):
+/// what writes its bytes, checked as they stream, into the file it goes to
+/// -- off a primary's stream (`Receiver::take_image`), or a node's.
+pub(crate) type Incoming<'a> = &'a mut Writes<'a>;
+
+/// What writes a file's bytes into the writer it is handed: an image
+/// taken off a stream, or one written from a pin ([`Archive::put_with`]).
+pub(crate) type Writes<'a> = dyn FnMut(&mut dyn Write) -> io::Result<()> + 'a;
+
 /// What a stream's hello did to an archive.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Took {
@@ -669,7 +679,7 @@ impl Archive {
         parent: &Arc<Parent>,
     ) -> io::Result<Archive> {
         let made = !dir.as_ref().is_dir();
-        fs::create_dir_all(dir.as_ref())?;
+        fennec_core::fs::create_dir_private(dir.as_ref())?;
         Ok(Archive {
             dir: dir.as_ref().to_path_buf(),
             key,
@@ -1212,9 +1222,64 @@ impl Archive {
             None => bytes,
         };
         let tmp = path.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
+        let mut f = fennec_core::fs::create_like(&tmp, path)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        renamed(&f, &tmp, path)?;
+        if self.key.is_some() {
+            self.landed(role, change, time, began);
+        }
+        Ok(())
+    }
+
+    /// [`Self::put`] of an image `write` writes as it comes -- off a
+    /// primary's stream, or from a pin of the archive's end -- sealed a
+    /// frame at a time where the archive is sealed ([`seal::Sealing`]): a
+    /// frame held at a time, never the image. Its file's head is sealed
+    /// before the side file is made, as `put` seals first; refused part
+    /// way, the side file goes.
+    fn put_with(
+        &self,
+        path: &Path,
+        role: Role,
+        change: u64,
+        time: u64,
+        write: &mut Writes<'_>,
+    ) -> io::Result<()> {
+        let mut began = None;
+        let mut head = Vec::new();
+        let frames = match &self.key {
+            Some(key) => {
+                let binding = self.binding(role, change, time)?;
+                began = (role == Role::Image).then_some(binding.began);
+                Some(seal::begin(key, &binding, &mut head)?)
+            }
+            None => None,
+        };
+        let tmp = path.with_extension("tmp");
+        let f = fennec_core::fs::create_like(&tmp, path)?;
+        let written = (|| -> io::Result<()> {
+            match frames {
+                // A frame of a mebibyte a write: no buffer besides.
+                Some(frames) => {
+                    (&f).write_all(&head)?;
+                    let mut sealing = seal::Sealing::new(frames, &f);
+                    write(&mut sealing)?;
+                    sealing.finish()?;
+                }
+                None => {
+                    let mut out = io::BufWriter::with_capacity(crate::replication::MESSAGE, &f);
+                    write(&mut out)?;
+                    out.flush()?;
+                }
+            }
+            f.sync_all()
+        })();
+        if let Err(e) = written {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         renamed(&f, &tmp, path)?;
         if self.key.is_some() {
             self.landed(role, change, time, began);
@@ -1379,7 +1444,7 @@ impl Archive {
         }
         // Plain, sealed or not: a time, which the images' names say.
         let tmp = began.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
+        let mut f = fennec_core::fs::create_private(&tmp)?;
         f.write_all(format!("{first}\n").as_bytes())?;
         f.sync_all()?;
         renamed(&f, &tmp, &began)
@@ -1390,6 +1455,13 @@ impl Archive {
     pub fn add_image(&self, seq: u64, image: &[u8]) -> io::Result<()> {
         let time = now_ms();
         self.put(&self.image_path(seq, time), Role::Image, seq, time, image)
+    }
+
+    /// [`Self::add_image`] of an image `write` writes as it comes: a
+    /// backup's off its primary's stream ([`backup`]).
+    pub fn add_image_with(&self, seq: u64, write: &mut Writes<'_>) -> io::Result<()> {
+        let time = now_ms();
+        self.put_with(&self.image_path(seq, time), Role::Image, seq, time, write)
     }
 
     /// The last change the archive holds, the history it is on, the
@@ -1551,14 +1623,19 @@ impl Archive {
         else {
             return Err(io::Error::other("the primary did not say hello"));
         };
-        let bytes = match image {
+        let len = match image {
             true => match rx.receive()? {
-                Message::Image(bytes) => Some(bytes),
+                Message::Image(len) => Some(len),
                 _ => return Err(io::Error::other("the primary promised an image")),
             },
             false => None,
         };
-        if self.hello(&mut w, bytes.as_deref(), seq, lineage)? == Took::Diverged {
+        // Taken as it comes, into the archive's file, checked as it streams
+        // ([`crate::replication::take_image`]): read whole, it was the
+        // database in the archiver's memory.
+        let mut take = |out: &mut dyn Write| rx.take_image(len.unwrap_or(0), out);
+        let incoming = len.map(|_| &mut take as Incoming<'_>);
+        if self.hello_with(&mut w, incoming, seq, lineage)? == Took::Diverged {
             return Err(corrupt(format!(
                 "the primary is at change {seq} on a history that does not lead from \
                  this archive's change {at}: it was restored to an earlier moment, or \
@@ -1566,10 +1643,10 @@ impl Archive {
                  holds; archive it into a directory of its own"
             )));
         }
-        if let Some(bytes) = &bytes {
+        if let Some(len) = len {
             report(&format!(
                 "image at change {seq} ({:.1} MB)",
-                bytes.len() as f64 / 1e6
+                len as f64 / 1e6
             ));
         }
         // A line sealed before this version goes on from an image of its
@@ -1640,11 +1717,29 @@ impl Archive {
     /// goes on from, or the place it goes on from without one, and the
     /// history its writes are on. An image on a history that does not lead
     /// from the archive's place, and at or before it, is not taken
-    /// ([`Took::Diverged`]).
+    /// ([`Took::Diverged`]). The tests' way in, an image in memory; a
+    /// stream's is taken as it comes ([`Self::hello_with`]).
+    #[cfg(test)]
     pub(crate) fn hello(
         &self,
         w: &mut Writer,
         image: Option<&[u8]>,
+        seq: u64,
+        lineage: Vec<(u64, u64)>,
+    ) -> io::Result<Took> {
+        let mut put = |out: &mut dyn Write| out.write_all(image.unwrap_or_default());
+        let incoming = image.map(|_| &mut put as Incoming<'_>);
+        self.hello_with(w, incoming, seq, lineage)
+    }
+
+    /// [`Self::hello`] of an image taken as it comes ([`Incoming`]): into
+    /// its file as its bytes arrive, never held whole. Not taken -- an
+    /// image on another history ([`Took::Diverged`]) -- none of it is
+    /// read, and the stream goes no further.
+    pub(crate) fn hello_with(
+        &self,
+        w: &mut Writer,
+        image: Option<&mut Writes<'_>>,
         seq: u64,
         lineage: Vec<(u64, u64)>,
     ) -> io::Result<Took> {
@@ -1661,8 +1756,9 @@ impl Archive {
             return Ok(Took::Diverged);
         }
         let had = w.images;
+        let taken = image.is_some();
         match image {
-            Some(bytes) => {
+            Some(image) => {
                 // Timed by the archiver's clock, but never before the latest
                 // write the archive holds ([`Self::take`]): a clock behind
                 // the one that timed the writes dated the image before writes
@@ -1670,7 +1766,8 @@ impl Archive {
                 // took it for the base of a window those writes are in,
                 // letting go of the image a restore inside it starts from.
                 let time = now_ms().max(w.latest);
-                self.put(&self.image_path(seq, time), Role::Image, seq, time, bytes)?;
+                let path = self.image_path(seq, time);
+                self.put_with(&path, Role::Image, seq, time, image)?;
                 if let Some(s) = &mut w.segment {
                     s.sync()?;
                 }
@@ -1696,7 +1793,7 @@ impl Archive {
             // tenant: without its history a new archive asks for an image
             // again, and an image without one is read for it
             // (`ends_on_image_of`).
-            if image.is_some() && had {
+            if taken && had {
                 self.sync_dir()?;
             }
             self.put(
@@ -1711,7 +1808,7 @@ impl Archive {
             // lineage's writes under the old one's, which the primary's
             // next hello took for another database's. With one, the next
             // segment's sync (`take`) covers it.
-            if image.is_none() {
+            if !taken {
                 self.sync_dir()?;
             }
             w.history = theirs;
@@ -1864,7 +1961,7 @@ impl Archive {
                         }
                         None => None,
                     };
-                    let mut file = File::create(&path)?;
+                    let mut file = fennec_core::fs::create_private(&path)?;
                     file.write_all(head.as_ref().map_or(&LOG_MAGIC[..], |h| &h.0))?;
                     if head.is_some() {
                         self.landed(Role::Segment, seq, 0, None);
@@ -1941,11 +2038,28 @@ impl Archive {
         let given = out;
         let out = &fennec_core::fs::resolved(out);
         let tmp = out.with_extension("restoring");
-        let r = self.assemble(&tmp, to)?;
+        let (r, written) = self.assemble_into(&tmp, to)?;
+        // The mode of the file it replaces, set on the handle that wrote it
+        // (`fennec_core::fs::mode_like`), never by a name a link could
+        // move: the checkpoint below renames its image over with this
+        // file's mode, as every rewrite keeps a database's.
+        fennec_core::fs::mode_like(&written, out)?;
         // Opened to check it whole, and forked: from here its writes are no
         // longer the primary's. The checkpoint lands the graph the open just
         // built in the file, as a clean shutdown would, so the database's
-        // first real open does not build it a second time.
+        // first real open does not build it a second time. Opened by its
+        // name, as a database is (`fs::open`, through a link): held to the
+        // handle that wrote it first, a link or another file put there
+        // since the copy is refused, but one put there between the two is
+        // opened, forked and renamed over `out` -- by a writer of the
+        // directory, whom the database's files are trusted to (SECURITY.md:
+        // that writer may remove or replace the database itself). Closing
+        // it would take an open of a database over a handle, which
+        // fennec-core has not, and the rename below held to the file the
+        // checkpoint renamed in (`swap_in`), which it does not hand back.
+        #[cfg(unix)]
+        fennec_core::fs::still_named(&written, &tmp)?;
+        drop(written);
         let mut db = fennec_core::fs::open(&tmp).map_err(|e| corrupt(e.to_string()))?;
         if db.change_seq() != r.seq {
             return Err(corrupt(format!(
@@ -2024,57 +2138,67 @@ impl Archive {
         // copied a stale database-sized file, and the next round could not
         // write over it and took no image. What rounds before left goes
         // first; a name one of them still holds is not taken.
-        let (seq, bytes) = self.end_image(end)?;
-        // The segments may have gone on while this read them: the image is
-        // of the change it holds, timed by that change's write.
-        let time = if seq == end {
-            time
-        } else {
-            self.time_of(seq)?.unwrap_or(time)
-        };
-        // Not synced here: what stands on it syncs first -- `prune` before
-        // it lets go of what the image replaces, the next segment (`roll`)
-        // before its first write. Lost alone, the segments it was taken from
-        // are still there, and the next round takes it again.
-        self.put(&self.image_path(seq, time), Role::Image, seq, time, &bytes)?;
+        let (seq, put) = self.end_image(end, &mut |seq, image| {
+            // The segments may have gone on while this read them: the image
+            // is of the change it holds, timed by that change's write.
+            let time = if seq == end {
+                time
+            } else {
+                self.time_of(seq)?.unwrap_or(time)
+            };
+            // Not synced here: what stands on it syncs first -- `prune`
+            // before it lets go of what the image replaces, the next
+            // segment (`roll`) before its first write. Lost alone, the
+            // segments it was taken from are still there, and the next
+            // round takes it again.
+            let path = self.image_path(seq, time);
+            self.put_with(&path, Role::Image, seq, time, &mut |w| image.write_to(w))
+        })?;
+        put?;
         self.roll.store(true, Ordering::SeqCst);
         Ok(Some(seq))
     }
 
-    /// The database as the archive's end holds it, its image's bytes and
-    /// the change it is at: its last image and the writes after it,
-    /// assembled in a file of the round's own -- `end`, the end looked for,
-    /// names it -- and opened.
-    fn end_image(&self, end: u64) -> io::Result<(u64, Vec<u8>)> {
+    /// The database as the archive's end holds it -- its last image and the
+    /// writes after it, assembled in a file of the round's own, which `end`,
+    /// the end looked for, names -- opened, and its image handed to `then`
+    /// as a pin ([`PinnedImage`]) to write where it goes: the change it is
+    /// at, and what `then` answered. The file is mapped through the handle
+    /// that wrote it, never opened again by its name -- on Windows a copier
+    /// that opened it between could hold it from being opened to write --
+    /// its documents read where they lie, what an open builds alone in
+    /// memory, and the image written from it as it is read. Read whole and
+    /// loaded, then snapshotted, the end was the database three times over
+    /// in the archiver's memory, and one larger than it was never
+    /// consolidated.
+    fn end_image(
+        &self,
+        end: u64,
+        then: &mut dyn FnMut(u64, &PinnedImage) -> io::Result<()>,
+    ) -> io::Result<(u64, io::Result<()>)> {
         let mut said = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         self.sweep(&mut said);
         let tmp = self.dir.join(scratch_name(end, &said));
-        // Read back through the handle that wrote it, never opened again
-        // by its name: on Windows a copier that opened it between could
-        // hold it from being opened to write, which an open of a database
-        // asks (`fs::open_in_memory`).
-        let image = self
-            .assemble_into(&tmp, Target::End)
-            .and_then(|(r, mut f)| {
-                let mut bytes = Vec::new();
-                f.seek(SeekFrom::Start(0))?;
-                f.read_to_end(&mut bytes)?;
-                drop(f);
-                let mut db = fennec_core::engine::Database::new();
-                db.load(&bytes).map_err(|e| corrupt(e.to_string()))?;
-                drop(bytes);
-                if db.change_seq() != r.seq {
-                    return Err(corrupt(format!(
-                        "the archive's end is change {}, the database opened at {}",
-                        r.seq,
-                        db.change_seq()
-                    )));
-                }
-                Ok((r.seq, db.snapshot()))
-            });
+        let image = self.assemble_into(&tmp, Target::End).and_then(|(r, f)| {
+            let corrupted = |e: fennec_core::error::Error| corrupt(e.to_string());
+            let mut db = fennec_core::engine::Database::new();
+            db.load_mapped(fennec_core::fs::mapped(&f).map_err(corrupted)?)
+                .map_err(corrupted)?;
+            drop(f);
+            if db.change_seq() != r.seq {
+                return Err(corrupt(format!(
+                    "the archive's end is change {}, the database opened at {}",
+                    r.seq,
+                    db.change_seq()
+                )));
+            }
+            let image = db.pin_image(false).map_err(corrupted)?;
+            Ok((r.seq, then(r.seq, &image)))
+        });
         // Not synced: brought back by a crash, the file is no image or
         // segment by name, and the next round, or the next writer's open,
-        // removes it.
+        // removes it. Let go of once the database and its pin, which map
+        // it, are gone: Windows refuses a mapped file's removal.
         self.let_go(&tmp, &mut said);
         image
     }
@@ -2172,15 +2296,24 @@ impl Archive {
                 }
             )),
         };
-        let (seq, bytes) = self.end_image(at).map_err(refused)?;
+        let (seq, put) = self
+            .end_image(at, &mut |seq, image| {
+                // Of another change, refused below with nothing written.
+                if seq != at {
+                    return Ok(());
+                }
+                let last = self.images()?.last().map_or(0, |i| i.1);
+                let time = now_ms().max(latest).max(last.saturating_add(1));
+                let path = self.image_path(at, time);
+                self.put_with(&path, Role::Image, at, time, &mut |w| image.write_to(w))
+            })
+            .map_err(refused)?;
         if seq != at {
             return Err(refused(io::Error::other(format!(
                 "its end restores to change {seq}"
             ))));
         }
-        let last = self.images()?.last().map_or(0, |i| i.1);
-        let time = now_ms().max(latest).max(last.saturating_add(1));
-        self.put(&self.image_path(at, time), Role::Image, at, time, &bytes)
+        put
     }
 
     /// When change `seq` was appended, from the segment that holds it.
@@ -2393,9 +2526,9 @@ impl Archive {
             }
         }
         let last = covered.max(images.last().map_or(0, |i| i.0));
-        let probe = verify_probe();
-        let restored = self.restore(&probe, Target::End);
-        let _ = fs::remove_file(&probe);
+        let probe = Probe::make()?;
+        let restored = self.restore(&probe.0.join("verify.fennec"), Target::End);
+        drop(probe);
         let r = restored?;
         if r.seq != last {
             return Err(corrupt(format!(
@@ -2417,13 +2550,9 @@ impl Archive {
     }
 
     /// The image `to` starts from and the writes after it up to there,
-    /// copied into `tmp`: a fennecdb file, not yet opened.
-    fn assemble(&self, tmp: &Path, to: Target) -> io::Result<Restored> {
-        self.assemble_into(tmp, to).map(|(r, _)| r)
-    }
-
-    /// [`Self::assemble`], and `tmp` as it was written: one handle, open to
-    /// read it back, from its making to its last write.
+    /// copied into `tmp` -- a fennecdb file, not yet opened -- and `tmp` as
+    /// it was written: one handle, open to read it back, from its making to
+    /// its last write.
     ///
     /// Two passes over the segments, one in memory at a time: the first
     /// finds where to stop, the second copies the writes up to there.
@@ -2494,14 +2623,9 @@ impl Archive {
         // The image, then the writes after it: that is a fennecdb file.
         let _ = fs::remove_file(tmp);
         let mut f = match &self.key {
-            None => copied(&self.image_path(image, taken), tmp)?,
+            None => fennec_core::fs::copy_private(&self.image_path(image, taken), tmp)?,
             Some(_) => {
-                let mut f = File::options()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(tmp)?;
+                let mut f = fennec_core::fs::create_private(tmp)?;
                 f.write_all(&self.read_whole(
                     &self.image_path(image, taken),
                     Role::Image,
@@ -2628,45 +2752,48 @@ fn scratch_name(end: u64, left: &[String]) -> String {
     name
 }
 
-/// `from` copied to `to`, `to` open to read back and append to. A Unix
-/// copies by the system -- a clone on APFS, `copy_file_range` on Linux --
-/// and opens it again.
-#[cfg(not(windows))]
-fn copied(from: &Path, to: &Path) -> io::Result<File> {
-    fs::copy(from, to)?;
-    File::options().read(true).append(true).open(to)
+/// Where `verify` restores the archive's end to: a directory of its own a
+/// call, made new and its owner's alone in the process's temp directory
+/// (`fennec_core::fs::create_dir_new`), a random name refused where
+/// anything is there, and removed whole with what the restore left in it
+/// as it is dropped. It was a file there named by the process and a count,
+/// `fennec-verify-<pid>-<n>.fennec`, which another user of the machine
+/// could put first as a link to a file of theirs: the restore followed it
+/// (`fs::resolved`), took that file's `0644` and renamed the archive's
+/// plaintext over it, the cleanup removing the link alone -- an archive's
+/// rows, unsealed by root's `FENNEC_KEY_FILE`, in another user's file
+/// (G14's review, F5). Named by the count alone before, two verifies in
+/// one process within a millisecond restored into the same `.restoring`
+/// file.
+struct Probe(PathBuf);
+
+impl Probe {
+    fn make() -> io::Result<Probe> {
+        let temp = std::env::temp_dir();
+        // A name taken is another's: tried again under a new one, a few
+        // times, since 64 random bits are not guessed.
+        for _ in 0..8 {
+            let dir = temp.join(format!("fennec-verify-{:016x}", fresh_id()));
+            match fennec_core::fs::create_dir_new(&dir) {
+                Ok(()) => return Ok(Probe(dir)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "no directory of verify's own could be made in {}: every name tried was taken",
+                temp.display()
+            ),
+        ))
+    }
 }
 
-/// [`copied`] on Windows: through the one handle, from the file's making
-/// on. Opened again after `CopyFileExW`, it could be held between by a
-/// copier that shares no writer (32) -- a sync tool, an indexer, `fs::copy`
-/// itself -- and the round's image refused.
-#[cfg(windows)]
-fn copied(from: &Path, to: &Path) -> io::Result<File> {
-    let out = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(to)?;
-    let mut w = io::BufWriter::with_capacity(1 << 20, out);
-    io::copy(&mut File::open(from)?, &mut w)?;
-    w.into_inner().map_err(io::IntoInnerError::into_error)
-}
-
-/// Where `verify` restores the archive's end to, a file of its own each
-/// call. Named by the process and the millisecond, two verifies in one
-/// process within a millisecond -- tests side by side, or anything that
-/// checks several archives at once -- restored into the same `.restoring`
-/// file, and one opened the other's: "the restored file is at change 151,
-/// not 15".
-fn verify_probe() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "fennec-verify-{}-{}.fennec",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// One image of the database behind `upstream`, taken while it runs, into
@@ -2690,13 +2817,17 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
     else {
         return Err(io::Error::other("the primary sent no image"));
     };
-    let Message::Image(mut bytes) = rx.receive()? else {
+    let Message::Image(len) = rx.receive()? else {
         return Err(io::Error::other("the primary promised an image"));
     };
+    // Taken as it comes, into its file, every record held to its sum as it
+    // streams ([`crate::replication::take_image`]): read whole, the backup
+    // was the database in the memory of the machine taking it, and one
+    // larger than that memory was never backed up.
     if out.is_dir() {
         // Durable once said taken, as a backup into a file.
         let archive = Archive::with_key(out, key.cloned())?;
-        archive.add_image(seq, &bytes)?;
+        archive.add_image_with(seq, &mut |w| rx.take_image(len, w))?;
         archive.sync_dir()?;
     } else {
         let history = History {
@@ -2704,17 +2835,47 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
             following: false,
         };
         let id = crate::replication::fork_id(&history, fresh_id());
-        bytes.extend_from_slice(&history.forked(id, seq).record());
-        if let Some(key) = key {
-            bytes = seal::seal_whole(key, &Binding::backup(), &bytes)?;
-        }
+        let forked = history.forked(id, seq).record();
+        // Sealed, its head before the side file is made: a seal the
+        // system's randomness refused left an empty `.tmp` a try.
+        let mut head = Vec::new();
+        let frames = match key {
+            Some(key) => Some(seal::begin(key, &Binding::backup(), &mut head)?),
+            None => None,
+        };
         let tmp = out.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
+        let f = fennec_core::fs::create_like(&tmp, out)?;
+        let written = (|| -> io::Result<()> {
+            match frames {
+                // A frame of a mebibyte a write: no buffer besides.
+                Some(frames) => {
+                    (&f).write_all(&head)?;
+                    let mut sealing = seal::Sealing::new(frames, &f);
+                    rx.take_image(len, &mut sealing)?;
+                    sealing.write_all(&forked)?;
+                    sealing.finish()?;
+                }
+                None => {
+                    let mut w = io::BufWriter::with_capacity(crate::replication::MESSAGE, &f);
+                    rx.take_image(len, &mut w)?;
+                    w.write_all(&forked)?;
+                    w.flush()?;
+                }
+            }
+            f.sync_all()
+        })();
+        if let Err(e) = written {
+            drop(f);
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
         crate::tenant_hooks::put_away_beside(given)?;
+        // The rename goes by the name: held to the file written first, as
+        // a record's (`renamed`).
+        #[cfg(unix)]
+        fennec_core::fs::still_named(&f, &tmp)?;
         fs::rename(&tmp, out)?;
         sync_dir_of(out)?;
     }
@@ -2739,21 +2900,29 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
         )));
     }
     let tmp = out.with_extension("tmp");
-    fs::write(&tmp, &bytes)?;
-    // Opened to check it whole, as a restore checks its file.
+    let mut f = fennec_core::fs::create_like(&tmp, out)?;
+    f.write_all(&bytes)?;
+    // Opened to check it whole, as a restore checks its file: by its name,
+    // held to the handle that wrote it first as a restore's is, to be read
+    // alone, mapped as a server maps it. A link put there in the moment
+    // between is read in its place, written to never, and the rename below
+    // refused. Read from `bytes` instead, it was every document copied
+    // into memory, where the mapped open adopts the image's offset index.
+    #[cfg(unix)]
+    fennec_core::fs::still_named(&f, &tmp)?;
     let seq = fennec_core::fs::open_read_only(&tmp)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
         .change_seq();
-    #[cfg(not(windows))]
-    File::open(&tmp)?.sync_all()?;
-    // Through a handle that may write: Windows' `FlushFileBuffers` refuses
-    // a read-only one (5, access denied), where a Unix fsyncs any -- every
-    // `fennec unseal` there failed so (archive.rs's sealed archive test).
-    #[cfg(windows)]
-    File::options().write(true).open(&tmp)?.sync_all()?;
+    // Through the handle that wrote it, which may write: opened again by
+    // the name, a link there was synced in its place, and on Windows a
+    // read-only handle's `FlushFileBuffers` is refused (5, access denied),
+    // which failed every `fennec unseal` there until it opened one to write.
+    f.sync_all()?;
     fennec_core::fs::forget_sync_log(out)?;
     crate::instance::put_away_beside(given)?;
     crate::tenant_hooks::put_away_beside(given)?;
+    #[cfg(unix)]
+    fennec_core::fs::still_named(&f, &tmp)?;
     fs::rename(&tmp, out)?;
     sync_dir_of(out)?;
     Ok(seq)
@@ -2764,8 +2933,13 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
 /// flushes a renamed file before its directory (docs/design/windows.md,
 /// decision 3); [`names_synced`] then flushes the directory alone, once
 /// for every name renamed in before it, as a Unix's directory fsync does.
+/// On a Unix `tmp` is first held to `f` (`fennec_core::fs::still_named`):
+/// the rename goes by the name, and another file put there since -- by a
+/// writer of the archive's directory -- is renamed into no record's place,
+/// the write failing as a failed rename fails it.
 #[cfg(not(windows))]
-fn renamed(_f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+fn renamed(f: &File, tmp: &Path, to: &Path) -> io::Result<()> {
+    fennec_core::fs::still_named(f, tmp)?;
     fs::rename(tmp, to)
 }
 
@@ -2822,13 +2996,66 @@ mod tests {
         }
     }
 
-    /// A thousand calls fall in a millisecond or two: each still names a
-    /// file no other verify in the process restores into.
+    /// A record -- an image, `history`, `began` -- is renamed into its
+    /// place only from the file written through its handle: another put at
+    /// the side file's name since, a link to a file or a file of its own,
+    /// is renamed nowhere, and the record there stays as it was. Up to
+    /// 0.2.0 the rename went by the name alone, and moved whatever was there.
+    #[cfg(unix)]
     #[test]
-    fn every_verify_restores_into_a_file_of_its_own() {
-        let probes: std::collections::HashSet<PathBuf> =
-            (0..1000).map(|_| verify_probe()).collect();
-        assert_eq!(probes.len(), 1000);
+    fn a_record_is_renamed_in_only_from_the_file_it_wrote() {
+        let dir = std::env::temp_dir().join(format!("fennec-renamed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (tmp, to) = (dir.join("history.tmp"), dir.join("history"));
+        let target = dir.join("elsewhere");
+        fs::write(&target, b"another file").unwrap();
+        fs::write(&to, b"the record").unwrap();
+        for put in ["a link to a file", "a file"] {
+            let mut f = fennec_core::fs::create_like(&tmp, &to).unwrap();
+            f.write_all(b"the new record").unwrap();
+            fs::remove_file(&tmp).unwrap();
+            match put {
+                "a link to a file" => std::os::unix::fs::symlink(&target, &tmp).unwrap(),
+                _ => fs::write(&tmp, b"put there").unwrap(),
+            }
+            assert!(renamed(&f, &tmp, &to).is_err(), "{put} renamed in");
+            assert_eq!(fs::read(&to).unwrap(), b"the record", "{put}");
+            assert_eq!(fs::read(&target).unwrap(), b"another file", "{put}");
+            fs::remove_file(&tmp).unwrap();
+        }
+        let mut f = fennec_core::fs::create_like(&tmp, &to).unwrap();
+        f.write_all(b"the new record").unwrap();
+        renamed(&f, &tmp, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"the new record");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each verify restores into a directory of its own: a hundred held at
+    /// once are a hundred, each made `0700`, and each removed whole, with
+    /// what was written in it, once let go. A name there already is never
+    /// taken: one made at it is refused rather than used.
+    #[cfg(unix)]
+    #[test]
+    fn every_verify_restores_into_a_directory_of_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let probes: Vec<Probe> = (0..100).map(|_| Probe::make().unwrap()).collect();
+        let dirs: std::collections::HashSet<&PathBuf> = probes.iter().map(|p| &p.0).collect();
+        assert_eq!(dirs.len(), 100);
+        for p in &probes {
+            let mode = fs::metadata(&p.0).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", p.0.display());
+            fs::write(p.0.join("verify.fennec"), b"rows").unwrap();
+        }
+        let gone: Vec<PathBuf> = probes.iter().map(|p| p.0.clone()).collect();
+        drop(probes);
+        assert!(gone.iter().all(|d| !d.exists()), "a probe left behind");
+        let taken = std::env::temp_dir().join(format!("fennec-taken-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&taken);
+        fs::create_dir(&taken).unwrap();
+        let refused = fennec_core::fs::create_dir_new(&taken).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        fs::remove_dir(&taken).unwrap();
     }
 
     /// The archives made in one parent before its sync are covered by it,

@@ -249,6 +249,8 @@ fn retired() -> Option<(u64, u64)> {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
     }
     let mut info = [0u64; 37];
+    // SAFETY: `info` is the 37 words of `rusage_info_v4` (above), all that
+    // flavor 4 writes; the call keeps no pointer to it.
     let r = unsafe { proc_pid_rusage(std::process::id() as i32, 4, info.as_mut_ptr()) };
     (r == 0).then_some((info[31], info[32]))
 }

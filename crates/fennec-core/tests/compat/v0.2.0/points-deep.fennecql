@@ -1,0 +1,6 @@
+-- A point under 64 lists, which the release reads and a later change
+-- refuses at the open.
+collections
+get plain order n
+get points count
+get points

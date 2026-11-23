@@ -1972,6 +1972,19 @@ refusals and MCP rates counted by caller) is 29% of the server's, and
 db-64's registry that waits on no lock after its shutdown 18%. The file
 was written from that run, each budget the one the job printed.
 
+The sixth train (#678, 2026-11-22) took `make small` 544 bytes past its
+budget: 2 988 544 bytes, four pages (+16 384, +0.55%) more than its
+measurement, where the budget's half a percent left 15 840. `fennec`
+(5 049 104, +0.41%) and `fennec-server` (8 411 856, +0.39%) stayed inside
+theirs. Built a step at a time on macOS, the symbols kept, the shell
+without its default features grew 14 205 bytes of `__TEXT` (code, constants
+and strings): G50's read-only reader, which surveys a file by reading it
+rather than through a mapping of its whole length, 56%; G14 F5's file
+helpers (`create_private`, `copy_private`, `mode_like`, `still_named`) 26%;
+the compact that keeps places 16%; the fuzz fix's walk over a damaged tail
+3%. G14 F1 and the release fixtures compile nothing into it. Only
+`small`'s entry was written from that run.
+
 Rejected: a budget of the measurement itself, which would stop every pull
 request that adds a byte and make any two in the merge queue that each
 write one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0,

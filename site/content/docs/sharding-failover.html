@@ -24,8 +24,44 @@ curl -X PUT localhost:8090/_shard/nodes/n1 \
 <ul>
   <li><b>Failover:</b> <code>POST /_shard/nodes/&lt;n&gt;/failover</code>.</li>
   <li><b>Use <code>--sync always</code> on the primary</b> so a failover
-    loses no write.</li>
+    loses no write the standby was sent. A write waits a second at most for
+    a standby's stream that keeps up, and not at all for one behind or
+    reconnecting: a standby not connected, or behind, when its node is lost
+    is promoted where it stands, without what it was not sent — and on a
+    plain-HTTP hop between the nodes, whoever can reach it can cut the
+    stream and hold it there. Watch for it before it matters (<a
+    href="#watching-a-standby">below</a>).</li>
 </ul>
+
+<h3 id="watching-a-standby">Watching a standby</h3>
+
+<p>Each copy says how it follows at
+<code>/t/&lt;tenant&gt;/_replication/status</code> (the replication token):
+<code>connected</code>, <code>behind</code> — writes on its primary's disk it
+has not applied, as its primary says every 2 s — and
+<code>last_contact_ms</code>. A node counts its copies a failover may
+promote, never by tenant, and keeps each open, its follower running or not
+— one whose database failed, one nothing follows for, which after a
+restart it counts once something opens it, a request or the promotion:
+<code>fennec_copies_disconnected</code>
+and <code>fennec_copies_behind</code> on its <code>/_metrics</code>, which the
+deploy kit's <code>FennecTenantCopiesDisconnected</code> (one not connected
+for two minutes) and <code>FennecTenantCopiesBehind</code> (one more than
+1 000 writes behind for five) alerts read (<a
+href="https://github.com/fennec-db/fennecdb/blob/main/deploy/RUNBOOK.md#a-copy-not-following">A
+copy not following</a>). A promotion answers what its copy knew —
+<code>"connected"</code>, <code>"behind"</code>,
+<code>"last_contact_ms"</code> — the router logs it for each tenant, and
+<code>fennec_router_promotions_total{copy="not_connected"}</code> counts the
+copies promoted not connected: every copy of a node whose process was
+killed among them, its stream ended with it, so read
+<code>last_contact_ms</code> against when the node stopped answering. A
+copy stays connected until a read of its stream fails, 10 s on where its
+primary's machine was lost or cut off, so the router's line says what it
+was not sent is lost wherever it was last heard from more than 4 s — two
+keep-alives — before. Over a network others can reach, give the nodes
+<code>--tls-cert</code> and <code>--tls-key</code> and follow
+<code>https://</code>.</p>
 
 <details class="deep"><summary>How a standby follows every tenant</summary>
 <p>Every tenant file has a feed of its own, so a node's tenants are followed
@@ -74,8 +110,14 @@ medians of three rounds of four to twelve runs, 3 to 4 ms each, and the
 first write on the promoted node 0.18 ms.</p>
 
 <p>A promoted tenant's history forks where the replica stood, so what the
-primary had not sent is gone — the same trade a database's failover makes,
-and <code>--sync always</code> on the primary is what makes it none. A
+primary had not sent is gone — the same trade a database's failover makes.
+<code>--sync always</code> on the primary makes it none for a standby that
+was keeping up: none the standby was sent, which under it is every write
+answered while its stream kept up. Sent means handed to the primary's
+kernel, which a machine lost takes with it, and a standby taking an image
+is counted as sent each write from the image's flush on, so a promotion
+before it has applied the image loses the writes answered meanwhile, its
+copy saying <code>"connected": false</code>. A
 failover that moved every tenant ends the pair; one that left a tenant behind
 keeps it, so a second call can take it. The old node rejoins as the standby of
 the new one: point its <code>--replica-of</code> there and record the pair the
@@ -257,7 +299,11 @@ answered 409) no longer deletes it unseen. The target's node takes it back
 only if it is a file this router noted with an identity. Otherwise the move
 fails 409, the tenant stays on its source, and the file is noted for an
 operator as a file a move found on its target, which the router did not
-note. A replica's attach that finds a file (409) has it follow only if the
+note. A target still installing an image of the name, such as an earlier
+move's whose answer was lost, answers 503 with <code>Retry-After</code>,
+and so does its take-back meanwhile: the move waits and asks again, the
+source frozen, for up to <code>--upstream-timeout</code>, and a repair
+keeps the note until the node says the file is gone. A replica's attach that finds a file (409) has it follow only if the
 node finds it still carrying the identity the router recorded for it, such
 as an old primary back from a failover; any other file is judged the same
 way as a move's. A node holding a file the router cannot judge is skipped

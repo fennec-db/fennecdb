@@ -1,0 +1,4 @@
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1},{"n":2},{"n":3}]}}
+{"kind":"rows","result":{"columns":["id","n","s"],"rows":[{"id":1,"n":1,"s":"synced"}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":3}]}}
+{"kind":"schemas","collections":[{"name":"kept","fields":[{"name":"n","type":"int","index":"hash"},{"name":"s","type":"text","index":"none"}]}]}

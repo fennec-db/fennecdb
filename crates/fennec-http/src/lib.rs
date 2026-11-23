@@ -1071,6 +1071,20 @@ fn body_ceiling(
     }
 }
 
+/// Whether a request read as far as its head is an image's import whose
+/// body is read as it comes (`admin::import`), not whole: a tenant node's
+/// `PUT /_admin/tenants/<t>/file` carrying the admin token -- the ceiling
+/// [`body_ceiling`] gave it already asked it -- with a `Content-Length`
+/// within that ceiling. One past it is refused 413 as any body is, and a
+/// chunked one read whole, to `max_import`.
+#[inline]
+fn streamed(cfg: &Config, imports: bool, head: &http::Head, ceiling: usize) -> bool {
+    imports
+        && cfg.admin_token.is_some()
+        && admin::is_import(head.request())
+        && head.length().is_some_and(|len| len > 0 && len <= ceiling)
+}
+
 /// A single connection: reads consecutive requests on a keep-alive
 /// connection, holding its `slot` under `--max-connections` until it ends.
 fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cfg: &Config) {
@@ -1126,15 +1140,22 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             .and_then(|head| {
                 let Some(head) = head else { return Ok(None) };
                 match body_ceiling(cfg, imports, head.request()) {
+                    // An image's import carrying the admin token, of a
+                    // length within its ceiling: its body left to be read
+                    // as it comes (`admin::import`).
+                    Ok(ceiling) if streamed(cfg, imports, &head, ceiling) => {
+                        let len = head.length();
+                        Ok(Some((head.unread(), len)))
+                    }
                     Ok(ceiling) => head
                         .body(&mut reader, ceiling)
-                        .map(Some)
+                        .map(|req| Some((req, None)))
                         .map_err(Unread::Bad),
                     Err(refused) => Err(Unread::Refused(Box::new((head.unread(), refused)))),
                 }
             });
-        let mut req = match read {
-            Ok(Some(req)) => req,
+        let (mut req, streamed) = match read {
+            Ok(Some(read)) => read,
             Ok(None) => return,
             Err(unread) => {
                 let resp = match unread {
@@ -1187,6 +1208,41 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 .is_err()
                 || !keep_alive
             {
+                return;
+            }
+            continue;
+        }
+
+        // An image's import, its body read as it comes into a file beside
+        // the tenant's rather than whole as the request's
+        // (`admin::import`): answered here, before any other route, as the
+        // admin's routes are -- past `open_refusal` alone of what is above
+        // them -- its body left unread until now, and the connection ended
+        // where it is left part read.
+        if let (Some(len), Backend::Tenants(tenants)) = (streamed, backend) {
+            let (status, sent, whole) = match open_refusal(cfg, backend, &req) {
+                Some(refused) => {
+                    let status = refused.status;
+                    let sent = cors(refused, cfg).write(&mut out, false, false);
+                    (status, sent.is_ok(), false)
+                }
+                None => {
+                    trace::begin(&req);
+                    let r =
+                        admin::import(&mut out, &mut reader, tenants, cfg, &req, len, keep_alive);
+                    trace::end(r.0);
+                    r
+                }
+            };
+            audit::http(&req, status, peer);
+            if !whole {
+                if sent {
+                    drop(reader);
+                    conn.end_refused();
+                }
+                return;
+            }
+            if !sent || !keep_alive {
                 return;
             }
             continue;
@@ -1326,6 +1382,21 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         // of the spans and none of the time.
         trace::begin(&req);
 
+        // A tenant's image going to a move, written out as it is read
+        // rather than as an answer's body, which held it whole
+        // (`admin::export`).
+        if let Backend::Tenants(tenants) = backend {
+            if admin::is_export(&req) {
+                let (status, sent) = admin::export(&mut out, tenants, cfg, &req, keep_alive);
+                audit::http(&req, status, peer);
+                trace::end(status);
+                if !sent || !keep_alive {
+                    return;
+                }
+                continue;
+            }
+        }
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
@@ -1435,7 +1506,12 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 // subscription: it takes the connection over.
                 trace::discard();
                 let _ = out.set_read_timeout(None);
-                match replication::handle(&mut out, db, repl, &req) {
+                // A tenant's copy is promoted by the node's admin alone.
+                let answered = match &tenant {
+                    Some(_) => replication::handle_tenant(&mut out, db, repl, &req),
+                    None => replication::handle(&mut out, db, repl, &req),
+                };
+                match answered {
                     None => return,
                     Some(resp) => {
                         audit::http(&req, resp.status, peer);

@@ -725,7 +725,7 @@ CLAIMS = [
     ("README.md", r"fennec-server:(\d+\.\d+\.\d+)", "version", 0),
     ("README.md", r"(\d+) KB of gzipped WebAssembly and", "kb_gz", 0),
     ("README.md", r"as (\d+) KB of\s+gzipped WebAssembly", "kb_gz", 0),
-    ("README.md", r"and a (\d+) KB gzipped client", "kb_client_gz", 0),
+    ("README.md", r"and an? (\d+) KB gzipped client", "kb_client_gz", 0),
     # The site quotes what a visitor downloads: the module gzipped.
     ("site/content/index.html", r"compiles to (\d+) KB of gzipped WebAssembly", "kb_gz", 0),
     ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),

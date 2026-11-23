@@ -11,13 +11,21 @@ each.](../../docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes fr
 the path, never the query; the router forwards bytes, parsing none; the
 registry opens a file under its lock and closes it on its last `Arc` alone,
 never while its follower or anything beside it holds the database: no two
-`Database`s share a file. A tenant's role is its file's, not the node's
+`Database`s share a file. A copy a failover may promote stays open once
+opened, its follower running or not, and the node's scrape counts it
+(`fennec_copies_disconnected`). A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
-the export), copy, install, the flip in one statement, the source
+the export), copy (relayed as it comes, never held: `Pool::call_streamed`),
+install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A create or an
 install answers once the file and its name in the directory are durable
 (`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the
-file back under `<file>.lock` (`take_back_made`). A node
+file back under `<file>.lock` (`take_back_made`). An install's image goes
+beside the tenant's file under that lock and its claim of the name, held
+through the rename: a second install, a create or a reclaim of the name
+is refused at once, a 503 naming its wait (`Tenants::claim`), never the
+409 that says a file is there, and the router asks again after the wait,
+within `--upstream-timeout` (`ComeBack`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
 reading (`grant_from`); the router counts a node by the directory's
@@ -27,7 +35,13 @@ last it sent (`Leases::turn`, `lease::round_due`). Every write path meets
 the engine's fence (`Database::set_fence`), every route answering a write
 asks `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
 promotes only a copy of the tenant's lineage and history
-(`tenants::Expected`, 409) unless `force`d.
+(`tenants::Expected`, 409) unless `force`d, and through its admin alone
+(`replication::handle_tenant`: `/t/<t>/_replication/promote` is 404),
+answering what the copy knew of its primary (`replication::Heard`), which
+the router logs and counts (`fennec_router_promotions_total`), its line
+saying what the copy was not sent is lost unless it was connected, nothing
+behind and heard from within two keep-alives (`STALE_MS`). A node's words
+reach the router's log and errors escaped, a refusal whole (`words`).
 
 **[A failed attach is tried again, a file left taken back by
 identity.](../../docs/design/tenants.md#replicas-tried-again)** `try_again`
@@ -36,7 +50,8 @@ repairs a failed attach under the claim;
 `leftovers` row (`fennec_router_files_left`) with its ids
 (`fennec_http::instance`); the node deletes it, or follows over it at an attach's 409, only
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
-slot; no id, never.
+slot; no id, never. A row noted under an id is forgotten on its node's
+word alone, never on a listing that lacks it (`look_at_leftovers`).
 
 **[A tenant's hook secrets are its file's, relayed by the router and kept
 by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**

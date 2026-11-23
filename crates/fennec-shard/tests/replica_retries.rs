@@ -116,6 +116,11 @@ enum Act {
     /// Holds it, not sent on, until the test lets it go, then sends it on
     /// and the answer back.
     Hold,
+    /// Sends on its head and half its body, ends the client's connection
+    /// at once with nothing said, and holds the node's until the test lets
+    /// it go, then sends the rest: an install the node takes its time over,
+    /// whose answer the router never hears.
+    Stall,
 }
 
 struct Rule {
@@ -265,6 +270,25 @@ fn serve(mut client: TcpStream, target: &str, rules: &Shared) {
             held_until_released(rules);
             if let Some(answer) = asked_of(target, &bytes) {
                 let _ = client.write_all(&answer);
+            }
+        }
+        Some(Act::Stall) => {
+            let sent = closing(&bytes);
+            let head = sent
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map_or(sent.len(), |n| n + 4);
+            let half = head + (sent.len() - head) / 2;
+            let Ok(mut server) = TcpStream::connect(target) else {
+                let _ = client.shutdown(Shutdown::Both);
+                return;
+            };
+            let begun = server.write_all(&sent[..half]);
+            let _ = client.shutdown(Shutdown::Both);
+            if begun.is_ok() {
+                held_until_released(rules);
+                let _ = server.write_all(&sent[half..]);
+                let _ = server.read_to_end(&mut Vec::new());
             }
         }
         // Carried on as it comes, so a stream -- a replica following the
@@ -1109,6 +1133,65 @@ fn a_move_undone_leaves_its_targets_copy_to_be_taken_back() {
     assert!(body.contains(r#""left":[]"#), "{body}");
     assert!(!n3.holds("acme"), "the repair left the copy");
     reads(n1.port, "acme", "get notes select title", "\"one\"");
+}
+
+/// A move whose install went unanswered -- its target still taking the
+/// image, slower than the router waited -- notes the file it may leave
+/// there under the identity it proposed. While that install is under way
+/// the node refuses its name to everything else with a 503 naming its wait:
+/// a repair's take-back judges nothing and keeps the note, and a move tried
+/// again waits and asks again rather than read a file there. The install
+/// lands, that move takes the noted file back and installs its own, and
+/// nothing is left. Refused 409, as a file there, the repair forgot the
+/// note of a file not yet in place, the move tried again had the reclaim
+/// judge the place empty, forgot the note and failed, and the install
+/// then put a file there that no router knew of.
+#[test]
+fn a_move_meeting_an_install_of_its_name_under_way_waits_for_it() {
+    let (n1, n2, n3) = (node("iw1"), node("iw2"), node("iw3"));
+    let p2 = Proxy::to(n2.port);
+    let port = router();
+    put_node(port, "n1", &format!("127.0.0.1:{}", n1.port), "iw1", "a");
+    put_node(port, "n2", &p2.addr, "iw2", "a");
+    // Of another zone, so the tenant's replica goes there, and the repair
+    // below places none on n2, whose `PUT` the install refuses too.
+    put_node(port, "n3", &format!("127.0.0.1:{}", n3.port), "iw3", "b");
+    create_acme(port);
+    assert_eq!(placed(port, "acme"), ("n1".into(), Some("n3".into())));
+    let install = "PUT /_admin/tenants/acme/file ";
+    p2.arm(install, Act::Stall, 1);
+    let (status, body) = call(port, "POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(placed(port, "acme").0, "n1");
+    assert_eq!(files_left(port), 1, "the install unanswered was not noted");
+    let side = n2.dir.join("acme.fennec.importing");
+    until("the install never began on n2", || side.exists());
+
+    // A repair meanwhile: n2 lists no `acme`, and its take-back is refused.
+    let (status, body) = repair(port);
+    assert_eq!(status, 200, "{body}");
+    assert!(reports(&body, "acme", "n2", "being installed"), "{body}");
+    assert_eq!(
+        files_left(port),
+        1,
+        "the note went with the install under way"
+    );
+
+    // The move again, while the install goes on: it waits and asks again.
+    let moved = std::thread::spawn(move || {
+        call(port, "POST", "/_shard/tenants/acme/move", r#"{"to":"n2"}"#)
+    });
+    until("the move neither asked again nor ended", || {
+        p2.seen(install) >= 3 || moved.is_finished()
+    });
+    p2.release();
+    let (status, body) = moved.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(placed(port, "acme").0, "n2");
+    assert_eq!(files_left(port), 0);
+    assert!(!n1.holds("acme"));
+    assert!(!side.exists(), "the install left its image beside the file");
+    reads(n2.port, "acme", "get notes select title", "\"one\"");
 }
 
 /// A move whose source would not let go of its copy once the move was done

@@ -382,6 +382,9 @@ fn lists(dir: &std::path::Path) {
 /// A call's answer, whatever it is.
 fn answer(h: u64, sql: &str, params: &str, vectors: &[u8]) -> String {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     unsafe {
         fennec_query(
             h,
@@ -400,6 +403,9 @@ fn answer(h: u64, sql: &str, params: &str, vectors: &[u8]) -> String {
 
 fn open(p: &str, flags: u32) -> u64 {
     let (mut h, mut out) = (0, std::ptr::null_mut());
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_open(
             p.as_ptr(),
@@ -416,6 +422,9 @@ fn open(p: &str, flags: u32) -> u64 {
 
 fn ok(h: u64, sql: &str, params: &str, vectors: &[u8]) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -435,6 +444,8 @@ fn ok(h: u64, sql: &str, params: &str, vectors: &[u8]) {
 
 fn call(f: unsafe extern "C" fn(u64, *mut *mut c_char, *mut usize) -> i32, h: u64) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: `f` is one of the C ABI's calls taking a handle and the out
+    // pointers: `out` a local to write, `out_len` NULL, as fennec.h allows.
     let code = unsafe { f(h, &mut out, std::ptr::null_mut()) };
     assert_eq!(code, 0, "{}", taken(out));
 }
@@ -458,9 +469,12 @@ fn taken(out: *mut c_char) -> String {
     if out.is_null() {
         return String::new();
     }
+    // SAFETY: `out` is not NULL (above): the NUL-ended text the call wrote,
+    // read before it is freed.
     let s = unsafe { std::ffi::CStr::from_ptr(out) }
         .to_string_lossy()
         .into_owned();
+    // SAFETY: the text the call wrote, freed once.
     unsafe { fennec_free_string(out) };
     s
 }

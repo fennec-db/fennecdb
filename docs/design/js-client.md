@@ -6,7 +6,7 @@ The long form of the invariants [web/CLAUDE.md](../../web/CLAUDE.md) lists under
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fennecdb/web` ships `fennec.wasm` (every index and the schema
-check, 287.7 KB brotli) and `@fennecdb/web/client`, so a user has two
+check, 288.2 KB brotli) and `@fennecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fennec-lite.wasm` (no index, no schema check, 173 KB brotli; `make
@@ -23,7 +23,11 @@ fetched the `.wasm` through `fennec.js` either (only `Fennec.open` does),
 and bundling `connect` and a builder query's rows is 8.8 KB brotli
 through the entry against 11.7 through `fennec.js` (5.7 against 8.2 when
 the entry was made, 7.5 through `fennec.js` before `FennecHttp.live`), whose `Fennec` class a bundler cannot drop -- its static
-block is a side effect. `web/fennec.client.test.js` walks the client's imports and fails
+block is a side effect. `FennecFile`'s look at a name its worker keeps is
+a static method for that reason (`FennecFile.here`, which `openFile`
+calls): as a static block it kept the class, and all it reaches, in that
+bundle -- 50 972 bytes against 48 964, 16 385 brotli against 15 734
+(esbuild 0.28, minified, 2026-11-21). `web/fennec.client.test.js` walks the client's imports and fails
 if they reach anything but those three files or hold the module's glue,
 `FennecSync`, IndexedDB or files. `FennecHttp.live` is `Fennec.live`'s
 contract over a server: a subscription to each collection the query reads
@@ -170,10 +174,13 @@ IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
 `<name>~` and is flushed before the file is written over, so a crash leaves
 one of the two whole; `openFile` takes the copy when its image is whole.
 `persist(db, key, { cryptoKey })` seals the image and each chunk with
-AES-GCM (WebCrypto), a tag over the key, the image's random generation and
-the chunk's number, so one moved, dropped from the middle or kept from an
-image before is refused; a row persists in 0.16 ms either way, the 32 MB
-image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
+AES-GCM (WebCrypto), a tag over the key, the image's random generation,
+the chunk's number and the tag of the record before it -- the image's, for
+the first chunk -- so one moved, dropped from the middle, kept from an
+image before or put after another chunk than the one it was sealed after is
+refused ([below](#sealed-chunks-in-a-chain)); a row persists in 0.16 ms
+either way, the 32 MB image in 129 ms against 76. The OPFS file stays
+plain: it is `fennec-server`'s.
 A database's `persist`, `restore` and `openFile` calls run one after another
 in call order (`inTurn`), each once the one before has settled, refused or
 not: a `persist` called while another is out stores what was written by its
@@ -191,6 +198,268 @@ naming the earlier failure). A `persist` after a restore that failed as it
 loaded stores the database whole as it left it; after one refused before
 the load (a wrong `cryptoKey`, a chunk that does not unseal, an IndexedDB
 error) a chunk, the record standing.
+
+A module that traps -- `boxed`'s abort where it has no memory left to
+answer in, a bound it checks -- is left where it stopped, so every later
+call on any database of its instance throws one `FennecError` saying to
+open the database again (`guarded`), and the instance is marked stopped
+(`halted`). What the error asks for works with nothing called first:
+`openFile` of a name a database of this worker keeps (`holding`, by name,
+the `FennecFile` keeping it, asked once the file's handle is refused, as
+that database holds it) takes it from a database whose module stopped --
+its handles closed, nothing flushed or written, since what the trap kept
+from the file never reaches it, and the handle asked for again at once --
+and refuses it at once, naming this worker, from one that runs on. Before, the name stayed held until
+the file's own `close()`, which nothing said to call, and the open was
+refused as "open elsewhere (another worker or tab)"; and `Fennec.close()`
+called `fennec_close`, threw "the module stopped" and let go of nothing.
+A close is total after a trap: `Fennec.close()` marks the database closed
+and lets its file go, both handles, entering the module no more and
+throwing nothing, and so does `FennecFile.close()`, which a second call
+makes do nothing. Closing a live database lets its file go too, flushed,
+as the file's `close()` does. A close met on the way out of a failure --
+`loads`' trial of a copy beside the file, `openFile`'s schema check --
+never takes the place of the error that brought it there: the copy's
+refusal names the room it lacked, and a schema refusal its differences
+(`web/fennec.file.test.js`). The Cloudflare example's `#retire` closes
+the database it lets go of after `release`: thrown there, the retiring
+promise rejected, and every call queued on it with "the module stopped";
+it now restores, and they run on the database restored from storage
+(`integrations/cloudflare/example.test.js`).
+
+### Sealed chunks in a chain
+
+A sealed record's tag covers the tag of the record before it: version 2 of
+the seal, the image's `v` (1.0's review, G14). Version 1 -- 0.2.0's, and
+this tree's before it -- covered the key, the generation and the place
+alone, and a page goes on from a store cut short: it restores what is left
+and seals its next chunks at the places of those cut, under the same
+generation, so a chunk it cut opened after one it had kept, or one it
+sealed since after one it cut, writes dropped or doubled in the middle of
+the store. Chained, a store cut short opens only as it stood or as the page
+went on from it, never spliced (`web/fennec.persist.test.js`, `a sealed
+store cut short opens as it stood or as the page went on, never spliced`).
+What remains is a store cut at a record's edge -- the page's latest writes
+lost, as in a store whose latest writes were never persisted -- and an
+older store put back whole, which nothing a page keeps can tell from the
+one it holds. The tags are read off the records as stored, before any
+opens, so a restore still opens them side by side; a chunk's AAD grows by
+the 16 bytes of the tag. With the replica's refusals below, the client grew
+4.0 KB, half of it comments, 1.3 KB gzipped and 1.1 KB brotli (and the
+store's lock below more). A chunk's seal and open
+take one GHASH block more and a 16-byte copy. In Node over the tests'
+IndexedDB, twelve rounds a side taken in turns at a load of 4.5 (another
+agent's build), a sealed row persisted in 0.023 ms p50 against main's
+0.022 and an image of 20 000 rows with 300 chunks restored in 3.9 ms
+against 4.1; in headless Chrome (`make file-bench`, at 3.7 to 3.9) a row
+took 0.14 ms against 0.13 and the 32 MB image 132 ms against 128, its
+restore moving between 37 and 74 ms either way over three rounds, two of
+them at loads of 6.8 to 7.1. A quiet machine's `make file-bench` in Chrome
+and Firefox is owed before this lands. The AAD's prefix (`fennecdb/2\0`) differs from
+version 1's (`fennecdb\0`) from its ninth byte, so neither reads as the
+other whatever the key's name holds, and the image's `v` is in its own AAD:
+changed, the image does not open, and a version past 2 is refused by its
+number, never read as this one.
+
+The page's stored data is a frozen surface
+([compatibility.md](compatibility.md#the-frozen-surfaces)): a store sealed
+as version 1 restores, read as it was sealed -- 0.2.0's own store in
+`web/fennec.compat.test.js`, one sealed here as 0.2.0 sealed it in `a
+store sealed as version 1 restores, and its next persist stores an image
+of version 2` -- and the next `persist` stores an image sealed as version 2
+over it, its chunks with it: one image more, once, since a chunk sealed
+after a version 1 record would cover a tag that record was not sealed to
+be followed by. Nothing is sealed as version 1 any more. A client before
+this one refuses a store sealed as version 2, its image's tag not opening
+under version 1's AAD; what is frozen is a later client reading an earlier
+one's store, not the layout.
+
+A replica (`sync({ persist })`) seeds only a key that holds nothing. A
+store that is there and does not restore -- sealed with another `cryptoKey`
+or none, in the clear where one is given, its bytes changed, a later
+client's, an image the module or the code's schema refuses, a read
+IndexedDB failed -- refuses the sync, kept as it stands with the writes it
+holds unsent (`#loadPersist`). It once took such a store for a cache and
+seeded, and its first `persist` stored the seed's image over the store and
+the writes in it, which the right key would have sent (1.0's review). No
+refusal marks a store replaceable: what cannot be read here cannot be told
+to hold nothing -- an image the module refuses under the key that opened
+it is a later client's, or a module's bug, never an attacker's, and
+collation data a page offline could not fetch is there the next time. A
+tab that takes the lead restores the store again for the queue the tab
+before it kept; refused, it tells `onError`, leads, and stores nothing
+there (`#unkept`). Where the store it restores is another than the one it
+read at its start (`sameStore`: the generation, the sizes, the count of
+chunks and the last one's tag), its first `persist` stores an image:
+before, its chunk took the place of the leader's next, the leader's after
+it stayed, and read after it a row the leader had written came back over
+this tab's write of it -- chained, that store no longer restored at all. A
+tab that reads the store as it stands goes on in chunks, as before
+(`web/fennec.sync.test.js`: `a store that does not open under the key
+given is kept with its writes, and the right key sends them`, `a tab
+taking the lead stores over a store the tab before it wrote since it read
+it`, `a tab taking the lead from a store it cannot restore stores nothing
+there`).
+
+A leader closed while its own persist was out let go of the lead at once
+(the review of this change): the next tab read the store and went on in
+chunks from it, then the closed tab's chunk landed in the place of the
+next tab's first, and every chunk after it, sealed after a record gone,
+refused the store for good -- both tabs' unsent writes lost with it, and
+nothing told. `close` now lets go of the store only once what was written
+before it is stored (`#letGo`): the persist out, then one for the writes
+made while it was out. The second review found those never stored -- the
+persist went on again only while the replica was open, and the close ended
+its sends, so the next tab took over a store with the first write and not
+the second, which no tab sent. A hung IndexedDB call cannot hold the store
+for good: past `LET_GO_MS`, 5 s -- a 32 MB image is sealed and stored in
+129 ms in Chrome, 418 ms in Safari unsealed -- it is let go of all the
+same, no persist is started after the one out, and `onError` is told what
+is not stored (`a leader closed while it stores lets go of the store once
+its write landed, and the next sends it`, `a leader closed while it stores
+stores the writes made meanwhile before it lets go, and the next sends
+them`, `a leader whose persist outlasts its close stores nothing once it
+let go of the store`). The tests hold the close's timer (`closeHeld`) and
+say when the bound passes: the first assumed the persist was let through
+within 5 s of real time, and the last waited them out. The third review
+found a write lost between the loop's last look for a write waiting and
+its end: `#persisting` was cleared in a `finally` a few microtasks after
+that look, so a write landing between found a persist out, left itself to
+it, and none came -- closed then, the replica let go of the store without
+it, nothing told (at two microtasks in a row after the transaction
+completed; on main such a write waited for the next). The loop now ends in
+the step it last looks, `#persisting` set before it runs and cleared with
+that look (`a write made as the persist before it ends is stored before
+the close lets go of the store`, at each of 41 microtasks).
+
+What keeps a write from landing after the next replica read the store is a
+claim, not the lock. A replica claims the store before it reads it
+(`claim`): a random token under `['fennecdb/owner', key]`, an array key, so
+no `persist` or `putState` key is it and no key's range of strings reaches
+it. Every write a replica makes reads the token in its own read/write
+transaction and writes its record only where the token is its own
+(`persistNow`'s `owner`); one finding another's, or none, stores nothing,
+and the replica stores nothing there from then on, `unkept` and `onError`
+saying why (`taken`). IndexedDB runs the read/write transactions over one
+store one at a time, each seeing those before it (IndexedDB 3.0, *transaction
+scheduling*), so a write runs before a claim -- and the claimer's read,
+after its claim, sees it -- or after, and finds the claim: nothing depends
+on when a lock manager grants a lock. The fence this replaces asked a flag
+where the write made its transaction, after its last await, and held
+because every engine registers a transaction as it is made, before a lock
+granted later in another tab -- which no specification says (the second
+review). The claim costs one small transaction as a replica takes a store
+over, and each of its writes one read before its record in the same
+transaction, made in the background of the write that made it: in headless
+Chrome 158 a chunk's transaction took 0.11 ms p50 alone and 0.14 ms with the
+read before it (1 200 of each, in turns, at a load of 4 another agent
+made). A plain `persist` reads nothing more.
+
+The election's lock is named by the url and the collections, so two
+replicas under one `persist` key -- other shapes, another url, or two tabs
+with `leader: false` -- each led and stored there, each chunk after its
+own: the store spliced, then never restored. A replica stores its key only
+holding the key's own lock (`storeLock`, `fennecdb/persist:<key>`, a name
+no election's can be). A tab with no election asks for it as it stands
+(`ifAvailable`) before it reads the store at its start, and takes nothing
+over: no restore more than before. One an election makes leader asks for
+it before it leads and takes the store over first (`#takeStore`, the
+restore its lead made before), so the queue the tab before kept is sent
+before its own writes. One that finds the lock held stores nothing there,
+`status()`'s `unkept` saying so -- a tab with no election leading all the
+same, an elected one waiting to lead -- and takes the store over once it
+is let go of. The tabs an elected one leads, or will, said nothing while
+it waited, their writes reaching no server (the second review): it tells
+them why it stores nothing (`#unkeptBy`, an `unkept` message, again to a tab
+that says hello or hands it a write), and their `unkept` says it. The
+election's lock is always asked for first, so no two tabs wait on each
+other. A replica of this page that closed is waited for (`letting`) before
+the lock is asked for as it stands: let go of, a lock is free a few
+microtasks later, and a sign-out and sign-in under one key found it held.
+A lock asked for costs 16 µs in Node, granted and let go of (p50), beside a
+restore's milliseconds (`replicas of other shapes under one persist key
+store it one at a time`, `with leader: false a second tab stores nothing
+under the key till the first lets go`).
+
+Without a lock manager -- outside a secure context, in Safari before 15.4
+and Firefox before 96 -- every tab held the key: two tabs on one key each
+stored their chunks after their own, a sealed store ended refused for good
+and an unsealed one lost writes, while the docs said one at a time stored
+it (the second review). The claim holds there too: each tab claims the
+store as it starts, so the last one started stores the key and the others
+store nothing from then on, their writes still sent (`with no lock manager
+two tabs on one key leave a store that restores, the last one started
+storing it`). No tab takes the store back once the last one closes: with
+nothing to say it closed, one taking a store it found claimed would take
+it from a tab still running. A store deleted under a running replica --
+`unpersist` with no lock to ask, `indexedDB.deleteDatabase`, the site's
+data cleared -- is not stored again by it, its token gone: before, its next
+persist stored its image there again. A lock manager given as `locks` must
+answer `ifAvailable` with `fn(null)` where the lock is held, as the Web
+Locks API does; one that waits instead, written to 0.2.0's contract, holds
+a second replica's start until the first lets go
+([compatibility.md](compatibility.md#changed-on-purpose-before-10)). A
+0.2.0 tab beside this client on one key asks for no lock and reads no
+claim, and can still store over this client's chunks.
+
+`#unkept` reached `onError` alone: without one, a leader stored nothing
+for the rest of its session, after a one-off IndexedDB failure too.
+`status()` says it (`unkept`), and a take-over whose read or claim
+IndexedDB itself failed -- `unread`, its error marked where `restoreNow`
+reads or `claim` writes, never a record that does not open -- reads the
+store again at the next persist; one that does not open is kept as it
+stands, never read again by that tab (`a tab whose take-over read
+IndexedDB failed reads the store again at its next persist`). The start's
+refusal said to delete the store, and the only way documented,
+`indexedDB.deleteDatabase('fennecdb')`, deleted every account's.
+`unpersist(key)` deletes one key's image, chunks and claim under the key's
+lock -- asked of the `locks` the replicas were given, or
+`navigator.locks` -- refused while a replica keeps it, and lets go of the
+shared connection, so every database's next `persist` in this page stores
+an image rather than a chunk after one deleted (`unpersist deletes one
+key's store, refused while a replica keeps it`). Another page's plain
+`persist` of the key is not reached: its connection is its own, and its
+next chunk follows an image deleted, which `restore` does not find. A
+check that the image is there before each chunk would reach it, at a read
+more on every `persist` of every page, for a key one page deletes under
+another that writes it; the docs say so instead.
+
+A key's chunks were the records from `key#` to `key#\uffff`: another key
+named `key#` and anything -- `notes#archive`, its chunks, a `putState` key
+`notes#cursor` -- was among them, so an image stored under `notes` deleted
+them, `unpersist('notes')` too, and a restore of `notes` read them as its
+chunks (the second review). A chunk's key is `key#` and nine digits
+(`chunkKey`); the range is now from `key#000000000` to `key#999999999`, and
+what it holds is read as `isChunk` says, since another key's can still be
+in it (`notes#1`, `notes#2024`'s chunks). One shape is a chunk's still:
+another key whose name is `key#` followed by nine digits is read as this
+key's chunk -- restored as one, written over by the chunk of its number,
+deleted with the key's -- so the docs say to avoid such names (the third
+review). Refused by `persist`, such a key would narrow what it takes, a
+surface that only grows
+([compatibility.md](compatibility.md#what-grows-what-breaks)). An image
+reads the range's keys before it deletes them, one delete where they are
+all its own, as they nearly always are, a delete a key otherwise; a
+restore reads the keys beside the records (`getAllKeys`). In headless
+Chrome 158 (load 2.5 to 4, the two in turns, p50 of eight), a 4 MB
+image's transaction took 4.0 ms either way over no chunks, 7.7 ms with one
+delete and 9.9 ms with the keys read first over 300, 32.3 and 36.8 ms over
+3 000, 73.5 and 77.5 ms over 10 000 -- paid once a fold, a microsecond or
+two a chunk before it; a restore's read of 300 chunks took 1.0 ms and 1.4
+(forty each).
+Deleting at once, the keys read beside to undo the transaction where
+another's were among them, took as long: the read is the cost, not the
+wait for it. A row's chunk reads nothing more (`a key's image, chunks,
+restore and unpersist reach no other key's records`).
+
+The first review's answers grew the client by 7.8 KB, nearly half of it
+comments, 2.2 KB gzipped and 1.8 KB brotli, and by 2.2 KB, 0.8 KB gzipped,
+minified by esbuild as an app bundles it. The second's grew it by 4.6 KB
+more, half of it comments, 1.4 KB gzipped and 1.1 KB brotli (283, 88 and
+74 KB where the docs quote it, `site/build.py`), and by 1.3 KB, 0.4 KB
+gzipped, minified. The third's grew it by 0.7 KB, nearly all comments,
+0.3 KB gzipped and 0.2 KB brotli (284, 88 and 74 KB; 363 KB brotli with
+the module), and by 28 bytes minified.
 
 ### In real browsers
 
@@ -232,7 +501,8 @@ What it found, fixed with it:
   stops a busy worker only 2 s after its page is gone, its sync access
   handles open till then, and `openFile` was refused as open elsewhere for
   1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
-  it refuses, a file this worker itself holds refused at once (`holding`).
+  it refuses, a file another database of this worker keeps refused at once,
+  naming it (`holding`, `FennecFile.here`), or taken from it once its module stopped.
   Firefox and Safari end the worker at once: the file opens 50 to 85 ms
   after the reload in Firefox, about 60 ms in Safari 27.
 - Safari names a held file `InvalidStateError`, where the standard, Chrome

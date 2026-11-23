@@ -23,6 +23,9 @@ fn scratch(name: &str) -> PathBuf {
 fn taken(code: i32, out: *mut c_char) -> (i32, String) {
     let text = match out.is_null() {
         true => String::new(),
+        // SAFETY: `out` is not NULL: the text the call just wrote through it,
+        // a NUL-ended `CString`, read once and then freed once, as fennec.h
+        // says.
         false => unsafe {
             let s = CStr::from_ptr(out).to_str().unwrap().to_string();
             fennec_free_string(out);
@@ -35,6 +38,9 @@ fn taken(code: i32, out: *mut c_char) -> (i32, String) {
 fn open(path: &str) -> u64 {
     let (mut h, mut out) = (0, std::ptr::null_mut());
     let flags = FENNEC_OPEN_NO_SYNC | FENNEC_OPEN_NO_AUTO_COMPACT;
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_open(
             path.as_ptr(),
@@ -51,6 +57,9 @@ fn open(path: &str) -> u64 {
 
 fn query(h: u64, sql: &str, params: &str, vectors: &[u8]) -> (i32, String) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: pointers and lengths of live `&str`s and slices, or NULL as
+    // fennec.h's *Pointers and lengths* allows; the out pointers locals' or
+    // NULL.
     let code = unsafe {
         fennec_query(
             h,
@@ -69,6 +78,8 @@ fn query(h: u64, sql: &str, params: &str, vectors: &[u8]) -> (i32, String) {
 
 fn close(h: u64) {
     let mut out = std::ptr::null_mut();
+    // SAFETY: a handle, and `out` a local to write; `out_len` NULL, as
+    // fennec.h allows.
     let code = unsafe { fennec_close(h, &mut out, std::ptr::null_mut()) };
     assert_eq!(taken(code, out).0, FENNEC_OK);
 }

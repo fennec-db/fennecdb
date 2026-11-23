@@ -638,3 +638,40 @@ fn what_a_replica_cannot_take_is_refused() {
     assert!(w.sync.claims(&p.stmts).is_err());
     w.settle();
 }
+
+/// A replica of the sync takes rows as values and writes each by its own
+/// schema, never its server's places: a field dropped on the server, a
+/// compact there and the writes after it -- which a copy following the
+/// server's records read one field early while a compact renumbered the
+/// places -- leave it holding the server's rows, value for value.
+#[test]
+fn a_compact_after_a_drop_on_the_server_leaves_the_rows_the_server_holds() {
+    let mut server = Server::new();
+    server
+        .db
+        .execute(&fennec_ql::parse_one("alter collection tasks drop field title").unwrap())
+        .unwrap();
+    let mut w = World::with(server, Database::new());
+    let read = "get tasks select key, status, priority order key";
+    let open = Value::Text("open".into());
+    let server_rows = |w: &World| -> Vec<Vec<Value>> {
+        let rows = w.server.rows(read).into_iter().map(|r| r.values);
+        rows.filter(|v| v[1] == open).collect()
+    };
+    let local_rows =
+        |w: &World| -> Vec<Vec<Value>> { w.local(read).into_iter().map(|r| r.values).collect() };
+    assert_eq!(local_rows(&w), server_rows(&w));
+    for sql in [
+        "compact",
+        r#"put tasks {key: "d", status: "open", priority: 9}"#,
+        r#"set tasks {priority: 2} where key = "a""#,
+    ] {
+        w.server
+            .db
+            .execute(&fennec_ql::parse_one(sql).unwrap())
+            .unwrap();
+    }
+    w.deliver();
+    assert_eq!(local_rows(&w).len(), 3);
+    assert_eq!(local_rows(&w), server_rows(&w));
+}

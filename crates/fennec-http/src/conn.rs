@@ -309,8 +309,10 @@ mod open {
         let open = open();
         let mut wakers = Vec::new();
         for (fd, wake) in open.iter() {
-            // SAFETY: open while it is listed, let go of under this lock
-            // before it closes; `ManuallyDrop` keeps it from closing here.
+            // SAFETY: open while it is listed: the `Secured` owning it lets
+            // it go (`forget`, in its drop, a panic's unwinding too) under
+            // this lock before its `sock` field closes it; `ManuallyDrop`
+            // keeps it from closing here.
             let s = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(*fd) });
             let _ = s.shutdown(std::net::Shutdown::Read);
             #[cfg(windows)]

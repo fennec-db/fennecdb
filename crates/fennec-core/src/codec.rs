@@ -625,6 +625,25 @@ pub fn skip_field(buf: &[u8], pos: &mut usize) -> Result<()> {
     skip::<true>(buf, pos, 0)
 }
 
+/// [`skip_field`] where a dropped place may stand, which every write after
+/// the drop and every compact makes a one-byte `null`: a null stepped over
+/// by its byte, the call into the skip -- 34 instructions of its frame and
+/// its match -- not made. Asked only where a dropped place may stand: by
+/// the readers a query picks once for a collection holding one before a
+/// field it reads (`Store::read_fields_passing`, a filter's fields and an
+/// aggregate's; `Store::read_field_in`, an order's keys), a compare more on
+/// every other value they pass, and by `Schema::read_doc` and
+/// `read_written` for the dropped places alone. The JSON writer passes a
+/// dropped place as any value (`Database::query_json`).
+#[inline(always)]
+pub fn skip_passing(buf: &[u8], pos: &mut usize) -> Result<()> {
+    if buf.get(*pos) == Some(&TAG_NULL) {
+        *pos += 1;
+        return Ok(());
+    }
+    skip_field(buf, pos)
+}
+
 #[inline]
 fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<()> {
     let tag = match buf.get(*pos) {
@@ -637,7 +656,7 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<
         TAG_NULL => Ok(()),
         // Its byte looked for, as the decoder does: stepped over unseen, a
         // bool the payload ends before left `pos` past the end, and a
-        // compact's copy of the bytes it skipped (`Schema::without_dropped`)
+        // compact's copy of the bytes it skipped (`schema::reclaim`)
         // sliced past them.
         TAG_BOOL => {
             take(buf, pos, 1)?;

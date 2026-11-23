@@ -80,6 +80,12 @@ BREAKS = [
     {"version": "2", "kind": "node", "operation": "PUT /_admin/tenants/{tenant}/hooks/{hook}",
      "change": "request field key narrowed",
      "reason": "a github hook keyed by X-GitHub-Delivery took a captured event again under a new one: GitHub signs the body alone. A caller writes key body or leaves key out; a payload sent twice carries an id of its own. A set 0.2.0 saved with delivery still reads and installs whole (PUT .../hook-secrets keeps it), its hook's events refused until it is set again (docs/webhooks)"},
+    {"version": "3", "kind": "node", "operation": "POST /t/{tenant}/_replication/promote",
+     "change": "operation removed",
+     "reason": "it forked a tenant's copy with the replication token alone -- every node of a region and every archiver holds it -- past the lease's fence and every check the admin's promotion makes, a standby unknown to its router, which never called it; not deprecated first, a hole kept open a release (G14). A copy is promoted by POST /_admin/tenants/{tenant}/promote, the router's failover's call (docs/sharding-reference)"},
+    {"version": "3", "kind": "router", "operation": "POST /t/{tenant}/_replication/promote",
+     "change": "operation removed",
+     "reason": "the node's, which the router forwards: removed there (the node's entry). A tenant fails over through the router (POST /_shard/nodes/{node}/failover), a copy by POST /_admin/tenants/{tenant}/promote on its node"},
 ]
 
 

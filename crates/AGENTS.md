@@ -25,6 +25,20 @@ fuzz` lists the targets; CI's `fuzz-smoke` runs each by count, `fuzz.yml`
 weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
 finding a regression test in its own crate.
 
+**[Every `unsafe` block says why it is sound.](../docs/design/conventions.md#unsafe-code)**
+A `// SAFETY:` comment above each `unsafe` block and `unsafe impl`, or above
+the statement it is, names what guarantees it -- for a C ABI the contract
+fennec.h and its `# Safety` sections write, never "the caller guarantees"
+alone -- and an unsafe operation in an `unsafe fn` is in a block of its
+own. Clippy's `undocumented_unsafe_blocks` and rustc's
+`unsafe_op_in_unsafe_fn`, denied in the root Cargo.toml's
+`[workspace.lints]`, which every crate takes, hold it where code compiles;
+`tools/lints_check.py` (CI's fmt job) reads every `.rs` file whatever its
+`cfg`. [fennec-ffi's, fennec-abi's and fennec-core's tests run under
+ASan](../docs/design/conventions.md#sanitizers) (`make sanitize`, CI's
+`sanitize`, no required check, never a merge group's): every unsafe site
+they hold is reached by one, and a new site owes its test.
+
 **[A secret is compared by `crypto::ct_eq` alone](../docs/design/conventions.md#secrets-compared)**
 -- a token, a mark, a MAC, a signature, a proof, a password -- never by
 `==` or `!=`, which leave at the first byte that differs:
@@ -38,3 +52,29 @@ meets its block to another implementation's, each test's count of cases
 held. `SECURITY.md` is held to the tree the same way, by
 `tools/security_md_check.py` (CI's fmt job): a flag, path, link or primitive
 it names that is gone fails, and so does any kind of check counting zero.
+
+**[A file is made by `fennec_core::fs`'s helpers, its owner's alone](../docs/design/durability.md#files-modes)**
+-- `private` on the open of a file its operator names, which goes through
+a link there as a database's open does (`fs::resolved`); `private_beside`
+(`O_NOFOLLOW`, each target's number, a Unix without one failing to build)
+on a file opened again beside a database; `create_private`,
+`create_like` (`O_EXCL`) or `copy_private` (a clone with `CLONE_NOFOLLOW`
+on Apple's systems, of a file its owner's alone) for a side file written
+whole, these following no link at their name, an archive's records, a
+backup, an unseal, a compact's swap and a replica's image held to their
+writer's handle before their rename (`still_named`, the handle
+`Sink::adopt` is handed), one a crash left beside a database removed by its
+owner alone (`.taking` by the open that writes it, `.importing` by a node
+under the tenant's lock, `sweep_left`); `create_dir_private` or
+`create_dir_new` for a directory -- `0600`, a directory `0700`, whatever
+the umask, from the call that makes it, or for a clone, which takes its
+source's owner-only mode, on its handle before it is handed back: never
+a `chmod` by name.
+A file renamed over another is given that one's mode before the rename, by
+an `fchmod` of its open handle (`mode_like`), a group's bits only where it
+is of that group, nothing from a file another user owns; nothing is
+chowned. `tools/file_create_check.py` (CI's fmt job) refuses
+`File::create`, `fs::write`, `.create(..)`, `create_dir_all`, `fs::copy`,
+a clone, an `fs::rename` in a function giving no mode and the like, by any
+name a `use` gives them, in `crates/*/src` outside tests, fennec-bench and
+fennec-fuzz, an exception allowed with why and how many times.

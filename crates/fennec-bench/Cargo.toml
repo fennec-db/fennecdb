@@ -8,6 +8,9 @@ publish = false
 # `make compare` runs the comparison; `beir` is asked for by name.
 default-run = "fennec-bench"
 
+[lints]
+workspace = true
+
 [dependencies]
 fennec-core = { path = "../fennec-core" }
 fennec-ql = { path = "../fennec-ql" }
