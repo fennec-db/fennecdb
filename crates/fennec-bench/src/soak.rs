@@ -120,6 +120,15 @@ const SILENT_AFTER: u64 = 10_000_000_000;
 /// hung before the guard has to.
 const WAIT_MAX: Duration = Duration::from_secs(540);
 
+/// A shell command that prints 1 where the file it is handed is there and
+/// was written in the last minute -- a compaction writing its side file
+/// (`<file>.beside`) -- and 0 otherwise. A kill leaves the side file of a
+/// compact it cut, and the server started again leaves it until its next
+/// compact makes it anew: by its being there, the second dry run of
+/// 2026-11-23 read the twelve minutes after its kill of minute 90 as a
+/// compaction writing, none running, and judged no memory in them.
+const WRITTEN_SINCE: &str = "sh -c '[ -e \"$1\" ] && [ $(( $(date +%s) - $(stat -c %Y \"$1\") )) -lt 60 ] && echo 1 || echo 0' sh";
+
 /// A step of the VM's clock against this host's, from one minute's look to
 /// the next, past which the line marks it: a fifth of the `@ttl` slack's
 /// second, well past the probe's own round trip of a few ms.
@@ -162,6 +171,7 @@ struct Opts {
     name: String,
     progress: Option<PathBuf>,
     kept: Option<PathBuf>,
+    logs: Option<PathBuf>,
     load_before: f64,
 }
 
@@ -173,7 +183,7 @@ const HELP: &str = "ycsb soak --sync 250|always (--rate <ops/s> [--label 50] | -
     [--replica-back-max 60] [--lag-max 5] [--catchup-max 300] [--recall-min 0.925]
     [--samples 3] [--disk-floor 3g] [--replication-buffer 64] [--out soak.tsv] [--run-id <id>]
     [--image fennecdb-ycsb] [--tools p6-tools] [--name p6] [--progress <file>]
-    [--kept <file>] [--load-before <load>]
+    [--kept <file>] [--logs <dir>] [--load-before <load>]
 ycsb soak report <soak.tsv> [<run-id>]";
 
 impl Opts {
@@ -220,6 +230,7 @@ impl Opts {
             name: "p6".into(),
             progress: None,
             kept: None,
+            logs: None,
             load_before: -1.0,
         };
         let mut i = 0;
@@ -271,6 +282,7 @@ impl Opts {
                 "--name" => o.name = v.clone(),
                 "--progress" => o.progress = Some(PathBuf::from(&v)),
                 "--kept" => o.kept = Some(PathBuf::from(&v)),
+                "--logs" => o.logs = Some(PathBuf::from(&v)),
                 "--load-before" => o.load_before = v.parse().expect("--load-before <load>"),
                 other => panic!("unknown argument {other}\n{HELP}"),
             }
@@ -515,6 +527,11 @@ struct Kit {
     /// outlive the run, for whoever reads why.
     keep: Arc<AtomicBool>,
     kept: Option<PathBuf>,
+    /// Where the servers' logs are written as their containers go
+    /// (`--logs`): the second dry run of 2026-11-23 counted 40 reads
+    /// through the replica answered 504, and nothing of either server was
+    /// left to say why.
+    logs: Option<PathBuf>,
 }
 
 impl Kit {
@@ -579,6 +596,7 @@ impl Kit {
     }
 
     fn clean(&self) {
+        self.keep_logs();
         for c in self.containers() {
             docker(&["rm", "-f", &c]);
         }
@@ -588,6 +606,53 @@ impl Kit {
             }
         }
         docker(&["network", "rm", &self.net()]);
+    }
+
+    /// Each server's log, every life of it (`docker start` keeps the
+    /// container's), its lines stamped by Docker, into `--logs` before the
+    /// container is removed: `<name>-server.log`, `<name>-replica.log`.
+    fn keep_logs(&self) {
+        use std::process::{Command, Stdio};
+        let Some(dir) = &self.logs else {
+            return;
+        };
+        for c in [self.server(), self.replica()] {
+            // None yet: the clean before a run starts.
+            if !docker(&["container", "inspect", "-f", "{{.Id}}", &c]).0 {
+                continue;
+            }
+            let path = dir.join(format!("{c}.log"));
+            let Ok(f) = std::fs::File::create(&path) else {
+                continue;
+            };
+            let Ok(e) = f.try_clone() else {
+                continue;
+            };
+            let Ok(mut child) = Command::new("docker")
+                .args(["logs", "--timestamps", &c])
+                .stdin(Stdio::null())
+                .stdout(f)
+                .stderr(e)
+                .spawn()
+            else {
+                continue;
+            };
+            let until = Instant::now() + Duration::from_secs(120);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < until => {
+                        std::thread::sleep(Duration::from_millis(50))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+            say(format!("{c}'s log kept: {}", path.display()));
+        }
     }
 
     /// The run's secrets as the containers read them (fennec-server's
@@ -734,7 +799,7 @@ impl Kit {
              echo fds $(ls /proc/1/fd | wc -l); \
              echo majflt $(cut -d' ' -f12 /proc/1/stat); \
              echo filesize $(stat -c %s /proc/1/root/data/{file}); \
-             echo compacting $(ls /proc/1/root/data/{file}.beside 2>/dev/null | wc -l); \
+             echo compacting $({WRITTEN_SINCE} /proc/1/root/data/{file}.beside); \
              head -1 /proc/stat; \
              echo vmfree $(df -kP /proc/1/root/data | awk 'NR == 2 {{print $4}}')"
         );
@@ -1842,6 +1907,24 @@ fn class(
     c
 }
 
+/// How far the open loop is behind its schedule at `now` (ns from the
+/// start), in seconds: the median connection's lag behind the operation it
+/// waits for or works on, none where it is ahead -- `None` at the peak,
+/// which keeps no schedule. A server that answers under the rate leaves
+/// every connection behind and the lag growing: the second dry run of
+/// 2026-11-23 fell behind at minute 13 and never caught up, 1 656 s behind
+/// at its end, and from minute 28 every operation was a restart's or a
+/// compact's backlog (`class`), its steady p99 written as 0 for none.
+fn behind_s(slots: &[Slot], now: u64) -> Option<f64> {
+    let lags: Vec<f64> = slots
+        .iter()
+        .map(|s| s.due.load(Ordering::Relaxed))
+        .filter(|&d| d != u64::MAX)
+        .map(|d| now.saturating_sub(d) as f64 / 1e9)
+        .collect();
+    (!lags.is_empty()).then(|| median(&lags))
+}
+
 /// A worker's latencies: an operation is timed from when it was due, and
 /// counted apart where it was a restart's or a compact's (`class`).
 struct Hists {
@@ -1866,13 +1949,16 @@ impl Hists {
 }
 
 /// A worker's own: its latencies since the minute's line took them, its
-/// log since the checker did, the start of what it has in flight and the
-/// operations it ended in the minute.
+/// log since the checker did, the start of what it has in flight, the
+/// operations it ended in the minute, and when the operation it waits for
+/// or works on was due (`u64::MAX` at the peak, which keeps no schedule):
+/// how far the open loop is behind (`behind_s`).
 struct Slot {
     hists: Mutex<Hists>,
     log: Mutex<Vec<Ev>>,
     inflight: AtomicU64,
     done: AtomicU64,
+    due: AtomicU64,
 }
 
 /// A reader beside the workers -- the side jobs', the end's sweep -- whose
@@ -1966,6 +2052,10 @@ struct Shared {
     /// so -- which every minute after would meet again: the first said,
     /// and the minute's loop ends the run on it (`stop_run`).
     fault: Mutex<Option<String>>,
+    /// The replication token, which `/_replication/status` asks: read on
+    /// both servers as a read through the replica answers 504
+    /// (`replication_said`).
+    repl_token: std::sync::OnceLock<String>,
 }
 
 impl Shared {
@@ -2008,6 +2098,7 @@ impl Shared {
                     log: Mutex::new(Vec::new()),
                     inflight: AtomicU64::new(u64::MAX),
                     done: AtomicU64::new(0),
+                    due: AtomicU64::new(u64::MAX),
                 })
                 .collect(),
             readers: vec![Reader {
@@ -2026,7 +2117,38 @@ impl Shared {
                 .collect(),
             notes: Mutex::new(Vec::new()),
             fault: Mutex::new(None),
+            repl_token: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Both servers' `/_replication/status` as they are now: the replica's
+    /// connection, change, lag, images and reconnects, the primary's change
+    /// and durable one -- said beside a read the replica answered 504, the
+    /// second dry run of 2026-11-23's 40 errors, which nothing of the run
+    /// could say the cause of.
+    fn replication_said(&self) -> String {
+        let Some(token) = self.repl_token.get() else {
+            return String::new();
+        };
+        let auth = format!("Authorization: Bearer {token}\r\n");
+        let look = |addr: &str| -> String {
+            let Ok(mut c) = http::Http::try_connect(addr, Duration::from_secs(5)) else {
+                return "no connection".into();
+            };
+            match c.try_request_with("GET", "/_replication/status", "text/plain", &auth, b"") {
+                Ok((200, body)) => {
+                    let t = String::from_utf8_lossy(body);
+                    t.chars().take(400).collect()
+                }
+                Ok((status, _)) => format!("{status}"),
+                Err(e) => e.to_string(),
+            }
+        };
+        format!(
+            "; the primary then {}; the replica {}",
+            look(&self.addr),
+            look(&self.raddr)
+        )
     }
 
     /// The run stops at the minute's end for `why`, the first fault said.
@@ -2218,7 +2340,13 @@ impl Worker<'_> {
                             said()
                         ));
                     }
-                    self.sh.failed(t, false, said);
+                    // A read the replica held past its wait: what each
+                    // server said of replication as it answered.
+                    let sh = self.sh;
+                    self.sh.failed(t, false, || match replica && status == 504 {
+                        true => format!("{}{}", said(), sh.replication_said()),
+                        false => said(),
+                    });
                     return Answer::Refused(status);
                 }
                 Err(e) => {
@@ -2651,6 +2779,10 @@ fn work(sh: &Shared, w: usize) {
             (Some(first), Some(e)) => {
                 let due = first + e.mul_f64(sent as f64);
                 sent += 1;
+                slot.due.store(
+                    due.saturating_duration_since(sh.t0).as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
                 let now = Instant::now();
                 std::thread::sleep(due.saturating_duration_since(now));
                 (due, due > now)
@@ -3063,7 +3195,12 @@ fn load_average() -> (f64, f64) {
 /// this one and Docker's (its VM, whose CPUs the look counts apart), by
 /// `ps`'s `%cpu` -- on macOS a decaying average of about the last minute,
 /// on Linux a process's own lifetime's, so there a rough sign alone.
-fn others_on_host() -> Option<f64> {
+///
+/// With it the three of them that took the most, by name and in cores:
+/// said on a minute they took a core or more. The second dry run of
+/// 2026-11-23 counted a core or more in 53 of its minutes, up to 2.9, and
+/// nothing named whose.
+fn others_named() -> Option<(f64, Vec<(String, f64)>)> {
     let me = std::process::id();
     let o = std::process::Command::new("ps")
         .args(["-A", "-o", "pcpu=,pid=,comm="])
@@ -3071,6 +3208,7 @@ fn others_on_host() -> Option<f64> {
         .ok()?;
     let text = String::from_utf8_lossy(&o.stdout);
     let mut sum = 0.0;
+    let mut top: Vec<(String, f64)> = Vec::new();
     for l in text.lines() {
         let mut w = l.split_whitespace();
         let (Some(cpu), Some(pid)) = (w.next(), w.next()) else {
@@ -3090,9 +3228,18 @@ fn others_on_host() -> Option<f64> {
         if pid.parse::<u32>().ok() == Some(me) || docker {
             continue;
         }
-        sum += cpu.parse::<f64>().unwrap_or(0.0);
+        let cpu = cpu.parse::<f64>().unwrap_or(0.0);
+        sum += cpu;
+        // Its name without its directories.
+        let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+        match top.iter_mut().find(|(n, _)| *n == name) {
+            Some(x) => x.1 += cpu / 100.0,
+            None => top.push((name, cpu / 100.0)),
+        }
     }
-    Some(sum / 100.0)
+    top.sort_by(|a, b| b.1.total_cmp(&a.1));
+    top.truncate(3);
+    Some((sum / 100.0, top))
 }
 
 /// A job beside the load, one at a time in the order asked, each with the
@@ -3531,6 +3678,10 @@ struct Settings {
     /// The servers' `--replication-buffer`, MiB: 64, the server's own
     /// default, where a start line from before it does not say.
     replication_buffer: u64,
+    /// The CPUs of Docker's VM (`docker info`'s `NCPU`): what a task the
+    /// engine cuts in shares spreads over (`fennec_core::threads`), a
+    /// thread a CPU but the one that asked. 0 where unknown.
+    cpus: u64,
 }
 
 impl Settings {
@@ -3551,6 +3702,7 @@ impl Settings {
             subscriptions: o.subscriptions as u64,
             threads: o.threads as u64,
             replication_buffer: o.replication_buffer,
+            cpus: 0,
         }
     }
 
@@ -3574,6 +3726,7 @@ impl Settings {
             ("subscriptions", self.subscriptions.to_string()),
             ("threads", self.threads.to_string()),
             ("replication_buffer", self.replication_buffer.to_string()),
+            ("cpus", self.cpus.to_string()),
         ]
     }
 
@@ -3595,6 +3748,7 @@ impl Settings {
             subscriptions: g("subscriptions")? as u64,
             threads: g("threads")? as u64,
             replication_buffer: g("replication_buffer").map_or(64, |x| x as u64),
+            cpus: g("cpus").map_or(0, |x| x as u64),
         })
     }
 }
@@ -3793,6 +3947,15 @@ fn stop_run(bench: &Kit, sh: Option<&Shared>, o: &Opts, why: &str) -> ! {
     std::process::exit(4);
 }
 
+/// The CPUs of Docker's VM, 0 where `docker info` does not say.
+fn vm_cpus() -> u64 {
+    let (ok, out) = docker_within(Duration::from_secs(60), &["info", "--format", "{{.NCPU}}"]);
+    match ok {
+        true => out.trim().parse().unwrap_or(0),
+        false => 0,
+    }
+}
+
 /// Whether the replica says it is connected and holds the change `target`.
 fn replica_ready(kit: &Kit, target: u64) -> bool {
     kit.status(kit.replica_port).is_some_and(|st| {
@@ -3968,7 +4131,11 @@ fn run(o: &Opts) {
         replica_port: http::free_port(),
         keep: Arc::new(AtomicBool::new(false)),
         kept: o.kept.clone(),
+        logs: o.logs.clone(),
     });
+    if let Some(dir) = &o.logs {
+        let _ = std::fs::create_dir_all(dir);
+    }
     bench.clean();
     let (ok, out) = docker(&["network", "create", &bench.net()]);
     assert!(ok, "docker network create: {out}");
@@ -4080,7 +4247,8 @@ fn run(o: &Opts) {
         o.sync,
         o.memory
     ));
-    let settings = Settings::of(o);
+    let mut settings = Settings::of(o);
+    settings.cpus = vm_cpus();
     let mut v: Vec<(&str, String)> = settings.values();
     v.extend([
         ("started", started.to_string()),
@@ -4122,6 +4290,7 @@ fn run(o: &Opts) {
         })
         .collect();
     let sh = Arc::new(Shared::new(o, addr.clone(), raddr.clone(), &ranges));
+    let _ = sh.repl_token.set(bench.token.clone());
     let mut handles = Vec::new();
     for w in 0..o.threads {
         let sh = Arc::clone(&sh);
@@ -4187,6 +4356,7 @@ fn run(o: &Opts) {
         last = now;
         // The latencies of the minute, and of the hour to it: the steady
         // operations apart from the restarts' and the compacts' (`class`).
+        let loop_behind = behind_s(&sh.slots, sh.ns());
         let mut h = Hists::new();
         let mut idle = 0;
         for s in &sh.slots {
@@ -4338,7 +4508,17 @@ fn run(o: &Opts) {
             _ => -1.0,
         };
         cpu_prev = cpu_now;
-        let others_host = others_on_host().unwrap_or(-1.0);
+        let named = others_named();
+        let others_host = named.as_ref().map_or(-1.0, |x| x.0);
+        if let Some((cores, top)) = named.filter(|x| x.0 >= 1.0) {
+            say(format!(
+                "minute {m}: other processes on this host took {cores:.1} cores, the most {}",
+                top.iter()
+                    .map(|(n, c)| format!("{n} {c:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let sample = match o.samples > 0 && !o.peak {
             true => sample(&sh, &mut sample_rng, o.samples),
             false => None,
@@ -4349,6 +4529,25 @@ fn run(o: &Opts) {
             .retain(|w| w.2.saturating_add(120_000_000_000) > now_ns);
         let hfree = host_free(&o.out);
         let vfree = look.and_then(|l| l.vm_free);
+        // The steady latencies where there were steady operations: with
+        // none -- every connection behind its schedule all minute, owing a
+        // restart's or a compact's backlog -- a quantile is no figure, and
+        // written as 0 it read as the best minute of the run.
+        let mut steady: Vec<(&str, String)> = Vec::new();
+        if h.steady.n > 0 {
+            steady.extend([
+                ("p50", format!("{:.0}", h.steady.pct(0.5))),
+                ("p99", format!("{:.0}", h.steady.pct(0.99))),
+                ("p999", format!("{:.0}", h.steady.pct(0.999))),
+                ("max", format!("{:.0}", h.steady.max as f64 / 1e3)),
+            ]);
+        }
+        if hour.n > 0 {
+            steady.push(("p99_hour", format!("{:.0}", hour.pct(0.99))));
+        }
+        if let Some(b) = loop_behind {
+            steady.push(("behind_s", format!("{b:.1}")));
+        }
         let mut v: Vec<(&str, String)> = vec![
             ("started", started.to_string()),
             ("life", life.to_string()),
@@ -4357,11 +4556,7 @@ fn run(o: &Opts) {
             ("ops_s", format!("{:.0}", ops as f64 / secs)),
             ("rate", format!("{:.0}", o.rate)),
             ("idle_workers", idle.to_string()),
-            ("p50", format!("{:.0}", h.steady.pct(0.5))),
-            ("p99", format!("{:.0}", h.steady.pct(0.99))),
-            ("p999", format!("{:.0}", h.steady.pct(0.999))),
-            ("max", format!("{:.0}", h.steady.max as f64 / 1e3)),
-            ("p99_hour", format!("{:.0}", hour.pct(0.99))),
+            ("steady_ops", h.steady.n.to_string()),
             ("restart_ops", h.restart.n.to_string()),
             ("p99_restart", format!("{:.0}", h.restart.pct(0.99))),
             ("compact_ops", h.compact.n.to_string()),
@@ -4434,6 +4629,7 @@ fn run(o: &Opts) {
             ("others_vm", format!("{others_vm:.2}")),
             ("clock_step", (stepped as u8).to_string()),
         ];
+        v.extend(steady);
         if let Some(ms) = checker.lost_ms_max.take() {
             v.push(("lost_ms_max", ms.to_string()));
         }
@@ -4543,12 +4739,23 @@ fn run(o: &Opts) {
         }
         let cell = format!("{}:{}:m{m:04}", o.sync, o.label);
         append_values(&o.out, "soak", &o.run_id, &cell, &v);
+        let tail = match (h.steady.n, loop_behind) {
+            (0, Some(b)) => format!("no operation on its schedule, the loop {b:.0} s behind"),
+            (0, None) => "no steady operation".to_string(),
+            (_, b) => format!(
+                "p99 {:.0} us, p99.9 {:.0}, max {:.0} ms{}",
+                h.steady.pct(0.99),
+                h.steady.pct(0.999),
+                h.steady.max as f64 / 1e6,
+                match b {
+                    Some(b) if b >= 1.0 => format!(", the loop {b:.0} s behind"),
+                    _ => String::new(),
+                }
+            ),
+        };
         say(format!(
-            "{m:>4} min: {:.0} ops/s, p99 {:.0} us, p99.9 {:.0}, max {:.0} ms; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB, lag {lag_s:.1} s, load {load1:.1}",
+            "{m:>4} min: {:.0} ops/s, {tail}; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB, lag {lag_s:.1} s, load {load1:.1}",
             ops as f64 / secs,
-            h.steady.pct(0.99),
-            h.steady.pct(0.999),
-            h.steady.max as f64 / 1e6,
             look.map(|l| l.file >> 20).unwrap_or(0),
             metric_sum(page.as_bytes(), "fennec_data_bytes") >> 20,
             look.map(|l| l.rss_anon >> 20).unwrap_or(0),
@@ -4561,7 +4768,7 @@ fn run(o: &Opts) {
             stop_run(&bench, Some(&sh), o, &format!("minute {m}: {why}"));
         }
         if o.peak && m > 1 {
-            peak.push(ops as f64 / secs);
+            peak.push((ops as f64, secs));
         }
         if !rup {
             sh.note(format!("the replica was found stopped at minute {m}"));
@@ -4851,11 +5058,26 @@ fn run(o: &Opts) {
     if let Some(ms) = checker.lost_ms_max.take() {
         v.push(("lost_ms_max", ms.to_string()));
     }
+    // The peak is what the server answered over every minute but the
+    // first -- the operations over their time, never the median minute's
+    // rate: under the run's memory the file doubles with the updates and
+    // the server compacts it on its own, and the minutes as the file nears
+    // twice its live bytes and while it compacts answer half as many. The
+    // second dry run of 2026-11-23 took the median of four minutes of a
+    // fresh file, 3 214 a second; its 80%, 2 571, held twelve minutes,
+    // until the file passed 1.8 GB under 512 MB and both servers compacted
+    // on their own, and was never held again -- 1 196-1 258 a second while
+    // the primary compacted.
     if o.peak && !peak.is_empty() {
-        peak.sort_by(|a, b| a.total_cmp(b));
-        let p = peak[peak.len() / 2];
+        let (ops, secs) = peak
+            .iter()
+            .fold((0.0, 0.0), |a: (f64, f64), x| (a.0 + x.0, a.1 + x.1));
+        let p = ops / secs.max(1.0);
         v.push(("peak_ops_s", format!("{p:.0}")));
+        let own = auto[0].0 + auto[0].1;
+        v.push(("peak_auto_compacts", own.to_string()));
         println!("peak {p:.0}");
+        println!("peak_compacts {own}");
     }
     append_values(&o.out, "soak", &o.run_id, &cell, &v);
     say(format!(
@@ -4943,7 +5165,7 @@ fn restart(
         &format!("{}-verify", bench.name),
         &bench.volume("data"),
         &format!(
-            "ls /data/soak.fennec.beside >/dev/null 2>&1 && echo BESIDE; \
+            "[ \"$({WRITTEN_SINCE} /data/soak.fennec.beside)\" = 1 ] && echo BESIDE; \
              if /tools/fennec verify /data/soak.fennec; then echo VERIFY-OK; \
              else cp /data/soak.fennec /data/{copy} && echo KEPT; exit 1; fi"
         ),
@@ -5044,7 +5266,7 @@ struct Judged {
     notes: Vec<String>,
 }
 
-pub const CRITERIA: [&str; 19] = [
+pub const CRITERIA: [&str; 20] = [
     "8 hours and an end line",
     "ran its planned minutes",
     "every minute has operations from every connection",
@@ -5064,6 +5286,7 @@ pub const CRITERIA: [&str; 19] = [
     "match and near answer as a scan does",
     "every key read back, after each restart and at the end",
     "no server died, none OOM-killed",
+    "the open loop back on its schedule within every kill interval",
 ];
 
 fn list(v: &[u64]) -> String {
@@ -5248,6 +5471,13 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
     out
 }
 
+/// A line of the primary's in a compaction: its side file written at the
+/// look, or one the server or the run ended in the minute.
+fn compacted(m: &HashMap<String, f64>) -> bool {
+    let g = |k: &str| m.get(k).copied().unwrap_or(0.0);
+    g("compacting") > 0.0 || g("auto_compacts") > 0.0 || g("compact") > 0.0
+}
+
 /// A memory look that says something of a leak: none with a compact
 /// writing at the look (`begin_beside` clones each store), none in a
 /// minute the server or the run compacted.
@@ -5395,7 +5625,19 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         Some((get(line(a + 59)?, k)?, get(minutes.last()?.1, k)?))
     };
     match (same, pair("p99_hour"), pair("p99_compact_hour")) {
-        (Some(a), Some((s0, s1)), Some((c0, c1))) if s0 > 0.0 => {
+        // An hour with no operation on its schedule has no steady p99 --
+        // the loop behind it, every operation a restart's or a compact's
+        // backlog -- and is not held to one: the line wrote none (0 before,
+        // which a last hour behind its schedule passed against any).
+        (Some(a), None, _) => v.push((
+            CRITERIA[3],
+            false,
+            format!(
+                "not judged: no operation on its schedule in minutes {a}-{} or in the last hour, the open loop behind it",
+                a + 59
+            ),
+        )),
+        (Some(a), Some((s0, s1)), Some((c0, c1))) if s0 > 0.0 && s1 > 0.0 => {
             let ok = s1 <= 1.25 * s0 && (c1 <= 1.25 * c0 || c0 == 0.0 && c1 == 0.0);
             v.push((
                 CRITERIA[3],
@@ -5452,7 +5694,17 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // at 80% of the peak, longer at 50%: the dry run of 2026-11-22, its
     // anonymous memory held to a flat line, failed every life on it, the
     // most +75.9%, its memory beyond the feed and the engine's own flat
-    // within a megabyte once the feed was full.
+    // within a megabyte once the feed was full. And it is judged between
+    // compactions, each stretch of ten quiet looks or more from its first
+    // five to its last five, as a life is between kills: a compaction
+    // drops what the engine held of the old file and builds it again, and
+    // the heap it let go of is the allocator's to keep or hand back. The
+    // second dry run of 2026-11-23 failed one life at +9.4%, its memory
+    // beyond flat at 12-16 MB through minutes 65-80, then 26 MB from the
+    // compaction of minutes 81-86 -- the engine's own down from some 60 MB
+    // to 40-48 at it -- and flat again; the other lives' compactions moved
+    // it by 5 MB at most. A leak grows inside a stretch; the steps across
+    // compactions are said beside the verdict.
     let cap = settings.map_or(64, |s| s.replication_buffer) as f64 * 1048576.0;
     let mut grew = Vec::new();
     let mut most = 0.0f64;
@@ -5461,20 +5713,52 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // compactions took (no compact of the run's in the minute) -- what a
     // life too few looks were left in says.
     let mut looks = Vec::new();
+    // The steps across compactions, said beside the verdict: the most, in
+    // bytes, and its minute.
+    let mut step: Option<(f64, u64)> = None;
     for (life, xs) in &lives {
         let feed = feed_held(xs, cap, *life == 0);
-        // Each settled quiet look: its anonymous memory, and that less what
-        // the server holds.
-        let quiet: Vec<(f64, f64)> = xs
+        // Each settled quiet look: the stretch between compactions it is
+        // in, its anonymous memory, that less what the server holds, and
+        // its minute. A compaction -- the run's or the server's own,
+        // writing at a look or ended in a minute -- starts a stretch.
+        let mut stretch = 0usize;
+        let quiet: Vec<(usize, f64, f64, u64)> = xs
             .iter()
             .zip(&feed)
             .skip(xs.len() - settled(xs).len())
-            .filter(|((_, m), _)| quiet_look(m, false))
-            .filter_map(|((_, m), f)| {
+            .filter_map(|((k, m), f)| {
+                if compacted(m) {
+                    stretch += 1;
+                }
+                if !quiet_look(m, false) {
+                    return None;
+                }
                 let anon = get(m, "rss_anon")?;
-                Some((anon, anon - get(m, "memory_bytes").unwrap_or(0.0) - f))
+                Some((
+                    stretch,
+                    anon,
+                    anon - get(m, "memory_bytes").unwrap_or(0.0) - f,
+                    *k,
+                ))
             })
             .collect();
+        // What the memory beyond what is held did across each compaction:
+        // the median of a stretch's last three quiet looks to the next's
+        // first three.
+        let parts: Vec<&[(usize, f64, f64, u64)]> = quiet.chunk_by(|a, b| a.0 == b.0).collect();
+        for w in parts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a.len() < 3 || b.len() < 3 {
+                continue;
+            }
+            let beyond =
+                |xs: &[(usize, f64, f64, u64)]| median(&xs.iter().map(|x| x.2).collect::<Vec<_>>());
+            let d = beyond(&b[..3]) - beyond(&a[a.len() - 3..]);
+            if step.is_none_or(|s| d > s.0) {
+                step = Some((d, b[0].3));
+            }
+        }
         let own = settled(xs)
             .iter()
             .filter(|(_, m)| {
@@ -5482,28 +5766,30 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 !quiet_look(m, false) && g("compact") == 0.0 && g("compact_ops") == 0.0
             })
             .count();
+        let long = parts.iter().map(|p| p.len()).max().unwrap_or(0);
         looks.push(format!(
-            "life {life} {} of {} ({own} in the server's own)",
+            "life {life} {} of {} ({own} in the server's own, {long} between two compactions at the most)",
             quiet.len(),
             settled(xs).len()
         ));
-        if quiet.len() < 10 {
-            continue;
-        }
-        judged_lives += 1;
-        let at = |xs: &[(f64, f64)], k: usize| -> f64 {
+        let at = |xs: &[(usize, f64, f64, u64)], k: usize| -> f64 {
             median(
                 &xs.iter()
-                    .map(|x| if k == 0 { x.0 } else { x.1 })
+                    .map(|x| if k == 0 { x.1 } else { x.2 })
                     .collect::<Vec<_>>(),
             )
         };
-        let (first, last) = (&quiet[..5], &quiet[quiet.len() - 5..]);
-        let g = (at(last, 1) - at(first, 1)) / at(first, 0).max(1.0);
-        most = most.max(g);
-        if g >= 0.05 {
-            grew.push(*life);
+        let mut judged = false;
+        for p in parts.iter().filter(|p| p.len() >= 10) {
+            judged = true;
+            let (first, last) = (&p[..5], &p[p.len() - 5..]);
+            let g = (at(last, 1) - at(first, 1)) / at(first, 0).max(1.0);
+            most = most.max(g);
+            if g >= 0.05 && !grew.contains(life) {
+                grew.push(*life);
+            }
         }
+        judged_lives += judged as usize;
     }
     v.push((
         CRITERIA[5],
@@ -5512,22 +5798,30 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             // Not a leak and not a pass: the run's data left nothing to
             // judge -- under the run's memory the server compacts on its
             // own, and a life whose minutes are mostly compactions has no
-            // ten quiet looks. Said so, each life's looks beside it.
+            // ten quiet looks between two. Said so, each life's looks
+            // beside it.
             0 => format!(
-                "NOT JUDGED, too few quiet looks: no life of the primary had ten from its fifth line, its other looks in a compaction -- quiet of settled: {}",
+                "NOT JUDGED, too few quiet looks: no life of the primary had ten between two compactions from its fifth line, its other looks in a compaction -- quiet of settled: {}",
                 match looks.is_empty() {
                     true => "no line names its life".to_string(),
                     false => looks.join(", "),
                 }
             ),
             _ => format!(
-                "{judged_lives} of {} lives of ten quiet looks or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of the first five to the last five's{}",
+                "{judged_lives} of {} lives of ten quiet looks between two compactions or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of a stretch's first five to its last five's{}{}",
                 lives.len(),
                 most * 100.0,
                 cap / 1048576.0,
                 match grew.is_empty() {
                     true => String::new(),
                     false => format!("; lives {}", list(&grew)),
+                },
+                match step {
+                    Some((d, k)) if d > 0.0 => format!(
+                        "; across a compaction it stepped {:+.1} MB at most (minute {k})",
+                        d / 1048576.0
+                    ),
+                    _ => String::new(),
                 }
             ),
         },
@@ -5587,7 +5881,16 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // with its doings. Each server within 2 of its run's median every
     // minute; and the primary, which starts again every half hour, within
     // 2 from the median of a life's first five looks to its last five --
-    // a leak of a few a life never leaves a run-wide band.
+    // a leak of a few a life never leaves a run-wide band. A task the
+    // engine cuts in shares runs them on a thread a CPU of the VM but the
+    // one that asked, joined before it returns (`vector::spread`, under
+    // `std::thread::scope`: an image's index, a graph's lists, an exact
+    // scan): a look that lands in one sees up to the CPUs less one more,
+    // and the next look none of them. Such a look is said apart, never
+    // failed; a thread left over is at the next look too. The second dry
+    // run of 2026-11-23 failed the primary on one look, minute 17, 7 more
+    // on the VM's 8 CPUs, back at 6 the next minute, 0 within each life.
+    let cpus = settings.map_or(0, |s| s.cpus) as f64;
     for (c, key, conn, rkey, rconn) in [
         (
             CRITERIA[7],
@@ -5612,19 +5915,39 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 continue;
             }
             let mid = median(&sorted);
-            let off: Vec<u64> = net
-                .iter()
-                .filter(|x| (x.1 - mid).abs() > 2.0)
-                .map(|x| x.0)
-                .collect();
+            let within = |x: f64| (x - mid).abs() <= 2.0;
+            // A look over the band by no more than a task in shares adds,
+            // the next look back within it.
+            let shares = |i: usize| {
+                let x = net[i].1;
+                k.ends_with("threads")
+                    && x > mid
+                    && x - mid <= 2.0 + (cpus - 1.0).max(0.0)
+                    && net.get(i + 1).is_some_and(|n| within(n.1))
+            };
+            let (mut off, mut spread) = (Vec::new(), Vec::new());
+            for (i, x) in net.iter().enumerate() {
+                match (within(x.1), shares(i)) {
+                    (true, _) => {}
+                    (false, true) => spread.push(x.0),
+                    (false, false) => off.push(x.0),
+                }
+            }
             ok &= off.is_empty();
             let (lo, hi) = sorted
                 .iter()
                 .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
             write!(
                 detail,
-                "{who}: median {mid:.0}, {lo:.0} to {hi:.0}{}",
-                minutes_said(&off)
+                "{who}: median {mid:.0}, {lo:.0} to {hi:.0}{}{}",
+                minutes_said(&off),
+                match spread.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        "; a task on the VM's {cpus:.0} CPUs at minutes {}, gone at the next look",
+                        list(&spread)
+                    ),
+                }
             )
             .unwrap();
             if who == "the primary" {
@@ -5767,11 +6090,18 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     let parts = |k: &str| -> Vec<f64> { minutes.iter().filter_map(|(_, m)| get(m, k)).collect() };
     let starts = parts("start_ms");
     let start_most = starts.iter().copied().fold(0.0f64, f64::max);
+    // An operation due in a restart waits out the backlog its connection
+    // had when the kill came too: the most the loop was behind at the look
+    // before a kill is the bound's (`behind_s`, a line before the kill's).
+    let backlog = minutes
+        .iter()
+        .filter(|(_, m)| get(m, "kill").is_some_and(|x| x > 0.0))
+        .filter_map(|(k, _)| line(k.checked_sub(1)?).and_then(|m| get(m, "behind_s")))
+        .fold(0.0f64, f64::max);
+    let bound = longest / 1e3 + 2.0 + backlog;
     v.push((
         CRITERIA[13],
-        settings.is_some()
-            && slow.is_empty()
-            && p99r.is_some_and(|x| x <= longest * 1e3 + 2e6),
+        settings.is_some() && slow.is_empty() && p99r.is_some_and(|x| x <= bound * 1e6),
         format!(
             "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; p99 of the operations due in one {}; {:.0} met a restart",
             longest / 1e3,
@@ -5779,9 +6109,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             median(&starts) / 1e3,
             start_most / 1e3,
             p99r.map_or("? (no end line)".into(), |x| format!(
-                "{:.1} s of {:.1}",
+                "{:.1} s of {bound:.1}{}",
                 x / 1e6,
-                longest / 1e3 + 2.0
+                match backlog > 0.0 {
+                    true => format!(" (the loop {backlog:.1} s behind its schedule at a kill)"),
+                    false => String::new(),
+                }
             )),
             sum("down")
         ),
@@ -5927,6 +6260,66 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             sum("r_died"),
             minutes_said(&gone)
         ),
+    ));
+    // The open loop's rate is the run's premise: a server that answers
+    // under it leaves every connection behind its schedule, and from then
+    // on each latency the run writes is the queue's. A compact's or a
+    // restart's backlog drains -- at 80% of the peak a kill's in four
+    // times as long as the server was gone -- so the loop must be back on
+    // its schedule (the median connection within a second of it) at some
+    // look of every stretch as long as the kill interval; one behind
+    // longer was asked for more than the server answers. The second dry run of 2026-11-23,
+    // at 80% of a peak measured over four minutes of a fresh file, fell
+    // behind at minute 13 as the file passed 1.8 GB under the run's 512 MB
+    // and never came back, 1 656 s behind at its end.
+    let every = settings.map_or(30, |s| match s.kill_every {
+        0 => 30,
+        k => k,
+    });
+    let looked: Vec<(u64, f64)> = minutes
+        .iter()
+        .filter_map(|(k, m)| Some((*k, get(m, "behind_s")?)))
+        .collect();
+    // Each stretch of lines behind (over a second), from its first to its
+    // last, and the most it was behind.
+    let mut stretches: Vec<(u64, u64, f64)> = Vec::new();
+    for &(k, b) in &looked {
+        if b <= 1.0 {
+            continue;
+        }
+        match stretches.last_mut() {
+            Some(x) if x.1 + 1 == k => {
+                x.1 = k;
+                x.2 = x.2.max(b);
+            }
+            _ => stretches.push((k, k, b)),
+        }
+    }
+    let long: Vec<&(u64, u64, f64)> = stretches
+        .iter()
+        .filter(|x| x.1 - x.0 + 1 >= every)
+        .collect();
+    let most = looked.iter().map(|x| x.1).fold(0.0f64, f64::max);
+    v.push((
+        CRITERIA[19],
+        !looked.is_empty() && looked.len() as u64 == n && long.is_empty(),
+        match (looked.is_empty(), long.is_empty()) {
+            (true, _) => "not judged: no line says how far behind its schedule the loop was".into(),
+            (false, true) => format!(
+                "back on it within every {every} minutes, {most:.1} s behind at the most{}",
+                match looked.len() as u64 == n {
+                    true => String::new(),
+                    false => format!("; {} of {n} lines say how far", looked.len()),
+                }
+            ),
+            (false, false) => format!(
+                "behind {}",
+                long.iter()
+                    .map(|x| format!("from minute {} to {}, {:.0} s at the most", x.0, x.1, x.2))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        },
     ));
     judged.notes = notes(&minutes, start, end, settings);
     judged
@@ -6511,6 +6904,7 @@ mod tests {
             subscriptions: 64,
             threads: 32,
             replication_buffer: 64,
+            cpus: 8,
         };
         let at = |m| schedule(m, 480, 30, 90, 20, 120, 50);
         assert_eq!(at(50), vec![Doing::Backup]);
@@ -6558,6 +6952,7 @@ mod tests {
             subscriptions: 64,
             threads: 32,
             replication_buffer: 64,
+            cpus: 8,
         };
         let mut out = String::new();
         let mut line = |cell: &str, m: &HashMap<&'static str, f64>| {
@@ -6611,6 +7006,8 @@ mod tests {
                 ("life", life),
                 ("ops", 60_000.0),
                 ("idle_workers", 0.0),
+                ("steady_ops", 50_000.0),
+                ("behind_s", 0.0),
                 ("p99_hour", 2_000.0),
                 ("p99_compact_hour", 5_000.0),
                 ("file", 2.0e9),
@@ -6745,6 +7142,18 @@ mod tests {
                 vec![CRITERIA[3]],
             ),
             (
+                // The loop behind its schedule all the last hour: no steady
+                // operation, no steady p99 -- written as 0, it passed.
+                "no operation on its schedule in the last hour",
+                Box::new(|m, x| {
+                    if (421..=480).contains(&m) {
+                        x.remove("p99_hour");
+                        x.insert("steady_ops", 0.0);
+                    }
+                }),
+                vec![CRITERIA[3]],
+            ),
+            (
                 "the compacts' tail drifting",
                 Box::new(|m, x| {
                     if m > 420 && m < u64::MAX {
@@ -6779,6 +7188,24 @@ mod tests {
                     }
                 }),
                 vec![CRITERIA[6]],
+            ),
+            (
+                "the same threads at two looks",
+                Box::new(|m, x| {
+                    if m == 200 || m == 201 {
+                        x.insert("threads", 147.0);
+                    }
+                }),
+                vec![CRITERIA[7]],
+            ),
+            (
+                "more threads than a task in shares makes",
+                Box::new(|m, x| {
+                    if m == 200 {
+                        x.insert("threads", 150.0);
+                    }
+                }),
+                vec![CRITERIA[7]],
             ),
             (
                 "a thread more each hour",
@@ -6887,6 +7314,18 @@ mod tests {
                     }
                 }),
                 vec![CRITERIA[13]],
+            ),
+            (
+                // Asked more than the server answers: 40 minutes behind,
+                // the kill of minute 60 among them -- its restart's bound
+                // takes the backlog in.
+                "the loop behind its schedule for 40 minutes",
+                Box::new(|m, x| {
+                    if (31..=70).contains(&m) {
+                        x.insert("behind_s", 100.0);
+                    }
+                }),
+                vec![CRITERIA[19]],
             ),
             (
                 "zero backups",
@@ -7006,6 +7445,34 @@ mod tests {
         }
         // What a right server does and the report must pass.
         let passes: Vec<(&str, Tweak)> = vec![
+            (
+                // A task in shares on the VM's 8 CPUs at one look: 7 more,
+                // none at the next.
+                "a task's threads at one look",
+                Box::new(|m, x| {
+                    if m == 200 {
+                        x.insert("threads", 147.0);
+                    }
+                }),
+            ),
+            (
+                // The heap a compaction let go of, kept: a step at the
+                // compaction of minute 100, flat on both sides of it.
+                "a step at a compaction, flat between",
+                Box::new(|m, x| {
+                    if (101..=120).contains(&m) {
+                        x.insert("rss_anon", 115e6);
+                    }
+                }),
+            ),
+            (
+                "the loop back on its schedule within each kill interval",
+                Box::new(|m, x| {
+                    if (31..=55).contains(&m) || (61..=85).contains(&m) {
+                        x.insert("behind_s", 100.0);
+                    }
+                }),
+            ),
             (
                 // The open loop's backlog after each restart in the hour's
                 // tail: two kills an hour cost more than one, and the last
@@ -7423,6 +7890,7 @@ mod tests {
             replica_port,
             keep: Arc::new(AtomicBool::new(false)),
             kept: None,
+            logs: None,
         }
     }
 
@@ -7529,6 +7997,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_loop_is_behind_by_its_median_connections_lag() {
+        let slot = |due: u64| Slot {
+            hists: Mutex::new(Hists::new()),
+            log: Mutex::new(Vec::new()),
+            inflight: AtomicU64::new(u64::MAX),
+            done: AtomicU64::new(0),
+            due: AtomicU64::new(due),
+        };
+        let s = 1_000_000_000;
+        // At the peak no connection keeps a schedule.
+        assert_eq!(behind_s(&[slot(u64::MAX), slot(u64::MAX)], 10 * s), None);
+        // Ahead of it -- waiting for an operation due later -- is not
+        // behind; one stuck connection does not move the median.
+        let slots = [slot(11 * s), slot(10 * s), slot(9 * s), slot(2 * s)];
+        assert_eq!(behind_s(&slots, 10 * s), Some(1.0));
+        let slots = [slot(s), slot(2 * s), slot(3 * s)];
+        assert_eq!(behind_s(&slots, 10 * s), Some(8.0));
     }
 
     #[test]
@@ -7854,7 +8342,7 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("life 0 "), "{said}");
-        assert!(said.contains("in the server's own)"), "{said}");
+        assert!(said.contains("in the server's own, "), "{said}");
         // A run with them judged says how many of how many.
         let j = judge(&synthetic(480, &|_, _| {}), None);
         let (_, pass, said) = &j[0].verdicts[5];

@@ -13,16 +13,19 @@
 #
 # from the repository's root, on a machine doing nothing else, one sync mode
 # a run: first the peak the mix reaches as fast as it is answered
-# (PEAK_MINUTES), then the soak open loop at each of FRACTIONS of it, in
-# turn: 8 hours each, 16 and a half for one sync mode as it comes. A
-# fraction that failed its report ends the run there, unless KEEP_GOING=1.
-# Each setting is an environment variable:
+# (PEAK_MINUTES, long enough for the file to double and the server to
+# compact it on its own: its operations over its time, which a soak's
+# rate must hold through both), then the soak open loop at each of
+# FRACTIONS of it, in turn: 8 hours each, 17 for one sync mode as it
+# comes. A fraction that failed its report ends the run there, unless
+# KEEP_GOING=1. Each setting is an environment variable:
 #
-#   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=4 RECORDS=1000000
+#   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=30 RECORDS=1000000
 #   MEMORY=512m THREADS=32 SUBSCRIPTIONS=64 KILL_EVERY=30
 #   COMPACT_EVERY=20 BACKUP_EVERY=120 BACKUP_AT=50 KILL_IN_COMPACT_EVERY=90
 #   LOSS_MS=650 (250; 0 under always) RESTART_MAX=120 RUN=p6 QUIET_LOAD=4
 #   KEEP_GOING=0 OUT=crates/fennec-bench/results/soak.tsv
+#   LOGS=$TMPDIR/<run's name>-logs (both servers' logs, kept as they go)
 #
 # A minute's line is appended to OUT (family `soak`) as the minute ends, so
 # a run cut short keeps what it measured; `ycsb soak report OUT <run>`
@@ -91,7 +94,10 @@ case $sync in
 esac
 MINUTES=${MINUTES:-480}
 FRACTIONS=${FRACTIONS:-50 80}
-PEAK_MINUTES=${PEAK_MINUTES:-4}
+# Four minutes of a freshly loaded file measured its best: the second dry
+# run of 2026-11-23 held 80% of them twelve minutes, until the file passed
+# 1.8 GB under 512 MB and both servers compacted on their own.
+PEAK_MINUTES=${PEAK_MINUTES:-30}
 RECORDS=${RECORDS:-1000000}
 MEMORY=${MEMORY:-512m}
 THREADS=${THREADS:-32}
@@ -150,6 +156,7 @@ need=$(((live * 17 / 2) / 1024 + (4 << 20)))
 ENV_FLOOR=$((live * 3 / 1024 + (1 << 20)))
 ENV_GATE='' ENV_MARKER="${TMPDIR:-/tmp}/$NAME.env" ENV_PROGRESS="${TMPDIR:-/tmp}/$NAME.progress"
 KEPT="${TMPDIR:-/tmp}/$NAME.kept"
+LOGS=${LOGS:-${TMPDIR:-/tmp}/$NAME-logs}
 free=$(df -k . | awk 'NR == 2 {print $4}')
 echo "needs $((need >> 20)) GB of disk, $((free >> 20)) GB free; refused over a load of $QUIET_LOAD"
 if [ "$free" -lt "$need" ]; then
@@ -226,7 +233,8 @@ step "$cargo" build --release --offline -q -p fennec-bench --bin ycsb --no-defau
 common="--sync $sync --records $RECORDS --memory $MEMORY --threads $THREADS
     --subscriptions $SUBSCRIPTIONS --tools $NAME-tools --out $OUT --kept $KEPT
     --image $ENV_IMAGE
-    --progress $ENV_PROGRESS --loss-ms $LOSS_MS --restart-max $RESTART_MAX"
+    --progress $ENV_PROGRESS --loss-ms $LOSS_MS --restart-max $RESTART_MAX
+    --logs $LOGS"
 
 # The environment failed run $1 (cell $2): marked so, and the run ends.
 env_failed() {
@@ -249,7 +257,7 @@ soak_names() {
     : >"$ENV_PROGRESS"
 }
 
-echo "$(date '+%F %H:%M') the peak, $PEAK_MINUTES minutes as fast as answered"
+echo "$(date '+%F %H:%M') the peak, $PEAK_MINUTES minutes as fast as answered; the servers' logs in $LOGS"
 soak_names "$NAME-peak"
 env_check "$need" "$ENV_VOLUME" || env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$ENV_WHY"
 peaks="${TMPDIR:-/tmp}/$NAME.peak"
@@ -271,12 +279,15 @@ stopped_at_once() {
 }
 stopped_at_once "$RUN-s$sync-peak"
 peak=$(awk '$1 == "peak" {print $2}' "$peaks")
+own=$(awk '$1 == "peak_compacts" {print $2}' "$peaks")
 rm -f "$peaks"
 [ -n "$peak" ] || {
     echo "no peak measured" >&2
     exit 1
 }
-echo "$(date '+%F %H:%M') the peak is $peak operations a second"
+echo "$(date '+%F %H:%M') the peak is $peak operations a second, over $PEAK_MINUTES minutes and ${own:-no} compactions of the server's own"
+[ "${own:-0}" = 0 ] &&
+    echo "$(date '+%F %H:%M') the server did not compact on its own in the peak: its rate may not hold through one (PEAK_MINUTES)"
 
 status=0
 for f in $FRACTIONS; do
