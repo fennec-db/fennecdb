@@ -95,7 +95,9 @@ jobs:
       # docs/design/text.md#tokenizer: the accent fold's table is written by
       # its script alone, through rustfmt, from Unicode's UnicodeData.txt --
       # kept by its version, so a run asks unicode.org only on a miss, and
-      # held to the checksum gen.py pins either way.
+      # held to the checksum gen.py pins either way. Every error is retried:
+      # curl's `--retry` alone takes a reset mid-transfer (exit 56) as final,
+      # and one dropped #681's merge group, its cache not yet on main.
       - id: unicode-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -105,7 +107,7 @@ jobs:
       - name: The accent fold's table is what tools/fold/gen.py writes
         run: |
           f=~/.cache/unicode/18.0.0/UnicodeData.txt
-          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/18.0.0/ucd/UnicodeData.txt; }
+          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$f" https://www.unicode.org/Public/18.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
       # Also a step of the `test` job (see there): on 2026-11-15, before
