@@ -234,7 +234,10 @@ fn every_tls_end_is_a_close_notify_the_shutdown_s_too() {
         );
         events.push_str(&line);
     }
-    // A connection whose handshake is done, its request not sent.
+    // A connection whose handshake is done, its request not sent: the
+    // client's handshake, which TLS 1.3 ends at the server's `Finished` --
+    // the server may still be reading the client's as the shutdown comes
+    // (held there by the test below).
     let mut waiting = dial();
 
     let (code, log) = server.terminate();
@@ -244,6 +247,131 @@ fn every_tls_end_is_a_close_notify_the_shutdown_s_too() {
     assert!(ended.is_ok(), "the stream: {ended:?}\n{log}");
     let ended = waiting.read_to_end(&mut rest);
     assert!(ended.is_ok(), "the waiting connection: {ended:?}\n{log}");
+}
+
+/// A connection whose client has its handshake done while the server's is
+/// not ends with its `close_notify` at the one shutdown too. TLS 1.3 ends
+/// the client's handshake at the server's `Finished` and the server's at
+/// the client's, which a relay holds here until the shutdown has begun --
+/// until the stream it wakes has read its end. The shutdown waits for the
+/// handshake and ends the connection as it ends one waiting for its
+/// request. Before, it was neither listed nor waited for: the exit cut it
+/// with a TCP end alone, and the test above failed once in a merge group
+/// where the server's thread read the client's `Finished` after the
+/// shutdown had looked. The handshake's end is to come within the
+/// shutdown's grace (`conn::END_GRACE`), as the stream's does: the
+/// `Finished` goes on from the thread that read the stream's end, no other
+/// woken for it (docs/design/http.md#tls).
+#[test]
+fn a_handshake_the_shutdown_comes_in_the_middle_of_ends_with_a_close_notify() {
+    let (pem, key) = (cert("server.pem"), cert("server.key"));
+    let file = tmp("https-shaking", "data.fennec");
+    let server = start(&[
+        "--tls-cert",
+        &pem,
+        "--tls-key",
+        &key,
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    run_tls(port, "create collection notes (t text)");
+    let mut stream = std::io::BufReader::new(dial_tls(("127.0.0.1", port)));
+    stream
+        .get_mut()
+        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut events = String::new();
+    while !events.contains("event: seed") {
+        let mut line = String::new();
+        assert!(
+            std::io::BufRead::read_line(&mut stream, &mut line).unwrap() > 0,
+            "{events}"
+        );
+        events.push_str(&line);
+    }
+    let (relay, held) = finished_held(port);
+    let mut shaking = dial_tls(relay);
+    let held = held.recv().expect("the relay");
+
+    // The stream's end says the shutdown has begun: then the server gets
+    // the client's `Finished`, passed on by the thread that read the end.
+    let stream = std::thread::spawn(move || {
+        let ended = stream.read_to_end(&mut Vec::new());
+        held.pass_on();
+        ended
+    });
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "{log}");
+    let ended = stream.join().unwrap();
+    assert!(ended.is_ok(), "the stream: {ended:?}\n{log}");
+    let ended = shaking.read_to_end(&mut Vec::new());
+    assert!(
+        ended.is_ok(),
+        "the connection in its handshake: {ended:?}\n{log}"
+    );
+}
+
+/// A TLS connection to `addr`, trusting the test CA, its handshake done.
+fn dial_tls(addr: impl std::net::ToSocketAddrs) -> fennec_tls::TlsStream {
+    let s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let client = fennec_tls::Client::trusting_pem_file(Path::new(&cert("ca.pem"))).unwrap();
+    client.dial(s, "localhost").unwrap()
+}
+
+/// A relay to `port` for one connection: it passes on everything the server
+/// sends, and of the client's bytes its first record -- its `ClientHello`
+/// -- then hands over both sockets, holding the rest, a TLS 1.3 client's
+/// `Finished`, until [`Held::pass_on`]. The client's handshake is then
+/// done, the server's not.
+fn finished_held(port: u16) -> (std::net::SocketAddr, std::sync::mpsc::Receiver<Held>) {
+    use std::net::{Shutdown, TcpListener};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (hand, held) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().expect("the client");
+        let mut server = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+        let (mut from, mut to) = (server.try_clone().unwrap(), client.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from, &mut to);
+            let _ = to.shutdown(Shutdown::Write);
+        });
+        // A record's head is five bytes, its length the last two.
+        let mut head = [0u8; 5];
+        client
+            .read_exact(&mut head)
+            .expect("the ClientHello's head");
+        let mut hello = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+        client.read_exact(&mut hello).expect("the ClientHello");
+        server.write_all(&head).unwrap();
+        server.write_all(&hello).unwrap();
+        let _ = hand.send(Held { client, server });
+    });
+    (addr, held)
+}
+
+/// A relayed connection's client bytes held after its `ClientHello`.
+struct Held {
+    client: TcpStream,
+    server: TcpStream,
+}
+
+impl Held {
+    /// What the client sent since, passed on from the calling thread --
+    /// one hop fewer than a relay's thread woken to, which the shutdown's
+    /// grace has to cover -- and the rest by a thread of its own.
+    fn pass_on(mut self) {
+        let mut sent = [0u8; 4096];
+        if let Ok(n) = self.client.read(&mut sent) {
+            let _ = self.server.write_all(&sent[..n]);
+        }
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut self.client, &mut self.server);
+            let _ = self.server.shutdown(std::net::Shutdown::Write);
+        });
+    }
 }
 
 /// A request over TLS is `"proto":"https"` in the audit log, a refusal

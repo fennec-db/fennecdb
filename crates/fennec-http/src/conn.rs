@@ -237,9 +237,13 @@ pub fn ending() -> bool {
 /// waits for them up to `grace`. A connection in the middle of an answer
 /// sends its end after it, if the process is still there. Before, the
 /// process exiting closed them all with a TCP end alone, which a TLS client
-/// reads as a stream cut short.
+/// reads as a stream cut short. A connection in its handshake is waited for
+/// too, and ends as its handshake does (`open::Shaking`).
 pub fn end_all(grace: Duration) {
-    ENDING.store(true, Ordering::Relaxed);
+    // Sequentially consistent, against a handshake's count
+    // ([`open::Shaking::begin`]): either it sees this, or the wait below
+    // sees it.
+    ENDING.store(true, Ordering::SeqCst);
     #[cfg(all(feature = "tls", any(unix, windows)))]
     {
         for wake in open::shut_reading() {
@@ -262,6 +266,7 @@ pub fn end_all(grace: Duration) {
 #[cfg(feature = "tls")]
 mod open {
     use std::net::TcpStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(any(unix, windows))]
     use std::sync::{Arc, Mutex};
 
@@ -282,10 +287,54 @@ mod open {
         OPEN.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// TLS connections in their handshake, not yet listed: [`end_all`]
+    /// waits for them as for those listed.
+    ///
+    /// [`end_all`]: super::end_all
+    static SHAKING: AtomicUsize = AtomicUsize::new(0);
+
+    /// A connection counted in its handshake, from before its first byte
+    /// is read to after it is listed ([`note`]): the one shutdown either
+    /// waits for its handshake and lists it, read side shut, or finds it
+    /// not begun. A TLS 1.3 client's handshake is done once it has the
+    /// server's `Finished`, the server's only once it reads the client's:
+    /// a shutdown landing between them found the connection neither
+    /// listed nor waited for, and the exit cut a session its client had
+    /// begun with no `close_notify`.
+    pub(super) struct Shaking(());
+
+    impl Shaking {
+        /// Counted, or `None` where the shutdown is ending the connections
+        /// already: a handshake begun now could send its `Finished` after
+        /// [`end_all`] stopped waiting, so none is, and the client's ends
+        /// before it had a session. Sequentially consistent with
+        /// [`end_all`]'s store: it sees this count, or this sees its store.
+        ///
+        /// [`end_all`]: super::end_all
+        pub(super) fn begin() -> Option<Shaking> {
+            SHAKING.fetch_add(1, Ordering::SeqCst);
+            let counted = Shaking(());
+            (!super::ENDING.load(Ordering::SeqCst)).then_some(counted)
+        }
+    }
+
+    impl Drop for Shaking {
+        fn drop(&mut self) {
+            SHAKING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `sock` listed, its handshake done; its read side shut where the
+    /// shutdown has begun: [`shut_reading`] ran before this, under the same
+    /// lock, and this connection ends as those it shut do.
     #[cfg(any(unix, windows))]
     pub(super) fn note(sock: &TcpStream) {
         use super::sock::AsRawFd;
-        open().insert(sock.as_raw_fd(), None);
+        let mut open = open();
+        open.insert(sock.as_raw_fd(), None);
+        if super::ending() {
+            let _ = sock.shutdown(std::net::Shutdown::Read);
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -322,9 +371,12 @@ mod open {
         wakers
     }
 
+    /// No connection listed nor in its handshake: the count read under the
+    /// lock, which a handshake done is listed under before it is let go of.
     #[cfg(any(unix, windows))]
     pub(super) fn none() -> bool {
-        open().is_empty()
+        let open = open();
+        open.is_empty() && SHAKING.load(Ordering::SeqCst) == 0
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -409,6 +461,9 @@ impl Conn {
     fn secured(stream: TcpStream, tls: &Tls) -> Option<Conn> {
         use std::time::Instant;
         let deadline = Instant::now() + tls.handshake;
+        // Counted until it is listed, so the one shutdown waits for its
+        // handshake ([`open::Shaking`]); none begun once that is ending.
+        let shaking = open::Shaking::begin()?;
         // The first byte, looked at before rustls reads it: a handshake's
         // record is 0x16, and a plain request's method a capital letter,
         // which rustls would answer with an alert its client prints as a
@@ -461,6 +516,7 @@ impl Conn {
         // session's reads and writes ([`Secured`]).
         let sock = tls.socket();
         open::note(&sock);
+        drop(shaking);
         Some(Conn::Tls(Box::new(Secured {
             tls: RefCell::new(tls),
             sock,

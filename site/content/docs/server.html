@@ -371,8 +371,10 @@ at most, so a scan or a client with the wrong CA cannot fill the log.</p>
 <p>Every connection the server ends on purpose ends with TLS's
 <code>close_notify</code>: an answer with <code>Connection: close</code>, a
 kept-alive connection's end, a stream of changes or a replica's stream, and
-each open connection at a shutdown. A client reading a stream to its end can
-tell that end from one cut short. A connection whose write failed gets none,
+each open connection at a shutdown, one still in its handshake too, which
+the shutdown waits for as it waits for the others; one that comes after the
+shutdown began is closed before its handshake. A client reading a stream to
+its end can tell that end from one cut short. A connection whose write failed gets none,
 and neither does a stream the router relays from a node that broke off. On
 Windows a shutdown also cuts an answer still being written to a slow
 client, which a Unix server lets finish for half a second, and resets a

@@ -2398,10 +2398,42 @@ its own `close_notify`, its session its own, and the shutdown waits up to
 descriptor, each let go of under the list's lock before it closes, so a
 shutdown never shuts a descriptor a new connection took
 (`every_tls_end_is_a_close_notify_the_shutdown_s_too`). Before, only a
-refused request's end sent one. On Windows the list keys a socket's
-`SOCKET` (`conn/windows.rs`), and a shut read side wakes no thread blocked
-reading it -- a connection waiting for its request was cut by the exit
-with a reset -- so the socket's pending I/O is cancelled after the
+refused request's end sent one. A handshake under way is waited for too:
+TLS 1.3 ends the client's handshake once it has the server's `Finished`,
+the server's only once it reads the client's, so a client can begin its
+session -- a request to send, an answer to read -- while the server's
+thread is still in `Tls::handshake`, not yet listed. A connection is
+counted from before its first byte is read until it is listed
+(`open::Shaking`, an atomic beside the list), `end_all` waiting until both
+are empty; one listed after the shutdown has begun -- looked at under the
+list's lock, which `end_all` shut the others' under -- has its read side
+shut there (`open::note`) and ends as they do, its `close_notify` sent. A
+handshake that would begin after the shutdown does not (`Shaking::begin`,
+sequentially consistent with `end_all`'s store: either it sees the
+shutdown or the wait sees its count), its socket closed before a byte of
+the server's, so no client has a session the exit cuts. Before, such a
+connection was neither listed nor waited for, and the exit ended it with a
+TCP end alone: `every_tls_end_is_a_close_notify_the_shutdown_s_too` failed
+once in a merge group on CI's macOS runner (#681): the connection it
+dials just before the `SIGTERM` had a server thread that took the client's
+`Finished` after the syncer's look had begun the shutdown. On this Mac
+beside busy loops it passed 700 runs of 700; its processes at background
+QoS (`taskpolicy -c background`, eight at a time, twelve busy loops) it
+failed 36 times in 64, each at that connection, and after, never there in
+400 (once at the stream, its `close_notify` later than `END_GRACE`). A
+relay holding the client's `Finished` until the shutdown has woken a
+stream makes the race every run
+(`a_handshake_the_shutdown_comes_in_the_middle_of_ends_with_a_close_notify`):
+20 failures in 20 before, none in 300 after beside sixteen busy loops,
+eight at a time. It stands on `END_GRACE` as the stream does, with more threads to
+run inside it -- the stream's, the test's, the handshake's: at background
+QoS it failed 19 times in 160, none in 160 with the grace made 5 s. The
+count is three atomic operations a TLS connection, beside its handshake's
+milliseconds, and nothing on a plain one; the release `fennec-server` was
+7 223 184 bytes either way. On Windows the list
+keys a socket's `SOCKET` (`conn/windows.rs`), and a shut read side wakes no
+thread blocked reading it -- a connection waiting for its request was cut
+by the exit with a reset -- so the socket's pending I/O is cancelled after the
 shutdown (`CancelIoEx`; std makes every socket overlapped), the read after
 it meeting the shut side. The cancel takes every request on the socket,
 not its read alone: a send blocked on a slow reader fails too, and an

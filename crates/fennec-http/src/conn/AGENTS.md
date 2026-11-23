@@ -71,6 +71,11 @@ connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request
 a 400; without the flags the `&Conn` is the `TcpStream` it was, nothing
 added. A failed handshake is counted by reason, logged a minute apart at
 most; an end on purpose sends `close_notify` (`conn::end_all`), never after
-a failed write or `Conn::cut`. A timeout set where the peer may have reset,
-bytes of its still to read, goes through `conn::unless_gone` (fennec-tls's
-own in a handshake): macOS's EINVAL there never fails a handshake done.
+a failed write or `Conn::cut`. The one shutdown waits for a handshake under
+way as for a connection listed -- counted from before its first byte until
+it is listed (`open::Shaking`), listed with its read side shut once the
+shutdown has begun (`open::note`) -- and lets none begin after it: TLS 1.3
+ends the client's handshake before the server's, and a session its client
+had begun was cut bare. A timeout set where the peer may have reset, bytes
+of its still to read, goes through `conn::unless_gone` (fennec-tls's own in
+a handshake): macOS's EINVAL there never fails a handshake done.
