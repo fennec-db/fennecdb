@@ -149,6 +149,14 @@ impl Head {
         Ok(req)
     }
 
+    /// The body's length its `Content-Length` says, `None` for a chunked
+    /// one: an image's import with one is read as it comes
+    /// (`admin::import`).
+    #[inline]
+    pub fn length(&self) -> Option<usize> {
+        self.length
+    }
+
     /// The request, its body left unread: for an answer refusing it from
     /// its head, after which the connection ends as a refused one does
     /// (`accept::end_refused`), or its body would be read as the next

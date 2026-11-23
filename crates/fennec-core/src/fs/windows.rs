@@ -70,6 +70,55 @@ extern "system" {
         info: *mut c_void,
         len: u32,
     ) -> i32;
+    fn GetFileInformationByHandle(file: *mut c_void, info: *mut ByHandleInfo) -> i32;
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`: a `FILETIME` is two `DWORD`s, aligned to
+/// four as each, so the struct is thirteen of them, 52 bytes.
+#[repr(C)]
+#[derive(Default)]
+struct ByHandleInfo {
+    attributes: u32,
+    times: [u32; 6],
+    volume_serial: u32,
+    size: [u32; 2],
+    links: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+/// Opens a link itself, not the file it leads to, as `lstat` reads one.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`: std's, refusing
+/// no other opener anything.
+const SHARE_ALL: u32 = 0x7;
+
+/// The file `f` is open on: its volume's serial number and its index on
+/// that volume (`GetFileInformationByHandle`), one file whatever names it --
+/// what `same-file` and the `fstat`'s device and inode compare.
+fn file_id(f: &File) -> io::Result<(u32, u64)> {
+    let mut info = ByHandleInfo::default();
+    // SAFETY: the handle is the file's, open across the call, and `info` is
+    // the struct the call fills, of the size it writes.
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let index = (u64::from(info.index_high) << 32) | u64::from(info.index_low);
+    Ok((info.volume_serial, index))
+}
+
+/// Whether `path` names, as no link, the file `f` is open on: the name
+/// opened for no access, sharing everything -- no writer refused for it --
+/// and as no link (`FILE_FLAG_OPEN_REPARSE_POINT`), so a link put at the
+/// name is a file of its own, as `lstat` reads one; then the two
+/// [`file_id`]s compared. `fs::still_named`, before a rename by the name.
+pub(super) fn named(f: &File, path: &Path) -> io::Result<bool> {
+    let there = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(SHARE_ALL)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    Ok(file_id(f)? == file_id(&there)?)
 }
 
 /// Refused by another handle's share mode, or by a delete pending on the
@@ -577,8 +626,6 @@ pub(super) mod tests {
     const FILE_DISPOSITION_FLAG_DELETE: u32 = 0x1;
     const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS: u32 = 0x2;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    /// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`: std's.
-    const SHARE_ALL: u32 = 0x7;
     /// `FILE_SHARE_READ | FILE_SHARE_WRITE`: an opener that refuses others
     /// a delete or a rename.
     const SHARE_NO_DELETE: u32 = 0x3;

@@ -299,7 +299,11 @@ answered 409) no longer deletes it unseen. The target's node takes it back
 only if it is a file this router noted with an identity. Otherwise the move
 fails 409, the tenant stays on its source, and the file is noted for an
 operator as a file a move found on its target, which the router did not
-note. A replica's attach that finds a file (409) has it follow only if the
+note. A target still installing an image of the name, such as an earlier
+move's whose answer was lost, answers 503 with <code>Retry-After</code>,
+and so does its take-back meanwhile: the move waits and asks again, the
+source frozen, for up to <code>--upstream-timeout</code>, and a repair
+keeps the note until the node says the file is gone. A replica's attach that finds a file (409) has it follow only if the
 node finds it still carrying the identity the router recorded for it, such
 as an old primary back from a failover; any other file is judged the same
 way as a move's. A node holding a file the router cannot judge is skipped

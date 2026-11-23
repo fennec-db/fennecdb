@@ -625,11 +625,24 @@ pub fn mode_like(new: &File, like: &Path) -> std::io::Result<()> {
 /// writer of its directory since -- and is not renamed into a database's
 /// place. An `fstat` and an `lstat`, a rewrite: `swap_in`'s, and before
 /// each rename of fennec-http's archive, a backup and an unseal.
-#[cfg(unix)]
+///
+/// On Windows the name is opened as no link, for no access and sharing
+/// everything, and its volume's serial number and file index compared with
+/// the handle's (`GetFileInformationByHandle`): until the image review's
+/// second round a rename there went by the name alone, held by nothing but
+/// `<file>.lock` -- `Sink::adopt` was handed the follower's handle and let
+/// it be.
+#[cfg(any(unix, windows))]
 pub fn still_named(file: &File, path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
-    if (open.dev(), open.ino()) != (there.dev(), there.ino()) {
+    #[cfg(unix)]
+    let same = {
+        use std::os::unix::fs::MetadataExt;
+        let (open, there) = (file.metadata()?, std::fs::symlink_metadata(path)?);
+        (open.dev(), open.ino()) == (there.dev(), there.ino())
+    };
+    #[cfg(windows)]
+    let same = windows::named(file, path)?;
+    if !same {
         return Err(std::io::Error::other(format!(
             "{} is no longer the file written: another was put at its name, which is not \
              renamed into the database's place",
@@ -807,6 +820,10 @@ impl FileSink {
         &self,
         disk: &mut Disk,
         #[cfg(not(windows))] image: File,
+        // On Windows, whether `from` still named the file written as its
+        // handle was let go ([`still_named`]), which fails the sink here as
+        // a Unix's look below does.
+        #[cfg(windows)] named: std::io::Result<()>,
         from: &Path,
     ) -> Result<()> {
         let swapped = (|| -> Result<File> {
@@ -835,6 +852,8 @@ impl FileSink {
             // On Windows the rename is tried again while another handle
             // refuses it, and the file flushed through the handle opened
             // here before its directory is (docs/design/windows.md).
+            #[cfg(windows)]
+            named?;
             #[cfg(windows)]
             let mut f = windows::swap(from, &self.path)?;
             f.seek(SeekFrom::End(0))?;
@@ -887,6 +906,14 @@ impl FileSink {
                 .truncate(false),
         )
         .open(&path)?;
+        // An image a replica's follower was taking beside the file when its
+        // process ended (`Sink::image_side`), as large as the database and
+        // never read: removed by whoever opens the file to write it, its
+        // owner under `<file>.lock` -- a primary's, a copy's, an app's, the
+        // shell's -- never by a tool that only looks. Left to the follower
+        // as it started, a copy started again as a primary kept it for good.
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = std::fs::remove_file(beside(&path, "taking"));
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
@@ -1256,11 +1283,13 @@ impl Sink for FileSink {
         // by its name (`swap_in`).
         #[cfg(not(windows))]
         self.swap_in(&mut disk, written, &tmp)?;
-        // Windows' swap opens it again itself, once this handle is closed.
+        // Windows' swap opens it again itself, once this handle is closed:
+        // the name held to it first.
         #[cfg(windows)]
         {
+            let named = still_named(&written, &tmp);
             drop(written);
-            self.swap_in(&mut disk, &tmp)?;
+            self.swap_in(&mut disk, named, &tmp)?;
         }
         drop(disk);
         self.rewritten();
@@ -1273,16 +1302,28 @@ impl Sink for FileSink {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &Path) -> Result<()> {
+    fn image_side(&self) -> Option<PathBuf> {
+        Some(beside(&self.path, "taking"))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &Path, written: &File) -> Result<()> {
         let mut disk = lock(&self.disk);
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
-        // Opened where it is no link (`O_NOFOLLOW`): the side file's
-        // handle stays with its writer, and a link put at `.beside` since
-        // is refused here, the database as it was, rather than followed.
+        // The handle that wrote it, the file appended to after: whatever
+        // was put at `side`'s name since -- a link, or a file, which an
+        // open by the name (`O_NOFOLLOW`) took and renamed in -- is not the
+        // one written, and `swap_in`'s `still_named` refuses it, the
+        // database as it was. On Windows, whose swap opens the file again
+        // by its name, the name is held to that handle's file the same way
+        // (by its file index), which until the image review's second round
+        // nothing did.
         #[cfg(not(windows))]
-        let image = private_beside(OpenOptions::new().read(true).write(true)).open(side)?;
+        let image = written.try_clone()?;
+        #[cfg(windows)]
+        let named = still_named(written, side);
         #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
         {
             self.mapping = None;
@@ -1290,7 +1331,7 @@ impl Sink for FileSink {
         #[cfg(not(windows))]
         self.swap_in(&mut disk, image, side)?;
         #[cfg(windows)]
-        self.swap_in(&mut disk, side)?;
+        self.swap_in(&mut disk, named, side)?;
         drop(disk);
         self.rewritten();
         Ok(())
@@ -1847,6 +1888,12 @@ impl SideFile {
         &self.path
     }
 
+    /// The file written, open: what a rename of it by its name is held to
+    /// first ([`still_named`]) -- a tenant's import (fennec-http).
+    pub fn file(&self) -> &File {
+        self.out.w.get_ref()
+    }
+
     /// Has what is written from here on kept out of the page cache, where
     /// the system lets a file ask: a compact whose new file would not fit
     /// in memory beside the old one ([`crate::cache::room`]). Written
@@ -1903,6 +1950,43 @@ impl SideFile {
     /// Taken in place of the database's file: not to be removed.
     pub fn adopted(&mut self) {
         self.adopted = true;
+    }
+
+    /// What is written so far, read back through the handle that wrote it:
+    /// an image taken for a database held in memory (`--no-mmap`), which
+    /// reads its file whole as its open would.
+    pub fn read_back(&mut self) -> Result<Vec<u8>> {
+        self.out.w.flush()?;
+        let f = self.out.w.get_mut();
+        let mut bytes = Vec::new();
+        f.seek(SeekFrom::Start(0))?;
+        f.read_to_end(&mut bytes)?;
+        f.seek(SeekFrom::End(0))?;
+        Ok(bytes)
+    }
+}
+
+/// `file` mapped whole, read-only: a database written beside and opened
+/// through the handle that wrote it, never by its name -- an archive's end
+/// as a consolidating round assembles it (fennec-http's `end_image`),
+/// whose documents are then read where they lie rather than read into
+/// memory.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+pub fn mapped(file: &File) -> Result<crate::store::Base> {
+    let len = file.metadata()?.len() as usize;
+    Ok(Arc::new(Mapping::of(file, len)?))
+}
+
+/// A side file as a byte stream: what a replica's image arriving off its
+/// stream is copied into as it is checked (fennec-http's `take_image`).
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+impl std::io::Write for SideFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        ImageOut::write(self, bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.w.flush()
     }
 }
 

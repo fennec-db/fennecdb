@@ -121,3 +121,8 @@ path = "tests/replica_retries.rs"
 [[test]]
 name = "read_replicas"
 path = "tests/read_replicas.rs"
+
+# Counts every thread's heap with an allocator of its own: a binary apart.
+[[test]]
+name = "move_peak"
+path = "tests/move_peak.rs"

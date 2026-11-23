@@ -230,8 +230,8 @@ impl Sink for Wrapped {
     fn side(&self) -> Option<PathBuf> {
         self.inner.side()
     }
-    fn adopt(&mut self, side: &Path) -> Result<()> {
-        self.inner.adopt(side)
+    fn adopt(&mut self, side: &Path, written: &std::fs::File) -> Result<()> {
+        self.inner.adopt(side, written)
     }
     fn sync_existing(&mut self) -> Result<()> {
         self.inner.sync_existing()

@@ -40,8 +40,8 @@
 //! `Archive::held`), never read as another tenant's or a choice it did not
 //! make.
 
-use crate::archive::{Archive, Parent, Took, Writer};
-use crate::replication::{self, read_head, read_kind, u64_at, Upstream, MESSAGE};
+use crate::archive::{Archive, Incoming, Parent, Took, Writer};
+use crate::replication::{self, kind_head, read_head, read_kind, u64_at, Upstream, MESSAGE};
 use crate::seal::Key;
 use crate::tenants::{a_device, shaped};
 use fennec_core::history::History;
@@ -172,7 +172,10 @@ enum NodeMessage {
         /// The node's time as it said hello.
         at: u64,
         lineage: Vec<(u64, u64)>,
-        image: Option<Vec<u8>>,
+        /// The length of the image that follows on the stream unread,
+        /// taken as it comes ([`Receiver::take_image`]) or passed over at
+        /// the next message.
+        image: Option<u64>,
     },
     Writes {
         name: String,
@@ -358,7 +361,9 @@ impl NodeArchive {
                     // a disk that refused a write is tried again, as a
                     // write's failure is, from where the archives stand.
                     let given = (seq, at, lineage);
-                    match self.hello(&mut writers, &name, given, image.as_deref(), report) {
+                    let mut take = |out: &mut dyn io::Write| rx.take_image(out);
+                    let incoming = image.map(|len| (len, &mut take as Incoming<'_>));
+                    match self.hello(&mut writers, &name, given, incoming, report) {
                         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                             report(&format!("tenant `{name}`: {e}; left as it is"));
                             writers.remove(&name);
@@ -482,15 +487,22 @@ impl NodeArchive {
         writers: &mut HashMap<String, Writer>,
         name: &str,
         (seq, said, lineage): (u64, u64, Vec<(u64, u64)>),
-        image: Option<&[u8]>,
+        image: Option<(u64, Incoming<'_>)>,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
+        let (len, mut image) = match image {
+            Some((len, take)) => (Some(len), Some(take)),
+            None => (None, None),
+        };
         let kept = self.kept(name)?;
         if !writers.contains_key(name) {
             writers.insert(name.into(), kept.archive.writer()?);
         }
         let w = writers.get_mut(name).expect("inserted above");
-        let took = kept.archive.hello(w, image, seq, lineage.clone())?;
+        // Not taken where the archive diverged: taken below, by the new one.
+        let took = kept
+            .archive
+            .hello_with(w, image.as_deref_mut(), seq, lineage.clone())?;
         let kept = match took {
             Took::Went => kept,
             Took::Diverged => {
@@ -514,7 +526,7 @@ impl NodeArchive {
                 ));
                 let fresh = self.kept(name)?;
                 let mut w = fresh.archive.writer()?;
-                if fresh.archive.hello(&mut w, image, seq, lineage)? != Took::Went {
+                if fresh.archive.hello_with(&mut w, image, seq, lineage)? != Took::Went {
                     return Err(io::Error::other("a new archive refused its first image"));
                 }
                 writers.insert(name.into(), w);
@@ -526,10 +538,10 @@ impl NodeArchive {
         if gone_at(&kept.archive)?.is_some() {
             kept.archive.note(false, said)?;
         }
-        if let Some(image) = image {
+        if let Some(len) = len {
             report(&format!(
                 "tenant `{name}`: image at change {seq} ({:.1} MB)",
-                image.len() as f64 / 1e6
+                len as f64 / 1e6
             ));
         }
         drop(kept);
@@ -725,7 +737,7 @@ fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
     let mut r = BufReader::with_capacity(MESSAGE + 64, s);
     let (status, length) = read_head(&mut r)?;
     replication::answered(&mut r, status, length, "node")?;
-    Ok(Receiver { r })
+    Ok(Receiver { r, unread: 0 })
 }
 
 /// What a node sends of each kind of message on its stream of every
@@ -743,6 +755,10 @@ fn node_sends(tag: u8) -> Option<u64> {
 
 struct Receiver<R = BufReader<crate::dial::Stream>> {
     r: R,
+    /// The bytes of an image a hello announced that are still on the
+    /// stream: passed over before the next message, where nothing took them
+    /// -- a tenant passed over, or one whose image was refused part way.
+    unread: u64,
 }
 
 /// A node's answer read off `r` as its archiver reads it -- the head, then
@@ -762,7 +778,7 @@ pub fn read_answer(r: &mut impl BufRead) -> (usize, io::Error) {
 fn read_each(r: &mut impl BufRead, n: &mut usize) -> io::Result<std::convert::Infallible> {
     let (status, length) = read_head(r)?;
     replication::answered(r, status, length, "node")?;
-    let mut rx = Receiver { r };
+    let mut rx = Receiver { r, unread: 0 };
     loop {
         rx.receive()?;
         *n += 1;
@@ -770,8 +786,21 @@ fn read_each(r: &mut impl BufRead, n: &mut usize) -> io::Result<std::convert::In
 }
 
 impl<R: BufRead> Receiver<R> {
+    /// The image the last hello announced, copied into `out` as it comes
+    /// and checked as it streams (`replication::take_image`); what it left
+    /// unread, refused part way, is passed over before the next message.
+    fn take_image(&mut self, out: &mut dyn io::Write) -> io::Result<()> {
+        let (taken, left) = replication::taken_of(&mut self.r, self.unread, out);
+        self.unread = left;
+        taken
+    }
+
     fn receive(&mut self) -> io::Result<NodeMessage> {
         let bad = || io::Error::other("the node sent a message it should not");
+        if self.unread > 0 {
+            let n = std::mem::take(&mut self.unread);
+            replication::passed_over(&mut self.r, n)?;
+        }
         let (tag, body) = read_kind(&mut self.r, node_sends)?;
         let named = |body: &[u8]| -> io::Result<(String, usize)> {
             let n = *body.first().ok_or_else(bad)? as usize;
@@ -804,15 +833,22 @@ impl<R: BufRead> Receiver<R> {
                 let seq = u64_at(h, 2);
                 let at = u64_at(h, 18);
                 let image = match h[1] {
+                    // Its name read, its image left on the stream to be
+                    // taken as it comes: read whole, a tenant's image was
+                    // the tenant in the archiver's memory.
                     1 => {
-                        let (tag, body) = read_kind(&mut self.r, node_sends)?;
-                        let (of, at) = named(&body)?;
-                        if tag != b'I' || of != name {
+                        let (tag, len) = kind_head(&mut self.r, node_sends)?;
+                        let mut n = [0u8; 1];
+                        io::Read::read_exact(&mut self.r, &mut n)?;
+                        let mut prefix = vec![n[0]; 1 + n[0] as usize];
+                        io::Read::read_exact(&mut self.r, &mut prefix[1..])?;
+                        let (of, at) = named(&prefix)?;
+                        let left = len.checked_sub(at as u64);
+                        if tag != b'I' || of != name || left.is_none() {
                             return Err(io::Error::other("the node promised an image"));
                         }
-                        let mut body = body;
-                        body.drain(..at);
-                        Some(body)
+                        self.unread = left.unwrap_or(0);
+                        Some(self.unread)
                     }
                     _ => None,
                 };

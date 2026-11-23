@@ -1090,10 +1090,10 @@ fn a_node_refuses_to_promote_a_copy_that_is_not_its_tenant_unless_forced() {
         call(n.port, method, target, body, Some("adm-refuse1"))
     };
     assert_eq!(admin("PUT", "/_admin/tenants/t", "").0, 201);
-    let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-    let from = format!(r#"{{"from":"http://{}"}}"#, gone.local_addr().unwrap());
-    drop(gone);
-    let (status, body) = admin("POST", "/_admin/tenants/t/follow", &from);
+    // Port 1, which no test's server takes: a port let go of is the next
+    // `bind` to port 0's (`docs/design/conventions.md`, *Ports*).
+    let from = r#"{"from":"http://127.0.0.1:1"}"#;
+    let (status, body) = admin("POST", "/_admin/tenants/t/follow", from);
     assert_eq!(status, 200, "{body}");
     let (status, body) = admin("POST", "/_admin/tenants/t/promote", "");
     assert_eq!(status, 409, "a copy that took nothing was promoted: {body}");

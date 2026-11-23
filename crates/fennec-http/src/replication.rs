@@ -56,6 +56,7 @@
 
 use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
+use fennec_core::engine::PinnedImage;
 use fennec_core::prelude::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -895,11 +896,21 @@ impl Sink for Tee {
     fn side(&self) -> Option<std::path::PathBuf> {
         self.file.side()
     }
+    /// Passed on, so a replica that has replicas of its own takes its
+    /// primary's image into a file beside its own as one without does.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.file.image_side()
+    }
     /// The side file holds every write, and is fsynced before it takes the
     /// file's place.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> fennec_core::error::Result<()> {
-        self.file.adopt(side)?;
+    fn adopt(
+        &mut self,
+        side: &std::path::Path,
+        written: &std::fs::File,
+    ) -> fennec_core::error::Result<()> {
+        self.file.adopt(side, written)?;
         self.feed.mark_durable(self.feed.seq());
         Ok(())
     }
@@ -1419,6 +1430,161 @@ pub(crate) fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Res
     Ok(())
 }
 
+/// An image's message: its head, `before`, then the image written as it
+/// is read ([`PinnedImage::write_to`]) -- its documents from the database's
+/// file and segments as they stood at the pin, never gathered. Built whole
+/// in the primary's memory, an image was a second copy of the database
+/// there, and one larger than that memory was killed at its first follow
+/// (docs/design/replication.md#an-image-sent-as-it-is-read).
+pub(crate) fn image_message(
+    out: &mut impl Write,
+    tag: u8,
+    before: &[&[u8]],
+    image: &PinnedImage,
+) -> io::Result<()> {
+    let len = before.iter().map(|p| p.len() as u64).sum::<u64>() + image.len();
+    let mut head = [0u8; 9];
+    head[0] = tag;
+    head[1..].copy_from_slice(&len.to_le_bytes());
+    out.write_all(&head)?;
+    for p in before {
+        out.write_all(p)?;
+    }
+    image.write_to(out)
+}
+
+/// The least an image a server sends -- a follow's, a backup's, an
+/// archive's, a node stream's, a move's -- goes out at, in bytes a second,
+/// past [`SILENCE`]: its time is that and a second more for every 64 KiB
+/// its receiver took ([`Pace`]), and past it the server ends the stream.
+/// A pin holds the image until it is out -- each collection's id index (12
+/// bytes a row), up to 8 MB of the open segment copied, and the disk of a
+/// file a compact renamed over since -- and the socket's write timeout
+/// alone bounds only a receiver taking nothing: one taking a few bytes
+/// within each held it for as long as it liked. 512 kbit/s is far below a
+/// receiver that can keep a copy -- a replica, a backup, an archiver or a
+/// move's target, each writing to a disk; a 254 MB image went out in 40 ms
+/// on loopback and is taken in under a second -- and holds a 1 GiB image,
+/// a node's largest, to some 4.6 hours. A bound nearer a working link's
+/// rate would end a slow replica's image for good, sent again and pinned
+/// again at every try, which costs the primary more than one slow send.
+const IMAGE_RATE: u64 = 64 << 10;
+
+/// [`Pace`]'s grace in milliseconds and its bytes a second: [`SILENCE`]
+/// and [`IMAGE_RATE`], but where a test set its own ([`set_image_pace`]).
+static PACE: [AtomicU64; 2] = [
+    AtomicU64::new(SILENCE.as_millis() as u64),
+    AtomicU64::new(IMAGE_RATE),
+];
+
+/// Holds every image this process sends or takes to `grace` and `rate`
+/// bytes a second ([`Pace`]): a test's, whose receiver reads slower than
+/// it in seconds rather than hours.
+#[doc(hidden)]
+pub fn set_image_pace(grace: Duration, rate: u64) {
+    PACE[0].store(grace.as_millis() as u64, Ordering::Relaxed);
+    PACE[1].store(rate.max(1), Ordering::Relaxed);
+}
+
+/// An image going out: when it began, and how many of its bytes its
+/// connection took.
+pub(crate) struct Pace {
+    began: Instant,
+    sent: u64,
+}
+
+impl Pace {
+    pub(crate) fn new() -> Pace {
+        Pace {
+            began: Instant::now(),
+            sent: 0,
+        }
+    }
+
+    /// Whether `sent` bytes in `took` kept the pace: [`IMAGE_RATE`] past
+    /// [`SILENCE`]. What the sender ends an image by, and what its receiver
+    /// says a cut came from.
+    fn kept(sent: u64, took: Duration) -> bool {
+        let (grace, rate) = (
+            PACE[0].load(Ordering::Relaxed),
+            PACE[1].load(Ordering::Relaxed),
+        );
+        let earned = grace.saturating_add(sent.saturating_mul(1000) / rate);
+        took.as_millis() as u64 <= earned
+    }
+
+    /// Before each write of the image to `conn`, in the writer under the
+    /// stream's buffer, where a slow receiver's write blocks: past its
+    /// pace, the image is ended, said in the log, and the stream with it.
+    fn check(&self, conn: &crate::conn::Conn) -> io::Result<()> {
+        let took = self.began.elapsed();
+        if Pace::kept(self.sent, took) {
+            return Ok(());
+        }
+        let peer = conn.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let words = slower();
+        crate::log!(
+            "replication: the image to {peer} ended, {} of its bytes taken in {} s: {words}",
+            self.sent,
+            took.as_secs(),
+        );
+        Err(io::Error::new(io::ErrorKind::TimedOut, words))
+    }
+
+    /// `n` more of the image's bytes taken.
+    fn took(&mut self, n: usize) {
+        self.sent += n as u64;
+    }
+}
+
+/// What an image taken too slowly is ended with: the sender's log line, and
+/// its receiver's words for the cut ([`taken_of`]).
+fn slower() -> String {
+    let rate = PACE[1].load(Ordering::Relaxed);
+    format!(
+        "a server ends an image taken slower than {} KiB a second",
+        rate >> 10
+    )
+}
+
+/// A stream's connection as its buffer writes it: an image held to its
+/// pace while one goes out (`image`), each write of it looked at before it
+/// may block. The follow's stream and a move's export write through it --
+/// one writer type, whose code the binary holds once -- and the node's
+/// stream through its own (`node_stream`'s `Out`).
+pub(crate) struct Sending<'a> {
+    pub(crate) conn: &'a crate::conn::Conn,
+    pub(crate) image: Option<Pace>,
+}
+
+impl Write for Sending<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut conn = self.conn;
+        paced(&mut self.image, conn, || conn.write(buf))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.conn)
+    }
+}
+
+/// [`Pace::check`] and [`Pace::took`] around a write of `pace`'s image
+/// through `write`: the node stream's.
+pub(crate) fn paced(
+    pace: &mut Option<Pace>,
+    conn: &crate::conn::Conn,
+    write: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    if let Some(p) = pace {
+        p.check(conn)?;
+    }
+    let n = write()?;
+    if let Some(p) = pace {
+        p.took(n);
+    }
+    Ok(n)
+}
+
 pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -1475,7 +1641,9 @@ fn stream(
     // the image or the cursor one record off.
     let (seq, lineage, epoch, image) = {
         // An image of what has landed: a block's writes reach the replica
-        // as the record it lands as, or never.
+        // as the record it lands as, or never. Pinned, and written out
+        // once the lock is let go ([`image_message`]); plain where the
+        // follower reads no sums.
         let g = crate::held::read(db);
         let now = g.change_seq();
         let epoch = feed.epoch();
@@ -1483,10 +1651,10 @@ fn stream(
         if go_on {
             (since, g.history().clone(), epoch, None)
         } else {
-            (now, g.history().clone(), epoch, Some(g.snapshot()))
+            (now, g.history().clone(), epoch, Some(g.pin_image(!sums)))
         }
     };
-    let image = match image.map(|i| plain_unless(sums, i)).transpose() {
+    let image = match image.transpose() {
         Ok(i) => i,
         Err(e) => {
             let _ = Response::error(500, &e.to_string()).write(out, false, false);
@@ -1534,14 +1702,21 @@ fn stream(
     let mut hello = vec![VERSION, image.is_some() as u8];
     hello.extend_from_slice(&u64s(&[seq, feed.durable(), now_ms()]));
     hello.extend_from_slice(&lineage.encode());
-    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, *out);
+    let sending = Sending {
+        conn: out,
+        image: None,
+    };
+    let mut w = io::BufWriter::with_capacity(MESSAGE + 64, sending);
     let opened = w.write_all(head.as_bytes()).and_then(|_| {
         message(&mut w, b'H', &[&hello])?;
         if let Some(image) = &image {
-            message(&mut w, b'I', &[image])?;
+            // Held to its pace until it is out, its last bytes flushed.
+            w.get_mut().image = Some(Pace::new());
+            image_message(&mut w, b'I', &[], image)?;
         }
         w.flush()
     });
+    w.get_mut().image = None;
     drop(image);
     if opened.is_err() {
         return;
@@ -1691,7 +1866,12 @@ pub enum Message {
         durable: u64,
         lineage: Vec<(u64, u64)>,
     },
-    Image(Vec<u8>),
+    /// An image of this many bytes, which follow on the stream unread: the
+    /// receiver takes them as they come ([`Receiver::take_image`]) before
+    /// it reads another message. Read whole, an image was the database in
+    /// the memory of whatever took it -- a replica, `fennec backup`, an
+    /// archiver -- and one larger than that memory never followed.
+    Image(u64),
     /// Writes numbered on from `first`, each with the time it was appended.
     Writes {
         first: u64,
@@ -1886,8 +2066,155 @@ impl Receiver {
     }
 
     pub fn receive(&mut self) -> io::Result<Message> {
-        let (tag, body) = read_message(&mut self.r)?;
-        decode(tag, body)
+        let (tag, len) = kind_head(&mut self.r, primary_sends)?;
+        if tag == b'I' {
+            return Ok(Message::Image(len));
+        }
+        decode(tag, kind_body(&mut self.r, tag, len)?)
+    }
+
+    /// The image a [`Message::Image`] announced, its `len` bytes copied
+    /// into `out` as they come, every record held to its sum as it streams
+    /// past ([`take_image`]).
+    pub fn take_image(&mut self, len: u64, out: &mut dyn Write) -> io::Result<()> {
+        take_image(&mut self.r, len, out)
+    }
+}
+
+/// An image's `len` bytes off `r`, each written into `out` as it comes, and
+/// every record held to its sum as it streams past
+/// (`fennec_core::engine::check_reader`, `fennec verify`'s check, a stretch
+/// held at a time): what a replica, `fennec backup` and an archiver take an
+/// image with, and a node a move's (`Tenants::import_from`). Read into
+/// memory whole and checked after (`check_records`), an image was the
+/// database in the taker's memory, twice and more for a replica, which
+/// loaded it into a database of its own there too: one larger than that
+/// memory never followed, never backed up, never moved. A stream that ends
+/// before `len` is cut short (`UnexpectedEof`), the reader's other errors
+/// -- a halt, a timeout -- and `out`'s as they came, damage refused in
+/// words; what went into `out` before a refusal is no image.
+pub(crate) fn take_image(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> io::Result<()> {
+    taken_of(r, len, out).0
+}
+
+/// [`take_image`], and how many of the image's bytes it left on the
+/// stream unread: a node's archiver passes them over before the next
+/// message where a tenant's image is refused part way (`node_archive`).
+/// Over a `dyn Read`, one type of its own whatever the stream: as a `dyn
+/// Read` for the check, each type copying from was a reader's every
+/// method made again, some 2.5 KB of fennec-server's code a type.
+pub(crate) fn taken_of(r: &mut dyn Read, len: u64, out: &mut dyn Write) -> (io::Result<()>, u64) {
+    /// The stream, the image's `left` bytes of it alone, copied into
+    /// `out` as they are read; `ended` where it ran out before them.
+    struct Copied<'a> {
+        r: &'a mut dyn Read,
+        left: u64,
+        out: &'a mut dyn Write,
+        ended: bool,
+    }
+    impl Read for Copied<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let most = usize::try_from(self.left).map_or(buf.len(), |l| l.min(buf.len()));
+            if most == 0 {
+                return Ok(0);
+            }
+            let n = self.r.read(&mut buf[..most])?;
+            if n == 0 {
+                self.ended = true;
+                return Ok(0);
+            }
+            self.left -= n as u64;
+            self.out.write_all(&buf[..n])?;
+            Ok(n)
+        }
+    }
+    let began = Instant::now();
+    let mut copied = Copied {
+        r,
+        left: len,
+        out,
+        ended: false,
+    };
+    let checked = fennec_core::engine::check_reader(&mut copied);
+    let left = copied.left;
+    if copied.ended {
+        // Taken slower than a sender holds an image to, the cut is said to
+        // be its end ([`Pace`]), which the sender's log says too.
+        let (got, took) = (len - left, began.elapsed());
+        let mut words = format!("an image cut short of its {len} bytes");
+        if !Pace::kept(got, took) {
+            words = format!("{words}, {got} taken in {} s: {}", took.as_secs(), slower());
+        }
+        return (
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, words)),
+            left,
+        );
+    }
+    let r = match checked {
+        Ok(_) => Ok(()),
+        Err(fennec_core::error::Error::Io(e)) => Err(io::Error::other(e)),
+        Err(e) => Err(io::Error::other(format!(
+            "the image of {len} bytes does not hold: {e}"
+        ))),
+    };
+    (r, left)
+}
+
+/// An image's `len` bytes off `r`, read and let go of: a stream read for
+/// its messages alone ([`read_answer`] with no copy).
+pub(crate) fn passed_over(r: &mut impl Read, len: u64) -> io::Result<()> {
+    if io::copy(&mut r.take(len), &mut io::sink())? < len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("a `I` message cut short of its {len} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// An image arrived: written into the file beside the copy's own, its
+/// follow record after it, synced; or, for a copy whose sink has no file,
+/// in memory.
+enum Arrived {
+    Side(fennec_core::fs::SideFile),
+    Whole(Vec<u8>),
+}
+
+/// An image a hello promised at change `seq` on `lineage`, its `len` bytes
+/// off `r`, taken for a copy whose image side is `side`
+/// (`Database::image_side`): written into a file there as it comes and
+/// checked as it streams ([`take_image`]), then the record saying the copy
+/// follows `lineage` appended and the file synced -- the image the copy's
+/// file becomes, whole, before anything of the copy changes. Its heap a
+/// constant: the stream's buffer and the check's. Refused, the file goes
+/// as it drops. A copy whose sink has no file takes it in memory, grown as
+/// it comes: the fuzzer's, and a test's -- a server's copy is a file's, a
+/// tenant's too.
+fn arrived(
+    r: &mut dyn Read,
+    len: u64,
+    lineage: &[(u64, u64)],
+    side: Option<std::path::PathBuf>,
+) -> io::Result<Arrived> {
+    let follows = History {
+        lineage: lineage.to_vec(),
+        following: true,
+    }
+    .record();
+    match side {
+        Some(path) => {
+            let mut side = fennec_core::fs::SideFile::create(&path).map_err(io::Error::other)?;
+            take_image(r, len, &mut side)?;
+            side.write_all(&follows)?;
+            side.sync().map_err(io::Error::other)?;
+            Ok(Arrived::Side(side))
+        }
+        None => {
+            let mut bytes = Vec::new();
+            take_image(r, len, &mut bytes)?;
+            bytes.extend_from_slice(&follows);
+            Ok(Arrived::Whole(bytes))
+        }
     }
 }
 
@@ -1909,7 +2236,6 @@ fn decode(tag: u8, body: Vec<u8>) -> io::Result<Message> {
                     .lineage,
             }
         }
-        b'I' => Message::Image(body),
         b'W' => {
             let n = body.get(8..16).ok_or_else(bad)?;
             let n = u64::from_le_bytes(n.try_into().unwrap());
@@ -1949,7 +2275,7 @@ fn decode(tag: u8, body: Vec<u8>) -> io::Result<Message> {
 }
 
 /// A primary's answer read off `r` as a replica reads it -- [`read_head`],
-/// then each message held to its kind's bound ([`read_message`]) and
+/// then each message held to its kind's bound ([`kind_head`]) and
 /// decoded as [`Receiver::receive`] decodes it -- until one is refused or
 /// the bytes end: how many messages it read, and what ended it. Given a
 /// `copy`, an image its hello promised is taken as a follower takes one:
@@ -1975,32 +2301,40 @@ fn read_each(
 ) -> io::Result<std::convert::Infallible> {
     let (status, length) = read_head(r)?;
     answered(r, status, length, "primary")?;
-    let mut promised = None;
+    let mut promised: Option<(u64, Vec<(u64, u64)>)> = None;
     loop {
-        let (tag, body) = read_message(r)?;
-        let message = decode(tag, body)?;
-        *n += 1;
-        let Some(copy) = copy.as_deref_mut() else {
+        let (tag, len) = kind_head(r, primary_sends)?;
+        if tag == b'I' {
+            let Some(copy) = copy.as_deref_mut() else {
+                passed_over(r, len)?;
+                *n += 1;
+                continue;
+            };
+            let Some((seq, lineage)) = promised.take() else {
+                return Err(io::Error::other(
+                    "the primary sent an image it did not promise",
+                ));
+            };
+            let image = arrived(r, len, &lineage, copy.image_side())?;
+            *n += 1;
+            let fresh = loaded(image, copy.is_mapped(), seq)?;
+            fresh.adopt_by(copy).map_err(io::Error::other)?;
+            copy.follow(lineage).map_err(io::Error::other)?;
             continue;
-        };
-        match message {
-            Message::Hello {
-                image: true,
-                seq,
-                lineage,
-                ..
-            } => promised = Some((seq, lineage)),
-            Message::Image(bytes) => {
-                let Some((seq, lineage)) = promised.take() else {
-                    return Err(io::Error::other(
-                        "the primary sent an image it did not promise",
-                    ));
-                };
-                let (fresh, bytes) = loaded(bytes, &lineage, seq)?;
-                copy.adopt(fresh, &bytes).map_err(io::Error::other)?;
-                copy.follow(lineage).map_err(io::Error::other)?;
-            }
-            _ => {}
+        }
+        let message = decode(tag, kind_body(r, tag, len)?)?;
+        *n += 1;
+        if copy.is_none() {
+            continue;
+        }
+        if let Message::Hello {
+            image: true,
+            seq,
+            lineage,
+            ..
+        } = message
+        {
+            promised = Some((seq, lineage));
         }
     }
 }
@@ -2103,9 +2437,10 @@ impl Follower {
     /// adoption after them; a promotion, a release under the tenant's slot,
     /// every `get` of the tenant behind it and the node's shutdown waited
     /// with it. Walked away from, the copy holds what it held, and follows on
-    /// from there once started again. A halt that comes during the check
-    /// and load still waits for them -- nothing looks inside `load` -- and
-    /// is met at the second look, before the adoption.
+    /// from there once started again. The check runs as the image streams,
+    /// a halt met at its next read ([`Watched`]); one that comes during the
+    /// load still waits for it -- nothing looks inside `load` -- and is met
+    /// at the second look, before the adoption.
     fn halted(&self, _at: &'static str) -> bool {
         #[cfg(test)]
         self.halt_here(_at);
@@ -2164,6 +2499,9 @@ impl Follower {
         *lock(&self.ended.0) = false;
         let _ends = Ends(&self.ended);
         self.refused.store(false, Ordering::SeqCst);
+        // An image a crash or a kill left part taken beside the copy's file
+        // ([`arrived`]) went as the file was opened to be written
+        // (`fennec_core::fs`'s `FileSink::create`), a copy's or a primary's.
         let mut force_image = false;
         let mut pause = Duration::from_millis(100);
         while !self.stop.load(Ordering::SeqCst) {
@@ -2284,23 +2622,33 @@ impl Follower {
             }
         }
         if image {
-            let Message::Image(bytes) = stream.receive()? else {
+            let Message::Image(len) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
             };
+            // Where the image goes and how the copy holds its documents,
+            // asked under the read lock, let go before a byte of it comes.
+            let (side, mapped) = {
+                let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+                (g.image_side(), g.is_mapped())
+            };
+            // Written into the file beside the copy's as it comes, checked
+            // as it streams, with no lock held: reads, and the copy's own
+            // upkeep, go on meanwhile ([`arrived`]).
+            let image = arrived(&mut stream.r, len, &lineage, side)?;
             // A halt is looked at as the image has arrived and once it is
             // loaded ([`Self::halted`]): what is left to wait for once the
-            // copy changes is the adoption, a rewrite of the file.
+            // copy changes is the adoption, the file's rename.
             if self.halted("an image arrived") {
                 return Ok(());
             }
             // Loaded before the lock is taken: reads go on meanwhile.
-            let (fresh, bytes) = loaded(bytes, &lineage, seq)?;
+            let fresh = loaded(image, mapped, seq)?;
             if self.halted("an image loaded") {
                 return Ok(());
             }
             let _changing = Changing(&self.db, "adopted its primary's image");
             let mut g = crate::held::write(&self.db);
-            g.adopt(fresh, &bytes).map_err(io::Error::other)?;
+            fresh.adopt_by(&mut g).map_err(io::Error::other)?;
             g.follow(lineage).map_err(io::Error::other)?;
             if let Some(feed) = &self.feed {
                 // The image's history, which `follow` appends no record
@@ -2501,9 +2849,8 @@ impl Follower {
     /// ([`Self::halted`]), a check and load already under way waited for
     /// -- minutes for many gigabytes -- and walked away from after; else
     /// one message landing under the write lock, and its fsync, or an
-    /// adoption begun: the image written over the copy's file and synced, a
-    /// write of the image's length, which the copy's memory then points
-    /// at. A promotion and a tenant's release, which halt, end within that,
+    /// adoption begun: the image's file, written and synced as it came,
+    /// renamed into the copy's place and its directory synced. A promotion and a tenant's release, which halt, end within that,
     /// and so do a `get` of the tenant and the node's shutdown, which wait
     /// for the tenant's slot a release holds as it halts.
     pub fn halt(&self) {
@@ -2576,51 +2923,61 @@ impl Heard {
 }
 
 /// A primary's image made the database a copy adopts: every record held
-/// to its sum, which an open does not ask of an image's -- one damaged on
-/// the way would be this file's whole -- then loaded into a database of its
-/// own with the record saying it follows on its `lineage`, and held to the
-/// change its hello said, `seq`. The image's own history is its
-/// primary's, taking writes, and the record `follow` appends after the
-/// rename went with a kill before a write behind: the restart opened the
-/// copy as a primary's file, following nothing (`Tenants::open_as`); with
-/// it in the bytes that replace the file, `follow` appends nothing. Room
-/// for the record alone: grown as a `Vec` grows, a 40 MB image took 80. An
-/// image at another change than its hello said is no primary's: refused
+/// to its sum as it arrived ([`take_image`]), which an open does not ask
+/// of an image's -- one damaged on the way would be this file's whole --
+/// with the record saying it follows on its lineage after it
+/// ([`arrived`]), loaded, and held to the change its hello said, `seq`.
+/// The image's own history is its primary's, taking writes, and the record
+/// `follow` appends after the rename went with a kill before a write
+/// behind: the restart opened the copy as a primary's file, following
+/// nothing (`Tenants::open_as`); with it in the bytes that replace the
+/// file, `follow` appends nothing. Taken into the file beside the copy's,
+/// it is loaded from there as the copy is held (`Database::from_side`):
+/// mapped, its documents stay in the file, which the adoption renames into
+/// the copy's place, and the load builds only what an open of it would.
+/// An image at another change than its hello said is no primary's: refused
 /// before it replaces anything, where a `debug_assert` stood, a panic in a
 /// debug build that a peer's bytes reached. The follower's path and the
 /// `stream` fuzz target's ([`read_answer`]).
-fn loaded(mut bytes: Vec<u8>, lineage: &[(u64, u64)], seq: u64) -> io::Result<(Database, Vec<u8>)> {
-    fennec_core::engine::check_records(&bytes).map_err(io::Error::other)?;
-    let follows = History {
-        lineage: lineage.to_vec(),
-        following: true,
-    }
-    .record();
-    // Asked, a refusal in words: the image is the database whole, and
-    // its room taken as `reserve_exact` takes it, a refused one aborted the
-    // process -- a node and every tenant it holds -- one allocation past
-    // `read_kind`'s. `load`'s own allocations still abort on a refusal.
-    bytes.try_reserve_exact(follows.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            format!(
-                "an image of {} bytes: the allocator refused the {} asked for it and the \
-                 record that follows it",
-                bytes.len(),
-                bytes.len().saturating_add(follows.len())
-            ),
-        )
-    })?;
-    bytes.extend_from_slice(&follows);
-    let mut fresh = Database::new();
-    fresh.load(&bytes).map_err(io::Error::other)?;
-    if fresh.change_seq() != seq {
+fn loaded(image: Arrived, mapped: bool, seq: u64) -> io::Result<Loaded> {
+    let loaded = match image {
+        Arrived::Side(mut side) => {
+            let fresh = Database::from_side(&mut side, mapped).map_err(io::Error::other)?;
+            Loaded::Side(fresh, side)
+        }
+        Arrived::Whole(bytes) => {
+            let mut fresh = Database::new();
+            fresh.load(&bytes).map_err(io::Error::other)?;
+            Loaded::Whole(fresh, bytes)
+        }
+    };
+    let at = match &loaded {
+        Loaded::Side(fresh, _) | Loaded::Whole(fresh, _) => fresh.change_seq(),
+    };
+    if at != seq {
         return Err(io::Error::other(format!(
-            "the primary's image is at change {}, its hello at {seq}",
-            fresh.change_seq()
+            "the primary's image is at change {at}, its hello at {seq}"
         )));
     }
-    Ok((fresh, bytes))
+    Ok(loaded)
+}
+
+/// An image loaded ([`loaded`]), to be adopted.
+enum Loaded {
+    Side(Database, fennec_core::fs::SideFile),
+    Whole(Database, Vec<u8>),
+}
+
+impl Loaded {
+    /// Adopted by `copy`: the file it was taken into renamed into the
+    /// copy's place (`Database::adopt_side`), or the bytes written there
+    /// (`Database::adopt`).
+    fn adopt_by(self, copy: &mut Database) -> fennec_core::error::Result<()> {
+        match self {
+            Loaded::Side(fresh, side) => copy.adopt_side(fresh, side),
+            Loaded::Whole(fresh, bytes) => copy.adopt(fresh, &bytes),
+        }
+    }
 }
 
 /// Says a follower's thread ended as it drops: at the loop's end and in a
@@ -2731,6 +3088,7 @@ fn primary_sends(tag: u8) -> Option<u64> {
 
 /// A primary's message off its stream, held to its kind's bound
 /// ([`read_kind`]).
+#[cfg(test)]
 pub(crate) fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     read_kind(r, primary_sends)
 }
@@ -2749,10 +3107,12 @@ pub(crate) fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 /// the allocator moves them into, three times what came at the most, and
 /// a message read whole has held twice its length at the most: measured
 /// (`tests/message_peak.rs`, a growth counted as the move it may be), the
-/// allocator's high-water mark for an image of 40 MiB was 72 MiB, 1.80
-/// times it, for one a byte past [`FIRST`] doubled twice twice it less a
-/// byte, and for a terabyte announced and 3 MiB sent 6 MiB, three times
-/// the [`FIRST`] that had come as it grew. Each allocation is asked with
+/// allocator's high-water mark for writes of 40 MiB was 80 MiB, twice it,
+/// the records decoded beside the body, for one a byte past [`FIRST`]
+/// doubled twice twice it less a byte, and for a terabyte announced and 3
+/// MiB sent 6 MiB, three times the [`FIRST`] that had come as it grew. An
+/// image is read so by none: it is taken as it comes ([`take_image`],
+/// [`kind_head`] its head alone). Each allocation is asked with
 /// `try_reserve_exact`, a refusal an error naming the kind, the length and
 /// the bytes asked for: a refused allocation aborts the process -- a node
 /// with every tenant it holds, `fennec archive` and `fennec backup`, which
@@ -2762,6 +3122,17 @@ pub(crate) fn read_kind(
     r: &mut impl Read,
     longest: fn(u8) -> Option<u64>,
 ) -> io::Result<(u8, Vec<u8>)> {
+    let (tag, len) = kind_head(r, longest)?;
+    Ok((tag, kind_body(r, tag, len)?))
+}
+
+/// [`read_kind`]'s first half: a message's kind and its length, held to
+/// the bound `longest` gives its kind, its body not read -- an image's,
+/// which is taken as it comes ([`take_image`]).
+pub(crate) fn kind_head(
+    r: &mut impl Read,
+    longest: fn(u8) -> Option<u64>,
+) -> io::Result<(u8, u64)> {
     let mut head = [0u8; 9];
     r.read_exact(&mut head)?;
     let (tag, len) = (head[0], u64::from_le_bytes(head[1..].try_into().unwrap()));
@@ -2770,12 +3141,19 @@ pub(crate) fn read_kind(
             "a message of a kind none is sent of ({tag})"
         )));
     };
-    let kind = tag as char;
     if len > most {
         return Err(io::Error::other(format!(
-            "a `{kind}` message of {len} bytes, past the {most} one of its kind holds"
+            "a `{}` message of {len} bytes, past the {most} one of its kind holds",
+            tag as char
         )));
     }
+    Ok((tag, len))
+}
+
+/// [`read_kind`]'s second half: the body of a `tag` message of `len` bytes,
+/// read into memory as it comes.
+pub(crate) fn kind_body(r: &mut impl Read, tag: u8, len: u64) -> io::Result<Vec<u8>> {
+    let kind = tag as char;
     let cut = |e: io::Error| match e.kind() {
         io::ErrorKind::UnexpectedEof => io::Error::new(
             e.kind(),
@@ -2796,7 +3174,7 @@ pub(crate) fn read_kind(
         grown(&mut body, len.min(have.saturating_mul(2)), kind, len)?;
         r.read_exact(&mut body[have..]).map_err(cut)?;
     }
-    Ok((tag, body))
+    Ok(body)
 }
 
 /// `body` made `to` bytes long, zeroed past what it held, the allocator
@@ -3304,7 +3682,11 @@ mod tests {
 
     /// An empty database made to follow, and a follower of `url` for it.
     fn copy_of(url: &str) -> (Arc<RwLock<Database>>, Arc<Follower>) {
-        let mut db = Database::new();
+        copy_over(url, Database::new())
+    }
+
+    /// [`copy_of`] over `db`.
+    fn copy_over(url: &str, mut db: Database) -> (Arc<RwLock<Database>>, Arc<Follower>) {
         let lineage = db.history().lineage.clone();
         db.follow(lineage).unwrap();
         let db = Arc::new(RwLock::new(db));
@@ -3330,26 +3712,57 @@ mod tests {
     /// Each look is held here by a halt come at that moment; without it the
     /// follower went on to adopt the image, and a promotion, a release
     /// under the tenant's slot and a node's shutdown waited for a check, a
-    /// load and a rewrite of the whole image.
+    /// load and a rewrite of the whole image. A copy with a file as a
+    /// server's has -- its image taken into `.taking` beside it, its follow
+    /// record after it, synced -- keeps its file to the byte, nothing left
+    /// beside it: without either look the image was renamed in.
     #[test]
     fn a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "fennec-repl-halt-look-{}-{}",
+            std::process::id(),
+            // Not an `Instant`'s `Debug`, whose `:` Windows takes in no
+            // file's name (`ERROR_DIRECTORY`, 267).
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         for at in ["an image arrived", "an image loaded"] {
-            let (image, seq) = two_rows();
-            let done = Arc::new(AtomicBool::new(false));
-            let _done = Done(Arc::clone(&done));
-            let url = primary(answer(true, seq, &framed(b'I', &image)), held(done));
-            let (db, f) = copy_of(&url);
-            *lock(&f.halt_at) = Some(at);
-            f.start("fennec-test-halt-look".into()).unwrap();
-            let ended = ended_within(&f, SILENCE);
-            assert!(
-                ended && f.images() == 0,
-                "{at}: the follower took the image after its halt (ended {ended}, images {})",
-                f.images()
-            );
-            assert_eq!(db.read().unwrap().change_seq(), 0, "{at}");
-            f.halt();
+            for filed in [false, true] {
+                let (image, seq) = two_rows();
+                let done = Arc::new(AtomicBool::new(false));
+                let _done = Done(Arc::clone(&done));
+                let url = primary(answer(true, seq, &framed(b'I', &image)), held(done));
+                let path = dir.join(format!("{}-{filed}.fennec", at.replace(' ', "-")));
+                let (db, f) = match filed {
+                    false => copy_of(&url),
+                    true => copy_over(&url, fennec_core::fs::open(&path).unwrap()),
+                };
+                let before = filed.then(|| {
+                    db.write().unwrap().sync().unwrap();
+                    std::fs::read(&path).unwrap()
+                });
+                *lock(&f.halt_at) = Some(at);
+                f.start("fennec-test-halt-look".into()).unwrap();
+                let ended = ended_within(&f, SILENCE);
+                assert!(
+                    ended && f.images() == 0,
+                    "{at}, a file {filed}: the follower took the image after its halt \
+                     (ended {ended}, images {})",
+                    f.images()
+                );
+                assert_eq!(db.read().unwrap().change_seq(), 0, "{at}");
+                if let Some(before) = before {
+                    assert!(
+                        std::fs::read(&path).unwrap() == before,
+                        "{at}: the copy's file changed"
+                    );
+                    let side = fennec_core::fs::beside(&path, "taking");
+                    assert!(!side.exists(), "{at}: the image left beside the copy");
+                }
+                f.halt();
+            }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A halt whose cut the read in flight misses -- on Windows, one begun

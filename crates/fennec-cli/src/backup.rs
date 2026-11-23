@@ -388,6 +388,27 @@ pub fn main(command: &str, args: &[String]) -> Code {
     // file made. Looked at once: the restore below is the one this says.
     let sealed = command == "restore" && !tenants && Path::new(&positional[0]).is_file();
     if sealed && key_file.is_none() {
+        // What the file is, from its first bytes: a backup taken without a
+        // key is the database itself, which nothing restores, and was told
+        // to give a key it never had.
+        let mut first = [0u8; 8];
+        let read = std::fs::File::open(&positional[0])
+            .and_then(|mut f| std::io::Read::read(&mut f, &mut first));
+        let first = &first[..read.unwrap_or(0)];
+        let path = &positional[0];
+        if first.starts_with(&fennec_core::engine::MAGIC[..]) {
+            fail(&format!(
+                "{path} is a database file, not a sealed backup: a backup taken without \
+                 --key-file is the database itself, opened as it is; `fennec restore` takes a \
+                 sealed backup or an archive's directory"
+            ));
+        }
+        if !fennec_http::seal::is_sealed(first) {
+            fail(&format!(
+                "{path} is neither a sealed backup nor a database file: `fennec restore` takes \
+                 a sealed backup or an archive's directory"
+            ));
+        }
         fail("a sealed backup opens with --key-file");
     }
     // The files the flags name, once the line is not refused.
