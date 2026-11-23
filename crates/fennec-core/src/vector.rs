@@ -5332,9 +5332,13 @@ impl VectorIndex {
         if filled.len() != tombs.len() || filled.contains(&false) {
             return false;
         }
-        // SAFETY: every share wrote each of its nodes' `dim` slots -- a
-        // tombstone's from the record, a live node's from its document --
-        // or said it had not, which returned above.
+        // SAFETY: the arena was empty -- `restore` made the index anew
+        // (`with_precision`) -- so its first `len` slots are the parts, laid
+        // end to end, and its capacity holds them (`reserve_exact`). Every
+        // share wrote each of its nodes' `dim` slots -- a tombstone's from
+        // the record, a live node's from its document -- or said it had not,
+        // which returned above, as a share that never ran does (`filled`
+        // short of one answer a share).
         unsafe {
             match &mut self.data {
                 Arena::F32(d) => d.set_len(len),

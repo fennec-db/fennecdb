@@ -711,3 +711,79 @@ fn a_restore_or_a_backup_never_writes_over_a_database_unasked() {
     let verify = fennec(&["verify", &archive, "--force"]);
     assert_eq!(verify.status.code(), Some(2), "{}", text(&verify.stderr));
 }
+
+/// What the program makes -- a database the shell opens, its lock, a
+/// `.save`, a restore -- is its owner's alone under a umask of 022 and of
+/// 000, set by `sh` for the program alone, and a file there keeps the mode
+/// an operator gave it through a `.save` and a `restore --force` over it.
+/// Up to 0.2.0 each took the umask's mode, and a replacement the umask's
+/// in place of its own.
+#[cfg(all(unix, feature = "backup"))]
+#[test]
+fn what_the_program_makes_is_its_owners_alone_and_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    fn mode(p: &str) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+    fn chmod(p: &str, mode: u32) {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    for mask in ["022", "000"] {
+        let d = Dir::new(&format!("modes-{mask}"));
+        // `fennec <args>` under `mask`, `input` piped in.
+        let under = |args: &[&str], input: &str| {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "umask \"$0\" && exec \"$@\"", mask, BIN])
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+            // Its output once it exits, or killed past two minutes: one
+            // that hangs fails the test with what it printed.
+            let pid = child.id().to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(child.wait_with_output().unwrap()));
+            let out = rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or_else(|_| {
+                    let _ = Command::new("kill").args(["-KILL", &pid]).status();
+                    let out = rx.recv().unwrap();
+                    panic!("{args:?} killed past two minutes: {}", text(&out.stderr))
+                });
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        };
+        let (p, saved) = (d.file("made.fennec"), d.file("saved.fennec"));
+        under(
+            &[&p],
+            &format!("create collection notes (body text)\n.save {saved}\n"),
+        );
+        for (file, what) in [(&p, "a database"), (&saved, "a .save")] {
+            assert_eq!(mode(file), 0o600, "{what} under umask {mask}");
+            assert_eq!(mode(&format!("{file}.lock")), 0o600, "{what}'s lock");
+        }
+        chmod(&saved, 0o640);
+        under(
+            &[],
+            &format!("create collection other (x int)\n.save {saved}\n"),
+        );
+        assert_eq!(mode(&saved), 0o640, "a .save over a file, umask {mask}");
+
+        let archive = d.file("archive");
+        let mut db = fennec_core::prelude::Database::new();
+        db.execute(&fennec_ql::parse_one("create collection notes (body text)").unwrap())
+            .unwrap();
+        fennec_http::archive::Archive::with_key(&archive, None)
+            .unwrap()
+            .add_image(db.change_seq(), &db.snapshot())
+            .unwrap();
+        let out = d.file("restored.fennec");
+        under(&["restore", &archive, &out], "");
+        assert_eq!(mode(&out), 0o600, "a restore under umask {mask}");
+        chmod(&out, 0o640);
+        under(&["restore", &archive, &out, "--force"], "");
+        assert_eq!(mode(&out), 0o640, "a restore --force over a file");
+    }
+}

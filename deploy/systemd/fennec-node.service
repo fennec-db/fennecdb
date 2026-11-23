@@ -76,9 +76,9 @@ LimitCORE=0
 # The data and nothing else is writable; the files are the node's alone.
 StateDirectory=fennecdb/node
 StateDirectoryMode=0700
-# The audit log, 0600 under the UMask: a log shipper reads it through an
-# ACL (RUNBOOK, "Logs"), and rotates it by copytruncate, since SIGHUP shuts
-# the server down.
+# The audit log, 0600 as fennecdb makes every file: a log shipper reads it
+# through an ACL on the file (RUNBOOK, "Logs"), and rotates it by
+# copytruncate, since SIGHUP shuts the server down.
 LogsDirectory=fennecdb/node
 ReadWritePaths=/var/lib/fennecdb/node
 UMask=0077

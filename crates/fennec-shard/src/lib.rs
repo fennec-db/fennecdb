@@ -4327,7 +4327,7 @@ impl Router {
             Ok((status, _)) if done(status) => None,
             Ok((status, body)) => Some(format!(
                 "standby `{name}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
+                words(&body)
             )),
             Err(e) => Some(format!("standby `{name}` did not answer: {e}")),
         }
@@ -4512,10 +4512,7 @@ impl Router {
                             .collect(),
                     ),
                     Ok((status, body)) => {
-                        return Err(format!(
-                            "`{on}` answered {status}: {}",
-                            String::from_utf8_lossy(&body).trim()
-                        ))
+                        return Err(format!("`{on}` answered {status}: {}", words(&body)))
                     }
                     Err(e) => {
                         return Err(left(
@@ -4528,10 +4525,7 @@ impl Router {
                 match follow_over(&ids) {
                     Ok((200, body)) => (how, instances_at(&fields_of(&body))),
                     Ok((status, body)) => {
-                        let why = format!(
-                            "`{on}` answered {status}: {}",
-                            String::from_utf8_lossy(&body).trim()
-                        );
+                        let why = format!("`{on}` answered {status}: {}", words(&body));
                         return Err(left(how, &ids, why));
                     }
                     Err(e) => return Err(left(how, &ids, format!("`{on}` did not answer: {e}"))),
@@ -4583,10 +4577,7 @@ impl Router {
             let target = format!("/_admin/tenants/{tenant}");
             match self.pool.call(&n.addr, "DELETE", &target, &n.token, b"") {
                 Ok((204 | 404, _)) => None,
-                Ok((status, body)) => Some(format!(
-                    "`{on}` answered {status}: {}",
-                    String::from_utf8_lossy(&body).trim()
-                )),
+                Ok((status, body)) => Some(format!("`{on}` answered {status}: {}", words(&body))),
                 Err(e) => Some(format!("`{on}` did not answer: {e}")),
             }
         });
@@ -5358,6 +5349,17 @@ impl Router {
             body.as_bytes(),
         ) {
             Ok((200, body)) => {
+                // What the copy knew of its primary as it was promoted: a
+                // failover promotes it where it stands, and what it was not
+                // sent is lost -- logged for the tenant, and a copy promoted
+                // not connected counted.
+                let heard = copy_heard(&body);
+                metrics::promoted(heard.0);
+                let of = from.as_ref().map_or("", |(name, _)| name.as_str());
+                fennec_http::log!(
+                    "failover of `{of}`: `{tenant}` promoted on `{to}`, {}",
+                    heard_words(heard)
+                );
                 self.quota_after_failover(tenant, to);
                 self.hooks_after_failover(tenant, to);
                 let left = from.as_ref().map(|(name, _)| name.as_str());
@@ -5377,10 +5379,7 @@ impl Router {
                 }
                 .map_err(|e| message(&e))
             }
-            Ok((status, body)) => Err(format!(
-                "{status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Err(format!("{status}: {}", words(&body))),
             Err(e) => Err(format!("`{to}` did not answer: {e}")),
         }
     }
@@ -5548,10 +5547,7 @@ impl Router {
         };
         match self.pool.call(&n.addr, "PUT", target, &n.token, body) {
             Ok((200, _)) => None,
-            Ok((status, body)) => Some(format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Some(format!("`{node}` answered {status}: {}", words(&body))),
             Err(e) => Some(format!("`{node}` did not answer: {e}")),
         }
     }
@@ -5763,10 +5759,7 @@ impl Router {
         match self.pool.call(&n.addr, "GET", &target, &n.token, b"") {
             Ok((200, body)) => Ok((!names_and_version(&body).1.is_empty()).then_some(body)),
             Ok((404, _)) => Ok(None),
-            Ok((status, body)) => Err(format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Err(format!("`{node}` answered {status}: {}", words(&body))),
             Err(e) => Err(format!("`{node}` did not answer: {e}")),
         }
     }
@@ -6179,9 +6172,7 @@ impl Router {
                         }
                         self.lease_now(&name);
                         return Err(match other {
-                            Ok((status, body)) => {
-                                Fail(status, String::from_utf8_lossy(&body).into_owned())
-                            }
+                            Ok((status, body)) => Fail(status, words(&body)),
                             Err(e) => Fail(502, format!("node `{name}` did not answer: {e}")),
                         });
                     }
@@ -6256,7 +6247,7 @@ impl Router {
             })?;
         // 404 from the node: already gone there, which is what was asked.
         if status != 204 && status != 404 {
-            return Err(Fail(status, String::from_utf8_lossy(&body).into_owned()));
+            return Err(Fail(status, words(&body)));
         }
         let standby = self.read_dir().standby(&placement.node).map(str::to_string);
         self.write_dir().remove_tenant(tenant).map_err(internal)?;
@@ -6664,7 +6655,7 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
         Ok((status, body)) if status == want => Ok(body),
         Ok((status, body)) => Err(Fail(
             if status >= 500 { 502 } else { status },
-            format!("node `{node}`: {}", String::from_utf8_lossy(&body)),
+            format!("node `{node}`: {}", words(&body)),
         )),
         Err(e) => Err(Fail(502, format!("node `{node}` did not answer: {e}"))),
     }
@@ -6706,6 +6697,66 @@ impl Router {
     }
 }
 
+/// What a promoted copy knew of its primary, as its node's answer says it
+/// (`fennec_http::replication::Heard`): whether it was connected, how many
+/// writes behind its primary's disk and how long before it last heard from
+/// it, -1 for never. `None` each where the node does not say: one older
+/// than the fields.
+type Heard = (Option<bool>, Option<i64>, Option<i64>);
+
+fn copy_heard(answer: &[u8]) -> Heard {
+    let fields = fields_of(answer);
+    let at = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let int = |key: &str| match at(key) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let connected = match at("connected") {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    (connected, int("behind"), int("last_contact_ms"))
+}
+
+/// A promoted copy's [`Heard`] in a log line's words, saying what it was
+/// not sent is lost unless it was connected, nothing behind, and heard from
+/// within two keep-alives ([`STALE_MS`]) -- a node too old to say any of it
+/// included.
+fn heard_words((connected, behind, contact): Heard) -> String {
+    let Some(connected) = connected else {
+        return "its node too old to say what the copy knew of its primary: \
+                what it was not sent is lost"
+            .into();
+    };
+    let heard = match contact {
+        Some(ms) if ms >= 0 => format!("last heard from it {ms} ms before"),
+        _ => "never heard from it since it opened".into(),
+    };
+    let recent = contact.is_some_and(|ms| (0..=STALE_MS).contains(&ms));
+    format!(
+        "its copy {} its primary, {} writes behind it as it last said, {heard}{}",
+        if connected {
+            "connected to"
+        } else {
+            "not connected to"
+        },
+        behind.unwrap_or(0),
+        if connected && behind == Some(0) && recent {
+            ""
+        } else {
+            ": what it was not sent is lost"
+        }
+    )
+}
+
+/// How long a copy may have gone unheard from and still be counted on to
+/// hold what its primary sent: twice a keep-alive's `ALIVE`. A copy stays
+/// `connected` until a read of its stream fails -- at once where its
+/// primary's process was killed, `SILENCE` (10 s) on where its machine was
+/// lost or cut off, past a 5 s lease's lapse -- so one heard from longer
+/// ago may have been sent nothing for that long.
+const STALE_MS: i64 = 2 * fennec_http::replication::ALIVE.as_millis() as i64;
+
 /// The lineage a node's answer names (`"lineage": "<8 hex>"`): the one it
 /// made a tenant of, or took one's image in at.
 pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
@@ -6717,13 +6768,26 @@ pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
 #[cold]
 fn said(node: &str, answer: &std::io::Result<(u16, Vec<u8>)>) -> String {
     match answer {
-        Ok((status, body)) => format!(
-            "`{node}` answered {status}: {}",
-            String::from_utf8_lossy(body).trim()
-        ),
+        Ok((status, body)) => format!("`{node}` answered {status}: {}", words(body)),
         Err(e) => format!("`{node}` did not answer: {e}"),
     }
 }
+
+/// A node's answer as a log line or an error shows it, cut and escaped
+/// (`replication::peer_words_within`): whoever answers at a node's address,
+/// or stands on a plain-HTTP hop before it, wrote lines of its own -- a
+/// newline and the next line's prefix, a terminal's escapes -- into the
+/// router's log and its answers, as long as the node's answer ran.
+#[cold]
+fn words(body: &[u8]) -> String {
+    fennec_http::replication::peer_words_within(body.trim_ascii(), NODE_SHOWN)
+}
+
+/// The most of a node's answer [`words`] shows: a node's refusal whole, its
+/// JSON's braces and all -- the lineage refusal a failover meets is 313
+/// bytes, and a stream's 200 cut it before the `force` it names -- and a
+/// line no longer than a few of them.
+const NODE_SHOWN: usize = 2_000;
 
 /// `{tenant, why}`, a failure's entry in a list of them.
 fn why(tenant: &str, why: &str) -> String {
@@ -7210,6 +7274,93 @@ fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A promoted copy that says it was connected and nothing behind, but
+    /// last heard from its primary longer ago than two keep-alives, is
+    /// logged as losing what it was not sent: connected stays true until a
+    /// read fails, 10 s after a primary's machine was lost or cut off. The
+    /// answers are a stub node's, as `promote_on` reads them.
+    #[test]
+    fn a_copy_long_unheard_from_is_logged_as_losing_what_it_was_not_sent() {
+        let answer = |ms: i64| {
+            let body = format!(
+                r#"{{"promoted":"acme","seq":7,"history":"0000000700000001","connected":true,"behind":0,"last_contact_ms":{ms}}}"#
+            );
+            heard_words(copy_heard(body.as_bytes()))
+        };
+        let lost = ": what it was not sent is lost";
+        let fresh = answer(812);
+        assert!(!fresh.ends_with(lost), "{fresh}");
+        let edge = answer(STALE_MS);
+        assert!(!edge.ends_with(lost), "{edge}");
+        for ms in [STALE_MS + 1, 9_000, -1] {
+            let stale = answer(ms);
+            assert!(
+                stale.starts_with("its copy connected to its primary, 0 writes behind")
+                    && stale.ends_with(lost),
+                "{ms}: {stale}"
+            );
+        }
+        assert_eq!(STALE_MS, 4_000);
+    }
+
+    /// A node too old to say what its copy knew -- 0.2.0's promotion answers
+    /// `promoted`, `seq` and `history`, none of `connected`, `behind` and
+    /// `last_contact_ms` -- is logged as
+    /// losing what the copy was not sent, as one that said it was not
+    /// connected: it may have been anything. The answer is a stub node's,
+    /// as `promote_on` reads it.
+    #[test]
+    fn an_old_nodes_copy_is_logged_as_losing_what_it_was_not_sent() {
+        let body = r#"{"promoted":true,"seq":7,"history":"0000000700000001"}"#;
+        let heard = copy_heard(body.as_bytes());
+        assert_eq!(heard, (None, None, None));
+        assert_eq!(
+            heard_words(heard),
+            "its node too old to say what the copy knew of its primary: \
+             what it was not sent is lost"
+        );
+    }
+
+    /// A node's words reach the router's log and its errors cut and
+    /// escaped (`replication::peer_words_within`): a newline and the line
+    /// after it, a terminal's escape and quotes as Rust writes them, never as
+    /// they came -- in `said`, a promotion's refusal and the `{status}:
+    /// {body}` errors alike, which `words` writes. A node's refusal is shown
+    /// whole: the lineage one a failover meets, cut at a stream's 200
+    /// characters, lost the `force` it names.
+    #[test]
+    fn a_nodes_words_are_cut_and_escaped() {
+        let mut body =
+            b"refused\nfennec-shard: failover of `n1`: forged \x1b[2J \"quoted\"\n".to_vec();
+        body.resize(64 << 10, b'x');
+        let shown = [
+            said("n1", &Ok((500, body.clone()))),
+            words(&body),
+            match expect(Ok((409, body.clone())), 200, "n1") {
+                Err(Fail(409, why)) => why,
+                _ => panic!("a 409 is the node's refusal, its status kept"),
+            },
+        ];
+        for w in shown {
+            assert!(!w.contains('\n') && !w.contains('\x1b'), "{w:?}");
+            assert!(
+                w.contains(r"refused\nfennec-shard")
+                    && w.contains(r"\u{1b}[2J")
+                    && w.contains(r#"\"quoted\""#),
+                "{w}"
+            );
+            assert!(w.len() < NODE_SHOWN + 200, "{} bytes shown", w.len());
+            assert!(w.contains(&format!("{} bytes", 64 << 10)), "{w}");
+        }
+        let refusal = br#"{"error":"tenant `unsynced` here is of lineage none, not 953c5a6d, the tenant's: it has not taken its primary's image -- a copy made to follow a primary it never reached, or another file put in its place -- and promoted it would be an empty primary, or another file's. {\"force\": true} promotes it all the same"}"#;
+        assert_eq!(refusal.len(), 313);
+        let shown = words(refusal);
+        assert!(
+            shown.ends_with(r#"promotes it all the same\"}""#) && !shown.contains("the first"),
+            "{shown}"
+        );
+    }
 
     /// What the directory records of a set: its hooks' names and version,
     /// never a secret; a set of no hook, or one that does not read, none.

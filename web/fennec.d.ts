@@ -1698,9 +1698,11 @@ export declare class Fennec<S extends AnySchema<S> = Schema, Rel extends Relatio
     parts: () => Iterable<Uint8Array | ArrayBuffer> | AsyncIterable<Uint8Array | ArrayBuffer>,
   ): Promise<number>;
   /**
-   * Lets the database go. A `persist` of it not yet run is refused, as is
-   * a `restore` or `openFile` not yet done with it, and every later one; a
-   * `persist` already storing what it took finishes.
+   * Lets the database go, and the file it is kept in (`openFile`) with it.
+   * A `persist` of it not yet run is refused, as is a `restore` or
+   * `openFile` not yet done with it, and every later one; a `persist`
+   * already storing what it took finishes. After the module stopped (a
+   * trap) it throws nothing and writes nothing.
    */
   close(): void;
 
@@ -1739,7 +1741,10 @@ export interface LiveOptions {
 export interface PersistOptions {
   /**
    * An AES-GCM key (`crypto.subtle.generateKey` or `deriveKey`): each
-   * record is sealed with it, and a restore needs it.
+   * record is sealed with it, its tag over its name, its place and the
+   * record before it, and a restore needs it. A store cut short restores
+   * as it was before the cut, and never with a record cut among those
+   * sealed in their places since.
    */
   cryptoKey?: CryptoKey | null;
 }
@@ -1764,6 +1769,21 @@ export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOp
  * until the promise it returns settles.
  */
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
+/**
+ * Deletes what `persist` stored under `key` -- its image and its chunks, a
+ * replica's unsent writes among them -- and nothing else: a replica whose
+ * store does not restore is seeded anew after it. Its chunks are stored
+ * under `key#` and nine digits: another key whose name is `key#` followed
+ * by nine digits is read as this key's chunk; avoid such names. Refused
+ * while a replica (`sync`'s `persist`) keeps the key in this browser,
+ * asked of `locks` -- the lock manager the replicas were given -- or
+ * `navigator.locks`; one this page closed is waited for. With neither, a
+ * replica that keeps the key stores nothing there from then on
+ * (`status()`'s `unkept`). Every database's next `persist` in this page
+ * stores its image whole; another page's plain `persist` of the key is
+ * not reached, and goes on in chunks its `restore` does not find.
+ */
+export function unpersist(key: string, opts?: { locks?: SyncOptions['locks'] }): Promise<void>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
@@ -1782,7 +1802,11 @@ export interface FennecFile {
   flush(): number;
   /** The file's bytes, which `fennec` and a server open. */
   bytes(): Uint8Array;
-  /** Flushes and lets the file go: the database is kept in it no longer. */
+  /**
+   * Flushes and lets the file go: the database is kept in it no longer. A
+   * second call does nothing; after the module stopped (a trap) it writes
+   * nothing and throws nothing.
+   */
   close(): void;
 }
 
@@ -1793,7 +1817,9 @@ export interface FennecFile {
  * on `run` appends every statement's writes to it and flushes before it
  * answers. Only in a dedicated worker, one at a time a file: one another
  * worker holds is waited for 3 s, then refused -- the worker of a page
- * reloaded while it was busy lets go of it only once it has ended. In turn
+ * reloaded while it was busy lets go of it only once it has ended. One
+ * another database of this worker keeps is refused at once, or taken from
+ * it, nothing written, once its module stopped (a trap). In turn
  * with `persist` and `restore`: refused, its file let go of, once the
  * database is closed before it is done opening the file, and, called while
  * a `restore` is out, when that restore fails (as `persist`, which see).
@@ -1886,14 +1912,40 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * and is never opened for another, or another account's sign-in on the
    * same browser sends the writes left under its own token and shows their
    * rows. Signing out keeps it, for that account's next sign-in to send
-   * its `pending` writes; deleting it loses them.
+   * its `pending` writes; deleting it loses them. One stored that does not
+   * restore -- sealed with another `cryptoKey` or none, stored in the clear
+   * where a key is given, changed, a later client's, an IndexedDB read
+   * that failed -- refuses the sync (`sync` rejects), kept as it stands
+   * with the writes it holds unsent; only a key holding nothing is seeded.
+   * A tab that takes the lead from one whose store it cannot restore
+   * stores nothing there, and tells `onError`; `unpersist(key)` deletes
+   * it, its unsent writes with it, for the next sync to seed anew. One
+   * replica stores a key at a time, holding its lock (`navigator.locks`):
+   * another -- other shapes or another url under the same key, a second
+   * tab with `leader: false` -- stores nothing there until it lets go,
+   * then takes the store over, and `status()`'s `unkept` says so meanwhile.
+   * Each claims the store as it takes it over, and a write finding another's
+   * claim stores nothing: with no lock manager the last replica started
+   * stores the key, and the others nothing from then on. `close()` stores
+   * what was written before it, then lets go of the key; past 5 s it lets
+   * go all the same, and its persist out stores nothing once another
+   * replica claimed the store, `onError` told what was not stored.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
   cryptoKey?: CryptoKey | null;
-  /** `false` turns off multi-tab leader election. */
+  /**
+   * `false` turns off multi-tab leader election: each tab sends its own
+   * writes over its own streams, and a `persist` key is stored by one of
+   * them at a time.
+   */
   leader?: 'auto' | false;
-  /** Lock manager (defaults to `navigator.locks`). */
+  /**
+   * Lock manager (defaults to `navigator.locks`). With `persist`, its
+   * `request` is asked with `ifAvailable`, calling `fn(null)` where the
+   * lock is held, and with a `signal` that ends a wait: one that waits
+   * instead holds a second replica's start until the first lets go.
+   */
   locks?: { request(name: string, opts: unknown, fn: () => unknown): Promise<unknown> };
   onError?: (e: unknown) => void;
   /**
@@ -1935,6 +1987,16 @@ export interface ShapeStatus {
    */
   token: TokenWait | null;
   leader: boolean;
+  /**
+   * Why this tab stores nothing under `persist`, null where it stores it,
+   * another tab leads and stores it, or there is none: another replica
+   * keeps the key until it lets go, another claimed the store since or it
+   * was deleted, or the store did not restore as this tab took it over --
+   * read again at the next write where IndexedDB failed the read, kept as
+   * it stands where it does not open. A follower says why the tab elected
+   * to lead stores nothing, as that tab waits to lead or leads.
+   */
+  unkept: string | null;
 }
 
 /**
@@ -2043,7 +2105,11 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
 
   /** Finishes any pending live-query runs (for tests). */
   flush(): Promise<void>;
-  /** Closes the subscriptions and gives up the lead; the local database stays open. */
+  /**
+   * Closes the subscriptions and gives up the lead, and the `persist` key's
+   * store once what was written before it is stored, or after 5 s, past
+   * which nothing more is, `onError` told; the local database stays open.
+   */
   close(): void;
 }
 

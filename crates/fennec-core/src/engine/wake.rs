@@ -309,7 +309,7 @@ impl Database {
             for s in &sel.order {
                 keys.push(order_key(&c.schema, s, "")?);
             }
-            order_ids(&c.store, &passing, &keys, usize::MAX)?
+            order_ids_of(&c.store, &passing, &keys, usize::MAX)?
         } else {
             passing
         };

@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, a browser's launch and a page's reload, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two; those on test binaries, fuzzing and secrets are now kept by [crates/CLAUDE.md](../../crates/CLAUDE.md).
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, a browser's launch and a page's reload, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, why each `unsafe` block is sound and the sanitized tests that hold it, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two; those on test binaries, fuzzing, unsafe code and secrets are now kept by [crates/CLAUDE.md](../../crates/CLAUDE.md).
 
 ## Test binaries
 
@@ -116,7 +116,10 @@ restore (GitHub's caches are read from the run's own ref or the default
 branch's; a pull request's is its merge ref's, a merge group's its queue
 branch's). The caches and their inputs, each in `paths`: the 21 cargo `actions/cache`
 steps by `hashFiles('**/Cargo.lock', 'rust-toolchain.toml')` (the Unicode
-table's by its pinned version in the file); `setup-node`'s npm cache by the
+table's by its pinned version in the file), `sanitize`'s by the nightly the
+Makefile names (`FUZZ_NIGHTLY`) as well, so no stable build's entry is
+restored under it -- the Makefile being no path, a new nightly's entry is
+saved by main's next scheduled run; `setup-node`'s npm cache by the
 Grafana plugin's `package-lock.json`; `setup-go`'s by its `go.sum`, and
 `go.mod` for the Go version; the Flutter caches by the version pinned in
 `ci.yml`; `setup-gradle`'s key is the job and the commit, not a file's hash,
@@ -220,11 +223,17 @@ repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are
 -- 38 checks since 2026-11-21 -- but `size (browser module)`, which only
-runs on a pull request and so would never report in the merge queue, and a
-job is left out until it has passed on main: a new job until the merge
-group that brought it has. `perf (instructions)` was left out until the
-gate's holdout had a green run on main, and is required since 2026-11-21
-([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
+runs on a pull request and so would never report in the merge queue, and
+`sanitize` ([below](#sanitizers)), whose verdict rests on a dated nightly
+and a sanitizer's runtime, which a runner image can break with no change of
+ours -- a kernel laying out more of the address space at random than the
+sanitizer's shadow memory leaves room for has done so to ASan before -- and
+a merge queue held by that holds every change (a red `sanitize` is read and
+fixed in a change of its own, and a release waits for a green one:
+RELEASING.md); and a job is left out until it has passed on main: a new job
+until the merge group that brought it has. `perf (instructions)` was left
+out until the gate's holdout had a green run on main, and is required since
+2026-11-21 ([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -386,14 +395,24 @@ on threads past 16 384 documents, any other replayed in place,
 linked, and its records applied as a replica applies a primary's; the
 first byte of an input says whether its records are summed anew, so an
 open reads what a record holds rather than stopping at its sum),
-`sqlite` (`fennec import`'s reader over a file) and `certificate`
+`sqlite` (`fennec import`'s reader over a file), `certificate`
 (fennec-tls's walk of the certificate a PostgreSQL server shows to its
 signature algorithm, which picks a channel binding's hash, RFC 5929: the
 file itself, `src/end_point.rs`, compiled into the fuzzer by `#[path]`,
 since fennec-tls is rustls and ring and the fuzzer takes nothing from
 outside the workspace; its seeds are fennec-wire's test certificates and
 a certificate's shape for each signature algorithm the walk tells
-apart). `make fuzz`
+apart) and `stream` (a primary's
+answer as a replica, `fennec archive` and `fennec backup` read it --
+`replication::read_head`, each message held to its kind's bound,
+`read_message`, and decoded, `Receiver::receive`, an image its hello
+promised taken as the follower takes one, `loaded`, and adopted by a copy
+mapped as a server's, `Database::adopt`'s `repoint` and `rebind` -- and a
+node's stream of every tenant as its archiver reads it, whole or a few
+bytes a read; its
+seeds hold the two findings that came before it, a count of writes
+wrapping its message and writes of a terabyte announced,
+[replication.md](replication.md#replication)). `make fuzz`
 lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
 bytes gets its target in the pull request that adds it, and
 `.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
@@ -491,8 +510,17 @@ differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
 30 s each under ASan; `certificate`'s, 300 000, from its CPU time under ASan
 on a Mac beside the six's own smokes in the same run (19.8 s, where theirs
-took 13.2 to 29.5 s, 20.2 at the median), until CI's smoke says its own.
-Nor does a target read the wall clock: the `image`
+took 13.2 to 29.5 s, 20.2 at the median), until CI's smoke says its own;
+`stream`'s from a plain build's CPU time beside
+`http`'s (3.9 s for 120 000 runs of each on a Mac), then measured under
+ASan on the pinned nightly once it adopted the images it accepts: 34.8 s
+on a Mac (34.1 s of CPU) for 120 000 beside `http`'s 24.5 s for the same
+count, 1.42 times it -- some 43 s where CI's runner gives `http` its 30. With
+a seed of records without sums (the review's third round), 120 000 took
+32.1 s (31.6 of CPU), past every other target's 11.8 to 25.2 s in the same
+build on the same Mac: its count is 90 000, which that run passed at 24 s
+(80 000 at 21.4 s, 100 000 at 26.6), inside `http`'s 25.2, until CI's
+smoke says its own. Nor does a target read the wall clock: the `image`
 target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in
@@ -614,6 +642,228 @@ sync's messages through the native library and the browser module, and
 IndexedDB's chunks; nor is each target held to a count of runs since its
 code last changed.
 
+## Unsafe code
+
+Every `unsafe` block and `unsafe impl` says why it is sound, in a `//
+SAFETY:` comment on the lines above it or above the statement holding it
+(attributes may stand between): what the caller or the code around it
+guarantees, by name, that makes each access in bounds, aligned and alive
+for as long as it is used. For the C ABIs that is the contract written for
+the caller -- fennec.h's *Pointers and lengths*, each function's `# Safety`
+section, `fennec-wasm`'s memory contract -- for a mapping the file's
+length and the lock that keeps another process from cutting it, for a
+system call the layout of the struct it writes. A comment that restates
+the operation, or says "the caller guarantees" without saying where that
+is written, is not one.
+
+Two checks hold it, each where the other cannot reach. Clippy's
+`undocumented_unsafe_blocks` is denied in the root Cargo.toml's
+`[workspace.lints.clippy]`, which every crate takes by `[lints] workspace
+= true` -- `tools/lints_check.py` fails a member of the workspace that does
+not, a new crate too -- so every clippy run CI makes refuses a site without
+one in the code it compiles: the workspace's, wasm32's and each feature
+set's, part of Windows', the JNI functions' and `test-clock`'s. That is
+x86_64 Linux, wasm32 and Windows' check. The scanner below counts 371
+`unsafe` blocks and impls in the repository's 484 `.rs` files (2026-11-21,
+after the 79 blocks `unsafe_op_in_unsafe_fn` added, the merges after them
+-- the fifth train's counting allocator of fennec-import's tests among
+them -- and a reader's mapping laid over, `Mapping::reading`), and a
+review found about 48 of them, when they were 255, compiled
+in none of those runs -- aarch64's NEON kernels, prefetch and CRC
+instructions, Apple's system calls (the page cache's `F_NOCACHE`,
+`vm_statistics64`, `rusage_info_v4`, the lease's clock), the macOS-only
+examples, Windows' TLS and tests. So `tools/lints_check.py`, in CI's fmt
+job, also reads every `.rs` file the repository holds, whatever its `cfg`,
+comments, strings and characters masked, and refuses an `unsafe` block or
+`unsafe impl` with no comment saying `SAFETY:` where clippy reads one: on
+the lines just above it, blank lines skipped, or above the statement it is
+-- itself, or a `let`, `static` or `const` whose value it is -- attributes
+included, and never above the `fn` of a body the block opens the line of.
+It is a reader of text, never a compiler, and so reads only where the
+comment is, never whether it is true. Where it and clippy differ, its
+header says, each case run through both: it is stricter only for a block
+deeper in a statement on a later line -- an argument of a call, a term of
+a sum -- whose comment above the statement clippy takes and it does not.
+`tools/test_lints_check.py` holds it to a case of each kind it refuses and
+each place it reads a comment from, and, its last case, to the
+repository's own files, which is how CI's fmt job runs it.
+
+What neither check sees are the forms that are unsafe with no `unsafe`
+written, which edition 2021 allows. A plain `extern` block -- `extern "C"
+{ ... }`, Windows' `extern "system"`, 73 of them in 48 files (2026-11-21):
+`mmap`, `signal`, `pthread_kill`, `proc_pid_rusage`, `CreateFileMappingW`
+-- declares what the linker will bind by name alone, and a declaration
+whose signature is not the function's is undefined behaviour at its first
+call. `#[no_mangle]` -- 50 of them, the C ABIs' exports -- names a symbol
+another object of the program may define too. Neither asks a reason: clippy's lint is about blocks, and
+the scanner reads the keyword, which these do not carry. rustc's
+`missing_unsafe_on_extern` and `unsafe_attr_outside_unsafe` (edition 2024's
+rules, allowed by default in 2021) would have each written `unsafe extern
+"C"` and `#[unsafe(no_mangle)]`, which the scanner would then hold to a
+`SAFETY:` comment as it holds a block. Denying both in
+`[workspace.lints.rust]`, and the scanner reading those forms, is the next
+step; no lint's level changed with this paragraph. The scanner reads no
+`unsafe extern` block, `unsafe trait` or `#[unsafe(..)]` either, of which
+the tree has none; a macro's body it reads as text, so a block in one is
+held like any other (`jni.rs`'s), and the repository uses no outside
+macro. An unsafe operation in an `unsafe fn` is rustc's to refuse outside
+a block, on every target CI compiles -- x86_64 Linux, wasm32, arm64 macOS,
+x86_64 and arm64 Windows -- which leaves the Unix that is neither Linux nor
+Apple's, whose fallback (`lock.rs`) holds no `unsafe fn`.
+
+An unsafe operation in an `unsafe fn` goes in a block of its own, which
+says why it is sound like any other: rustc's `unsafe_op_in_unsafe_fn`,
+denied in `[workspace.lints.rust]`, is a lint of the compiler, not of
+clippy, so every build for every target refuses one outside a block --
+the release's for macOS, Linux on ARM and Windows, the mobile jobs', a
+developer's -- and the scanner holds that block's comment whatever builds
+it. Turned on on 2026-11-15, it moved the C ABIs' raw reads and writes --
+fennec-wasm's exports, fennec-ffi's and every JNI function -- into blocks,
+79 of them, each with its comment. `fennec-server`'s `__TEXT` and the
+browser module's code section stayed byte for byte what they were; the
+native library's code kept its size and its instructions, but for the
+registers two functions take -- `fennec_schema` and `fennec_sync_feed`,
+whose answer closures are bound before their `call` now, which a block
+around a closure passed inline would cover whole -- one value kept on the
+stack there rather than in a register, a load a call.
+
+When the lint was turned on (2026-11-15) the crates held 236 `unsafe`
+blocks and impls, 127 of them commented -- most of the rest in tests,
+examples and fennec-ffi's callers of its own ABI -- and writing the reasons
+down found three that had none. `fennec_alloc` made a `Layout` of any
+length the page asked for, unchecked: past `isize::MAX`, 2 GiB on wasm32,
+that is undefined behaviour, and `fennec_load_owned` then took the block as
+a `Vec`; it answers a null now. `boxed` copied an answer through the null a
+failed allocation answers, address 0 in a module, the bottom of its stack:
+it aborts now, and the page's `#write` throws on a null rather than write
+there. And `fennec_schema` read its text as UTF-8 before it looked at the
+mode, where fennec.h says `FENNEC_SCHEMA_DESCRIBE` leaves it unread: it
+answers the description first now. Each has its test, the first and last
+aborting on the standard library's precondition checks before the fix.
+
+A mapping's bytes are a `&[u8]` (`fs::Mapping::as_ref`), so two things
+must hold of them while a slice lives: no byte of it is on a page past the
+file's end, which a read ends the process at (`SIGBUS`), and no byte of it
+changes. A database's mapping covers the file's length when it is made and
+grows only over bytes written (`FileSink::written_through`). The one cut, a
+torn tail at the open, takes the bytes past it out of the mapping before
+the file is cut (`FileSink::cut`, `a_cut_takes_the_bytes_past_it_out_of_the_mapping`):
+until 2026-11-15 it left them covered, a slice of the mapping spanning
+pages past the file's end until the first handover, and the first appends
+after the cut landed in its bytes in place. No read reached them -- no
+record points past the cut, the cut runs before the open returns the
+database, and the appends were read from memory until a handover covered
+them anew -- but no slice may span them either. Appends land past what the
+mapping covers, and a rewrite renames a new file over the old (root
+CLAUDE.md, *A mapped file is replaced only by rename*). The one write in
+place is a compact's beside the database: the counter's head patched into
+its side file under the write lock (`finish_beside`), after `Beside::write`
+mapped that file and pointed the compact's stores at it. Those stores are
+the compact's alone until the swap, which comes after the patch, all on
+the one thread that runs it, and no slice of the mapping outlives the read
+that took it (the touch of every page ends before), so no read meets those
+bytes as they change. Another process writing the file is what the
+`<file>.lock` every opener of a file to write takes keeps out (root
+CLAUDE.md, *Single writer*); a process ignoring it can end a reader with
+`SIGBUS`. A reader that takes no lock (`open_read_only`: `fennec types`,
+`--read-only`) reads the file as it stood at its open, and a server opening
+it after a crash cuts a torn tail under it. So the reader maps the file only
+up to where no open to write it cuts it, a point it finds by reading the
+file, never through a mapping, and reads the rest into memory laid over the
+mapping's own pages (`Mapping::reading`; storage.md's *What a reader maps*):
+its open's walk and every slice it takes after read pages no cut takes, or
+its own copy. `a_reader_that_looked_before_a_cut_walks_what_it_read` stops
+a reader between its look at the file and its walk, cuts the file under it
+with a server's open, and walks: mapped at its length, the walk ended the
+process (`SIGBUS`). Its open covers the mapping only to the records it took
+(`Mapping::cover` once the load returns,
+`a_reader_is_covered_to_the_records_its_open_took`). Until 2026-11-21 it
+mapped the file at its length and walked it there, a server's open cutting
+it in the middle of that walk ending the reader, and until 2026-11-15 it
+kept the length for its life, every slice spanning the pages past the
+file's new end once a server had cut it. On Windows the reader maps the file at
+its length still: its view refuses the cut (`ERROR_USER_MAPPED_FILE`), the
+server's open failing by name until the reader is gone
+([windows.md](windows.md)); its mapping is views laid end to end, which
+only grow (`fs::windows::map`), and its own cut drops the database and its
+views first (`cut_and_open`).
+
+## Sanitizers
+
+The crates whose `unsafe` code an app's or a page's pointers reach run
+their tests under AddressSanitizer: `make sanitize`, CI's `sanitize` job
+on x86_64-unknown-linux-gnu, is `cargo test -p fennec-ffi -p fennec-abi -p
+fennec-core --lib --tests` built with `-Zsanitizer=address` on the
+Makefile's `FUZZ_NIGHTLY`, the fuzzer's dated nightly, for the host's
+triple, so build scripts and proc macros run uninstrumented (the nightly is
+only here, in `fuzz-smoke` and in `fuzz.yml`), in the `sanitize` profile:
+the test profile's checks -- debug assertions, overflow checks, the
+standard library's preconditions -- at opt-level 1, as ASan's own
+documentation advises. A report -- a read or write past a block, after its
+free, a double free -- ends that test binary, failed, the others run on
+(`--no-fail-fast`) and the run fails at its end. Three tests are skipped
+(`SANITIZE_SKIP`): those held to the standard library's own Unicode, which
+a nightly moves ahead of the pinned release's -- they fail on a new
+Unicode by design, for the case tables to be written again (`case.rs`,
+`tests/nocase.rs`), and say nothing of memory.
+`fennec-ffi`'s `tests/bounds.rs` calls each function of the C ABI at its
+edges -- a length of 0, a NULL with the largest length a `size_t` holds,
+a buffer exactly as long as it says, a heap block of that length alone or
+one whose bytes past the length change the answer if read, a vector
+claiming more `f32`s than its block holds, a place past the parameters, a
+handle no database holds, every mode, kind and status past the last -- so
+a read past a block is a report rather than a wrong answer.
+
+Every unsafe site of the three crates that the job's target compiles is
+reached by a test it runs, checked by a probe never committed: each site
+noted its number in a file the first time a process reached it, over the
+same tests on macOS (`make sanitize`'s run, ASan or not, reaches the
+same paths), and each Linux-only site by its macOS twin's path -- the
+`posix_fadvise` a compact past the page cache asks where macOS asks
+`F_NOCACHE`, the `fcntl` lock's struct, the CRC's SSE 4.2 path where macOS
+takes the ARM one. What the job does not reach: Windows' sites (the
+mapping in views, the lock's kernel32 calls), the browser module's
+(`vector::simd` is safe Rust; `Rows::row` and fennec-wasm's exports are
+wasm32's, which has no ASan, and run natively only in fennec-wasm's own
+tests), the `flock` lock of a Unix that is neither Linux nor Apple's, and
+the JNI functions, which need a JVM; aarch64's NEON kernels, prefetch and
+CRC instructions run under it on Apple silicon (`make sanitize`), not in
+CI's x86_64 leg.
+
+Leaks are not looked for (`detect_leaks=0`): a leak is no undefined
+behaviour, the engine's tests forget a database on purpose as a killed
+process leaves one (`fs::tests`), and LeakSanitizer does not run on Apple
+silicon, where the rest of the job is run again by hand. Nor does the job
+hold the binaries' own unsafe code -- fennec-http's sockets, `poll`,
+`getrandom` and file ACLs, fennec-server's signals and user switch,
+fennec-shard's and the shell's -- which the clippy lint holds to its
+comments alone; uninitialized reads (MemorySanitizer) and data races
+(ThreadSanitizer), each a build of the standard library of its own; doc
+tests; or what Miri checks of aliasing and provenance, which follows.
+It runs for a pull request, a push to main, the schedule and a dispatch,
+never for a merge group, where nothing waits for a check that is not
+required. Its first step looks at the files a pull request or a push
+changed against the commit it starts from and skips the tests -- the job
+still reporting success -- where none is under `crates/`, the Makefile, a
+manifest or the lock file, `rust-toolchain.toml`, `.cargo/` or `ci.yml`;
+the schedule and a dispatch run them whatever changed. A pull request
+merges past a red one (it is no required check, [above](#reruns)), and a
+release waits for a green one at its commit (RELEASING.md).
+
+Its first run, on an M-series Mac on 2026-11-15, found nothing: 1 000
+tests, no report. Built at opt-level 1 they ran no longer than the
+unsanitized debug build's: fennec-core's unit tests 54 s against 79,
+`tests/all.rs` 198 against 258, the machine shared with other builds (a
+load of 35 to 46 through the sanitized run); the build took 104 s. In CI's
+test job the same binaries, unsanitized, take 3.5 minutes (60 s and 146
+s), so the job, the nightly's install and the build with it, is bounded at
+30 minutes and expected within 15. It restores the cargo cache as every job
+of `ci.yml` does, saved by main's runs alone ([above](#reruns)), keyed by
+the job and the nightly's date beside `Cargo.lock` and
+`rust-toolchain.toml`: what it restores was built by that nightly with
+AddressSanitizer's flags, the registry's crates among it, and never a
+stable build's `target/`. The nightly itself is installed each run.
+
 ## Coverage
 
 `.github/workflows/coverage.yml` runs weekly (Wednesday 03:41 UTC) and by
@@ -636,8 +886,8 @@ by the tool or the workflow: a percentage measures how much code ran, not
 whether its behaviour is right, and a bar such as 85% would be arbitrary and
 steer toward tests that execute lines without asserting anything. What
 guards the boundary modules is their fuzz targets ([Fuzzing](#fuzzing)); the
-report shows where a target or a test reaches little. Miri and the
-sanitizers are separate items.
+report shows where a target or a test reaches little. Miri is a separate
+item; the sanitized tests are [above](#sanitizers).
 
 *The boundary list is data at the top of `tools/coverage_report.py`*
 (`BOUNDARIES`): each module with one line saying what untrusted bytes it

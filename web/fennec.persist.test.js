@@ -21,7 +21,7 @@ class KeyRange {
     return new KeyRange(lo, hi);
   }
   has(k) {
-    return k >= this.lo && k <= this.hi;
+    return typeof k === 'string' && k >= this.lo && k <= this.hi;
   }
 }
 
@@ -46,23 +46,22 @@ function fakeIndexedDB() {
     });
     return req;
   };
+  // An array key -- a replica's claim -- is kept by its JSON, outside every range of strings.
+  const at = (key) => (Array.isArray(key) ? JSON.stringify(key) : key);
+  const inRange = (range) => [...records.keys()].filter((k) => range.has(k)).sort();
   const store = (writes) => ({
     put(value, key) {
-      writes.push(['put', key, value.length ?? 0, () => records.set(key, value)]);
+      writes.push(['put', at(key), value.length ?? 0, () => records.set(at(key), value)]);
     },
-    delete(range) {
-      writes.push(['delete', `${range.lo}..`, 0, () => {
-        for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+    delete(q) {
+      if (!(q instanceof KeyRange)) return writes.push(['delete', at(q), 0, () => records.delete(at(q))]);
+      writes.push(['delete', `${q.lo}..`, 0, () => {
+        for (const k of inRange(q)) records.delete(k);
       }]);
     },
-    get: (key) => request(() => records.get(key)),
-    getAll: (range) =>
-      request(() =>
-        [...records.keys()]
-          .filter((k) => range.has(k))
-          .sort()
-          .map((k) => records.get(k)),
-      ),
+    get: (key) => request(() => records.get(at(key))),
+    getAll: (range) => request(() => inRange(range).map((k) => records.get(k))),
+    getAllKeys: (range) => request(() => inRange(range)),
   });
   const idb = {
     records,
@@ -263,7 +262,7 @@ test('a store deleted under the page has its image stored again by the next pers
   assert.equal(await deleteDatabase(), 'deleted');
   db.run('put t {n: 3}');
   await persist(db, 'g');
-  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#..']], 'the image, not a chunk');
+  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#000000000..']], 'the image, not a chunk');
   assert.deepEqual(await restored('g'), [1, 2, 3]);
   // Nothing written since the delete, the image is stored again all the same.
   assert.equal(await deleteDatabase(), 'deleted');
@@ -281,7 +280,7 @@ test('a store deleted under the page has its image stored again by the next pers
   db.run('put t {n: 5}');
   await persist(db, 'g');
   told();
-  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#..']]);
+  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#000000000..']]);
   assert.deepEqual(await restored('g'), [1, 2, 3, 4, 5]);
 
   // The connection gone while a chunk is being sealed: the chunk is
@@ -297,7 +296,7 @@ test('a store deleted under the page has its image stored again by the next pers
   idb.records.clear();
   await sealing;
   told();
-  assert.deepEqual(lastWrite(), [['put', 's'], ['delete', 's#..']]);
+  assert.deepEqual(lastWrite(), [['put', 's'], ['delete', 's#000000000..']]);
   assert.deepEqual(await restored('s', { cryptoKey }), [1, 2, 3, 4, 5, 6, 7]);
 });
 
@@ -375,7 +374,7 @@ test('a persist refused while another waits for it lets that one run, which stor
   const b = persist(db, 'w');
   await assert.rejects(a, { name: 'QuotaExceededError' });
   assert.ok((await b) > 0, 'the second answers for itself');
-  assert.deepEqual(idb.log.at(-1).map((w) => [w[0], w[1]]), [['put', 'w'], ['delete', 'w#..']], 'an image, holding what the refused one drained');
+  assert.deepEqual(idb.log.at(-1).map((w) => [w[0], w[1]]), [['put', 'w'], ['delete', 'w#000000000..']], 'an image, holding what the refused one drained');
   const back = await Fennec.open(wasm);
   assert.equal(await restore(back, 'w'), true);
   assert.deepEqual(ns(back), [1, 2, 3]);
@@ -586,7 +585,7 @@ test('a persist after a restore that failed as it loaded stores the database who
   };
   const stores = async (db, key) => {
     assert.ok((await persist(db, key)) > 0, 'stored');
-    assert.deepEqual(idb.log.at(-1).map((w) => w[1]), [key, `${key}#..`], 'an image');
+    assert.deepEqual(idb.log.at(-1).map((w) => w[1]), [key, `${key}#000000000..`], 'an image');
   };
 
   // The review's sequence: emptied for the image, then refused.
@@ -845,6 +844,139 @@ test('a sealed database restores with its key and nothing else', { skip: wasm ? 
   // A record stored in the clear is not taken for a sealed one.
   await persist(db, 'clear');
   await assert.rejects(restore(await Fennec.open(wasm), 'clear', { cryptoKey }), /stored in the clear/);
+
+  // A whole store moved under another name, by the same key: its image's
+  // tag covers the name it was sealed under.
+  const other = await Fennec.open(wasm);
+  other.run('create collection t (n int, body text)');
+  other.run('put t {n: 1, body: "the other one"}');
+  await persist(other, 'other', { cryptoKey });
+  const kept = new Map(idb.records);
+  for (const k of [...idb.records.keys()]) if (k === 'other' || k.startsWith('other#')) idb.records.delete(k);
+  for (const [k, v] of kept) if (k === 's' || k.startsWith('s#')) put(k.replace(/^s/, 'other'), v);
+  await assert.rejects(restore(await Fennec.open(wasm), 'other', { cryptoKey }), /other: record 0 does not open/);
+});
+
+// Each chunk's tag covers the tag of the record before it. Without that, a
+// page that went on from a store cut short sealed its next chunks at the
+// places of those cut, under the same generation, and a chunk it cut
+// opened after one it sealed since, or one sealed since after one it cut
+// (1.0's review): writes in the middle of the store dropped or doubled.
+// What remains is a store cut short, restored as the page left it then.
+test('a sealed store cut short opens as it stood or as the page went on, never spliced', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const chunk = (n) => `c#${String(n).padStart(9, '0')}`;
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const opened = async () => {
+    const d = await Fennec.open(wasm);
+    assert.equal(await restore(d, 'c', { cryptoKey }), true);
+    return ns(d);
+  };
+
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, body text)');
+  for (let i = 0; i < 100; i++) db.run('put t {n: $1, body: "a row of the image"}', [i]);
+  await persist(db, 'c', { cryptoKey });
+  for (const n of [1001, 1002, 1003, 1004]) {
+    db.run('put t {n: $1}', [n]);
+    assert.ok((await persist(db, 'c', { cryptoKey })) < 100, 'a chunk');
+  }
+  const base = ns(db).slice(0, 100);
+  assert.deepEqual([...idb.records.keys()].sort(), ['c', chunk(1), chunk(2), chunk(3), chunk(4)]);
+  const before = new Map(idb.records);
+
+  // Cut at 2: the page opens what is left and goes on, sealing 3 and 4 again.
+  idb.records.delete(chunk(3));
+  idb.records.delete(chunk(4));
+  const page = await Fennec.open(wasm);
+  assert.equal(await restore(page, 'c', { cryptoKey }), true);
+  assert.deepEqual(ns(page), [...base, 1001, 1002]);
+  for (const n of [2003, 2004]) {
+    page.run('put t {n: $1}', [n]);
+    await persist(page, 'c', { cryptoKey });
+  }
+  assert.deepEqual([...idb.records.keys()].sort(), ['c', chunk(1), chunk(2), chunk(3), chunk(4)]);
+  const after = new Map(idb.records);
+  assert.deepEqual(await opened(), [...base, 1001, 1002, 2003, 2004]);
+
+  // The chunk cut, then the one sealed in its place's next: refused.
+  idb.records.set(chunk(3), before.get(chunk(3)));
+  await assert.rejects(opened(), /c: record 4 does not open/);
+  // And the one sealed since, then the one cut after it.
+  idb.records.set(chunk(3), after.get(chunk(3)));
+  idb.records.set(chunk(4), before.get(chunk(4)));
+  await assert.rejects(opened(), /c: record 4 does not open/);
+  // What remains: either run cut short, as it stood.
+  idb.records.set(chunk(3), before.get(chunk(3)));
+  idb.records.delete(chunk(4));
+  assert.deepEqual(await opened(), [...base, 1001, 1002, 1003]);
+  idb.records.set(chunk(3), after.get(chunk(3)));
+  assert.deepEqual(await opened(), [...base, 1001, 1002, 2003]);
+});
+
+// A store sealed before chunks covered the tag before them -- 0.2.0's, up
+// to this tree (version 1: its image has no `v`) -- restores as it was
+// sealed, and the next persist stores an image sealed as version 2 in its
+// place, which its chunks then follow. The page's stored data is a frozen
+// surface (docs/design/compatibility.md); web/fennec.compat.test.js holds
+// 0.2.0's own store, this one a store sealed here as it sealed.
+test('a store sealed as version 1 restores, and its next persist stores an image of version 2', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  // Version 1's seal, as 0.2.0's web/fennec.js wrote it.
+  const sealedAsV1 = async (key, gen, n, bytes) => {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const additionalData = new TextEncoder().encode(`fennecdb\0${key}\0${gen}\0${n}`);
+    const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData }, cryptoKey, bytes));
+    return n === 0 ? { gen, iv, data } : { iv, data };
+  };
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int, body text)');
+  for (let i = 0; i < 100; i++) db.run('put t {n: $1, body: "a row of the image"}', [i]);
+  db.journal();
+  const gen = '0123456789abcdef';
+  idb.records.set('old', await sealedAsV1('old', gen, 0, db.snapshot()));
+  for (const [n, row] of [[1, 1001], [2, 1002]]) {
+    db.run('put t {n: $1}', [row]);
+    const { replace, bytes } = db.drain();
+    assert.equal(replace, false);
+    idb.records.set(`old#${String(n).padStart(9, '0')}`, await sealedAsV1('old', gen, n, bytes));
+  }
+  const want = ns(db);
+
+  const page = await Fennec.open(wasm);
+  assert.equal(await restore(page, 'old', { cryptoKey }), true);
+  assert.deepEqual(ns(page), want);
+  // Its `v` is its own: a version 1 image read as version 2 does not
+  // open, and a later version is refused by its number.
+  const image = idb.records.get('old');
+  idb.records.set('old', { ...image, v: 2 });
+  await assert.rejects(restore(await Fennec.open(wasm), 'old', { cryptoKey }), /old: record 0 does not open/);
+  idb.records.set('old', { ...image, v: 3 });
+  await assert.rejects(restore(await Fennec.open(wasm), 'old', { cryptoKey }), /old is sealed as version 3, which a later client wrote/);
+  idb.records.set('old', image);
+
+  // Written to, it stores an image sealed as version 2 in place of the
+  // three records, which its chunks follow.
+  page.run('put t {n: 2001}');
+  assert.ok((await persist(page, 'old', { cryptoKey })) > 1000, 'an image');
+  assert.deepEqual(idb.log.at(-1).map((w) => w[1]), ['old', 'old#000000000..']);
+  assert.equal(idb.records.get('old').v, 2);
+  page.run('put t {n: 2002}');
+  assert.ok((await persist(page, 'old', { cryptoKey })) < 100, 'then a chunk');
+  assert.deepEqual([...idb.records.keys()].filter((k) => k.startsWith('old')).sort(), ['old', 'old#000000001']);
+  const back = await Fennec.open(wasm);
+  assert.equal(await restore(back, 'old', { cryptoKey }), true);
+  assert.deepEqual(ns(back), [...want, 2001, 2002]);
 });
 
 // A page that keeps its state in the database asks its live queries before
@@ -873,4 +1005,66 @@ test('restore runs the live queries asked before it', { skip: wasm ? false : 'no
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(seen.at(-1), ['kept', 'new']);
   assert.ok((await persist(page, 'state')) > 0);
+});
+
+// A key's chunks were every record from `key#` on: an image stored under
+// `notes` and `unpersist('notes')` deleted `notes#archive`, another key's
+// store, and what `putState` kept under `notes#cursor`, and a restore of
+// `notes` read them as its chunks (the review's probe). A key's chunks are
+// `key#` and nine digits, and only those -- `notes#1` and `notes#2024` are
+// in the range those are in, and another key's.
+test("a key's image, chunks, restore and unpersist reach no other key's records", { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore, putState, getState, unpersist } = await import('./fennec.js');
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const rows = (d) => d.rows('get t select n order n');
+  const made = async (from) => {
+    const d = await Fennec.open(wasm);
+    d.run('create collection t (n int, body text)');
+    for (let i = from; i < from + 50; i++) d.run('put t {n: $1, body: $2}', [i, 'x'.repeat(100)]);
+    return d;
+  };
+  // Each an image and a chunk.
+  const keys = { notes: await made(0), 'notes#archive': await made(100), 'notes#2024': await made(200) };
+  for (const [i, [key, d]] of Object.entries(keys).entries()) {
+    const opts = key === 'notes' ? { cryptoKey } : {};
+    await persist(d, key, opts);
+    d.run('put t {n: $1}', [1000 + i]);
+    await persist(d, key, opts);
+  }
+  await putState('notes#cursor', 7);
+  await putState('notes#1', 'one');
+  const mine = (k) => k === 'notes' || /^notes#\d{9}$/.test(k);
+  assert.deepEqual([...idb.records.keys()].filter(mine).sort(), ['notes', 'notes#000000001']);
+  const others = () => new Map([...idb.records].filter(([k]) => !mine(k)).map(([k, v]) => [k, structuredClone(v)]));
+  const before = others();
+  assert.equal(before.size, 6);
+
+  // Its own chunks read back, and nothing else.
+  const back = await Fennec.open(wasm);
+  assert.equal(await restore(back, 'notes', { cryptoKey }), true);
+  assert.deepEqual(rows(back), rows(keys.notes));
+
+  // An image replaces its own chunks alone.
+  keys.notes.run('compact');
+  keys.notes.run('put t {n: 2000}');
+  await persist(keys.notes, 'notes', { cryptoKey });
+  assert.deepEqual([...idb.records.keys()].filter(mine), ['notes'], 'the image, its chunk gone');
+  assert.deepEqual(others(), before, 'every other record as it was');
+
+  // `unpersist` deletes its key's store alone.
+  keys.notes.run('put t {n: 2001}');
+  await persist(keys.notes, 'notes', { cryptoKey });
+  await unpersist('notes');
+  assert.deepEqual([...idb.records.keys()].filter(mine), []);
+  assert.deepEqual(others(), before, 'every other record as it was');
+  for (const key of ['notes#archive', 'notes#2024']) {
+    const d = await Fennec.open(wasm);
+    assert.equal(await restore(d, key), true);
+    assert.deepEqual(rows(d), rows(keys[key]), key);
+  }
+  assert.equal(await getState('notes#cursor'), 7);
+  assert.equal(await getState('notes#1'), 'one');
 });

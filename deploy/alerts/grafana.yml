@@ -938,3 +938,57 @@ groups:
         annotations:
           summary: "A copy on {{ $labels.instance }} refused a primary of another lineage and deleted itself"
           runbook: deploy/RUNBOOK.md#read-replicas
+      - uid: fennec-tenant-copies-disconnected
+        title: FennecTenantCopiesDisconnected
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fennec_copies_disconnected > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $values.A.Value }} tenant copies on {{ $labels.instance }} are not connected to their primary: a failover now promotes each where it stands, without what it was not sent"
+          runbook: deploy/RUNBOOK.md#a-copy-not-following
+      - uid: fennec-tenant-copies-behind
+        title: FennecTenantCopiesBehind
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fennec_copies_behind > 1000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A tenant copy on {{ $labels.instance }} is {{ $values.A.Value }} writes behind its primary: a failover now loses them"
+          runbook: deploy/RUNBOOK.md#a-copy-not-following

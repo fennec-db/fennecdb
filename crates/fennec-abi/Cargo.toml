@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 autotests = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # Without the indexes, as fennec-ql takes the core: each binding names the
 # ones it is built with, and asking for them here would put them back into

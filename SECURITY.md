@@ -120,6 +120,14 @@ In scope, and worth reporting:
   end, or the head's version or name's length changed so that its first
   frame's is),
   opens as the shorter file by design (below).
+- An integrity break in a page's sealed store (`persist` or `sync` with a
+  `cryptoKey`): a record that opens under another name than the one it
+  was stored under, at another place, after another record than the one it
+  was sealed after -- a chunk the page cut, among those it sealed in their
+  places since -- or with a byte changed; or a replica that stores over a
+  store it could not restore, the writes it held unsent with it. A store
+  cut at a record's edge, or an older one put back whole, restores as it
+  stood by design (below).
 - Studio, the page the server serves: it is served before any token, under a
   strict CSP, and shows stored rows to whoever holds the server token, so a
   script injected through a row it shows would take that token
@@ -150,12 +158,14 @@ a studio that a `fennec-server` serves
 ([`integrations/CLAUDE.md`](integrations/CLAUDE.md)); what a page shows of
 the server's data is the server's to decide, as in a browser.
 
-Seven parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
+Eight parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec
 (`codec`), a `.fennec` file's open, mapped as a server opens it, with a
-replica's apply (`image`), a SQLite file (`sqlite`), and the walk of the
+replica's apply (`image`), a SQLite file (`sqlite`), the walk of the
 certificate a PostgreSQL server shows that picks a channel binding's hash
-(`certificate`), under
+(`certificate`), and a primary's stream as a replica, an archiver and a
+backup read it, an image it sends adopted as a replica adopts one
+(`stream`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
 reader, the framing of a sealed file and of an archive, JWT and JWKS
@@ -365,6 +375,22 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   Keeping archives and backups in a bucket that keeps versions or locks
   objects is what holds them to their age. A plain archive promises nothing
   against whoever can write it.
+- **A page's sealed store holds its records to their name, place and
+  order, not to their age, and its end can be cut.** Whoever can write the
+  browser's storage can delete a store's latest chunks: it restores as the
+  page left it before them, as one whose latest writes were never
+  persisted would, and the page seals its next chunks in their places,
+  each covering the tag of the record before it, so they open only after
+  each other, never after a chunk it cut
+  ([JavaScript docs](https://fennecdb.com/docs/javascript#sealed)). An
+  older copy of the whole store put back restores as what it was. A store
+  sealed by 0.2.0 holds its chunks to their place alone: until the page's
+  next `persist` replaces it with an image sealed now, chunks 0.2.0 sealed
+  after such a cut still open among those cut. A replica given another
+  key, or none, refuses to start and keeps the store, where 0.2.0's seeded
+  over it and lost the writes it held unsent. Sizes and names are
+  visible, a script of the page's own origin holds its `CryptoKey` as the
+  page does, and an `openFile` file is never sealed.
 - **Nothing in memory is encrypted, and the live file is plain on disk.** The
   indexes (a text index's terms, a hash index's keys, vectors), the documents
   written since the last handover to the file (16 MB, 65 536 records or
@@ -375,6 +401,31 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   leaves out shared file mappings. Only an archive or a backup can be sealed
   (`--key-file`), never the file a server serves: the disk's own encryption
   covers that one, and swap and core dumps are the host's to protect.
+- **On a shared machine, the files are their user's: other users read none,
+  that user and root read all.** On Linux and macOS every file
+  `fennec-server` and `fennec` make -- a database, its sync log and lock, a
+  node's tenants and their records, an archive, a backup, a restore, the
+  audit log -- is made mode `0600` by the call that makes it, whatever the
+  umask, and a directory they make `0700`
+  ([crates/fennec-core/src/fs.rs](crates/fennec-core/src/fs.rs)); up to 0.2.0
+  each took the umask's mode, usually readable by every user. Not defended:
+  anything running as the server's user or as root; a file made by 0.2.0 or
+  before, or given a wider mode by its operator, which keeps that mode -- a
+  file replaced keeps the mode of the one it replaces, a group's bits only
+  where the new file is in that group (a setgid directory keeps it), and
+  nothing of a file another user owns; a copy made elsewhere
+  with other modes; a user who may write the directory a database is in,
+  trusted with its files as one who may remove or replace the database
+  itself: a restore opens its `.restoring` there again by its name,
+  checkpoints it and renames it in, and `fennec unseal` reads its `.tmp`
+  so, each held to the file it wrote just before it opens it again, a link
+  put there after that check followed -- for a restore, the file the link
+  names opened, checkpointed and renamed in; and what the
+  process list shows, a password in
+  `--follow`'s connection string among it
+  ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
+  file takes its folder's access list, and a key or a tenant's hook secrets
+  are made their user's alone.
 - **What the process holds is resident,** with no buffer pool of its own to
   evict from: the indexes, and the documents too under `--no-mmap`, since a
   mapped file's pages are the system's to keep or drop. A `--dir` node does

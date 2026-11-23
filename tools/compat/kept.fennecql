@@ -1,0 +1,9 @@
+-- The statements every later build answers over kept.fennec: a graph
+-- kept in the file's tail, and writes after it.
+describe points
+get points count
+get points near v [0.1, 0.2, 0.3, 0.4] limit 3 select n
+get points near v [0.1, 0.2, 0.3, 0.4] exact limit 3 select n
+get points near w [0, 0, 0, 0, 1, 1, 1, 1] limit 3 select n
+get points near w [0, 0, 0, 0, 1, 1, 1, 1] exact limit 3 select n
+get points where n < 5 order n

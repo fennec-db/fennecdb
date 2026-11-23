@@ -71,7 +71,45 @@ emptied the database. `web/fennec.persist.test.js`,
 `web/fennec.file.test.js` and `web/browser/` hold all seven. A change to
 these calls or to `idb` runs `web/browser/` in Chrome, Firefox and Safari
 before it lands -- every pull request's run has `browsers (safari)` --
-and `make file-bench` in Chrome and Firefox against main's.
+and `make file-bench` in Chrome and Firefox against main's. After a trap
+a close enters the module no more and throws nothing, its file let go of,
+and `openFile` takes a name another database of this worker keeps from
+one whose module stopped (`here`), refusing it from one that runs on
+([js-client.md](../docs/design/js-client.md#persistence-in-the-page),
+`web/fennec.file.test.js`).
+
+**[A sealed chunk opens only after its own, and a replica keeps a store it
+cannot restore.](../docs/design/js-client.md#sealed-chunks-in-a-chain)** A
+sealed record's tag covers the name it is stored under, its image's
+generation, its place and the tag of the record before it (`aad`, version
+2, the image's `v`): a page going on from a store cut short never opens
+with a chunk it cut, and what remains is a store cut at a record's edge. A
+store sealed as version 1 (0.2.0's) restores as it was sealed and the next
+`persist` stores an image over it; nothing is sealed so any more, and a
+later version is refused by its number. A change to what a tag covers is a
+new version beside the old, the old read as before: the page's stored data
+is a frozen surface. A `FennecSync` seeds only a key holding nothing: a
+store there that does not restore refuses its start, kept as it stands
+with its unsent writes (`#loadPersist`), and a tab taking the lead from
+one stores nothing there (`#unkept`, `status()`'s `unkept`), reading it
+again at its next persist only where IndexedDB failed the read (`unread`);
+one taking the lead from a store another tab wrote since it read it stores
+an image first (`sameStore`). A replica stores its key only holding the
+key's lock (`storeLock`), whatever its url, shapes or `leader`, claims the
+store before it reads it (`claim`, a token under an array key) and takes
+it over (`#takeStore`) before it leads. Each of its writes reads the token
+in its own read/write transaction and stores nothing where it finds
+another's or none (`taken`, `unkept`): IndexedDB runs a store's read/write
+transactions one at a time, so this holds with no lock manager, where the
+last replica started stores the key, and asks nothing of when a lock is
+granted. `close` stores what was written before it -- the persist loop
+ends in the step it last looks for a write waiting (`#persisting`) --
+then lets go of the lock, or after `LET_GO_MS`, past which no persist
+starts and `onError` is told. A key's chunks are `key#` and nine digits
+(`isChunk`): nothing reads or deletes another key's records but one named
+so, which the docs say to avoid. `unpersist` deletes one key's store,
+under its lock (`locks`). `web/fennec.persist.test.js` and
+`web/fennec.sync.test.js` hold each.
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a

@@ -1,6 +1,6 @@
 # Durability
 
-The long form of the invariants [the root CLAUDE.md](../../CLAUDE.md), [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md), [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, a node's tenants each synced on a thread of its own, the power cut that holds the sync log on Linux, and the one shutdown (the last three added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [the root CLAUDE.md](../../CLAUDE.md), [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md), [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Durability*: a storage error stopping writes, buffered writes written behind the lock, the sync log, the mode a file is made with and keeps through a rename, a node's tenants each synced on a thread of its own, the power cut that holds the sync log on Linux, and the one shutdown (the last four added after the move). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Storage errors
 
@@ -200,7 +200,25 @@ meanwhile claiming the point before it; a failed one stores nothing. No
 fsync is added for it, and a durability that covers nothing appended runs
 none still. A close after it appended something and everything was
 covered appends the 8-byte mark (`REC_SYNCED`) unsynced: a durable point the next open need not look for,
-lost harmlessly. An open hands its durable point to the sink
+lost harmlessly. An open that cuts a torn tail leaves the same mark after
+what it keeps, where a record it keeps carries a sum and no whole mark
+ends them already (`FileSink::cut`), each step fsynced before the next:
+the file first -- the earlier process's pages, which only that fsync
+makes durable, and a close's mark ending what the cut keeps -- then the
+mark, written over the first bytes the cut takes with a head past the end
+of any file after it (in three writes where they cross a 512-byte
+sector's end, the mark's kind byte last), then the cut. Each comes before
+what would claim more than the disk holds without it, so the next open
+reads the file as the one that cut it did whatever step a power cut stops
+-- the records that claimed how far it was durable may have gone with the
+tail -- on a disk that writes a 512-byte sector whole or not at all, which
+NVMe promises and SATA does not, but in the window of a mark across a
+sector's end, where it may be refused, and where, given a row below the
+durable point the disk damaged, three shapes of file have that row cut
+with the synced ones after it; a write or an fsync of the cut failing
+there leaves that window for an open tried again
+([storage.md](storage.md#file-format), *What a cut leaves*, *The cut's
+order*, *The sector, an assumption*). An open hands its durable point to the sink
 (`Sink::set_durable`), the appends after it claiming it until an fsync of
 their own covers more.
 
@@ -297,6 +315,273 @@ kept to the exit to `close_log` and a durability run after it
 `the_shell_leaves_no_sync_log`, failed on Linux before the close was
 asked, each finding the log after the stop; fennec-core's and
 fennec-http's tests pass on Linux, where every file keeps one.
+
+## Files' modes
+
+**Every file is made its owner's alone, and a file there keeps its mode.**
+On a Unix the call that makes a file gives it mode `0600` whatever the
+umask (`fs::private`, an `OpenOptions` with the mode), and one that makes a
+directory `0700` (`fs::create_dir_private`). Up to 0.2.0 each was the
+umask's -- `0644` under the usual 022, `0666` under 000 -- and every user
+of the machine read a node's tenants (their rows and the server's `_`
+collections), a tenant's records, archives, backups, a restore or an
+unseal, and the audit log's refused requests (G14's review). The attacker
+is another user of the same machine, without the server's user or root.
+
+What makes them, by crate: fennec-core's `FileSink::create` (the database,
+which every server, replica, tenant, router directory, shell, import and
+app open), `rewrite_with`'s `.compacting` (a checkpoint, a compact under the
+lock, a replica's image, a restore's checkpoint), `SideFile::create`'s
+`.beside` (a compact or an index built beside the database, the
+auto-compact), `SyncLog::open`; fennec-abi's `lock::take` (`<file>.lock`);
+fennec-http's `audit::open`, `instance::write` (`<t>.instance`),
+`tenants.rs`' `.follows`, `.quota` and an install's `.importing`,
+`Tenants::new`'s directory, `tenant_hooks` (`<t>.hooks`, already `0600`),
+`schedule::hint::write`, the archive's directory, images, `began`,
+segments and a restore's `.restoring` (`fs::copy_private`, `assemble_into`), `backup`'s and
+`unseal`'s `.tmp`, a node archive's root, records and restored directory;
+fennec-cli's `.save` and `fennec key` (already `0600`, made with
+`create_new`). Not data: `fennec types`' TypeScript, written with the
+umask's mode as source code is. The browser's OPFS file is no Unix file;
+the module has no `std-fs` and makes none.
+
+Never a `chmod` that narrows a file after its make: between the two,
+another user's `open` gets a descriptor that reads everything written
+after. The one `fchmod` there is (`mode_like`, below) gives a file made
+`0600` the mode of the one it is to replace, before the rename, never a
+mode wider than that one's. A side file is made
+by its open alone (`fs::create_private`, `O_CREAT | O_EXCL`), which follows
+no link put at its name: whatever is there -- a link, a file an earlier
+process left, wider under 0.2.0 -- is removed and the file made anew. Opened
+through a link, the image went into the file the link named and the mode
+set after with it, and the link was renamed over the database; truncated in
+place, a file kept its mode and any descriptor on it. A file opened again
+where it is there -- the sync log, the lock, a tenant's `.instance` -- takes
+`O_NOFOLLOW` instead (`fs::private_beside`), each target's number as its
+libc's `fcntl.h` has it -- Linux's by processor, the BSDs' and Apple's,
+illumos' -- and a Unix whose number is not listed fails to build: `0`
+there, as armv7 Android's library had it, left the open following links
+unsaid. `fs::copy_private` copies an image into `create_private`'s handle
+and returns it (it was the system's `fs::copy`, which opens its target
+through a link, then an open by the name); on Apple's systems it clones an
+image whose mode gives its owner read and write and no one else anything
+(`cloned`, `fclonefileat`), a clone being made with its source's mode --
+a wider image's would be another user's to open until an `fchmod` --
+and `CLONE_NOFOLLOW` keeping it off a link at its name: without the flag a
+clone follows one that names no file and is made where it points (macOS
+26.1), as the system's `fs::copy`, passing none, did. The clone hands back
+no descriptor, so its name is opened again with `O_NOFOLLOW` and held to
+what the clone made -- one regular file of one name, the process's
+(`CLONE_NOOWNERCOPY`: under root, root's), on the image's volume and of
+its length -- and to the name (`still_named`), then made `0600` on that
+handle where it is not; another file system, volume or a system without
+the flags copies. And `swap_in` renames a rewrite's
+`.compacting` in through the handle
+that wrote it, `.beside` through one opened with `O_NOFOLLOW` (an open by
+the name, as both were, followed a link put there while the image was
+written, the `fchmod` and every append after landing in the file it named).
+The rename itself goes by the name, so `swap_in` first holds the name to the
+handle's file (`still_named`, its device and inode against an `lstat`):
+another file put there since is renamed over nothing, and the sink fails, as
+a failed rename fails it. Each of these needs write access to the
+database's directory, which takes the database itself anyway: what they
+close is a write, a mode or a rename landing on a file the link names.
+`backup`, `unseal` and the small records (`renamed`: an image, `history`,
+`began`) hold their side file's name to the handle that wrote it before the
+rename, as `swap_in` does, and `unseal` syncs through that handle, where it
+opened the name again. What still goes by a name, to the same access, and
+SECURITY.md says so: a restore opens its `.restoring` again to check and
+fork it (`fs::open`, which resolves a link there) and renames it in after
+the checkpoint renamed its own image there, and `unseal` reads its `.tmp`
+again to check it (`fs::open_read_only`), each held to the handle that
+wrote it just before the open, so a link put there in that moment is
+followed. Closing the restore's takes an open of a database over a handle,
+which fennec-core has not; the unseal's check, read from the plaintext in
+memory instead, would copy every document, where the mapped open adopts
+the image's offset index.
+
+**One way to make a file.** `tools/file_create_check.py` (CI's fmt job,
+with `--self-test`) reads `crates/*/src` but fennec-bench's and
+fennec-fuzz's through `tools/secret_eq_check.py`'s reader -- comments,
+strings and `#[cfg(test)]` items left out -- and refuses `File::create`,
+`fs::write`, `.create(..)` and `.create_new(..)` given `true` or a name,
+`create_dir`, `create_dir_all`, `DirBuilder`, `fs::copy`, `fs::rename`,
+a call of `clonefile`, `clonefileat` or `fclonefileat`,
+`UnixListener::bind` and `UnixDatagram::bind` outside the helpers, a
+function of `std::fs` imported by its name or another (`use std::fs::{write,
+rename as moved}`) found where it is called so, and `File` or `fs` imported
+under another name too: an open whose statement puts the mode on it
+(`private(` or `private_beside(`) passes, a rename in a function that keeps
+the mode (`create_like(` or `mode_like(`) passes, and each other one is in
+its `ALLOWED` by file and kind, with why and how many: the helpers' own
+`DirBuilder`s and clone, Windows' opens and swap, `fennec key`'s `create_new` with
+mode `0600`, `fennec types`' TypeScript, the unwinding checks' scratch
+directory, an archive's `renamed` (whose callers made the record by
+`create_like`, or `began` by `create_private` where there is none), a
+tenant's install (refused where a file has the name), and a directory or a
+sidecar moved aside, which takes its own inode and mode with it. A new
+`File::create`, or a rename of a new file over another without its mode,
+fails the job rather than waiting for a review to see it.
+
+**A file there keeps its mode, through every replacement.** An operator's
+`chmod 640` for a backup job must survive a compact, so a side file renamed
+over a file takes that file's permission bits before the rename
+(`fs::mode_like`, on the side file's open handle -- `fchmod` -- never by a
+name a link could have moved): `swap_in` for a checkpoint, a compact under
+the lock or beside it and a replica's image (the handle that wrote the
+image, or `.beside`'s opened with `O_NOFOLLOW`, the one the sink appends
+through after), `Archive::restore` (on
+the handle `assemble_into` wrote `.restoring` through, before its
+checkpoint carries the mode on), `backup` and `unseal` into a file, `.save`,
+a tenant's records and `<t>.hooks`, the hint. A small record takes it as it
+is made (`fs::create_like`), before a byte is written; an image as long as a
+database just before its rename. The set-id bits are not copied. A file
+0.2.0 made `0644` is opened as it is and keeps `0644` -- fennecdb narrows
+nothing under an operator -- which the server page and SECURITY.md say,
+with the `chmod` that closes it.
+
+**A group's bits stay with its group** (`fs::kept_mode`). The new file is
+in the group a file made there gets -- the process's on Linux, the
+directory's on macOS -- not the old file's: nothing is chowned, owner and
+group being the rename's. Copied whatever the group, the bits of a database
+`chgrp backup` and `chmod 640` went, after the first compaction or the
+checkpoint at shutdown, to the server's group (the backup group losing its
+read on Linux) or, on macOS, to the directory's -- often `staff`, every
+local user (G14's review, F5). So the group's bits are copied only where the
+new file's group is the old one's, and cleared otherwise; the owner's and
+the others' are copied as they are. A `fchown` of the group back, which an
+owner may do to a group it is in, is not made: the batch's rule is that
+owner and group are whatever the rename gives, and a server keeping a group
+it was never told of would hold a file's access to whatever group it last
+saw. The way to keep a group across rewrites is the system's: a directory
+of the group, setgid and searchable by it (`chgrp backup /var/lib/fennec &&
+chmod g+xs /var/lib/fennec`: the `x` lets the group reach the file, which a
+`0700` directory does not), every file made in it then of the group, so the
+image is, and keeps the bits. A
+file another user owns lends nothing: its owner's mode is copied only where
+the old file is the process's user's, as the new one is, so a file put at a
+name fennecdb writes -- a link in a shared directory, as below -- never
+widens what fennecdb writes there.
+
+**`fennec verify` restores into a directory of its own.** It restored the
+archive's end into `<temp>/fennec-verify-<pid>-<n>.fennec`, a name another
+user of the machine could put first in `/tmp` as a link to a `0644` file of
+theirs in a directory of theirs: the restore resolved the link
+(`fs::resolved`, a `readlink` that Linux's `protected_symlinks` does not
+stop), took the file's mode and renamed the plaintext over it -- under
+root's `FENNEC_KEY_FILE` (the runbook's `fennec verify --tenants`), a sealed
+archive's rows -- and the cleanup removed the link alone; without a link, a
+file put at `.restoring`'s name lent its `0666`. Every release with
+`verify` had the name (v0.1.6 on, `0644` under the usual umask before this
+batch). It now makes `fennec-verify-<64 random bits>` in the process's temp
+directory, one directory, `0700`, by `mkdir` alone (`fs::create_dir_new`,
+never `recursive`, which takes one there), a name taken being tried again
+under another, restores into it and removes it whole (`Probe`, as it is
+dropped). A verify that never drops it -- killed, or a panic under `fennec`'s
+`panic = abort` -- leaves the directory in the temp directory with the
+restored plaintext in it, `0700` and its file `0600`: its owner's alone,
+whom the key's file let read the archive anyway, until the system's own
+cleaning of the temp directory or a hand removes it. `fennec verify` sweeps
+none: a removal by name and age in a directory every user writes is a
+second way to be led somewhere, for a file no one else can read.
+
+**A sidecar takes its database's mode.** The sync log is removed at every
+clean close and rewrite and made again at the next sync, so a mode set on it
+once would not last; made `0600` by its open, it then takes the mode of the
+file whose bytes it holds (`SyncLog::open`, `kept_mode` from the open
+files, an `fchmod` only where the modes differ), so whoever an operator let
+read the database reads its log, which a `--read-only` open and `fennec
+verify` apply after a power loss. `<file>.lock` made beside a database
+there takes of its mode only what a class that may write the database has
+(`lock::writers_mode`, when the file is new and empty): the owner's bits,
+the group's where the group may write it (and the lock is of its group),
+the others' where they may. A group that may only read the database got the
+lock's read too, and a reader holding `F_RDLCK` on it refuses the server's
+next start, where no reader needs the lock (`--read-only` takes none). One
+made first -- before its database -- is `0600`, as the database then is. A
+lock is never removed, so a mode set on it lasts.
+
+On Windows a file takes its directory's access list and these change
+nothing (`private` compiles to the plain open, `mode_like` to nothing);
+a secret's file is `owner_only`'s DACL ([windows.md](windows.md)).
+
+Measured: only a file's making changes. `private` is a flag on the open
+that makes the file, `O_EXCL` and `O_NOFOLLOW` flags on it too;
+`create_private` adds an `unlink` only where something is at the name, and
+`mode_like` an `fstat` and a `stat` to a replacement -- a compact's or a
+checkpoint's, against an image's writing -- and an `fchmod` only where the
+modes differ; `swap_in` takes the writer's handle where it opened
+`.compacting` by name (one `open` fewer), opens `.beside` as it did with
+`O_NOFOLLOW` added, and `still_named` adds an `fstat` and an `lstat` to
+each, and to a record's, a backup's and an unseal's rename. The image a
+restore or a consolidating round of an archive with no key starts from
+(never a request) is copied by `copy_file_range` on Linux, as
+`fs::copy` copied it: std's `io::copy` from a `File` into a
+`BufWriter<File>` is its `kernel_copy`, which flushes the empty buffer and
+hands both descriptors to the kernel. On APFS it is cloned again, as
+`fs::copy` cloned it, where the third round of G14's fixes had copied its
+bytes a mebibyte a call: with the fsync a restore runs after, on an
+8-core Mac with the one-minute load at 2.9-3.1, 256 MiB took
+0.004-0.008 s cloned, three runs, against 0.13-0.27 s copied and
+0.008-0.012 s by `fs::copy`; 1 GiB 0.003-0.010 s against 0.55-1.20 s and
+0.006-0.013 s (at a load of 6.8-7.1, others' work: 0.003-0.004 s,
+0.27-0.34 s and 0.010-0.013 s; 0.004-0.008 s, 0.81-1.98 s and
+0.006-0.018 s). An image wider than its owner's, which 0.2.0's archives
+hold, is still copied. The clone's code is 1 152 bytes of the `fennec`
+shell's `__text` on macOS (2 854 400 to 2 855 552; the file 3 751 920 to
+3 752 032 bytes), where `restore`, `archive` and `unseal` run;
+`fennec-server`'s file and sections are the same to the byte, and no other
+target builds it. The lock's `writers_mode` runs
+only for a lock file made, and the log's `kept_mode` only for a log made,
+its `fchmod` only where the log's mode is not already its database's. No request opens a file, and the perf gate's `file-open` makes
+none; its `file-compact` makes a side file an op. Counted natively on
+macOS (`proc_pid_rusage`'s instructions, the kernel's with the process's,
+which callgrind does not see), the op with the gate's 10 000 rows took
+10.34-10.43 million instructions before, four runs, and 10.40-10.42
+million after, inside that spread, its allocations the same (38 calls,
+1 086 121 bytes). A `chmod` on every compact, as `mode_like` first did,
+took it to 10.50-10.61 million: APFS journals the metadata write, some
+100 000 instructions, where the image of a database its owner's alone
+has its mode already.
+fennec-core's `files_are_made_their_owners_alone_and_keep_their_mode`,
+fennec-abi's `a_lock_file_is_made_its_owners_alone_or_as_its_database`,
+fennec-http's `tests/modes.rs` and fennec-cli's
+`what_the_program_makes_is_its_owners_alone_and_keeps_its_mode` run under
+a umask of 022 and 000, each set by `sh` for a child that runs the one
+test, since the umask is the process's and the tests beside it on cargo's
+threads make files too; each first asserts that a plain create takes the
+umask, then every path above, and a file made `0640` written, checkpointed,
+compacted, compacted beside, restored over, backed up and unsealed over;
+the sync log's mode as its open made it is read before it takes its
+database's (`synclog::MADE`, a test's), so the log made without the mode on
+its open fails it. fennec-core's `a_groups_read_goes_to_no_other_group`
+gives a database a group of the test's user it is not made with (`id -G`;
+skipped with its reason printed where the user has none) and `0640`, then
+holds its sync log, a checkpoint, a compact and a compact beside to that
+group with its bits or to none, and a database in a setgid directory to
+both; `a_link_at_a_side_files_name_is_never_followed` puts links at the
+sync log's, `.compacting`'s and `.beside`'s names, before each is made and,
+for the two images, while each is written (a link put there then was
+followed until `swap_in` took the writer's handle), and fennec-http's
+`a_link_at_the_sidecars_name_is_never_followed` at `.instance`'s;
+fennec-core's `a_copy_of_an_image_is_cloned_where_it_is_its_owners_alone`
+copies images `0600`, `0700`, `0644` and `0400` onto nothing, a link to a
+file, a link to none and a file left there, holds what the links name
+unchanged and unmade and the copy `0600`, the file at the name, open at
+its end, and on Apple's systems counts the clones (the first two cloned);
+fennec-http's `a_record_is_renamed_in_only_from_the_file_it_wrote` puts a
+link and a file at a record's side file once written, and holds the rename
+refused. fennec-abi's
+`a_lock_file_is_given_only_to_those_who_may_write_its_database` takes a
+lock beside databases `0600` to `0666`, of another group, and a link at the
+lock's name. fennec-http's `modes::verify_writes_nothing_another_user_reaches`
+plants links at the names a verify took, in a child whose `TMPDIR` is the
+test's own, and holds the files they name unchanged; `.follows`
+(`a_read_replicas_stream_is_no_standby`), `<t>.hooks` written again over
+`0640` (`a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone`),
+a node archive's `presence`, `history`, `began` and `restore_all`'s
+directory (`a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept`)
+are held through the server's own routes and the archiver.
 
 ## A node's syncs
 

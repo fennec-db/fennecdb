@@ -1,0 +1,4 @@
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":1100}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":7}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1099},{"n":1098}]}}
+{"kind":"schemas","collections":[{"name":"blobs","fields":[{"name":"n","type":"int","index":"hash"},{"name":"b","type":"bytes","index":"none"}]}]}

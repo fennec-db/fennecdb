@@ -66,6 +66,9 @@ const closed = new WeakSet();
 /** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
 const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
+/** The module's word that bytes are no image of a database (`#take`). */
+const NOT_AN_IMAGE = 'could not load image (corrupt or incompatible version)';
+
 /** A second database over a database's module (`Fennec`'s static block). */
 let sibling;
 /** A database made empty again, its handle a new one (`Fennec`'s static block). */
@@ -77,6 +80,8 @@ let met;
  * (`Fennec`'s static block): what lands a sync's seed in parts as one.
  */
 let block;
+/** Whether a database's module stopped (`Fennec`'s static block). */
+let stoppedOf;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -91,6 +96,143 @@ function whyNoModule(err) {
     ? err
     : new FennecError('fennec.wasm needs WebAssembly SIMD (Chrome 91+, Firefox 89+, Safari 16.4+)');
 }
+
+/**
+ * The most bytes the module is handed at once. It reads a length as an
+ * `i32`, which JavaScript makes of any number by ToInt32: 2^32 + 8 went
+ * over as 8 and `NaN` or `undefined` as 0, an allocation smaller than what
+ * was then written into it, over the module's heap. Past 2^31 - 1, its
+ * `isize::MAX`, the module has no room for any.
+ */
+const MAX_LEN = 0x7fffffff;
+
+/** `len`, refused unless it is a length the module can be handed. */
+function lengthOf(len, what) {
+  if (Number.isInteger(len) && len >= 0 && len <= MAX_LEN) return len;
+  throw new FennecError(`${what} must be a whole number of bytes from 0 to ${MAX_LEN}, not ${String(len)}`);
+}
+
+/**
+ * The module's exports, each call made through a guard. A trap -- an
+ * abort where the module has no memory left to answer in, a bound it
+ * checks -- leaves the instance as it stopped: its stack pointer where the
+ * call left it, a statement landed and neither answered nor flushed to its
+ * file. Run on, it answered from that state or trapped again; so every
+ * later call, on every database of the module, throws the one error
+ * saying to open the database again. A `TypeError` is a value no export
+ * takes (a `BigInt`), refused before the module runs.
+ *
+ * Each export's guard takes the arguments it does, by name, and so has its
+ * `length`, which `run` tells a module from before vectors went over apart
+ * by: a guard of `(...args)` made an array of them on every call, and a
+ * `run` makes five to eight. No export takes more than `GUARDS` has room
+ * for, and one that did is refused here rather than handed part of what
+ * it was given (`web/fennec.test.js` holds the module's to it).
+ */
+function guarded(exports) {
+  let trap = null;
+  const stopped = () =>
+    new FennecError(`the module stopped (${trap?.message ?? trap}): nothing more runs on its databases; open the database again`, { cause: trap });
+  // What a call that threw throws: a trap is kept, and stops every call after.
+  const failed = (e) => {
+    if (e instanceof TypeError) return e;
+    trap = e;
+    halted.add(out);
+    return stopped();
+  };
+  const ok = () => {
+    if (trap) throw stopped();
+  };
+  const out = {};
+  for (const [name, f] of Object.entries(exports)) {
+    if (typeof f !== 'function') {
+      out[name] = f;
+      continue;
+    }
+    if (f.length >= GUARDS.length) throw new FennecError(`${name} takes ${f.length} arguments, past the ${GUARDS.length - 1} its guard passes on`);
+    out[name] = GUARDS[f.length](f, ok, failed);
+  }
+  return out;
+}
+
+/** The guarded exports whose module stopped (`guarded`): no close enters it. */
+const halted = new WeakSet();
+
+/** A guard (`guarded`) by its export's arity: `GUARDS[n](f, ok, failed)` passes `n` arguments on. */
+const GUARDS = [
+  (f, ok, failed) => () => {
+    ok();
+    try {
+      return f();
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a) => {
+    ok();
+    try {
+      return f(a);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b) => {
+    ok();
+    try {
+      return f(a, b);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c) => {
+    ok();
+    try {
+      return f(a, b, c);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d) => {
+    ok();
+    try {
+      return f(a, b, c, d);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e) => {
+    ok();
+    try {
+      return f(a, b, c, d, e);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h, i) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h, i);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+];
 
 export class Fennec {
   #wasm; #handle; #collation;
@@ -130,6 +272,7 @@ export class Fennec {
       f.#handle = f.#wasm.fennec_open();
     };
     met = (f) => f.#wasm.fennec_wide?.();
+    stoppedOf = (f) => halted.has(f.#wasm);
     block = (f, op) => {
       const out = JSON.parse(f.#readString(f.#wasm.fennec_block(f.#handle, op)));
       if (out.kind === 'error') throw new FennecError(out.message);
@@ -169,7 +312,7 @@ export class Fennec {
     // Instantiated from a compiled module, `instantiate` gives the instance
     // alone, and from bytes the module and the instance: read as the
     // latter, a Worker's module had no exports and `open` threw.
-    const wasm = (mod instanceof WebAssembly.Instance ? mod : mod.instance).exports;
+    const wasm = guarded((mod instanceof WebAssembly.Instance ? mod : mod.instance).exports);
     // With `schema`, what the code declares is checked and made: a load
     // (`restore`, `openFile`) checks the database it brings in again.
     const db = new Fennec(wasm, wasm.fennec_open(), opts.collation ?? beside(src));
@@ -199,8 +342,14 @@ export class Fennec {
     return new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
   }
 
-  /** Reads the returned buffer and frees it. */
-  #readBytes(ptr) {
+  /**
+   * Reads the returned buffer and frees it. An address comes back as the
+   * `i32` its bits make, negative from 2 GiB on, where the module's memory,
+   * which has no maximum, may reach: read as the unsigned one it is
+   * (`>>> 0`), here, in `#readString` and where `fennec_alloc` answers.
+   */
+  #readBytes(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     // Copies, and has to: the array outlives the buffer freed on the next
     // line, and a view into wasm memory would read whatever lands there next.
@@ -213,19 +362,36 @@ export class Fennec {
   // `#readBytes` makes -- the decode is itself the copy -- and going through
   // it first meant every result was copied twice, which on a large result set
   // is megabytes of pure waste. The decode must finish before the free.
-  #readString(ptr) {
+  #readString(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     const out = dec.decode(new Uint8Array(this.#wasm.memory.buffer, ptr + 4, len));
     this.#wasm.fennec_free(ptr, 4 + len);
     return out;
   }
 
-  /** Copies a string, or bytes, into WASM memory. */
+  /**
+   * Copies a string, or bytes, into WASM memory. Never at 0, the null the
+   * module answers when it has no room: written there, the bytes went over
+   * the bottom of its stack.
+   */
   #write(data) {
     const bytes = typeof data === 'string' ? enc.encode(data) : data;
-    const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return [ptr, bytes.length];
+    const len = lengthOf(bytes.length, 'a text, its parameters or collation data');
+    const ptr = this.#wasm.fennec_alloc(len || 1) >>> 0;
+    if (!ptr) throw new FennecError(`no room in the module for ${len} bytes`);
+    this.#into(ptr, len, bytes);
+    return [ptr, len];
+  }
+
+  /**
+   * Writes `bytes` at `at` into the allocation of `len` at `ptr`, through a
+   * view of that allocation alone: bytes past it are a `RangeError`, never
+   * the module's memory beyond. A view each time: a call into the module
+   * may have grown its memory, which detaches the buffer before.
+   */
+  #into(ptr, len, bytes, at = 0) {
+    new Uint8Array(this.#wasm.memory.buffer, ptr, len).set(bytes, at);
   }
 
   /**
@@ -255,19 +421,25 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
-    // Not `jsonOf`: the module reads an int no double holds as the double
-    // it rounds to (`as_double`), and a look here cost every `run`.
-    const [pp, pl] = this.#write(JSON.stringify(json));
-    const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
+    let pp = 0;
+    let pl = 0;
+    let vp = 0;
+    let vl = 0;
     let out;
     try {
+      // Not `jsonOf`: the module reads an int no double holds as the double
+      // it rounds to (`as_double`), and a look here cost every `run`.
+      [pp, pl] = this.#write(JSON.stringify(json));
+      if (vectors) [vp, vl] = this.#write(vectors);
       // The time a read of a collection whose rows expire (`@ttl`) is
       // answered at: the module has no clock of its own.
       out = this.#readString(this.#wasm.fennec_query(this.#handle, sp, sl, pp, pl, vp, vl, this.now()));
     } finally {
+      // Those written before one that could not be -- a parameter
+      // `JSON.stringify` refuses, no room -- too.
       this.#wasm.fennec_free(sp, sl || 1);
-      this.#wasm.fennec_free(pp, pl || 1);
-      if (vectors) this.#wasm.fennec_free(vp, vl || 1);
+      if (pp) this.#wasm.fennec_free(pp, pl || 1);
+      if (vp) this.#wasm.fennec_free(vp, vl || 1);
     }
     // After an error too: the change ring says what landed, after the task.
     if (this.#lives?.size && !quiet) this.#touch();
@@ -357,13 +529,12 @@ export class Fennec {
     });
     const got = await Promise.all(want.map((name) => this.#chunk(name)));
     got.forEach((bytes, k) => {
-      const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-      new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+      const [ptr, len] = this.#write(bytes);
       let at;
       try {
-        at = this.#wasm.fennec_add_chunk(ptr, bytes.length);
+        at = this.#wasm.fennec_add_chunk(ptr, len);
       } finally {
-        this.#wasm.fennec_free(ptr, bytes.length || 1);
+        this.#wasm.fennec_free(ptr, len || 1);
       }
       if (chunks[at] !== want[k]) {
         throw new FennecError(`${want[k]}.bin is not this module's collation data (another version's?)`);
@@ -572,7 +743,9 @@ export class Fennec {
    * answer is simply "everything is stale" -- no data is lost.
    */
   setChangeCapacity(n) {
-    this.#wasm.fennec_set_change_capacity(this.#handle, whole(n, 'capacity'));
+    // The module takes a `u32`: 2^32 went over as 0, a ring of one.
+    if (whole(n, 'capacity') > 0xffffffff) throw new FennecError(`capacity must be at most ${0xffffffff}: ${n}`);
+    this.#wasm.fennec_set_change_capacity(this.#handle, n);
   }
 
   /** Collection schemas (the `collections` output). */
@@ -638,15 +811,21 @@ export class Fennec {
    * `restore` fetches it and loads the image again.
    */
   load(bytes) {
-    const ptr = this.#room(bytes.length);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return this.#take(ptr, bytes.length);
+    if (!(bytes instanceof Uint8Array)) throw new FennecError('load takes the image as a Uint8Array');
+    const len = bytes.length;
+    const ptr = this.#room(len);
+    this.#into(ptr, len, bytes);
+    return this.#take(ptr, len);
   }
 
-  /** Room in the module for an image of `len`: never 0, which is the module's own data. */
+  /**
+   * Room in the module for an image of `len`: never 0, which is the module's
+   * own data, and never for a length that is not one (`lengthOf`).
+   */
   #room(len) {
     if (kept.has(this)) throw new FennecError('the database is kept in a file (openFile): a load would leave the file behind');
-    const ptr = this.#wasm.fennec_alloc(len);
+    lengthOf(len, "an image's length");
+    const ptr = this.#wasm.fennec_alloc(len) >>> 0;
     if (!ptr) throw new FennecError(`no room for an image of ${len} bytes`);
     return ptr;
   }
@@ -669,7 +848,7 @@ export class Fennec {
       const e = new FennecError('the image needs collation data the module has not been handed');
       throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
     }
-    if (r !== 0) throw new FennecError('could not load image (corrupt or incompatible version)');
+    if (r !== 0) throw new FennecError(NOT_AN_IMAGE);
     // Another database now, whose counter may stand where a live query's
     // cursor did: every live query runs again, whatever the ring says.
     if (this.#lives?.size) {
@@ -713,9 +892,12 @@ export class Fennec {
     let at = 0;
     const put = (p) => {
       const bytes = p instanceof ArrayBuffer ? new Uint8Array(p) : p;
+      // Anything else's `length` is not its bytes': a `DataView` has none,
+      // and the next part went at `ptr + NaN`, the module's address 0.
+      if (!(bytes instanceof Uint8Array)) throw new FennecError('each part is a Uint8Array or an ArrayBuffer');
       if (at + bytes.length > length) throw new FennecError(`the parts hold more than the ${length} bytes said`);
       // A view each part: an await may let in a write that grows the memory.
-      new Uint8Array(this.#wasm.memory.buffer, ptr + at, bytes.length).set(bytes);
+      this.#into(ptr, length, bytes, at);
       at += bytes.length;
     };
     try {
@@ -730,10 +912,19 @@ export class Fennec {
     return this.#take(ptr, length);
   }
 
+  /**
+   * Lets the database go, and its file (`openFile`) as the file's `close`
+   * does. After a trap it enters the module no more and throws nothing:
+   * thrown, it kept the file's name from the open the error asks for.
+   */
   close() {
     closed.add(this);
     this.#lives?.clear();
-    this.#wasm.fennec_close(this.#handle);
+    try {
+      kept.get(this)?.close();
+    } finally {
+      if (!halted.has(this.#wasm)) this.#wasm.fennec_close(this.#handle);
+    }
   }
 }
 
@@ -928,36 +1119,88 @@ const DB_NAME = 'fennecdb';
 const STORE = 'images';
 /** Once the chunks outgrow this share of the image, a new image replaces them. */
 const FOLD = 0.5;
-/** Per database, where its chunks stand: `{key, next, image, chunks}`. */
+/** Per database, where its chunks stand: `{key, next, image, chunks}`, and the tag the next one is sealed after (`tag`). */
 const stored = new WeakMap();
 
 const chunkKey = (key, n) => `${key}#${String(n).padStart(9, '0')}`;
 
-// Sealed with a `CryptoKey` (AES-GCM), each record is `{gen, iv, data}` --
-// the image -- or `{iv, data}`, a chunk, its tag over the key it is stored
-// under, the image's generation and its place: a chunk moved, dropped from
-// the middle, or kept from an image before is refused, as is one byte
-// changed. The generation is random and new with each image, since the
-// chunks' numbers start again under it.
+// Sealed with a `CryptoKey` (AES-GCM), each record is `{v, gen, iv, data}`
+// -- the image -- or `{iv, data}`, a chunk, its tag over the key it is
+// stored under, the image's generation, its place and the tag of the record
+// before it: a chunk moved, dropped from the middle, kept from an image
+// before or put after another than the one it was sealed after is refused,
+// as is one byte changed. A store cut short, which the page goes on from,
+// opens as it stood or as the page went on, never with a chunk it cut
+// (docs/design/js-client.md#sealed-chunks-in-a-chain). The generation is
+// random and new with each image, since the chunks' numbers start again
+// under it. Version 1 (no `v`, 0.2.0's) covers no tag before: it restores as
+// it was sealed, and the next `persist` stores an image over it.
 const te = new TextEncoder();
-const aad = (key, gen, n) => te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+const CHAINED = 2;
+/** The tag WebCrypto's AES-GCM appends to what it seals: 128 bits, its default. */
+const TAG = 16;
+const NONE = new Uint8Array(0);
 
-async function seal(ck, key, gen, n, bytes) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(key, gen, n) }, ck, bytes));
-  return n === 0 ? { gen, iv, data } : { iv, data };
+/** What a record's tag covers beside its bytes: version 1's, or version 2's with the tag `before` it. */
+function aad(v, key, gen, n, before) {
+  if (v === 1) return te.encode(`fennecdb\0${key}\0${gen}\0${n}`);
+  // Never a version 1 AAD: its prefix is another from its ninth byte on.
+  const head = te.encode(`fennecdb/${v}\0${key}\0${gen}\0${n}\0`);
+  const out = new Uint8Array(head.length + before.length);
+  out.set(head);
+  out.set(before, head.length);
+  return out;
 }
 
-async function unseal(ck, key, gen, n, rec) {
+/** A sealed record's tag, as it is stored: the last bytes of its `data`. */
+function tagOf(rec) {
+  const d = ArrayBuffer.isView(rec.data) ? new Uint8Array(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength) : new Uint8Array(rec.data);
+  return d.slice(Math.max(0, d.length - TAG));
+}
+
+/** `bytes` sealed as version 2 at place `n` -- 0 the image -- after the record whose tag is `before`. */
+async function seal(ck, key, gen, n, bytes, before) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(CHAINED, key, gen, n, before) }, ck, bytes));
+  return n === 0 ? { v: CHAINED, gen, iv, data } : { iv, data };
+}
+
+async function unseal(ck, key, v, gen, n, rec, before) {
   try {
-    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(key, gen, n) }, ck, rec.data));
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(v, key, gen, n, before) }, ck, rec.data));
   } catch {
-    throw new FennecError(`${key}: record ${n} does not open: another key, or the stored bytes changed`);
+    throw new FennecError(`${key}: record ${n} does not open: another key, the stored bytes changed or a record before it replaced`);
   }
 }
 
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
-const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
+/**
+ * The range `key`'s chunks are in. Other keys can be too -- `notes#1` is
+ * between `notes#000000000` and `notes#999999999` -- so what it holds is
+ * read as `isChunk` says: the range alone, `key#` to `key#\uffff`, took
+ * another key's records, `notes#archive` and its chunks among them. A key
+ * named `key#` and nine digits is read as one of its chunks all the same:
+ * the docs say to avoid such names, `persist` taking any.
+ */
+const chunkRange = (key) => IDBKeyRange.bound(chunkKey(key, 0), `${key}#999999999`);
+const isChunk = (key, k) => /^\d{9}$/.test(k.slice(key.length + 1));
+
+/** Deletes `key`'s chunks in `os`'s transaction, and no other key's. */
+function dropChunks(os, key) {
+  const range = chunkRange(key);
+  const keys = os.getAllKeys(range);
+  keys.onsuccess = () => {
+    const mine = keys.result.filter((k) => isChunk(key, k));
+    // One delete where the range holds this key's chunks alone, as it nearly always does.
+    if (mine.length === keys.result.length) os.delete(range);
+    else for (const k of mine) os.delete(k);
+  };
+}
+
+/** Where a replica's token for `key` is kept: an array, never a string key `persist` or `putState` writes. */
+const ownerKey = (key) => ['fennecdb/owner', key];
+
+const randomHex = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 /**
  * The connection every call shares, opened by the first and kept: a call
@@ -1045,6 +1288,69 @@ async function inStore(mode, ask, on = null) {
   }
 }
 
+/** The lock a replica storing under `key` holds, whatever its url, shapes or `leader` (`#lockStore`). */
+const storeLock = (key) => `fennecdb/persist:${key}`;
+
+/** How long a closed replica waits for its persist before it lets go of its key's lock (`#letGo`). */
+const LET_GO_MS = 5000;
+
+/** Per key, a replica of this page letting go of its lock: settled once the lock is free (`#letGo`). */
+const letting = new Map();
+
+/** IndexedDB's own failures reading a store or claiming it, not a store that does not open: tried again, it may (`#takeStore`). */
+const unread = new WeakSet();
+
+/** A replica's write refused: another replica claimed the store since, or it was deleted (`persistNow`'s `owner`). */
+const taken = new WeakSet();
+
+/**
+ * A replica's claim on `key`'s store, made before it reads the store: a
+ * token every later write of the key's finds in its own transaction, or
+ * stores nothing. IndexedDB runs a store's read/write transactions one at a
+ * time, each seeing the ones before: a write of the replica before lands
+ * before this claim, and the read after it sees that write, or after, and
+ * finds another's token. No lock manager is needed for it.
+ */
+async function claim(key) {
+  const token = randomHex();
+  try {
+    await inStore('readwrite', (os) => {
+      os.put(token, ownerKey(key));
+    });
+  } catch (e) {
+    if (Object(e) === e) unread.add(e);
+    throw e;
+  }
+  return token;
+}
+
+/**
+ * Deletes what `persist` stored under `key`, its image, its chunks and a
+ * replica's claim on it, and nothing else; refused while a replica keeps
+ * the key in this browser (with `locks`, the one replicas were given). The
+ * connection is let go of: every database's next `persist` in this page
+ * stores an image.
+ */
+export async function unpersist(key, opts = {}) {
+  const drop = () =>
+    inStore('readwrite', (os, db) => {
+      os.delete(key);
+      dropChunks(os, key);
+      os.delete(ownerKey(key));
+      return () => {
+        if (shared?.db === db) shared = null;
+        db.close();
+      };
+    });
+  const locks = opts.locks ?? globalThis.navigator?.locks;
+  if (!locks) return drop();
+  await letting.get(key);
+  return locks.request(storeLock(key), { ifAvailable: true }, (lock) => {
+    if (lock === null) throw new FennecError(`${key} is kept by a replica that runs in this browser (sync's persist): close it first`);
+    return drop();
+  });
+}
+
 /**
  * Per database, the last of its `persist`, `restore` and `openFile` calls.
  * Each reads where the one before left the database -- the next chunk's
@@ -1108,7 +1414,12 @@ function filled(image) {
   return image;
 }
 
-async function persistNow(fennec, key, opts) {
+/**
+ * `persist`'s work, in its turn. With `owner`, a replica's token (`claim`),
+ * the record is written only where the store still holds it, asked in the
+ * write's own transaction; refused, the write stores nothing (`taken`).
+ */
+async function persistNow(fennec, key, opts, owner = null) {
   alive(fennec, 'persist');
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
@@ -1120,11 +1431,12 @@ async function persistNow(fennec, key, opts) {
   // store -- a delete of the database asks it to let go first
   // (`versionchange`), the browser clearing the site's data closes it
   // (`close`, or its requests refused) -- and chunks stored after would
-  // restore nothing. Then an image, even with nothing written since.
-  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db) {
+  // restore nothing. Then an image, even with nothing written since, and
+  // over a store restored as version 1 (no `tag`).
+  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db || (ck && !s.tag)) {
     fennec.journal();
     image = fennec.snapshot();
-    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0, tag: null };
     stored.set(fennec, s);
   } else {
     const { replace, bytes } = fennec.drain();
@@ -1133,34 +1445,48 @@ async function persistNow(fennec, key, opts) {
     else if (s.chunks + bytes.length > s.image * FOLD) image = fennec.snapshot();
     else chunk = bytes;
   }
-  const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
+  const gen = image && ck ? randomHex() : s.gen;
   let on = null;
+  let rec;
+  let refused = false;
   try {
     filled(image);
-    const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
+    rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image, NONE) : await seal(ck, key, gen, s.next, chunk, s.tag);
     // The connection may end while the record is sealed or the call waits
     // its turn: a chunk is stored over the image's alone.
     const ask = (os, db) => {
       on = db;
-      if (image) {
-        os.put(rec, key);
-        os.delete(chunkRange(key));
-      } else {
-        os.put(rec, chunkKey(key, s.next));
-      }
+      const write = () => {
+        if (image) {
+          os.put(rec, key);
+          dropChunks(os, key);
+        } else {
+          os.put(rec, chunkKey(key, s.next));
+        }
+      };
+      if (!owner) return write();
+      const held = os.get(ownerKey(key));
+      held.onsuccess = () => (held.result === owner ? write() : (refused = true));
     };
     await inStore('readwrite', ask, image ? null : s.db);
+    if (refused) {
+      const e = new FennecError(`${key}: what was written since the last persist is not stored: another replica claimed the store since, or it was deleted`);
+      taken.add(e);
+      throw e;
+    }
   } catch (e) {
     // The drained writes are nowhere now; the next call stores an image --
     // this one, where the image's connection had ended.
     stored.delete(fennec);
     // In this call's turn still: `persist` would wait for this very call.
     // It stores an image, which a database closed meanwhile has not.
-    if (e === ENDED) return persistNow(fennec, key, opts);
+    if (e === ENDED) return persistNow(fennec, key, opts, owner);
     throw e;
   }
-  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
-  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
+  // The tag the next chunk is sealed after: this record's, as stored.
+  const tag = ck ? tagOf(rec) : null;
+  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0, tag });
+  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length, tag });
   return (image ?? chunk).length;
 }
 
@@ -1209,25 +1535,43 @@ async function restoreNow(fennec, key, opts) {
   alive(fennec, 'restore');
   const ck = opts.cryptoKey ?? null;
   let on = null;
-  let [image, chunks] = await inStore('readonly', (os, db) => {
-    on = db;
-    const img = os.get(key);
-    const ch = os.getAll(chunkRange(key));
-    return () => [img.result, ch.result];
-  });
+  let image, chunks;
+  try {
+    [image, chunks] = await inStore('readonly', (os, db) => {
+      on = db;
+      const img = os.get(key);
+      // The values and their keys, in one order: a key's chunks alone kept.
+      const ch = os.getAll(chunkRange(key));
+      const ks = os.getAllKeys(chunkRange(key));
+      return () => [img.result, ch.result.filter((_, i) => isChunk(key, ks.result[i]))];
+    });
+  } catch (e) {
+    // IndexedDB's own failure, not the store's: read again, it may restore.
+    if (Object(e) === e) unread.add(e);
+    throw e;
+  }
   if (!image) return false;
   if (isSealed(image) !== !!ck) {
     throw new FennecError(ck ? `${key} is stored in the clear, not sealed with a key` : `${key} is sealed: restore needs its cryptoKey`);
   }
   const gen = ck ? image.gen : null;
+  let tag = null;
   if (ck) {
-    image = await unseal(ck, key, gen, 0, image);
+    const v = image.v ?? 1;
+    if (v !== 1 && v !== CHAINED) {
+      throw new FennecError(`${key} is sealed as version ${String(v)}, which a later client wrote and this one does not read`);
+    }
+    // Each record's tag is in the next one's AAD: read as stored, so they
+    // open side by side.
+    const tags = v === CHAINED ? [image, ...chunks].map(tagOf) : [];
+    image = await unseal(ck, key, v, gen, 0, image, NONE);
     // Opened side by side, refused in order: the first record that does not
     // open is the one named, whichever settled first.
-    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, v, gen, i + 1, c, tags[i])));
     const bad = opened.find((r) => r.status === 'rejected');
     if (bad) throw bad.reason;
     chunks = opened.map((r) => r.value);
+    tag = tags.at(-1) ?? null;
   }
   let bytes = image;
   if (chunks.length) {
@@ -1252,7 +1596,7 @@ async function restoreNow(fennec, key, opts) {
     await fennec.loadAsync(bytes);
     fennec.journal();
     // Its chunks follow over the connection it was read over, as `persist`'s.
-    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length, tag });
     // The database the code declared its schema for is this one now: checked
     // again, what it adds journaled with the rest.
     await checked(fennec, declared.get(fennec), 'apply');
@@ -1334,13 +1678,14 @@ function refused(name, e) {
  * Chrome puts off 2 s for a busy one (web/browser/).
  */
 const HELD_MS = 3000;
-/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
+/** The files this worker keeps, by directory (`null`: the origin's) and name: the `FennecFile` keeping each. */
 const holding = new Map();
 
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
   #fennec; #main; #aside; #name; #size; #image; #where;
   #failed = null;
+  #closed = false;
 
   constructor(fennec, name, main, aside, size, image, where) {
     this.#fennec = fennec;
@@ -1350,8 +1695,27 @@ class FennecFile {
     this.#size = size;
     this.#image = image;
     this.#where = where;
-    if (!holding.has(where)) holding.set(where, new Set());
-    holding.get(where).add(name);
+    if (!holding.has(where)) holding.set(where, new Map());
+    holding.get(where).set(name, this);
+  }
+
+  /**
+   * `openFile`'s look at a name this worker keeps: refused while its
+   * database runs; let go of once its module stopped, of which nothing runs
+   * again: whether it was. A static method, never a static block assigning
+   * it: a block runs as the module loads, a side effect a bundler keeps,
+   * and with it this class and all it reaches in an app that opens no file
+   * (esbuild, minified: 2.0 KB of the 51 KB an app of `connect` bundled to
+   * through this module, 0.65 KB brotli).
+   */
+  static here(where, name) {
+    const holder = holding.get(where)?.get(name);
+    if (!holder) return false;
+    if (!stoppedOf(holder.#fennec)) {
+      throw new FennecError(`${name} is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first`);
+    }
+    holder.close();
+    return true;
   }
 
   /** The file's name in its directory. */
@@ -1396,18 +1760,32 @@ class FennecFile {
     return readAt(this.#main, this.#size);
   }
 
-  /** Flushes and lets the file go: the database is kept in it no longer. */
+  /**
+   * Flushes and lets the file go, whatever throws: the database is kept in
+   * it no longer; a second call does nothing. After a trap nothing enters
+   * the module and nothing is thrown, the handles closed with nothing
+   * written: left open, they refused the open the error asks for, as
+   * "open elsewhere".
+   */
   close() {
+    if (this.#closed) return;
+    this.#closed = true;
     try {
-      this.flush();
+      if (!stoppedOf(this.#fennec)) this.flush();
     } finally {
       kept.delete(this.#fennec);
-      this.#fennec.journal(false);
-      this.#main.close();
-      this.#aside.close();
       const names = holding.get(this.#where);
-      names?.delete(this.#name);
+      if (names?.get(this.#name) === this) names.delete(this.#name);
       if (names?.size === 0) holding.delete(this.#where);
+      try {
+        if (!stoppedOf(this.#fennec)) this.#fennec.journal(false);
+      } finally {
+        try {
+          this.#main.close();
+        } finally {
+          this.#aside.close();
+        }
+      }
     }
   }
 
@@ -1425,10 +1803,10 @@ class FennecFile {
 
 /**
  * Synchronous access to `name` in `dir`, created if absent; held
- * elsewhere, asked for again for `HELD_MS` -- held by this worker
- * (`ours`), refused at once.
+ * elsewhere, asked for again for `HELD_MS`, and kept by a database of this
+ * worker (`mine`), refused at once or taken.
  */
-async function syncAccess(dir, name, ours) {
+async function syncAccess(dir, name, mine) {
   const fh = await dir.getFileHandle(name, { create: true });
   if (typeof fh.createSyncAccessHandle !== 'function') {
     throw new FennecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
@@ -1441,12 +1819,24 @@ async function syncAccess(dir, name, ours) {
       // Safari names a held file InvalidStateError, where the standard
       // (and Chrome and Firefox) say NoModificationAllowedError.
       if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
-      if (ours || Date.now() >= until) {
+      // Kept by a database of this worker whose module stopped, its
+      // handles were let go of just now: asked again at once.
+      if (mine()) continue;
+      if (Date.now() >= until) {
         throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
       }
       // Nothing tells when a handle is let go: asked again.
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+}
+
+/** `f()` on the way out of an error, which what it throws never takes the place of. */
+function quietly(f) {
+  try {
+    f();
+  } catch {
+    // The error on its way out says why.
   }
 }
 
@@ -1457,16 +1847,41 @@ async function syncAccess(dir, name, ours) {
  */
 function loads(fennec, bytes) {
   const trial = sibling(fennec);
+  let took;
   try {
     trial.load(bytes);
-    return true;
+    took = true;
   } catch (e) {
     // Refused for collation data: they loaded, and the text needs it.
-    if (e.collation) return true;
-    if (e instanceof FennecError) return false;
-    throw e;
-  } finally {
-    trial.close();
+    if (e.collation) took = true;
+    // No room, a module that stopped: the copy is no less a database, and
+    // a false here empties it.
+    else if (e instanceof FennecError && e.message === NOT_AN_IMAGE) took = false;
+    else {
+      quietly(() => trial.close());
+      throw e;
+    }
+  }
+  trial.close();
+  return took;
+}
+
+/**
+ * `loads` of the copy a rewrite left beside `name`, which may be the one
+ * whole database left: a copy that cannot be tried -- no room in the
+ * module, a module that stopped -- is kept, and the error names it, every
+ * `openFile` of `name` refused so until it is dealt with (the docs'
+ * "Keeping a database" says how). Thrown as it came, it named neither.
+ */
+function copyLoads(fennec, copy, name) {
+  try {
+    return loads(fennec, copy);
+  } catch (e) {
+    throw new FennecError(
+      `${name}~, the copy a rewrite of ${name} left beside it, could not be tried (${e?.message ?? e}): ` +
+        `it is kept, since it may hold the database's last writes; save its bytes and open them where there is room, then remove it`,
+      { cause: e },
+    );
   }
 }
 
@@ -1480,7 +1895,9 @@ function loads(fennec, bytes) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it. A file held elsewhere is waited for 3 s first.
+ * corrupt it. A file held elsewhere is waited for 3 s first; one another
+ * database of this worker keeps is refused at once, or taken from it,
+ * nothing written, once its module stopped (a trap).
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`
@@ -1499,15 +1916,18 @@ async function openFileNow(fennec, name, opts) {
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
   if (!dir) throw new FennecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
   const where = opts.dir ?? null;
-  const ours = holding.get(where)?.has(name) ?? false;
-  const main = await syncAccess(dir, name, ours);
+  // Asked only once a handle is refused: a database of this worker that
+  // keeps the file holds both handles until its file's close, and a handle
+  // granted is no file anyone holds.
+  const mine = () => FennecFile.here(where, name);
+  const main = await syncAccess(dir, name, mine);
   let aside = null;
   // Closed while the file was asked for, its handles are let go of below,
   // and closed while collation data was fetched or the schema checked: the
   // load called the file corrupt, the check the handle not found.
   const live = () => alive(fennec, 'openFile');
   try {
-    aside = await syncAccess(dir, `${name}~`, ours);
+    aside = await syncAccess(dir, `${name}~`, mine);
     live();
     const beside = aside.getSize();
     if (beside > 0) {
@@ -1516,7 +1936,7 @@ async function openFileNow(fennec, name, opts) {
       // when it is not.
       const end = imageEnd(readAt(aside, Math.min(beside, HEAD)));
       const copy = end > 0 && end <= beside ? readAt(aside, beside) : null;
-      if (copy && loads(fennec, copy)) overwrite(main, copy);
+      if (copy && copyLoads(fennec, copy, name)) overwrite(main, copy);
       aside.truncate(0);
       aside.flush();
     }
@@ -1550,7 +1970,7 @@ async function openFileNow(fennec, name, opts) {
     try {
       await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').finally(live);
     } catch (e) {
-      file.close();
+      quietly(() => file.close());
       throw e;
     }
     return file;
@@ -1968,6 +2388,21 @@ export class FennecSync {
   #waits = new Set();
   #pushed = [];
   #listeners = null;
+  /** Why this tab stores nothing under `persist` (`status()`'s `unkept`), and whether to read the store again. */
+  #unkept = null;
+  #unkeptAgain = false;
+  #taking = null;
+  /** The key's lock held, or no lock manager to hold one with; its release, and its request. */
+  #holding = false;
+  #releaseStore = null;
+  #storeAsk = null;
+  /** The key's lock let go of, past the close's bound: no persist is started after the one out (`#letGo`). */
+  #fenced = false;
+  /** This replica's claim on the store (`claim`), which each of its writes finds there or stores nothing. */
+  #owner = null;
+  /** This tab holds the election: its followers are told why it stores nothing (`#unkeptBy`), and say it. */
+  #elected = false;
+  #theirs = null;
 
   constructor(local, opts) {
     this.#local = local;
@@ -2033,7 +2468,7 @@ export class FennecSync {
     return this.#queue.length ? new Promise((r) => this.#pushed.push(r)) : Promise.resolve();
   }
 
-  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader}`. */
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader, unkept}`. */
   status() {
     // While a token is wanted the error is the token's too, both said here
     // from where its ask stands and never kept as a fault, as the native
@@ -2060,6 +2495,9 @@ export class FennecSync {
       // ask stands and the `TokenRefusal` it says or, delayed, will say.
       token,
       leader: this.#leader,
+      // Why this tab stores nothing under `persist`, or a follower why the
+      // tab elected to lead does not; null where it stores or the leader does.
+      unkept: this.#unkept?.message ?? this.#theirs,
     }));
   }
 
@@ -2215,7 +2653,10 @@ export class FennecSync {
     }
   }
 
-  /** Closes the subscriptions and gives up the lead. The local database stays open. */
+  /**
+   * Closes the subscriptions and gives up the lead, and the store once the
+   * persist it has out settled (`#letGo`). The local database stays open.
+   */
   close() {
     this.#closed = true;
     replicas.delete(this.#local);
@@ -2225,6 +2666,7 @@ export class FennecSync {
     this.#waits.clear();
     this.#chan?.close();
     this.#release?.();
+    this.#letGo();
     this.#lives.clear();
     if (this.#listeners) {
       for (const [k, f] of this.#listeners) globalThis.removeEventListener?.(k, f);
@@ -3243,7 +3685,21 @@ export class FennecSync {
     // the sync's words, as a native binding's `run` on a synced database
     // does; `close` gives the database back.
     replicas.add(this.#local);
-    await this.#loadPersist();
+    try {
+      // A tab with no election takes its key's lock before it reads the
+      // store, as it stands, and claims the store; one an election may make
+      // leader does so then. With no lock manager each tab claims it, the
+      // last one storing there.
+      if (this.#stores()) {
+        if (!this.#locks) this.#holding = true;
+        else if (this.#single()) await this.#tryStore();
+        if (this.#holding) await this.#claimFirst();
+      }
+      await this.#loadPersist();
+    } catch (e) {
+      this.close();
+      throw e;
+    }
     for (const text of SYNC_STATE) this.#local.run(text);
     this.#load();
     // A seed of several parts the page ended in the middle of landing: what
@@ -3333,9 +3789,15 @@ export class FennecSync {
    */
   #elect() {
     const name = `fennecdb:${this.#url}:${[...this.#shapes.keys()].join(',')}`;
-    if (this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks) {
-      // A single tab (or Node): no leader election needed.
+    if (this.#single()) {
+      // A single tab (or Node): no leader election needed. One that found
+      // its key's lock held takes the store over once it is let go of.
       this.#kick();
+      if (this.#stores() && !this.#holding) {
+        this.#awaitStore()
+          .then(() => this.#unkept || this.#persistSoon())
+          .catch((e) => this.#onError?.(e));
+      }
       return;
     }
     this.#leader = false;
@@ -3349,34 +3811,133 @@ export class FennecSync {
     // and a one-shot hello would go unanswered forever.
     this.#hello();
     this.#kick();
-    this.#locks.request(name, { mode: 'exclusive' }, async () => {
-      if (this.#closed) return;
-      await this.#lead();
-      // The lock stays with us until the tab closes.
-      return new Promise((r) => {
-        this.#release = r;
-      });
-    });
+    this.#locks
+      .request(name, { mode: 'exclusive' }, async () => {
+        if (this.#closed) return;
+        this.#elected = true;
+        this.#theirs = null;
+        // The store before the lead: the queue the tab before kept is taken
+        // over first, its writes sent before this tab's, and one tab writes
+        // the key at a time, whatever its shapes or url.
+        if (this.#stores()) {
+          const held = await this.#tryStore();
+          if (this.#closed) return;
+          if (held) await this.#takeStore();
+          else await this.#awaitStore();
+          if (this.#closed) return;
+        }
+        this.#lead();
+        // The lock stays with us until the tab closes.
+        return new Promise((r) => {
+          this.#release = r;
+        });
+      })
+      .catch((e) => this.#onError?.(e));
   }
 
-  /** This tab leads now: the queue its predecessor kept is taken over, and the others asked for theirs. */
-  async #lead() {
-    if (this.#persistKey && globalThis.indexedDB && !kept.has(this.#local)) {
-      const other = sibling(this.#local);
-      try {
-        if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
-          for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
-        }
-      } catch (e) {
-        this.#onError?.(e);
-      } finally {
-        other.close();
-      }
-    }
+  /** This tab leads now, the store taken over (`#takeStore`): the others are asked for their queues. */
+  #lead() {
     this.#leader = true;
     this.#flushing = this.#queue.length > 0;
     this.#chan.postMessage({ t: 'leader' });
     this.#kick();
+  }
+
+  /** Whether the replica is kept in IndexedDB (`persist`), not in a file. */
+  #stores() {
+    return !!this.#persistKey && !!globalThis.indexedDB && !kept.has(this.#local);
+  }
+
+  /** No election: `leader: false`, or no `BroadcastChannel` or lock manager to hold one with. */
+  #single() {
+    return this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks;
+  }
+
+  /** The key's lock, held till `#letGo`: as it stands or (`wait`) once free; false where held or closed. */
+  #lockStore(wait) {
+    return new Promise((got, failed) => {
+      // A wait the close ends, holding no place in the lock's queue.
+      const opts = wait ? { mode: 'exclusive', signal: this.#abort.signal } : { mode: 'exclusive', ifAvailable: true };
+      const asked = this.#locks.request(storeLock(this.#persistKey), opts, (lock) => {
+        if (lock === null || this.#closed) return got(false);
+        this.#holding = true;
+        got(true);
+        return new Promise((r) => {
+          this.#releaseStore = r;
+        });
+      });
+      // Settled once the lock is free again: what `letting` waits on.
+      this.#storeAsk = asked;
+      asked.catch((e) => (this.#closed ? got(false) : failed(e)));
+    });
+  }
+
+  /** The key's lock as it stands, once a replica of this page that closed has let go of it. */
+  async #tryStore() {
+    const free = letting.get(this.#persistKey);
+    if (free) {
+      this.#unkeptBy(this.#elsewhere());
+      await free;
+    }
+    const held = await this.#lockStore(false);
+    if (held) this.#unkeptBy(null);
+    return held;
+  }
+
+  /** Waits for the key's lock held elsewhere, `unkept` saying so, then takes the store over. */
+  async #awaitStore() {
+    this.#unkeptBy(this.#elsewhere());
+    if (await this.#lockStore(true)) await this.#takeStore();
+  }
+
+  /** Why this tab stores nothing, or null; told to the tabs it leads or will (`#theirs`). */
+  #unkeptBy(e) {
+    this.#unkept = e;
+    // A closed tab's channel is closed: posted to, it throws.
+    if (this.#elected && !this.#closed) this.#chan?.postMessage({ t: 'unkept', m: e?.message ?? null });
+  }
+
+  /** The store claimed before it is read (`claim`); refused, this tab stores nothing there, and tries again at its next persist. */
+  async #claimFirst() {
+    try {
+      this.#owner = await claim(this.#persistKey);
+    } catch (e) {
+      this.#unkeptAgain = true;
+      this.#unkeptBy(new FennecError(`${this.#persistKey} is kept as it is, and this tab stores nothing there: ${e.message}`, { cause: e }));
+      this.#onError?.(this.#unkept);
+    }
+  }
+
+  #elsewhere() {
+    return new FennecError(
+      `${this.#persistKey} is stored by another replica, in another tab or this one, and this one stores nothing there until it lets go`,
+    );
+  }
+
+  /**
+   * This tab writes the store now, the queue kept there taken over. A store
+   * another tab wrote since this one read it gets an image first: a chunk
+   * went on from where this tab read it. One that does not restore is kept,
+   * this tab storing nothing there (`#unkept`), read again at the next
+   * persist where IndexedDB failed the read (`#retake`).
+   */
+  async #takeStore() {
+    const other = sibling(this.#local);
+    try {
+      // Claimed first: a write of the replica before lands before the read, or not at all.
+      this.#owner = await claim(this.#persistKey);
+      if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
+        for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
+      }
+      if (!sameStore(stored.get(other), stored.get(this.#local))) stored.delete(this.#local);
+      this.#unkeptBy(null);
+    } catch (e) {
+      this.#unkeptAgain = unread.has(e);
+      this.#unkeptBy(new FennecError(`${this.#persistKey} is kept as it is, and this tab stores nothing there: ${e.message}`, { cause: e }));
+      this.#onError?.(this.#unkept);
+    } finally {
+      other.close();
+    }
   }
 
   /** Another tab's write, kept and sent here: nothing of it to put back in this replica. */
@@ -3511,6 +4072,12 @@ export class FennecSync {
   }
 
   async #onRelay(msg) {
+    // A tab that joined, or writes, learns why the one elected stores nothing, waiting to lead or leading.
+    if ((msg.t === 'hello' || msg.t === 'op') && this.#elected && this.#unkept) this.#unkeptBy(this.#unkept);
+    if (msg.t === 'unkept') {
+      this.#theirs = msg.m && `the tab elected to lead stores nothing: ${msg.m}`;
+      return;
+    }
     if (this.#leader) {
       if (msg.t === 'op') {
         this.#adopt(msg.op);
@@ -3567,36 +4134,133 @@ export class FennecSync {
    * The leader's alone: the other tabs' copies are fed by it.
    */
   #persistSoon() {
-    if (!this.#persistKey || !globalThis.indexedDB || !this.#leader || kept.has(this.#local)) return;
+    if (!this.#stores() || !this.#leader || !this.#holding || this.#closed) return;
+    if (this.#unkept) {
+      this.#retake();
+      return;
+    }
+    if (!this.#owner) return;
     if (this.#persisting) {
       this.#persistAgain = true;
       return;
     }
-    this.#persisting = (async () => {
-      do {
-        this.#persistAgain = false;
-        await persist(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
-      } while (this.#persistAgain && !this.#closed);
-    })()
-      .catch((e) => this.#onError?.(e))
-      .finally(() => {
-        this.#persisting = null;
-      });
+    const local = this.#local;
+    const key = this.#persistKey;
+    const owner = this.#owner;
+    const opts = { cryptoKey: this.#cryptoKey };
+    // Set before the loop runs: one ending at once (`inTurn` throws before
+    // it awaits where a restore failed) clears it after, never before.
+    let ended;
+    this.#persisting = new Promise((r) => (ended = r));
+    (async () => {
+      let failed = null;
+      try {
+        // A write made while one is out, the close's among them, is stored
+        // after it: closed, until the key's lock is let go of (`#letGo`).
+        do {
+          this.#persistAgain = false;
+          // `persist`, its write refused where another replica claimed the store.
+          await inTurn(local, () => persistNow(local, key, opts, owner), 'persist');
+        } while (this.#persistAgain && !this.#fenced);
+        if (this.#persistAgain) {
+          failed = new FennecError(
+            `${key}: what was written since the last persist is not stored: ` +
+              `the replica was closed, and let go of the store after ${LET_GO_MS / 1000} s waiting for it`,
+          );
+        }
+      } catch (e) {
+        failed = e;
+      }
+      // Over in the step that last looked for a write waiting: one made
+      // after finds none out and starts the next. Cleared a few microtasks
+      // on, in a `finally`, a write between was left to a loop that had
+      // ended, and a close let go of the store without it, telling nothing
+      // (the third review).
+      this.#persisting = null;
+      ended();
+      if (!failed) return;
+      // Claimed by another since, or deleted: this tab stores nothing there.
+      if (taken.has(failed) && this.#owner === owner) {
+        this.#owner = null;
+        this.#unkeptAgain = false;
+        this.#unkeptBy(failed);
+      }
+      this.#onError?.(failed);
+    })();
+  }
+
+  /**
+   * Lets go of the key's lock once the persist out has settled -- it stores
+   * what was written before the close -- as one landing after the next tab
+   * read the store replaced a record that tab's chunks were sealed after,
+   * and it never restored again. Past `LET_GO_MS` it is let go of all the
+   * same: that persist's write stores nothing once the next replica claimed
+   * the store, and none is started after it.
+   */
+  #letGo() {
+    const release = this.#releaseStore;
+    if (!release) return;
+    this.#releaseStore = null;
+    const key = this.#persistKey;
+    const free = this.#storeAsk.then(
+      () => {},
+      () => {},
+    );
+    letting.set(key, free);
+    free.then(() => letting.get(key) === free && letting.delete(key));
+    let t = null;
+    const go = () => {
+      if (this.#fenced) return;
+      clearTimeout(t);
+      this.#fenced = true;
+      this.#holding = false;
+      release();
+    };
+    const out = this.#persisting;
+    if (!out) return go();
+    t = setTimeout(go, LET_GO_MS);
+    t.unref?.();
+    out.then(go);
+  }
+
+  /** The store read again at a persist, where IndexedDB failed the take-over's read. */
+  #retake() {
+    if (!this.#unkeptAgain || this.#taking) return;
+    this.#taking = this.#takeStore().then(() => {
+      this.#taking = null;
+      if (!this.#unkept) this.#persistSoon();
+    });
   }
 
   /**
    * Restores the previous session's image: the replica, its cursors and the
-   * writes it had not sent, which go first.
+   * writes it had not sent, which go first. Only a key holding nothing is
+   * seeded: a store there that does not restore -- another key or none, a
+   * later client's, refused by the module -- stops the start, kept as it
+   * stands with its unsent writes, which a seed's first `persist` stored
+   * over (js-client.md#sealed-chunks-in-a-chain).
    */
   async #loadPersist() {
     if (!this.#persistKey || !globalThis.indexedDB || kept.has(this.#local)) return;
     try {
       await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
     } catch (e) {
-      // A corrupt or incompatible cache: reseed from scratch, not an error.
-      this.#onError?.(e);
+      throw new FennecError(
+        `the replica stored under ${this.#persistKey} does not restore (${e.message}): it is kept as it stands, ` +
+          'with the writes it has not sent; start again with the cryptoKey it was sealed with, or delete it ' +
+          `with unpersist(${JSON.stringify(this.#persistKey)}), those writes with it, to seed anew`,
+        { cause: e },
+      );
     }
   }
+}
+
+/** Whether two databases' `stored` read one store as it stood (`#takeStore`). */
+function sameStore(a, b) {
+  if (!a || !b) return false;
+  if (a.key !== b.key || a.ck !== b.ck || a.gen !== b.gen || a.next !== b.next || a.image !== b.image || a.chunks !== b.chunks) return false;
+  if (!a.tag || !b.tag) return a.tag === b.tag;
+  return a.tag.length === b.tag.length && a.tag.every((x, i) => x === b.tag[i]);
 }
 
 /** A refusal's words: the server's `{"error": ..}`, or what the transport said. */
@@ -3692,19 +4356,32 @@ function normalizeShape(raw, url) {
  *              asked for a new one when the server answers 401
  * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes,
  *              one account's -- the key names it, and a replica is never
- *              opened for another
+ *              opened for another. A store there that does not restore --
+ *              another `cryptoKey`, or none -- refuses the sync, kept as it
+ *              stands with its unsent writes; only none stored is seeded
+ *              (`unpersist` deletes one). One replica stores a key at a
+ *              time, holding its lock; another stores nothing there till
+ *              it lets go (`status()`'s `unkept`)
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
  *              with (`persist`)
  * - `onRefused` told of each write the server refused, which was put back
- * - `leader`   `false` turns off multi-tab leader election
- * - `locks`    lock manager (defaults to `navigator.locks`)
+ * - `leader`   `false` turns off multi-tab leader election: each tab sends
+ *              its own writes, and one stores `persist`'s key at a time
+ * - `locks`    lock manager (defaults to `navigator.locks`; `ifAvailable`
+ *              among its options)
  */
 export async function sync(opts = {}) {
   if (!opts.url) throw new FennecError('sync(): `url` is required');
   const local = opts.local ?? (await Fennec.open(opts.wasm ?? './fennec.wasm', { collation: opts.collation }));
-  const replica = new FennecSync(local, opts);
-  // The server owns the schema: the code's is compared with it, never applied.
-  await checked(replica.remote, opts, 'follow');
-  if (opts.schema) declared.set(replica, opts);
-  return replica.start();
+  try {
+    const replica = new FennecSync(local, opts);
+    // The server owns the schema: the code's is compared with it, never applied.
+    await checked(replica.remote, opts, 'follow');
+    if (opts.schema) declared.set(replica, opts);
+    return await replica.start();
+  } catch (e) {
+    // Opened here, the database is no one's once the sync is refused.
+    if (!opts.local) local.close();
+    throw e;
+  }
 }

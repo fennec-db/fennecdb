@@ -1,0 +1,7 @@
+-- A PostgreSQL table mirrored by --follow: its copy and the changes
+-- streamed after it, and `_follow`, which collection follows which slot.
+get _follow
+get items order id
+get items where id = 2
+get items count
+collections

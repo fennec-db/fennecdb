@@ -121,6 +121,14 @@ jobs:
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
 
+      # docs/design/conventions.md#unsafe-code: every unsafe block says why
+      # it is sound, clippy's undocumented_unsafe_blocks denied in the root
+      # Cargo.toml's [workspace.lints], which a crate takes only by naming
+      # it: each does, a new one too. The tests' last case is the check
+      # over the repository's files, so it runs once.
+      - name: Every crate takes the workspace's lints, and every unsafe block says why it is sound, whatever its cfg
+        run: python3 tools/test_lints_check.py
+
       # The compiler CI tests with is the one that ships: rust-toolchain.toml
       # names an exact release, and every Dockerfile's rust image is that
       # release, by digest, the toolchain file kept in the build; the images
@@ -137,6 +145,15 @@ jobs:
         run: |
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
+
+      # docs/design/durability.md#files-modes: a file the crates make is
+      # made 0600 (a directory 0700) by fennec_core::fs's helpers, whatever
+      # the umask; File::create, fs::write, create_dir_all and the like take
+      # the umask's 0644. The reader is held to its own cases first.
+      - name: Every file the crates make is made by fennec_core::fs's helpers
+        run: |
+          python3 tools/file_create_check.py --self-test
+          python3 tools/file_create_check.py
 
       # docs/design/conventions.md#security-policy: SECURITY.md names flags,
       # paths and primitives, and says nothing of TLS or the crates that the
@@ -190,6 +207,18 @@ jobs:
       # through, and holds BREAKS and the committed baseline.
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
+
+      # docs/design/compatibility.md: a release after one with no fixture
+      # set (crates/fennec-core/tests/compat/v<version>/, RELEASING.md's
+      # step 7), or with one its RELEASES line does not pin, is refused
+      # where its version is set.
+      - name: make version refuses a release after one with no fixture set
+        run: python3 tools/test_version.py
+
+      # docs/design/compatibility.md#fixture-sets: a set is written only by
+      # the programs its manifest names, built from its tag.
+      - name: compat_fixtures.py writes a set only with its tag's programs
+        run: python3 tools/test_compat_fixtures.py
 
       # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
       # the metrics only grow. Here only the checker's own tests, a break
@@ -2439,21 +2468,21 @@ jobs:
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
   # replica's apply, a SQLite file, the certificate a PostgreSQL server
-  # shows, walked to its signature's hash -- fuzzed for a count of runs each
-  # (about 30 s of this runner), built with AddressSanitizer and LLVM's coverage
-  # counters on the Makefile's dated nightly (a nightly only here and in
-  # fuzz.yml). A count, not a time: the same commit hands each target the
-  # same inputs on any runner, so the job passes or fails by the commit,
-  # never by the runner's speed, and anyone makes a finding again with
-  # `make fuzz-smoke` -- which is why it says a panic's message and an
-  # ASan report here, where fuzz.yml's runs, each week's own, say only the
-  # recipe. The test job runs the same targets over their seeds in a plain
-  # build; fuzz.yml gives each half an hour a week. Each target is capped
-  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
-  # ends at a named target's cap before this timeout: eight just under it
-  # -- these seven and `stream`, a primary's stream, which lands beside
-  # them -- are 48 minutes, and the build a minute and a half, with the
-  # seven and a half minutes to spare six had under 45.
+  # shows, walked to its signature's hash, a primary's stream -- fuzzed for a
+  # count of runs each (about 30 s of this runner), built with AddressSanitizer
+  # and LLVM's coverage counters on the Makefile's dated nightly (a nightly
+  # only here, in sanitize and in fuzz.yml). A count, not a time: the same
+  # commit hands each target the same inputs on any runner, so the job passes
+  # or fails by the commit, never by the runner's speed, and anyone makes a
+  # finding again with `make fuzz-smoke` -- which is why it says a panic's
+  # message and an ASan report here, where fuzz.yml's runs, each week's own,
+  # say only the recipe. The test job runs the same targets over their seeds
+  # in a plain build; fuzz.yml gives each half an hour a week. Each target is
+  # capped at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every
+  # run ends at a named target's cap before this timeout: eight just under it
+  # -- these seven and `stream`, a primary's stream, which lands beside them
+  # -- are 48 minutes, and the build a minute and a half, with the seven and a
+  # half minutes to spare six had under 45.
   fuzz-smoke:
     name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
@@ -2478,6 +2507,104 @@ jobs:
           echo "makes the same inputs, and the line 'fennec-fuzz reproduce ...' above, run"
           echo "with target/<host>/fuzz/fennec-fuzz after 'make fuzz ASAN=1', makes the one"
           echo "that ended it (docs/design/conventions.md#fuzzing)."
+
+  # docs/design/conventions.md#sanitizers: the tests of the crates whose
+  # unsafe code an app's or a page's pointers reach -- fennec-ffi's C ABI
+  # (tests/bounds.rs calls each function at its edges), fennec-abi, and
+  # fennec-core's mapping, kernels and arenas -- under AddressSanitizer, on
+  # the Makefile's dated nightly (a nightly only here, in fuzz-smoke and in
+  # fuzz.yml), built for the runner's triple so build scripts run plain. A
+  # report ends the run, failed. Leaks are not looked for: the engine's
+  # tests forget a database on purpose, as a killed process leaves one. Not
+  # a required check (conventions.md, "Reruns", says why), so it does not
+  # run for a merge group, where nothing waits for it: it skips its tests
+  # where a change touches no crate, the schedule runs it whole, and
+  # RELEASING.md asks it green at a release's commit. Bounded as fuzz-smoke
+  # is until it has runs to be bounded by: its tests took 3.5 minutes in the
+  # test job unsanitized (fennec-core's lib 60 s, tests/all.rs 146 s), and
+  # sanitized at opt-level 1 they took on a Mac what unsanitized ones did.
+  sanitize:
+    name: sanitize (fennec-ffi, fennec-abi, fennec-core tests under ASan)
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A pull request's and a push's files, against the commit each starts
+      # from: only the trees of the two are fetched. A scheduled or
+      # dispatched run, and one whose base cannot be fetched, tests whatever
+      # it finds.
+      - name: Whether the change touches what the job tests
+        id: touched
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          run=1
+          case "$EVENT" in
+            pull_request|push)
+              if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+                files=$(git diff --name-only "$BASE" HEAD)
+                if ! printf '%s\n' "$files" | grep -qE '^(crates/|Makefile$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.cargo/|\.github/workflows/ci\.yml$)'; then
+                  run=0
+                  echo "::notice::No crate, Makefile, manifest or ci.yml changed: the sanitized tests are skipped."
+                fi
+              fi
+              ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      # The cargo cache as every job keeps it, keyed by the nightly's date
+      # and this job: a stable toolchain's target/ is never restored under
+      # it, nor one an earlier nightly built. The Makefile, which names the
+      # nightly, is no path a push to main runs for: the entry of a new
+      # nightly is saved by main's next scheduled run, and until then a run
+      # builds cold, as one did before this cache.
+      - name: The nightly's date
+        id: nightly
+        if: steps.touched.outputs.run == '1'
+        run: echo "date=$(sed -n 's/^FUZZ_NIGHTLY ?= //p' Makefile)" >> "$GITHUB_OUTPUT"
+
+      - id: cargo-cache
+        if: steps.touched.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-
+
+      - name: Install the fuzzer's nightly, pinned to a date
+        if: steps.touched.outputs.run == '1'
+        run: make fuzz-toolchain
+
+      - name: The tests of fennec-ffi, fennec-abi and fennec-core under AddressSanitizer
+        if: steps.touched.outputs.run == '1'
+        run: make sanitize
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's

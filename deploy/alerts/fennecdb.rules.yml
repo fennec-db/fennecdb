@@ -33,9 +33,10 @@
 # real node_exporter -- and grafana.yml's rules to these, expression for
 # expression; fennecdb.rules.test.yml is promtool's tests of them.
 #
-# Not here, for want of a metric: a tenant's replica lag on a node (a --dir
-# node exports none by tenant; /t/<t>/_replication/status has it), how far
-# a node's archive is behind its node (`fennec archive` serves no metrics;
+# Not here, for want of a metric: which tenant's copy on a node is behind
+# (a --dir node exports none by tenant -- its fennec_copies_* count them --
+# and /t/<t>/_replication/status has it), how far a node's archive is
+# behind its node (`fennec archive` serves no metrics;
 # the node's fennec_node_streams says only whether an archiver is
 # connected), and a region router's copy of the global directory (its
 # follower exports nothing).
@@ -385,3 +386,28 @@ groups:
         annotations:
           summary: "A copy on {{ $labels.instance }} refused a primary of another lineage and deleted itself"
           runbook: deploy/RUNBOOK.md#read-replicas
+      # The copies on a node a failover may promote -- the standby's of its
+      # pair's tenants, a tenant's replica of its own; never a read
+      # replica's -- counted, never by tenant. A failover promotes a copy
+      # where it stands: under --sync always a write waits a second at most
+      # for the streams keeping up and none for one behind or reconnecting,
+      # so one not connected, or behind, when its primary is lost loses
+      # every write its primary answered that it was not sent. A node lost
+      # leaves each of its copies on the other node disconnected too:
+      # FennecNodeDown says so first.
+      - alert: FennecTenantCopiesDisconnected
+        expr: fennec_copies_disconnected > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} tenant copies on {{ $labels.instance }} are not connected to their primary: a failover now promotes each where it stands, without what it was not sent"
+          runbook: deploy/RUNBOOK.md#a-copy-not-following
+      - alert: FennecTenantCopiesBehind
+        expr: fennec_copies_behind > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A tenant copy on {{ $labels.instance }} is {{ $value }} writes behind its primary: a failover now loses them"
+          runbook: deploy/RUNBOOK.md#a-copy-not-following

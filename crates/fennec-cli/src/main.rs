@@ -943,7 +943,8 @@ fn save(db: &Database, path: &str) -> std::result::Result<(), String> {
     let path = fennec_core::fs::resolved(Path::new(path));
     let side = fennec_core::fs::beside(&path, "saving");
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&side)?;
+        // Its owner's alone, or the mode of the file it replaces.
+        let mut f = fennec_core::fs::create_like(&side, &path)?;
         f.write_all(&db.snapshot())?;
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(&path)?;

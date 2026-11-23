@@ -520,7 +520,13 @@ changes to the others and sends every tab's writes, one queue for all.</p>
 
 <ul>
   <li><b>Turn it off</b> with <code>leader: false</code>; without
-    <code>navigator.locks</code>, as in Node, it is off already.</li>
+    <code>navigator.locks</code> -- outside a secure context, in Safari
+    before 15.4 or Firefox before 96, in a Node without it -- it is off
+    already. Each tab then sends its own writes. With
+    <code>navigator.locks</code> one at a time stores the
+    <code>persist</code> key; without it the last tab started stores it,
+    and those before it nothing from then on (<a href="#one-writer">One
+    replica stores a key at a time</a>).</li>
 </ul>
 
 <details class="deep"><summary>How tabs elect a leader</summary>
@@ -739,3 +745,53 @@ await db.ready();
 db.live(db.from('tasks').order('priority', 'desc'), draw);
 await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
+
+<p>With <code>cryptoKey</code> the replica is sealed as <code>persist</code>
+seals a database (<a href="javascript.html#sealed">Sealed in IndexedDB</a>).
+Only a key that holds nothing is seeded: a replica whose store is there and
+does not restore -- sealed with another key or none, changed, written by a
+later client -- refuses to start, <code>sync</code> rejecting with the
+reason, and the store stays as it was, with the writes it had not sent.
+Started again with the key it was sealed with, it sends them; or
+<code>unpersist(key)</code> deletes that key's store, the writes in it
+with it, and the next <code>sync</code> seeds anew. A tab that takes the
+lead from such a store stores nothing in it, tells <code>onError</code>,
+and <code>status()</code>'s <code>unkept</code> says why; where IndexedDB
+itself failed the read, the next write reads the store again.</p>
+
+<pre data-lang="ts">import { unpersist } from './fennec.js';
+
+await unpersist(`tasks:${userId}`);   // refused while a replica keeps it in this browser
+</pre>
+
+<p><code>unpersist</code> asks <code>navigator.locks</code> whether a
+replica keeps the key, or the lock manager it is given
+(<code>unpersist(key, { locks })</code>, the one the replicas were given).
+It deletes that key's records alone; its chunks are stored under the key,
+<code>#</code> and nine digits, so another key whose name is
+<code>&lt;key&gt;#</code> followed by nine digits is read as this key's
+chunk -- avoid such names. Every database's next
+<code>persist</code> in this page stores its image whole; another page's
+plain <code>persist</code> of the key is not reached, and goes on in chunks
+that a <code>restore</code> does not find, so a key one page persists is
+deleted by that page.</p>
+
+<p id="one-writer"><b>One replica stores a key at a time.</b> It holds the
+key's lock (<code>navigator.locks</code>) while it stores there, whatever
+its url and shapes, so two replicas under one key -- other shapes, or tabs
+with <code>leader: false</code> -- never store over each other: the second
+stores nothing there, <code>status()</code>'s <code>unkept</code> saying
+so, and takes the store over, the first's unsent writes with it, once the
+first lets go. A tab with <code>leader: false</code> leads itself
+meanwhile; an elected one waits to lead, and its tabs' <code>unkept</code>
+says so too. Each replica also claims the store as it takes it over, and
+each of its writes finds that claim in its own IndexedDB transaction or
+stores nothing, so the store restores whatever the locks did. Without
+<code>navigator.locks</code> nothing holds a second tab back: the last
+replica started on a key stores it, and one started before stores nothing
+there from then on, <code>unkept</code> and <code>onError</code> saying so,
+its writes still sent. <code>close()</code> stores what was written before
+it, then lets go of the store; past 5 s it lets go all the same, its
+persist still out stores nothing once the next replica claimed the store,
+and <code>onError</code> is told what was not stored: the next tab never
+reads a store a closed one is still writing.</p>

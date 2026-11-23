@@ -1,0 +1,14 @@
+-- A statement of every timing a schedule writes, alive to the file's end,
+-- read at the set's clock: each one's schedule, the slot it runs next --
+-- computed from its timing, its zone, its last mark and its `since` --
+-- and its last mark.
+statements
+describe statement minutely
+describe statement daily
+describe statement weekly
+describe statement monthly
+describe statement nightly
+describe statement noon
+describe statement fresh
+get runs order at, id
+get once
