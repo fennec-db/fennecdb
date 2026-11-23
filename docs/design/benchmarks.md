@@ -343,9 +343,17 @@ heap figures say how much it takes.
 whose `--memory` (512 MB by default) is under its file's size (1 000 000
 records, 1.1 GB live), a second container following it as a replica, for
 8 hours a run. First the peak the mix reaches as fast as it is answered,
-four minutes; then the soak open loop at 50% and at 80% of it, a run each
--- the second only where the first's report passed, unless `KEEP_GOING=1`:
-eight hours on a known failure tell nothing more.
+thirty minutes, its operations over its time but the first minute's; then
+the soak open loop at 50% and at 80% of it, a run each -- the second only
+where the first's report passed, unless `KEEP_GOING=1`: eight hours on a
+known failure tell nothing more. The peak is long enough for the file to
+double with the updates and the server to compact it on its own, which
+the script says it did (`peak_compacts`): a rate a soak keeps for eight
+hours is held through both. Four minutes of a freshly loaded file, their
+median minute, measured its best -- 3 214 a second on the second dry run
+of 2026-11-23, whose 80% held twelve minutes, until the file passed 1.8 GB
+under 512 MB and both servers compacted on their own (the primary at
+1 196-1 258 a second meanwhile), and was never held again.
 
 **The servers ask a token.** Both, and the backup's read-only server, run
 with `--http-token` and `--replication-token`, two secrets of the run's
@@ -384,19 +392,35 @@ leaving the second's unsaid and the tools' volume behind; the self-test's
 toy docker fails that call as Docker does, and holds the tools' volume
 removed and a stopped soak ending the run with nothing after it.
 
-**What no run of the script passes yet.** A replica's first follow, and a
-backup, are sent an image, which the primary builds whole in its heap
+**An image under the run's memory.** A replica's first follow, and a
+backup, are sent an image, which the primary built whole in its heap
 under its read lock (fennec-http's replication `stream`:
-`Database::snapshot`), and the replica receives whole and loads beside it
-(`Follower::session`): under a `--memory` below the file's size -- the
-soak's premise -- the primary is OOM-killed the moment its replica first
-asks. The first short run after the token, 250 000 records (259 MB of
-file) under `--memory 256m`, lost its primary 0.7 s after the replica
-started (exit 137, OOM-killed), and the script stopped 30 s into the
-peak; the soak itself was run through `ycsb soak` alone at 100 000
-records under `--memory 512m` to hold the rest. Until the image is
-streamed as a checkpoint's is (`Sink::rewrite_with`), the long runs wait
-for it.
+`Database::snapshot`) and the replica received whole: under a `--memory`
+below the file's size -- the soak's premise -- the primary was OOM-killed
+the moment its replica first asked. The first short run after the token,
+250 000 records (259 MB of file) under `--memory 256m`, lost its primary
+0.7 s after the replica started (exit 137, OOM-killed), and the script
+stopped 30 s into the peak. Since the image goes out as a pin takes it and
+is taken as it arrives (#680), the second dry run's replica followed in
+4 s, 1 GB of file under 512 MB, and its backup was taken, restored and
+verified.
+
+**What a run keeps of its servers.** Both servers' logs, every life of
+the primary's, their lines stamped by Docker, are written into `--logs`
+(`LOGS`, beside the run's other files in `$TMPDIR`) as their containers
+go, a stopped run's too (`Kit::keep_logs`); and a read the replica
+answers 504 -- held past its wait (`Fennec-After`, 5 s) -- is said on the
+log with what each server's `/_replication/status` said as it answered
+(`Shared::replication_said`). The second dry run of 2026-11-23 counted 40
+such reads, every error it had: 7 in the minute after the restart of
+minute 60, 32 -- every connection -- as the replica came back after the
+kill of minute 90, and 1 at minute 86 as the run's compact ended. In each
+every 504 named one change of the replica's (5 562 489, 7 115 618,
+6 837 278): it held still for the whole wait, while the reads named
+changes the primary had answered up to 2 927 past it. Nothing of the run
+said whether the primary's durable change stood still -- under `--sync
+250` a replica is sent only what is on disk -- or the replica took
+nothing, and the containers' logs went with them.
 
 **One checker.** `soak.rs` is the driver -- the mix, the schedule, the
 kills, the minute's line and the report -- and decides no answer: whether
@@ -571,7 +595,12 @@ just before the kill leaves its request cut all the same. The server's
 own compactions are read from its `fennec_auto_compactions_total`, the
 minute's count on its line (`auto_compacts`, `r_auto_compacts` for the
 replica), and whether one was writing at the minute's look from its side
-file (`compacting`, `r_compacting`). After each restart the keys written in
+file written in the last minute (`compacting`, `r_compacting`) -- never by
+its being there: a kill leaves the side file of a compact it cut, which
+the server started again leaves until its next compact makes it anew, and
+the second dry run read the twelve minutes after its kill of minute 90 as
+a compaction writing, none running, and judged no memory in them (the
+same test says a kill found a compact writing, `kill_compacting`). After each restart the keys written in
 the 10 s before the kill, or by a write not answered, are read back -- a
 sweep that cannot connect or read is counted (`sweep_failed`), never
 passed over -- and at the end every key, every counter and every session.
@@ -598,9 +627,15 @@ cut short keeps what it measured, each line stamped with the harness's
 start (`started`, so a run id used again is told apart: the report judges
 the latest attempt) and the primary's `life` (its restarts before it):
 `ops`, `ops_s` against `rate`, `idle_workers` (connections that ended no
-operation in the minute); the steady operations' `p50`, `p99`, `p999` and
-`max` in microseconds, each timed from when it was due, and `p99_hour`, the
-steady p99 of the 60 minutes to then; apart from them `restart_ops` and
+operation in the minute); `behind_s`, how far the open loop is behind its
+schedule at the minute's end -- the median connection's lag behind the
+operation it waits for or works on, none where it is ahead; `steady_ops`
+and their `p50`, `p99`, `p999` and `max` in microseconds, each timed from
+when it was due, and `p99_hour`, the steady p99 of the 60 minutes to then,
+each written only where there were steady operations: a minute every
+connection spent behind its schedule has none, and its quantile written
+as 0 read as the run's best minute -- the second dry run's every minute
+from 28 to 120; apart from them `restart_ops` and
 `p99_restart`, the operations due from a second before a kill until the
 server answered again and, after it, until their connection was back on
 its schedule -- at 80% the open loop's backlog drains for minutes, its waits
@@ -631,10 +666,11 @@ gone that the run did not kill, the kernel's OOM kills of it); the clock's
 `clock_off_ms`, `clock_rtt_ms` and `clock_step`; and what else used the
 machine: `load1`, `load5`, `others_host` (this host's other processes, in
 cores, by `ps` -- on macOS a decaying average of about the minute, every
-process but the run's and Docker's) and `others_vm` (what the VM's CPUs did
+process but the run's and Docker's, the three that took the most named on
+the log's line for a minute they took a core or more) and `others_vm` (what the VM's CPUs did
 beside the two servers' cgroups, from `/proc/stat` and their `cpu.stat`;
 the run's own look, verify and backup containers among it). `:start` says
-the run's settings (`replication_buffer` among them) and the load before it (`load_before`), `:end` closes a
+the run's settings (`replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` and `peak_auto_compacts`, `:end` closes a
 finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
 `p99_restart` and `restart_ms_max` over the run, both files verified after
 both stopped as a supervisor stops them, and `replica_differs`: the same
@@ -654,11 +690,14 @@ one in a compact, the same compacts and backups at the same minutes of the
 hour: lines 61-120 of an 8-hour run, against 421-480 (`same_hour`), so
 that neither a restart's backlog nor a compact's tail weighs more in one
 than in the other; a two-hour run has no such hour and is not judged on
-it; the file at most 2.2 times the live bytes every minute; the primary's
+it, and neither is an hour with no operation on its schedule, which has
+no steady p99 (written as 0, a last hour behind its schedule passed
+against any); the file at most 2.2 times the live bytes every minute; the primary's
 `rss_anon` beyond what the server holds by its own account grown less
 than 5% of its `rss_anon` within each life (it is killed every 30
-minutes), from the median of its first five quiet looks from its fifth
-line to the median of its last five -- what it holds being its engine's
+minutes) and between two compactions, from the median of a stretch's
+first five quiet looks from the life's fifth line to the median of its
+last five -- what it holds being its engine's
 tables and indexes (`memory_bytes`) and its replication feed
 (`feed_held`): the records appended since the open, up to
 `--replication-buffer`, and the feed's index of them (three `u64`s a
@@ -680,7 +719,18 @@ same. Beyond the feed's bytes and the engine's own, the memory was flat
 within a megabyte in each life once the feed was full (lives 1-3 at 16.5,
 18 and 24 MB, the last a step of 6.7 MB at the compact of minute 100),
 growing before that some 0.25 MB a minute with the feed, its index not
-counted then (no `seq` on the dry run's lines). A life with fewer than ten quiet looks
+counted then (no `seq` on the dry run's lines). A compaction drops what
+the engine held of the old file and builds it again, and the heap it let
+go of is the allocator's to keep or hand back: the second dry run of
+2026-11-23, judged across them, failed one life at +9.4%, its memory
+beyond what was held flat at 12-16 MB through minutes 65-80, 26 MB after
+the compaction of minutes 81-86 -- the engine's own down from some 60 MB
+to 40-48 at it -- and flat again; the other lives' compactions moved it
+5 MB at most, and the replica's, never killed, settled at 70-78 MB beyond
+its engine's through four compactions of its own. A leak grows inside a
+stretch; the largest step across a compaction is said beside the verdict,
+where one a compaction of every life made would show. A life with no
+stretch of ten quiet looks between two compactions
 is not judged, and a run none of whose lives has ten -- the server's own
 compactions taking most minutes, which depends on the data and the memory
 -- fails the line as "NOT JUDGED, too few quiet looks", each life's quiet
@@ -688,7 +738,13 @@ and settled looks and those the server's own compactions took beside it,
 never as a leak; threads and descriptors less the
 connections open within 2 of their run's median, for both, and the
 primary's within 2 from the median of a life's first five looks to its last
-five -- a leak of a few a life never leaves a run-wide band; no error -- a
+five -- a leak of a few a life never leaves a run-wide band -- but a look
+over the band by no more than the VM's CPUs less one whose next look is
+back within it, said apart: a task the engine cuts in shares runs them on
+a thread a CPU but the one that asked, joined before it returns
+(`vector::spread` under `std::thread::scope`, `fennec_core::threads`), and
+the second dry run failed the primary on one look, minute 17, 7 more on
+the VM's 8 CPUs, back the next minute and 0 within each life; no error -- a
 status other than a 2xx is one wherever it falls, and so is a connection
 error or a 503 saying when to come back outside a restart's window, which
 within one is `down`; no mismatch (and the minutes the VM's clock stepped
@@ -697,13 +753,23 @@ replica connected each minute and within 5 s of the primary, its first
 follow within 1 800 s, back after each restart within `--replica-back-max`,
 caught up at the end within 300 s, and holding the primary's rows; every
 restart within `--restart-max` (120 s) and the restarts' operations' p99
-within the run's longest restart and two seconds; the kills and verifies
+within the run's longest restart, two seconds and the most the loop was
+behind its schedule at a kill's look, a backlog its operations wait out
+too; the kills and verifies
 the schedule owes for the run's length (`(minutes - 1) / 30`), its
 compacts (one the server's own turned away counting), the kills that cut
 a compact, backups whose restored records held and restores; every verify,
 backup and restore clean; match and near as a scan; every key read back,
 after each restart and at the end; no server died and none was
-OOM-killed. A disk short of `--disk-floor` (3 GB) on either side ends the
+OOM-killed; and the open loop back on its schedule (`behind_s` a second
+at most) at some look of every stretch as long as the kill interval -- a
+compact's or a restart's backlog drains, at 80% of the peak a kill's in
+four times as long as the server was gone, and a loop behind for longer was asked for more than
+the server answers, from which on every latency the run writes is its
+queue's: the second dry run fell behind at minute 13 and never caught up,
+1 656 s behind at its end, from minute 28 every operation a restart's or
+a compact's backlog and its p99 of the operations due in a restart
+1 640.7 s. A disk short of `--disk-floor` (3 GB) on either side ends the
 run as the environment's: the report says so and judges nothing of it
 (exit 2), never a pass and never the server's failure. Below the verdicts
 it says what the run measured of what was set without one: each kill's
