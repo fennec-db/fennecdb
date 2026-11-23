@@ -432,3 +432,136 @@ fn pinned_reads_beside_writers_answer_as_at_the_pin() {
     let compared = compared.load(Ordering::Relaxed);
     assert!(compared > 20, "{compared} answers compared in two minutes");
 }
+
+/// A writer that takes a few bytes a call, as a socket may.
+struct Trickle(Vec<u8>);
+
+impl std::io::Write for Trickle {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = buf.len().min(7);
+        self.0.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An image a pin takes (`Database::pin_image`) is the snapshot taken at
+/// its pin, byte for byte -- plain, the image `plain_image` makes of it --
+/// whatever lands after the pin: written out after deletes, updates, a
+/// field added, more documents, a statement defined, a handover and a
+/// compact beside it, and again. The database holds what an image holds
+/// beside its documents -- every index kind, a graph with tombstones, a
+/// field added, a named and a scheduled statement and a history -- its
+/// documents both in the mapped file and in memory.
+#[test]
+fn a_pinned_image_is_the_snapshot_at_its_pin() {
+    let path = tmp("image");
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    db.set_clock(Some(1_800_000_000_000));
+    db.allow_schedules();
+    // Every write handed over to the file, to begin with.
+    db.set_handover(1);
+    exec(
+        &mut db,
+        "create collection every (h int @hash, u text @unique, s int @sorted, t text @text, \
+         v vector<4> @hnsw(cosine, m=8), w sparse<8> @inverted, g geo @geo, \
+         at timestamp @ttl(3650d), j json, n int, @sorted(h, s))",
+    );
+    exec(&mut db, "create collection other (x int, y text nocase)");
+    // Read as the database reads its lists: a point's and a json field's
+    // numbers as written.
+    let exactly = |db: &mut Database, sql: &str| {
+        let s = fennec_ql::parse_one_for(db, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        db.execute(&s).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    };
+    for i in 0..300i64 {
+        exactly(
+            &mut db,
+            &format!(
+                "put every {{h: {}, u: \"u{i}\", s: {}, t: \"word{} common\", \
+                 v: [{}, {}, {}, 1], w: \"{{{}:1}}/8\", g: [{}, {}], at: {}, \
+                 j: {{k: {i}, l: [1, \"two\"]}}, n: {i}}}",
+                i % 7,
+                i * 3 % 101,
+                i % 13,
+                i % 5,
+                i % 3,
+                i % 11,
+                i % 8 + 1,
+                i % 360 - 180,
+                i % 180 - 90,
+                1_790_000_000_000i64 + i,
+            ),
+        );
+    }
+    exec(&mut db, "del every where n < 20");
+    exec(&mut db, "alter collection every add field later text");
+    exec(&mut db, "set every {later: \"x\", s: 7} where n < 60");
+    exec(
+        &mut db,
+        "create statement bump($x int) public as set every {n: n + 1} where h = $x",
+    );
+    exec(
+        &mut db,
+        "create statement tick every 1h as insert other {x: 1}",
+    );
+    db.fork(7).unwrap();
+    // The writes from here on held in memory.
+    db.set_handover(u64::MAX);
+    for i in 0..50 {
+        exec(&mut db, &format!("put other {{x: {i}, y: \"Y{i}\"}}"));
+    }
+    exec(&mut db, "set every {t: \"fresh words\"} where n >= 290");
+    assert!(db.collection("every").unwrap().store.is_mapped());
+    let lock = RwLock::new(db);
+    let (want, plain, pinned, pinned_plain) = {
+        let g = lock.read().unwrap();
+        let want = g.snapshot();
+        let plain = fennec_core::engine::plain_image(&want).unwrap();
+        (
+            want,
+            plain,
+            g.pin_image(false).unwrap(),
+            g.pin_image(true).unwrap(),
+        )
+    };
+    assert_eq!(pinned.len(), want.len() as u64);
+    assert_eq!(pinned_plain.len(), plain.len() as u64);
+    assert_eq!(pinned.change_seq(), lock.read().unwrap().change_seq());
+    assert_eq!(pinned.to_vec(), want);
+    assert_eq!(pinned_plain.to_vec(), plain);
+    {
+        let mut g = lock.write().unwrap();
+        exec(&mut g, "del every where n < 100");
+        exec(
+            &mut g,
+            "set every {t: \"other words\", s: 1} where n >= 100",
+        );
+        exec(&mut g, "alter collection other add field z int");
+        for i in 0..50 {
+            exec(
+                &mut g,
+                &format!("put other {{x: {i}, y: \"y{i}\", z: {i}}}"),
+            );
+        }
+        exec(&mut g, "create statement count_other() as get other count");
+        g.hand_over().unwrap();
+    }
+    assert_eq!(pinned.to_vec(), want, "after writes and a handover");
+    assert_eq!(pinned_plain.to_vec(), plain, "after writes and a handover");
+    Database::maintain(&lock, &stmt("compact"))
+        .expect("a compact runs beside")
+        .unwrap();
+    assert_eq!(pinned.to_vec(), want, "after a compact beside it");
+    let mut trickled = Trickle(Vec::new());
+    pinned.write_to(&mut trickled).unwrap();
+    assert_eq!(trickled.0, want, "written a few bytes at a time");
+    // Not the database as it stands now, which moved.
+    assert_ne!(lock.read().unwrap().snapshot(), want);
+    let mut back = Database::new();
+    back.load(&pinned.to_vec()).expect("the image opens");
+    assert_eq!(back.collection("every").unwrap().store.len(), 280);
+}

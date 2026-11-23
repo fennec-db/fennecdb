@@ -514,3 +514,42 @@ fn a_sealed_backup_without_its_key_is_refused_before_the_lock() {
         .collect();
     assert_eq!(left, ["today.sealed"], "{said}");
 }
+
+/// A file that is not sealed, restored without a key, is refused (2) naming
+/// what it is -- a database file, which a backup taken without a key is and
+/// which opens as it is, or neither that nor a sealed backup -- never told
+/// to give a key it never had; before `<out>.lock` is taken, as a sealed
+/// one.
+#[test]
+fn an_unsealed_file_restored_is_refused_naming_what_it_is() {
+    let scratch = api_dump::Scratch::new(
+        std::env::temp_dir().join(format!("fennec-cli-unsealed-{}", std::process::id())),
+    );
+    let cwd = scratch.0.as_path();
+    let mut db = fennec_core::engine::MAGIC.to_vec();
+    db.extend_from_slice(&[0; 64]);
+    std::fs::write(cwd.join("nightly.fennec"), &db).unwrap();
+    std::fs::write(cwd.join("notes.txt"), b"nothing of ours").unwrap();
+    for (file, says) in [
+        (
+            "nightly.fennec",
+            "nightly.fennec is a database file, not a sealed backup: a backup taken without \
+             --key-file is the database itself, opened as it is",
+        ),
+        (
+            "notes.txt",
+            "notes.txt is neither a sealed backup nor a database file",
+        ),
+    ] {
+        let (code, said) = fennec_clean(&["restore", file, "out.fennec"], cwd);
+        assert_eq!(code, 2, "{file}: {said}");
+        assert!(said.contains(says), "{file}: {said}");
+        assert!(!said.contains("opens with --key-file"), "{file}: {said}");
+    }
+    let mut left: Vec<String> = std::fs::read_dir(cwd)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["nightly.fennec", "notes.txt"]);
+}

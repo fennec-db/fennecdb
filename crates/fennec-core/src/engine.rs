@@ -61,7 +61,7 @@ pub use stored::{Statements, Stored, Timing};
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
-pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
+pub use pinned::{Pinned, PinnedImage, PIN_AT, PIN_BUDGET};
 #[cfg(not(target_arch = "wasm32"))]
 mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
@@ -805,8 +805,10 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let io = |e: std::io::Error| Error::Io(e.to_string());
     let mut r = std::io::BufReader::with_capacity(1 << 20, input);
     let mut magic = [0u8; MAGIC.len()];
-    r.read_exact(&mut magic)
-        .map_err(|_| Error::Corrupt("invalid fennecdb signature".into()))?;
+    r.read_exact(&mut magic).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => Error::Corrupt("invalid fennecdb signature".into()),
+        _ => io(e),
+    })?;
     if magic != MAGIC[..] {
         return Err(Error::Corrupt("invalid fennecdb signature".into()));
     }
@@ -814,6 +816,13 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
     let mut chunk = vec![0u8; 1 << 16];
     let short =
         |at: u64| Error::Corrupt(format!("the record at {at} runs past the end of the file"));
+    // A record cut short by the bytes' end; any other error of the reader
+    // as it came -- a replica's stream halted or cut, a disk's read -- which
+    // read as damage of the image had a replica take a halt for a torn one.
+    let cut = |e: std::io::Error, at: u64| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => short(at),
+        _ => io(e),
+    };
     loop {
         let mut kind = [0u8; 1];
         if r.read(&mut kind).map_err(io)? == 0 {
@@ -823,7 +832,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         // The counter's head is at the front alone ([`whole_record`]).
         if byte == REC_SEQ && at == MAGIC.len() as u64 {
             let mut h = [0u8; REC_SEQ_LEN - 1];
-            r.read_exact(&mut h).map_err(|_| short(at))?;
+            r.read_exact(&mut h).map_err(|e| cut(e, at))?;
             at += REC_SEQ_LEN as u64;
             n += 1;
             continue;
@@ -839,7 +848,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
             let mut shift = 0;
             loop {
                 let mut b = [0u8; 1];
-                r.read_exact(&mut b).map_err(|_| short(at))?;
+                r.read_exact(&mut b).map_err(|e| cut(e, at))?;
                 head.push(b[0]);
                 if shift > 63 {
                     return Err(Error::Corrupt(format!(
@@ -869,7 +878,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         let mut left = summed;
         while left > 0 {
             let take = left.min(chunk.len() as u64) as usize;
-            r.read_exact(&mut chunk[..take]).map_err(|_| short(at))?;
+            r.read_exact(&mut chunk[..take]).map_err(|e| cut(e, at))?;
             if is_checked {
                 crc = crc32c(crc, &chunk[..take]);
             }
@@ -877,7 +886,7 @@ pub fn check_reader(input: &mut dyn std::io::Read) -> Result<u64> {
         }
         if is_checked {
             let mut sum = [0u8; SUM];
-            r.read_exact(&mut sum).map_err(|_| short(at))?;
+            r.read_exact(&mut sum).map_err(|e| cut(e, at))?;
             if u32::from_le_bytes(sum) != crc {
                 return Err(Error::Corrupt(format!(
                     "the record at {at} fails its checksum"
@@ -1327,23 +1336,65 @@ fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
 pub(crate) struct Summed<'a> {
     out: &'a mut dyn ImageOut,
     sum: u32,
+    /// How `out` frames the record ([`ImageOut::framing`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    framing: Framing,
 }
 
 impl<'a> Summed<'a> {
     /// The head of a record whose body is `len` bytes, written.
     pub(crate) fn begin(out: &'a mut dyn ImageOut, kind: u8, cid: u32, len: usize) -> Result<Self> {
-        let (h, n) = head(checked_kind(kind, 1), cid, len + 1 + SUM);
+        #[cfg(not(target_arch = "wasm32"))]
+        let framing = out.framing();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (kind, len) = match framing {
+            Framing::Summed => (checked_kind(kind, 1), len + 1 + SUM),
+            Framing::Later => {
+                out.later(Later::Record)?;
+                (checked_kind(kind, 1), len + 1 + SUM)
+            }
+            // As `plain_records` frames a checked record anew.
+            Framing::Plain => (kind, len),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (kind, len) = (checked_kind(kind, 1), len + 1 + SUM);
+        let (h, n) = head(kind, cid, len);
         out.write(&h[..n])?;
         Ok(Summed {
             out,
             sum: crc32c(0, &h[..n]),
+            #[cfg(not(target_arch = "wasm32"))]
+            framing,
         })
     }
 
     /// The claim, none, and the sum, written: the record is whole.
     pub(crate) fn end(mut self) -> Result<()> {
+        // The sum the out makes as it writes the record out, of the bytes
+        // from its head; a plain record ends with its body.
+        #[cfg(not(target_arch = "wasm32"))]
+        match self.framing {
+            Framing::Summed => {}
+            Framing::Later => {
+                self.out.write(&[0])?;
+                return self.out.later(Later::Sum);
+            }
+            Framing::Plain => return Ok(()),
+        }
         self.write(&[0])?;
         self.out.write(&self.sum.to_le_bytes())
+    }
+
+    /// `store`'s live records, `len` bytes, as the record's body
+    /// ([`Store::write_live`]): written, or held by an out that writes
+    /// them as it writes the image out ([`Later::Live`]).
+    pub(crate) fn write_live(&mut self, store: &Store, len: usize) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.framing != Framing::Summed {
+            return self.out.later(Later::Live(store, len));
+        }
+        let _ = len;
+        store.write_live(self)
     }
 }
 
@@ -2650,6 +2701,51 @@ pub trait ImageOut {
     fn at(&self) -> u64;
     /// Overwrites bytes written earlier, in place.
     fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+    /// How the image's records are framed in it: [`Framing::Summed`] but
+    /// in an image a pin takes ([`PinnedImage`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn framing(&self) -> Framing {
+        Framing::Summed
+    }
+    /// What an out that frames otherwise is told besides the bytes
+    /// ([`Later`]); never asked of one that sums as it is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn later(&mut self, what: Later<'_>) -> Result<()> {
+        let _ = what;
+        Err(Error::Io(
+            "an image's out told of what it does not hold".into(),
+        ))
+    }
+}
+
+/// How an image's records go into an [`ImageOut`] ([`ImageOut::framing`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Framing {
+    /// Summed as they are written: a file's, a buffer's.
+    Summed,
+    /// Each one's sum made by the out as it writes the image out, and a
+    /// collection's live records held rather than written
+    /// ([`PinnedImage`]): summed as they were taken, every document was
+    /// read under the read lock.
+    Later,
+    /// As a version before checksums wrote them, no claim and no sum: the
+    /// image [`plain_image`] makes of one, for a follower that reads no
+    /// sums.
+    Plain,
+}
+
+/// What an out framing [`Framing::Later`] or [`Framing::Plain`] is told
+/// besides the bytes ([`ImageOut::later`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub enum Later<'a> {
+    /// A record begins: its sum is of the bytes from here.
+    Record,
+    /// The record's sum goes here, 4 bytes.
+    Sum,
+    /// A collection's live records, `len` bytes of a data record's body
+    /// ([`Store::write_live`]).
+    Live(&'a Store, usize),
 }
 
 /// A stretch of a store's bytes, held: the image a load kept, which never
@@ -2787,10 +2883,26 @@ pub trait Sink: Send {
     fn side(&self) -> Option<std::path::PathBuf> {
         None
     }
-    /// Puts the file at `side`, an image of every write so far and fsynced,
-    /// in place of this one, and appends to it from then on.
+    /// Where an image taken from elsewhere -- a replica's of its primary --
+    /// is written as it arrives, before it takes this file's place
+    /// ([`Self::adopt`], [`Database::adopt_side`]): a name of its own, never
+    /// [`Self::side`]'s, which a `compact` beside the database may be
+    /// writing meanwhile. `None` for every sink but a file's, and the image
+    /// is then taken in memory.
     #[cfg(not(target_arch = "wasm32"))]
-    fn adopt(&mut self, side: &std::path::Path) -> Result<()> {
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Puts the file at `side`, an image of every write so far and fsynced,
+    /// in place of this one, and appends to it from then on: the file
+    /// `written` is open on, the handle that wrote it, and no other put at
+    /// `side`'s name since (`fs::still_named`, on Windows by its file
+    /// index), which is refused. Opened again by its name, as up to the image's review, a
+    /// file put at `.beside` or `.taking` meanwhile -- no link, which the
+    /// open refused -- was renamed into the database's place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &std::path::Path, written: &std::fs::File) -> Result<()> {
+        let _ = written;
         Err(Error::Io(format!(
             "{} has no file to take the place of",
             side.display()
@@ -6819,7 +6931,8 @@ impl Database {
     /// image is what a page persists, a replica or a moved tenant is sent
     /// and an archive keeps, and written with the versions every update
     /// left behind it grew with them -- a page's image by every write since
-    /// the page was first opened.
+    /// the page was first opened. A server sends it as a pin takes it
+    /// ([`Self::pin_image`]), written out with no lock held.
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
         self.image_into(out, &self.order, &mut Vec::new())
     }
@@ -6842,7 +6955,12 @@ impl Database {
         let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
+            #[cfg(target_arch = "wasm32")]
             out.write(&self.history.record())?;
+            // The bytes `History::record` makes, framed as every record of
+            // the image is: a plain one where the out is plain.
+            #[cfg(not(target_arch = "wasm32"))]
+            put_record(out, REC_HISTORY, 0, &self.history.encode())?;
         }
 
         for name in &self.order {
@@ -6871,7 +6989,7 @@ impl Database {
                 #[cfg(not(target_arch = "wasm32"))]
                 placed.push((c.id, data.at()));
                 match compact {
-                    true => c.store.write_live(&mut data)?,
+                    true => data.write_live(&c.store, bytes)?,
                     false => c.store.write_image(&mut data)?,
                 }
                 data.end()?;
@@ -9043,6 +9161,99 @@ impl Database {
         *self.appended.get_mut() = image.len() as u64;
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_landed();
+        self.take_contents(fresh);
+        // The image is the file now: a mapped database reads the documents
+        // from there rather than holding the copy it was handed. Written
+        // elsewhere, it is walked to find them.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint(None, &[])?;
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// Whether the documents are read where they lie in the file mapped,
+    /// rather than held in memory (`fs::open_in_memory`, a server's
+    /// `--no-mmap`): how an image taken for this database is loaded
+    /// ([`Self::from_side`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_mapped(&self) -> bool {
+        self.mapped
+    }
+
+    /// Where an image taken for this database from elsewhere is written as
+    /// it arrives ([`Sink::image_side`]): `None` where its sink has no file,
+    /// and the image is taken in memory ([`Self::adopt`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .image_side()
+    }
+
+    /// The database an image written whole into `side` holds -- a replica's
+    /// of its primary, its follow record after it, synced -- loaded as a
+    /// database held as `mapped` says: its documents read where they lie in
+    /// the file, which is the database's own once [`Self::adopt_side`]
+    /// renames it in, what is derived from them alone built in memory; or
+    /// read into memory, where the database is held there. An image cut
+    /// short of a whole record is refused: one is whole, or none.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn from_side(side: &mut crate::fs::SideFile, mapped: bool) -> Result<Database> {
+        let len = ImageOut::at(side);
+        let mut fresh = Database::new();
+        let whole = match mapped {
+            true => fresh.load_mapped(side.map()?)?,
+            false => fresh.load(&side.read_back()?)?,
+        };
+        if (whole as u64) < len {
+            return Err(Error::Corrupt(format!(
+                "the image is cut short: the record at byte {whole} runs past its end, {len}"
+            )));
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::adopt`] of an image taken into the file beside this one
+    /// ([`Self::image_side`]) as it arrived and loaded from there
+    /// ([`Self::from_side`]): the sink renames it into the file's place
+    /// ([`Sink::adopt`], as a `compact` beside the database puts its file
+    /// there: held to its handle's name, the file's mode, the sync log
+    /// forgotten, the directory synced), and the stores `fresh` read from it
+    /// stand, their file the database's now. Nothing is written under the
+    /// lock but the rename, and nothing walked: taken in memory, the image
+    /// was written to disk here whole and every record head walked again.
+    /// Refused, the file is as it was, and `side` goes as it drops. The
+    /// file renamed in is the one the follower wrote, the stores `fresh`
+    /// read map: another put at its name since is refused before the sink
+    /// is asked, the database as it was and taking writes, and the sink
+    /// holds the rename to the side's own handle after ([`Sink::adopt`]) --
+    /// on Windows by its file index, until the image review's second round
+    /// held by nothing.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    pub fn adopt_side(&mut self, fresh: Database, mut side: crate::fs::SideFile) -> Result<()> {
+        self.refuse_if_failed()?;
+        crate::fs::still_named(side.file(), side.path())?;
+        let r = self.sink_mut().adopt(side.path(), side.file());
+        self.storage(r)?;
+        side.adopted();
+        *self.appended.get_mut() = ImageOut::at(&side);
+        self.forget_landed();
+        self.take_contents(fresh);
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// What [`Self::adopt`] and [`Self::adopt_side`] take of `fresh`: its
+    /// collections, history and statements, its change ring under this
+    /// one's size; the sink, the watcher and the plugins stay.
+    fn take_contents(&mut self, fresh: Database) {
         let cap = self.changes.capacity();
         self.collections = fresh.collections;
         self.order = fresh.order;
@@ -9071,16 +9282,6 @@ impl Database {
         {
             self.kept = 0;
         }
-        // The image is the file now: a mapped database reads the documents
-        // from there rather than holding the copy it was handed. Written
-        // elsewhere, it is walked to find them.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.repoint(None, &[])?;
-        self.dirty = false;
-        if let Some(w) = &self.watcher {
-            w.notify(self.changes.seq());
-        }
-        Ok(())
     }
 
     // ---------------------------------------------------------------- blocks

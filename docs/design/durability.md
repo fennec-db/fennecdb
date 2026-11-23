@@ -377,11 +377,27 @@ its length -- and to the name (`still_named`), then made `0600` on that
 handle where it is not; another file system, volume or a system without
 the flags copies. And `swap_in` renames a rewrite's
 `.compacting` in through the handle
-that wrote it, `.beside` through one opened with `O_NOFOLLOW` (an open by
-the name, as both were, followed a link put there while the image was
-written, the `fchmod` and every append after landing in the file it named).
+that wrote it, and a compact's `.beside` and a replica's `.taking` through
+the handle that wrote them, which `Sink::adopt` is handed and takes a `dup`
+of (an open by the name, as both were, followed a link put there while the
+image was written, the `fchmod` and every append after landing in the file
+it named; opened with `O_NOFOLLOW`, as `.beside` and `.taking` were until
+the review of images taken as they arrive, it took a regular file put at
+the name instead, which the stores a replica's image was loaded into do
+not map, and renamed it in). A replica's image is held to its name first
+in `Database::adopt_side` too, so that one put there is refused before the
+sink is asked, the copy as it was and taking writes; refused by the sink,
+as a compact's is, the database fails. A side file a crash left -- a
+replica's `.taking`, an install's `.importing` -- is removed by its owner
+alone: the open that writes the database (`FileSink::create`), and a node
+as it starts, under each tenant's lock taken without waiting
+(`tenants::sweep_left`); never a tool that only looks, nor one whose
+tenant's lock another process holds
+([replication.md](replication.md#an-image-taken-as-it-arrives)).
 The rename itself goes by the name, so `swap_in` first holds the name to the
-handle's file (`still_named`, its device and inode against an `lstat`):
+handle's file (`still_named`, its device and inode against an `lstat`; on
+Windows the volume's serial number and the file's index against the name
+opened as no link, since the image review's second round):
 another file put there since is renamed over nothing, and the sink fails, as
 a failed rename fails it. Each of these needs write access to the
 database's directory, which takes the database itself anyway: what they
@@ -429,8 +445,7 @@ over a file takes that file's permission bits before the rename
 (`fs::mode_like`, on the side file's open handle -- `fchmod` -- never by a
 name a link could have moved): `swap_in` for a checkpoint, a compact under
 the lock or beside it and a replica's image (the handle that wrote the
-image, or `.beside`'s opened with `O_NOFOLLOW`, the one the sink appends
-through after), `Archive::restore` (on
+image, the one the sink appends through after), `Archive::restore` (on
 the handle `assemble_into` wrote `.restoring` through, before its
 checkpoint carries the mode on), `backup` and `unseal` into a file, `.save`,
 a tenant's records and `<t>.hooks`, the hint. A small record takes it as it
@@ -511,9 +526,10 @@ that makes the file, `O_EXCL` and `O_NOFOLLOW` flags on it too;
 `mode_like` an `fstat` and a `stat` to a replacement -- a compact's or a
 checkpoint's, against an image's writing -- and an `fchmod` only where the
 modes differ; `swap_in` takes the writer's handle where it opened
-`.compacting` by name (one `open` fewer), opens `.beside` as it did with
-`O_NOFOLLOW` added, and `still_named` adds an `fstat` and an `lstat` to
-each, and to a record's, a backup's and an unseal's rename. The image a
+`.compacting` by name (one `open` fewer), a `dup` of `.beside`'s and
+`.taking`'s where it opened them again with `O_NOFOLLOW`, and
+`still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
+backup's and an unseal's rename. The image a
 restore or a consolidating round of an archive with no key starts from
 (never a request) is copied by `copy_file_range` on Linux, as
 `fs::copy` copied it: std's `io::copy` from a `File` into a

@@ -76,6 +76,7 @@ mod require;
 mod returning;
 mod rewrite;
 mod scheduled;
+mod side_files;
 mod sorted;
 mod sparse;
 mod spill;

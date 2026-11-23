@@ -117,8 +117,11 @@ impl Sink for Holding {
     fn side(&self) -> Option<std::path::PathBuf> {
         self.sink.side()
     }
-    fn adopt(&mut self, side: &std::path::Path) -> CoreResult<()> {
-        self.sink.adopt(side)
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink.image_side()
+    }
+    fn adopt(&mut self, side: &std::path::Path, written: &File) -> CoreResult<()> {
+        self.sink.adopt(side, written)
     }
     fn sync_existing(&mut self) -> CoreResult<()> {
         self.sink.sync_existing()
@@ -1243,7 +1246,11 @@ mod tests {
                 self.note("side");
                 None
             }
-            fn adopt(&mut self, _: &std::path::Path) -> CoreResult<()> {
+            fn image_side(&self) -> Option<std::path::PathBuf> {
+                self.note("image_side");
+                None
+            }
+            fn adopt(&mut self, _: &std::path::Path, _: &File) -> CoreResult<()> {
                 self.ok("adopt")
             }
             fn sync_existing(&mut self) -> CoreResult<()> {
@@ -1281,7 +1288,12 @@ mod tests {
         assert!(s.syncing());
         s.land(1, &[], b"").unwrap();
         s.side();
-        s.adopt(std::path::Path::new("x")).unwrap();
+        s.image_side();
+        s.adopt(
+            std::path::Path::new("x"),
+            &File::open(lock_path(&p)).unwrap(),
+        )
+        .unwrap();
         s.sync_existing().unwrap();
         s.write_out().unwrap();
         s.write_behind(true);
@@ -1299,6 +1311,7 @@ mod tests {
             "syncing",
             "land",
             "side",
+            "image_side",
             "adopt",
             "sync_existing",
             "write_out",

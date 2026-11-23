@@ -334,7 +334,19 @@ router meant to find its node refused forwarded to another test's router
 (`fennec-shard`'s `cors.rs`, once in 50 runs), and a relay meant for a
 region whose routers refuse it was answered by one naming its own node
 (`unsent.rs`, once in 300 runs of `unsent::`; none in 600 on port 1), each
-in Docker's Linux, three cores beside six busy loops. In Docker's Linux a
+in Docker's Linux, three cores beside six busy loops. The router's unit
+tests kept one (`src/lib.rs`'s `refusing`, and `src/upstream.rs`,
+`tests/metrics.rs` and `tests/lease_stalls.rs` alike): a write a failover
+cut went again to its new node's port, there taken by a listener of the
+same binary -- the test's own next one, which took the connection and never
+answered, so the router, the request gone out whole, rightly answered the
+502 saying it may have run after the upstream timeout's 10 seconds; or
+another test's router, whose 503 it passed on -- where the test wants the
+router's own answer to a refused dial. That was once in the merge queue's
+arm runner, and once in 400 runs of the crate's unit tests as above, none
+in 400 on port 1; with the ephemeral range narrowed to 100 ports, a fresh
+container a run, the two tests that dial it failed in 70 of 400 runs and
+in none of 200 on port 1. In Docker's Linux a
 port let go of came back from a `bind` to port 0 17 times in 100 000, and
 none while a connection its listener accepted was open or closing, so a
 stand-in node closed after it answered keeps its port while the test holds

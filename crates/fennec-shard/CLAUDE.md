@@ -15,11 +15,17 @@ never while its follower or anything beside it holds the database: no two
 opened, its follower running or not, and the node's scrape counts it
 (`fennec_copies_disconnected`). A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
-the export), copy, install, the flip in one statement, the source
+the export), copy (relayed as it comes, never held: `Pool::call_streamed`),
+install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A create or an
 install answers once the file and its name in the directory are durable
 (`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the
-file back under `<file>.lock` (`take_back_made`). A node
+file back under `<file>.lock` (`take_back_made`). An install's image goes
+beside the tenant's file under that lock and its claim of the name, held
+through the rename: a second install, a create or a reclaim of the name
+is refused at once, a 503 naming its wait (`Tenants::claim`), never the
+409 that says a file is there, and the router asks again after the wait,
+within `--upstream-timeout` (`ComeBack`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
 reading (`grant_from`); the router counts a node by the directory's
@@ -44,7 +50,8 @@ repairs a failed attach under the claim;
 `leftovers` row (`fennec_router_files_left`) with its ids
 (`fennec_http::instance`); the node deletes it, or follows over it at an attach's 409, only
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
-slot; no id, never.
+slot; no id, never. A row noted under an id is forgotten on its node's
+word alone, never on a listing that lacks it (`look_at_leftovers`).
 
 **[A tenant's hook secrets are its file's, relayed by the router and kept
 by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**
