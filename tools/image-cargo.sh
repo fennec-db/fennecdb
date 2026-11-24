@@ -72,6 +72,7 @@ set -eu
 # ---------------------------------------------------------------- wrapper
 # Cargo calls `$RUSTC_WRAPPER <rustc> <arguments>`.
 if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
+    rustc=$1
     "$@" || exit
     shift
     out='' name='' extra='' prev='' externs=''
@@ -87,6 +88,32 @@ if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
     done
     # rustc asked what it is (-vV, --print): no unit.
     if [ -z "$out" ] || [ -z "$name" ]; then exit 0; fi
+    # A unit is its crate and its directory's hash: Cargo's build-dir
+    # (1.100.0 on) gives each a directory of its own,
+    # build/<package>/<hash>/out, and its files the extra-filename -<hash>,
+    # or none: a binary it copies out, a build script. Another layout --
+    # the deps/ of the Cargo before, or the next one -- is refused by name
+    # here, where it shows first: the records are keyed by that hash, and
+    # read under any other layout the check finds no unit, or the wrong one.
+    unit=${out%/out}
+    hash=${unit##*/}
+    package=${unit%/*}
+    ok=''
+    case $out in */out) ;; *) hash='' ;; esac
+    case ${package%/*} in */build) ;; *) hash='' ;; esac
+    case $hash in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        case $extra in '' | "-$hash") ok=1 ;; esac
+        ;;
+    esac
+    if [ -z "$ok" ]; then
+        met=$("$rustc" -V 2>/dev/null) || met=$rustc
+        echo "image-cargo: $name was compiled into $out, extra-filename '$extra'; the check" \
+            "reads Cargo's build-dir of 1.100.0, each unit in build/<package>/<16-hex hash>/out" \
+            "with the extra-filename -<that hash> or none, and this build's compiler is $met:" \
+            "make tools/image-cargo.sh read its layout before building with it" >&2
+        exit 1
+    fi
     d=$out/$name$extra.d
     # The dep-info's rule for itself names every file the compile read.
     deps=$(awk -v t="$d:" 'index($0, t) == 1 { print substr($0, length(t) + 1); exit }' "$d")
@@ -96,7 +123,7 @@ if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
         exit 1
         ;;
     esac
-    record=$FENNEC_IMAGE_RECORDS/$name$extra
+    record=$FENNEC_IMAGE_RECORDS/$name-$hash
     set -f
     # shellcheck disable=SC2086 # one word a file
     sha256sum $deps $externs > "$record.$$"
@@ -169,35 +196,46 @@ while IFS= read -r m; do
             exit 1
             ;;
         esac
-        # Cargo names the script by a hard link, build-script-build, beside
-        # the unit it compiled, build_script_build-<hash>.
-        script=$(printf '%s\n' "$m" | grep -oE '"[^"]*/build-script-build"' | head -n 1)
-        script=${script#\"}
-        script=${script%\"}
-        [ -n "$script" ] || fail "cannot tell which build script this is: $m"
-        unit=$(find "${script%/*}" -maxdepth 1 -type f -name 'build_script_build-*' ! -name '*.d' | head -n 1)
-        unit=${unit##*/}
+        # Cargo names the script as it compiled it, in its unit's directory:
+        # build/<package>/<hash>/out/build_script_build.
+        file=$(printf '%s\n' "$m" | grep -oE '"[^"]*/out/build_script_build"' | head -n 1)
         ;;
     *)
-        unit=''
+        file=''
         ;;
     esac
-    if [ -n "$unit" ]; then
+    # The crate's name as rustc was handed it (build-script-build's too).
+    crate=$(printf '%s\n' "$m" | sed -n 's/.*"target":{[^}]*"name":"\([^"]*\)".*/\1/p' | tr - _)
+    if [ -n "$file" ]; then
         :
     elif [ -n "$exe" ]; then
-        # A binary is a hard link out of deps/ to the unit that made it.
-        unit=$(find "${exe%/*}/deps" -maxdepth 1 -type f -inum "$(stat -c %i "$exe")" | head -n 1)
-        unit=${unit##*/}
+        # A binary is its unit's output, build/<package>/<hash>/out/<crate>,
+        # copied out: the one holding its bytes. Not told by its inode, as a
+        # hard link out of deps/ was before Cargo's build-dir: the copy may
+        # be a file of its own (it is on macOS).
+        for f in $(find "${exe%/*}/build" -maxdepth 4 -path '*/out/*' -type f \
+            \( -name "$crate" -o -name "$crate-*" \) ! -name '*.*'); do
+            if cmp -s "$f" "$exe"; then
+                file=$f
+                break
+            fi
+        done
         bins="$bins $exe"
     else
-        # A library names its metadata in deps/, lib<unit>.rmeta; a
-        # proc-macro, which has none, its shared object.
-        unit=$(printf '%s\n' "$m" | grep -oE '/deps/lib[^"/]*\.(rmeta|so|dylib)"' | head -n 1)
-        unit=${unit#/deps/lib}
-        unit=${unit%\"}
-        unit=${unit%.*}
+        # A library names its metadata in its unit's out/,
+        # lib<crate>-<hash>.rmeta; a proc-macro, which has none, its shared
+        # object.
+        file=$(printf '%s\n' "$m" | grep -oE '"[^"]*/out/lib[^"/]*\.(rmeta|so|dylib)"' | head -n 1)
     fi
-    [ -n "$unit" ] || fail "cannot tell which unit this is: $m"
+    file=${file#\"}
+    file=${file%\"}
+    case $file in
+    */out/*) ;;
+    *) fail "cannot tell which unit this is: $m" ;;
+    esac
+    # Its crate and its directory's hash, as the wrapper recorded it.
+    unit=${file%/out/*}
+    unit=$crate-${unit##*/}
     record=$records/$unit
     [ -f "$record" ] || fail "$unit: no record of the files it was compiled from"
     # The record's paths are the tree's; asked of the build context's copy.

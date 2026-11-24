@@ -22,7 +22,7 @@
 # Every FROM names a digest, and the rust image the release
 # rust-toolchain.toml names, as the repository's Dockerfile does
 # (tools/toolchain_check.py holds both).
-FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
+FROM rust:1.100.0-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb AS build
 
 RUN apk add --no-cache musl-dev rsync
 

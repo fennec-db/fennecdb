@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""tools/toolchain_check.py: each way a toolchain file or a Dockerfile
-leaves the compiler CI tests with, refused, and what pins it, passed; then
-the repository's own files.
+"""tools/toolchain_check.py: each way a toolchain file, a Dockerfile, a
+script's image or a toolchain it names to rustup leaves the compiler CI
+tests with, refused by file and line, and what pins it, passed; then the
+repository's own files.
 
     python3 tools/test_toolchain_check.py
 """
@@ -114,6 +115,45 @@ class Scripts(unittest.TestCase):
         self.assertEqual(check.script_problems("x.py", text, "1.99.1"), [])
 
 
+class Toolchains(unittest.TestCase):
+    def test_another_release_named_to_rustup_is_refused_by_file_and_line(self):
+        text = ("env:\n"
+                "  RUSTUP_TOOLCHAIN: 1.99.1\n"
+                "jobs:\n"
+                "      - run: |\n"
+                "          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl\n"
+                "          rustup default stable\n"
+                "          RUSTUP_TOOLCHAIN='1.100' cargo build\n"
+                "          rustup install beta && cargo -V\n"
+                "          rustup toolchain install 1.100.0 nightly --profile minimal\n")
+        got = check.toolchain_problems(".github/workflows/x.yml", text, "1.100.0")
+        self.assertEqual([g.split(": ", 1)[0] for g in got],
+                         [".github/workflows/x.yml:%d" % n for n in (2, 5, 6, 7, 8, 9)], got)
+        self.assertIn("RUSTUP_TOOLCHAIN names 1.99.1: rust-toolchain.toml names 1.100.0", got[0])
+        self.assertIn("rustup toolchain install names 1.99.1", got[1])
+        self.assertIn("rustup default names stable", got[2])
+        self.assertIn("RUSTUP_TOOLCHAIN names 1.100:", got[3])
+        self.assertIn("rustup install names beta", got[4])
+        self.assertIn("rustup toolchain install names nightly:", got[5])
+
+    def test_the_release_a_dated_nightly_and_what_the_check_cannot_read_pass(self):
+        text = ("env:\n"
+                '  RUSTUP_TOOLCHAIN: "1.100.0"\n'
+                "          rustup toolchain install 1.100.0 --profile minimal --target x86_64-unknown-linux-musl\n"
+                "          rustup toolchain install 1.100.0-x86_64-unknown-linux-gnu\n"
+                "          rustup toolchain install nightly-2026-11-01 --profile minimal\n"
+                '          rustup toolchain install "$base" --profile minimal --target x86_64-unknown-linux-musl\n'
+                "\trustup toolchain install $(FUZZ_NIGHTLY) --profile minimal\n"
+                "  sh -c 'export RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) &&\n"
+                '        env["RUSTUP_TOOLCHAIN"] = channel\n'
+                "  RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}\n"
+                "          rustup toolchain install\n"
+                "          rustup target add x86_64-pc-windows-msvc 1.99.1\n"
+                "# RUSTUP_TOOLCHAIN: 1.99.1 built it before the pin; rustup default stable\n"
+                "          cargo -V  # rustup default stable would move it\n")
+        self.assertEqual(check.toolchain_problems("x.yml", text, "1.100.0"), [])
+
+
 class Committed(unittest.TestCase):
     def test_the_repository_passes(self):
         want, why = check.release((check.ROOT / "rust-toolchain.toml").read_text())
@@ -123,11 +163,13 @@ class Committed(unittest.TestCase):
             self.assertEqual(check.problems(path, text, want, path in check.PINNED), [], path)
         self.assertTrue(set(check.PINNED) <= set(check.dockerfiles()))
         scripts = check.scripts()
-        for path in ("integrations/kotlin/run-tests.sh", "examples/kotlin-android/run-smoke.sh"):
+        for path in ("integrations/kotlin/run-tests.sh", "examples/kotlin-android/run-smoke.sh",
+                     "tools/stress-test.sh", ".github/workflows/perf-holdout.yml"):
             self.assertIn(path, scripts)
         for path in scripts:
             text = (check.ROOT / path).read_text(encoding="utf-8", errors="replace")
             self.assertEqual(check.script_problems(path, text, want), [], path)
+            self.assertEqual(check.toolchain_problems(path, text, want), [], path)
 
 
 if __name__ == "__main__":

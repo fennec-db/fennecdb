@@ -374,13 +374,19 @@ at most, so a scan or a client with the wrong CA cannot fill the log.</p>
 <p>Every connection the server ends on purpose ends with TLS's
 <code>close_notify</code>: an answer with <code>Connection: close</code>, a
 kept-alive connection's end, a stream of changes or a replica's stream, and
-each open connection at a shutdown. A client reading a stream to its end can
-tell that end from one cut short. A connection whose write failed gets none,
-and neither does a stream the router relays from a node that broke off. On
-Windows a shutdown also cuts an answer still being written to a slow
-client, which a Unix server lets finish for half a second, and resets a
-connection whose client had sent more than the server read, a pipelined
-request.</p>
+each open connection at a shutdown, one still in its handshake too, which
+the shutdown waits for as it waits for the others, half a second at most. A
+connection that has sent nothing yet is not waited for, and one whose
+handshake would begin after the shutdown began is closed before it. A
+client reading a stream to its end can tell that end from one cut short. A
+connection whose write failed gets none, and neither does a stream the
+router relays from a node that broke off. A request the server had not yet
+read when the shutdown came is still served on Linux if it had reached the
+server by then (one still on the way gets no answer); on macOS it is
+dropped, the connection ending with <code>close_notify</code> and no
+answer, and on Windows the connection is reset. Dropped or reset, it never
+ran. On Windows a shutdown also cuts an answer still being written to a
+slow client, which a Unix server lets finish for half a second.</p>
 
 <p>A connection refused at <code>--max-connections</code>, or for which no
 thread can be made, is told a TLS <code>internal_error</code> alert, where plain

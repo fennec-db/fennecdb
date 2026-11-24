@@ -93,6 +93,14 @@ class SetUuid(unittest.TestCase):
             setuuid.set_uuid(src, os.path.join(self.d, "target", "instr", "app-1"), sign=False)
         setuuid.set_uuid(src, os.path.join(self.d, "target", "instr", "app-1"), sign=False, force=True)
 
+    def test_a_profile_directory_of_cargo_s_build_dir_is_build_output(self):
+        # Cargo 1.100.0 on keeps no .fingerprint there; its lock is.
+        src = self.write("target/release/examples/app", image(uuid.uuid4()))
+        with open(os.path.join(self.d, "target", "release", ".cargo-lock"), "w"):
+            pass
+        with self.assertRaisesRegex(ValueError, "build output"):
+            setuuid.set_uuid(src, os.path.join(self.d, "target", "release", "examples", "app-1"), sign=False)
+
     def test_what_is_no_mach_o_image_is_refused(self):
         src = self.write("a.sh", b"#!/bin/sh\necho hello\n")
         with self.assertRaisesRegex(ValueError, "Mach-O"):

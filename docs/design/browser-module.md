@@ -59,14 +59,14 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (554.6 KB, 191.6 brotli, against 841.8 and 288.2 with
+module with none (555.4 KB, 191.9 brotli, against 842.9 and 288.9 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.4 and 18.2, `sorted` 8.5 and 22.7 (with `composite`), `composite` 11.1 and 10.3
-(beside it), `collate` 8.7 and 8.1, `text` 17.1 and 17.9
+`vector` 20.6 and 18.5, `sorted` 8.4 and 22.9 (with `composite`), `composite` 11.1 and 10.6
+(beside it), `collate` 8.7 and 8.3, `text` 17.0 and 18.4
 (with `fuzzy`, `prefix` and its term table; 5.7 and 7.3 before the first two, 10.9 and 13.0 before the table),
-`facets` 3.5 and 3.7, `highlight` 3.8 and 3.1 (beside `text`), `nocase` 2.8 and 2.5, `geo`
-2.5 and 5.3 (its index with it), `analytics` 5.5 and 4.8, `sparse` 2.6
-and 1.0, the schema check 9.7 and 9.5. The module with every feature is the code
+`facets` 3.7 and 3.9, `highlight` 3.8 and 3.5 (beside `text`), `nocase` 2.9 and 2.7, `geo`
+2.4 and 5.4 (its index with it), `analytics` 5.4 and 5.4, `sparse` 2.6
+and 1.2, the schema check 9.6 and 9.7. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
 and closures renumbered, brotli within noise), each check for a missing
 one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a

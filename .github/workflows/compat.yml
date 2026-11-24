@@ -71,8 +71,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-compat-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-compat-
+          key: v2-ubuntu-latest-compat-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-compat-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: This tree's binaries
         run: cargo build -p fennec-server -p fennec-cli -p fennec-shard
