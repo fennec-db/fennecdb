@@ -68,6 +68,12 @@ as a break:</p>
     keyed write sent before the upgrade and again after it runs again,
     where v0.2.0 answered what it kept
     (<a href="http.html#idempotency">Retrying a write</a>).</li>
+  <li><b><code>fennec_data_bytes</code> is the live records.</b> As its help
+    and <a href="monitoring.html">Monitoring</a> say: up to v0.2.0 it
+    counted the overwritten and deleted records too, so a graph of it drops
+    after the upgrade, and <code>fennec_dead_bytes / (fennec_data_bytes +
+    fennec_dead_bytes)</code> passes a half where it never could. The shell's
+    <code>.stats</code> says the live and the dead bytes apart.</li>
 </ul>
 
 <h2>Upgrading</h2>

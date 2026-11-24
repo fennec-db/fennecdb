@@ -129,7 +129,7 @@ file</a>).</p>
 <tbody>
 <tr><td><code>.help</code></td><td>the summary of FennecQL and of these commands</td></tr>
 <tr><td><code>.tables</code></td><td>the collections</td></tr>
-<tr><td><code>.stats</code></td><td>storage statistics</td></tr>
+<tr><td><code>.stats</code></td><td>storage statistics: each collection's documents, the bytes of its live records and of the dead ones <code>compact</code> gives back, its segments and vector indexes</td></tr>
 <tr><td><code>.functions</code></td><td>the registered functions and plugins</td></tr>
 <tr><td><code>.save &lt;path&gt;</code></td><td>writes a snapshot of the database to a file</td></tr>
 <tr><td><code>.checkpoint</code></td><td>rewrites the file and saves the vector graphs in it, so the next open is fast</td></tr>

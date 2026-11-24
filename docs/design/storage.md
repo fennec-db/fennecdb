@@ -170,8 +170,9 @@ million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
 a live record a few to a page among dead ones, and one read in five waited
 for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
 loaded). `Database::garbage` is the file's bytes as written (`appended`)
-against the live records' (`Store::total_bytes - dead_bytes`, which the
-stores counted as writes landed already and an image's index carries) and
+against the live records' (`Store::live_bytes`, `total_bytes - dead_bytes`,
+which the stores counted as writes landed already and an image's index
+carries: [whole frames](#dead-bytes-are-whole-frames)) and
 what the last compact kept besides the documents (`kept`: schemas,
 counters, graphs, the file less every record the stores hold -- the
 versions a compact beside the writes copied and saw written over are dead,
@@ -233,6 +234,56 @@ the CPU alone, nothing moved. A database
 read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
+
+### Dead bytes are whole frames
+
+A version written over or deleted adds its whole frame to `dead_bytes`,
+head and payload, the head's length worked out from the id and the
+payload's length as `put_uvarint` writes them, each the shortest
+(`store::dead_frame`). So `Store::live_bytes`, `total_bytes - dead_bytes`,
+is the live frames to the byte -- what a compact writes of the documents,
+`Garbage::live`, and `fennec_data_bytes` (`CollectionStats::live_bytes`),
+read at a scrape with no walk of the index: through appends, a block put
+back, the walks a load makes in memory and in the file and an image's
+index (`store::tests::the_live_bytes_are_the_live_frames_to_the_byte`),
+and over HTTP against what a compact keeps (fennec-server's
+`the_data_bytes_are_the_live_records`). Through 0.2.0 a version written
+over or deleted left its payload's length alone, its head of 3 bytes or
+more counted live -- that test's 250 rows of 3 409 bytes, 200 of them
+written over three times and 50 deleted, read as 5 628 -- and
+`fennec_data_bytes` (`fenec_data_bytes` from 0.1.5 to 0.1.12) said
+`CollectionStats::bytes`, every record dead or alive, where its help and
+the monitoring page said the live ones: a P6 soak's server said 1 907 MiB
+of a 1 950 MiB file just before it compacted at half dead, and the page's
+alert, `dead / (data + dead) > 0.5`, could not fire.
+`CollectionStats::bytes` keeps its meaning, every record's bytes, which
+the browser module's `stats()` answers as `bytes` and @fennecdb/cloudflare
+reads as what the module holds (`held`); the shell's `.stats` says the
+live and the dead apart, as the studio's sidebar does.
+
+An image an older build wrote carries the payload count in its index,
+which an open takes (`adopt_index`): such a file's live bytes are high by
+its dead versions' heads until its next compact, where a walk of the frames
+counts them whole. `Store::live_len` still walks the index for the length
+`write_live` writes: a file's frame may hold a varint longer than the
+shortest, which no writer here makes and `dead_frame` would count short,
+and a length that is off makes the record after the data one unreadable.
+What it costs: a put over a row runs 14 instructions more of fennec's own
+code, all in `Store::append_onto` (the 530th put of `replays` traced by
+function against main, `make instr-compare TRACE=fennec_http::handle`:
+9 104 -> 9 118 of the request's 17 983). Over eight identities a side,
+`put` read +57 instructions a request (+0.27%) and `batch`, 100 rows
+written over a request, +2 611 (+0.26%), each inside two standard errors.
+A varint's length is protobuf's `(log2 * 9 + 73) / 64`
+(`store::varint_len`), an add and a shift: with `div_ceil(7)`, which
+divides, the put's own code was 29 more, and `after`, which an image's
+index asks once a document as it is written and as an open takes it, is
+cheaper by as much. The browser module grew 91 bytes, `dead_frame` held
+once there (`inline(never)`), where a copy in each of its three callers
+grew it 141; on aarch64 macOS fennec-server's code grew 128 bytes and
+`fennec`'s shrank 128, both files the same size to the byte. `make
+perf-gate` was not run: it counts under valgrind, which no image on the
+machine held.
 
 ### Dropped places
 
