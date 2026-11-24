@@ -674,14 +674,26 @@ module grew 400 bytes, fennec-server's code some 690. A replica's apply
 refuses one before the frame lands (`Database::apply_frames`, "a write op
 3 is neither a put nor a del"), so `Store::land_frame` is only ever handed
 a put or a del, its other arm a `debug_assert`. An image's index,
-which an open takes in the place of the walk (`Store::adopt_index`), reads
-no op: it describes a record of puts alone, as this version writes one.
+which a mapped open takes in the place of the walk (`Store::adopt_index`),
+reads no op: it names each live document's payload, whatever else the
+record holds. A checkpoint's record holds its frames as they stand,
+deletes and versions written over among them, counted in the index's
+`dead` (`Store::write_image`); only a compact's holds puts alone
+(`write_live`). So a new op comes behind a new mark on the index, which a
+build that does not know it leaves to the walk (the id counter's index,
+below).
 Every release from 0.1.0 through 0.2.0 replayed such a frame as one that
 changed nothing: it counted the version before it dead while the index
 still pointed at it, counted itself live, and the next compact dropped it
 with no word (`store::tests::an_unknown_op_is_refused_by_its_byte`,
-`an_unknown_op_in_the_file_is_refused_by_its_byte`). Replicas before 0.2.0
-applied one the same way; 0.2.0's apply refuses it
+`an_unknown_op_in_the_file_is_refused_by_its_byte`; through a record of
+its own, a block's, a spill's and a land's, each refusal naming the
+frame's place in the file, in
+`a_frame_of_an_op_neither_a_put_nor_a_del_is_refused_where_a_file_is_opened_and_applied`).
+A replica before 0.2.0 landed one in its store as an open replayed it
+(v0.1.12's `apply_frames` handed it to `Store::append`), and took the row
+out of its indexes besides (`unindex_doc(old, None)`) while the store
+still held it. 0.2.0's apply refuses it
 (`a_frame_that_does_not_read_changes_nothing`).
 A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
@@ -1578,7 +1590,26 @@ array (`push_above`), 4.8; in shares, a million rows of no vector open in
 quarter empty or reach the sparse map are read in turn, as `insert` places
 them, and so is an index whose shares do not read as it says. A binary that
 knows only `FRAMES_MARK` walks the record of a `FRAMES_SPLIT` image, as it
-walks one with no index. Read into memory, a load copies each frame as it stands into the
+walks one with no index.
+
+The mark is also what keeps a data op a later version adds refused rather
+than misread. `adopt_index` reads no frame's op: a frame's head is the chain
+of cache misses the index is there to skip (5.5 of a 14.2 ms open at
+100 000 x 128, `Store::image_index`), and reading each op would give that
+back. So under a mark this build knows, a frame of an op it does not is
+read as the put an entry says it is, or not at all, where the walk refuses
+it by its byte and its place ("unknown write op 3 at 4096", above). A version that adds an op
+writes its images' index under a mark of its own, the next number:
+`adopt_index` passes over a first byte it does not know (`false`, the store
+untouched), the open walks the record (`replay_mapped`, `load_from`'s other
+arm), mapped or read-only, and the walk refuses the frame; read into
+memory, a load walks every record whatever the mark. A put's op turned into
+another by damage inside an image is not seen by the index either, as a
+payload moved within the record is not: an image is read unchecked, and
+`fennec verify` holds it to its sums
+(`an_image_index_under_a_mark_this_build_does_not_know_leaves_its_record_to_the_walk`).
+
+Read into memory, a load copies each frame as it stands into the
 segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
 of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the

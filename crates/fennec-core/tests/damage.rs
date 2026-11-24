@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 const LEVELS: usize = 100_000;
 const REC_DATA: u8 = 3;
+const REC_NEXTID: u8 = 7;
 const REC_BLOCK: u8 = 9;
 const REC_SPILL: u8 = 10;
 const REC_LAND: u8 = 11;
@@ -359,6 +360,90 @@ fn a_frame_of_an_op_neither_a_put_nor_a_del_is_refused_where_a_file_is_opened_an
         }
     }
     drop(db);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An image's index of its data record, behind the id counter (kind 7), is
+/// taken by a mapped open in the place of the walk where its first byte is a
+/// mark this build knows, and reads no frame's op: reading each frame's head
+/// is the cost it removes. A frame of op 3 there is served as the put its
+/// entry says. A version that adds an op writes its images' index under a
+/// mark of its own (crates/fennec-core/CLAUDE.md's file format), which
+/// `Store::adopt_index` passes over: the open walks the record, mapped and
+/// read-only, and the walk refuses the frame by its byte and its place.
+/// Read into memory, the walk reads every op whatever the mark.
+#[test]
+fn an_image_index_under_a_mark_this_build_does_not_know_leaves_its_record_to_the_walk() {
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-mark-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("image.fennec");
+    let mapped = {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        exec(&mut db, "create collection d (n int)");
+        exec(&mut db, "put d {n: 1}");
+        exec(&mut db, "put d {n: 2}");
+        db.checkpoint().unwrap();
+        db.is_mapped()
+    };
+    let image = std::fs::read(&path).unwrap();
+    // The index's mark and the data record's first op, found by stepping
+    // over each record's head past the change counter's, 17 bytes.
+    let (mut mark, mut op) = (None, None);
+    let mut at = fennec_core::engine::MAGIC.len() + 17;
+    while at < image.len() {
+        let mut p = at + 1;
+        get_uvarint(&image, &mut p).unwrap();
+        let len = get_uvarint(&image, &mut p).unwrap() as usize;
+        if let Some(counter) = fennec_core::engine::record_body(&image[at..], REC_NEXTID) {
+            let mut q = 0;
+            get_uvarint(counter, &mut q).unwrap();
+            mark = Some(p + q);
+        }
+        if fennec_core::engine::record_body(&image[at..], REC_DATA).is_some() {
+            op = op.or(Some(p));
+        }
+        at = p + len;
+    }
+    let (mark, op) = (mark.expect("an index"), op.expect("a data record"));
+    assert_eq!(image[mark], fennec_core::store::FRAMES_SPLIT);
+    assert_eq!(image[op], fennec_core::store::OP_PUT);
+    // Each byte at `at` made 3, its record summed again: whole, so what it
+    // holds is read rather than cut as torn.
+    let damaged = |at: &[usize]| {
+        let mut f = image.clone();
+        for &a in at {
+            f[a] = 3;
+            assert!(fennec_core::engine::resum(&mut f, a));
+        }
+        std::fs::write(&path, &f).unwrap();
+        f
+    };
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    let said = format!("unknown write op 3 at {op}");
+    let refused = |r: Result<()>, how: &str| match r {
+        Err(Error::Corrupt(m)) => assert_eq!(m, said, "{how}"),
+        other => panic!("{how}: {other:?}"),
+    };
+
+    let op3 = damaged(&[op]);
+    match mapped {
+        true => assert_eq!(rows(&fennec_core::fs::open(&path).unwrap()), 2),
+        false => refused(fennec_core::fs::open(&path).map(drop), "not mapped"),
+    }
+    refused(
+        fennec_core::fs::open_in_memory(&path).map(drop),
+        "in memory",
+    );
+    refused(Database::new().load(&op3).map(drop), "loaded");
+
+    damaged(&[mark]);
+    assert_eq!(rows(&fennec_core::fs::open(&path).unwrap()), 2);
+    damaged(&[mark, op]);
+    refused(fennec_core::fs::open(&path).map(drop), "mapped");
+    refused(
+        fennec_core::fs::open_read_only(&path).map(drop),
+        "read-only",
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
