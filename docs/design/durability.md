@@ -617,7 +617,8 @@ modes differ; `swap_in` takes the writer's handle where it opened
 `.taking`'s where it opened them again with `O_NOFOLLOW`, and
 `still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
 backup's and an unseal's rename. The open that writes a file looks for
-four names beside it where it removed one: four `lstat`s where one
+four names beside it where it removed one -- five since a compact's scratch
+`.sorting` joined them -- four `lstat`s where one
 `unlink` was, each failing where nothing was left, a side file's lock file
 looked at only where one is there, and the names made in one buffer sized
 for the longest -- the perf gate's `file-open`, an open of 100 000 rows,
@@ -629,7 +630,13 @@ another one, read 3 779 623 against 3 779 735. Made by `beside` each, as
 #682 first made them, the four names asked nine calls and 882 bytes more
 than main there.) Its time is not quoted: the runs were made at a load of
 6.3, and a second round's, at 2.4 to 3.3, put both sides inside each
-other's spread. Release `fennec-server` on macOS: 4 288 bytes more
+other's spread. The fifth name, `.sorting`, counted against main's four on
+macOS (an open of 100 000 rows, as `file-open` makes it, 6 runs a side
+alternating, release builds over a bump allocator): 122.47 million
+instructions against 122.45 (medians), inside both sides' spread, 122.44-
+122.50 and 122.42-122.52; the allocator asked alike, 100 105 calls for
+7 450 309 bytes, the names' buffer sized for `.compacting` either way.
+Release `fennec-server` on macOS: 4 288 bytes more
 `__text` than main's (5 023 616 to 5 027 904), where the second round's
 lock module made it 6 144. By symbol, in builds that keep them (4 224
 bytes more there): the sweep's own functions 1 836 (`sweep_beside` 764,
