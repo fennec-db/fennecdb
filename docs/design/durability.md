@@ -399,63 +399,83 @@ request opens again keeps none; never a tool that only looks
 lock another process holds
 ([replication.md](replication.md#an-image-taken-as-it-arrives)). Nothing
 of this process can be writing one as the open runs: `<file>.lock`, which
-a `.save` takes too, refuses a second holder of the file in a process as in
-two, and a database rewrites nothing before its open returns. The removal
-is an `unlink`, which follows no link: one put at the name goes, the file
-it names as it was; a directory there stays, and the next rewrite of that
-name fails on it as it did before. A file at one of those names whose own
-lock a holder has -- `<file>.beside.lock`, a database a user named so
-beside another, served or written -- stays too (`fs::remove_left`, the
-open's and `sweep_left`'s alike): removed, its writer went on writing a
-file no name reached (#682's review; so for a `.taking` since #680). A
-link is not asked: whoever writes the file it names keeps that name, and
-asked, its lock would be that file's (`lock_path` follows a link) -- one
-to the database itself kept by the open asking, which holds it. The lock
-is asked only once something is at the name, so an open with nothing left
-makes one `lstat` a name where it made one `unlink`. It is asked through fennec-abi's lock module
-(`lock::unless_held`, which every `lock::hold` hands fennec-core through
-`fs::ask_locks_with` before the open the hold guards): only that module
-knows which locks this process holds, and a descriptor of one of those
-lock files opened and closed in fennec-core would let this process's
-record lock go. It opens the lock file only once this process holds none
-of it, under its list's guard so no hold here takes it meanwhile; takes
-it without waiting where it is free, never from a holder, for the
-removal, so nothing opens the file as it goes; and makes none where none
-is there. A lock file a crash or a close left unlocked keeps nothing; one
-that cannot be opened (another user's, a link at its name) cannot be
-tried, and keeps the file. A process that took no lock through that
-module -- fennec-core's own tests, a bench -- has none to ask, and keeps a
-side file a lock file stands beside. What the open removed it says, as it
-says a torn tail's cut (`Database::swept_on_open`: each name and the
-bytes it held, an empty `Vec`, nothing allocated, where nothing was
-left): fennec-server logs a line each as it opens its file, a node a line
-each as a tenant's open removes one and as `sweep_left` does at its
-start. Until the P6 soak's second run, a
-compact's `.beside`, a rewrite's `.compacting` and a `.save`'s `.saving`
-stayed until the next writer of the name made it again -- every release,
-`.compacting` from 0.1.0, `.beside` from 0.1.5 and `.saving` in 0.2.0 --
-and the soak, killed during a compaction, kept a 1.4 GB `.beside` beside
-its database through minutes 91 to 102, no compact running: a crash in a
-compact doubles the disk a database takes for as long as no compact runs,
-and the auto-compact waits for half the file to be dead. fennec-core's
-`tests/side_files.rs` kills a compact beside the database once its side
-file is made (`compacts_until_killed`, a child process ending with no
-destructor run) and holds the file left until the open that writes, past
-a read-only open; puts every name at its place before a mapped, an
-in-memory and a server's open; and puts a link and a directory at each,
-the link removed and its file kept, the directory kept and the database
-opened, and each open's `swept_on_open` holds what it removed, the next
-open nothing. fennec-abi's `a_side_file_whose_own_lock_is_held_stays`
-holds a `.beside`'s own lock in this process and then in another: the
-file stays each time, the holder's lock with it, and once both let go,
-the lock file left unlocked, it goes, said with its size, beside a
+a `.save` takes too, refuses a second holder of the file in a process as
+in two, and a database rewrites nothing before its open returns. The
+removal is an `unlink`, which follows no link: one put at the name goes,
+the file it names as it was; a directory there stays, and the next rewrite
+of that name fails on it as it did before. A file at one of those names
+with a lock file beside it -- `<file>.beside.lock`, held or not -- stays
+too, and is said kept at every open that finds it (`fs::remove_left`, the
+open's and `sweep_left`'s alike): no writer of ours makes a lock beside a
+side file, so one there says the name was opened as a database to be
+written -- a user's, beside another, served or stopped -- and a stopped
+database is never deleted. Removed, a served one's writer went on writing
+a file no name reached (#682's first review; so for a `.taking` since
+#680), and a stopped one went with all it held (the second). A crash's own
+leftover has no lock file beside it, and goes. The lock file is looked at,
+an `lstat`, never opened: a descriptor of a lock this process holds,
+opened and closed, would let its record lock go, and another process's
+lock is its holder's. The look is fennec-core's alone, made only once
+something is at the name, so an open with nothing left makes one `lstat` a
+name where it made one `unlink`. The second round asked the lock itself,
+through fennec-abi's lock module, which each `lock::hold` handed
+fennec-core (`fs::ask_locks_with`, `lock::unless_held`), and took it
+without waiting where it was free, for the removal. That removed a stopped
+database whose lock file a close had left unlocked --
+`fennec-server --file x.fennec.beside` stopped yesterday,
+`fennec x.fennec` today -- where a process that took no lock through the
+module kept it; it unlinked a file as large as the database under the
+module's guard, every hold and let-go in the process waiting on it; and
+where no lock file was there it unlinked with no lock held, as the look
+does. The look keeps the database and leaves every lock as it was. It lets
+by a database at the name never opened to be written -- a copy put there
+by hand, which no lock file marks -- and a first open of the name in
+another process landing between the look and the `unlink`; and a database
+it keeps is still at the name its neighbour's next rewrite of that kind
+writes over (`create_private` removes what is there). A link is not looked
+at: whoever writes the file it names keeps that name, whose lock is beside
+that file (`lock_path` follows a link) -- one to the database itself goes
+as a link. What the open removed or kept it says, as it says a torn tail's
+cut (`Database::swept_on_open`: each name, the bytes it held and whether
+it was kept, an empty `Vec`, nothing allocated, where nothing was left), a
+line each in one set of words (`Swept::said`): fennec-server's log as it
+opens its file; a node's as a tenant's open finds one and as `sweep_left`
+does at its start; the router's as it opens its directory and its copy of
+the global one; the shell's stderr; `fennec mcp --file`'s stderr after its
+first line; and `fennec import`'s output among its own lines, each
+headed `beside`. The native library says none, as it says no torn tail's
+cut: it writes no line an app did not ask for, and `fennec_open` answers a
+handle, no notes; saying them is for fennec.h to grow. Until the P6 soak's
+second run, a compact's `.beside`, a rewrite's `.compacting` and a
+`.save`'s `.saving` stayed until the next writer of the name made it again
+-- every release, `.compacting` from 0.1.0, `.beside` from 0.1.5 and
+`.saving` in 0.2.0 -- and the soak, killed during a compaction, kept a
+1.4 GB `.beside` beside its database through minutes 91 to 102, no compact
+running: a crash in a compact doubles the disk a database takes for as
+long as no compact runs, and the auto-compact waits for half the file to
+be dead. fennec-core's `tests/side_files.rs` kills a compact beside the
+database once its side file is made (`compacts_until_killed`, a child
+process ending with no destructor run) and holds the file left until the
+open that writes, past a read-only open; puts every name at its place
+before a mapped, an in-memory and a server's open; and puts a link and a
+directory at each, the link removed and its file kept, the directory kept
+and the database opened, and each open's `swept_on_open` holds what it
+removed, the next open nothing. Its
+`a_side_file_with_a_lock_file_beside_it_stays` puts a lock file no process
+holds beside a `.beside`, and none beside a `.saving`: the `.beside`
+stays, said kept at each open, the `.saving` goes, and once its lock file
+is gone the `.beside` goes too. fennec-abi's test of that name holds the
+`.beside`'s lock in another process: it stays, said kept, and this
+process's hold is refused after the open, the lock its holder's still; let
+go, its lock file left, it stays; its lock file gone, it goes, beside a
 `.saving` with no lock file, beside which none is made, and a link at
-`.taking` to the database itself, whose lock the test holds (a Unix's);
-run with the ask taken out, it fails at its first open. fennec-core's
-`with_no_lock_to_ask_a_side_file_beside_a_lock_file_stays` holds a
-process with no lock module to ask. fennec-http's two `sweep_left` tests
+`.taking` to the database itself (a Unix's). Without the look at the lock
+file, each fails at its first open. fennec-http's two `sweep_left` tests
 put `.compacting`, `.beside` and `.saving` beside a tenant's file and a
-linked one's, the first one whose own lock is held, kept.
+linked one's, the first a `.beside` with a held lock beside it, kept; and
+fennec-server's `crash.rs`, fennec-shard's `listen.rs` and fennec-cli's
+`lock.rs` hold the server's, the router's and the shell's lines, a file
+removed and one kept each.
 The rename itself goes by the name, so `swap_in` first holds the name to the
 handle's file (`still_named`, its device and inode against an `lstat`; on
 Windows the volume's serial number and the file's index against the name

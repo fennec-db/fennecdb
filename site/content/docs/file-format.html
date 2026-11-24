@@ -493,9 +493,11 @@ by a crash — a compact's <code>.beside</code>, a checkpoint's
 time the file is opened to be written (a server's start, the shell, an app),
 and a <code>--dir</code> node removes its tenants' as it starts; a read-only
 open (<code>--read-only</code>, <code>fennec types</code>) leaves it. The
-server logs each it removes, with its size. A file at such a name that is a
-database of its own, open in another server or shell (its own
-<code>.lock</code> held), is left. Until then it can be deleted by hand, while
-nothing has the file open to write it: one a running server is writing is its
-compact in flight.</p>
+server, a node and the router log each it removes, with its size, and the
+shell says each on stderr. A file at such a name with a lock file beside it
+(<code>&lt;name&gt;.lock</code>, held or not) is a database of its own, opened
+once as one, and is left, said at every open as <code>kept: a lock file beside
+it</code>; if it is none, delete it and its lock file by hand. Until then a side
+file can be deleted by hand, while nothing has the file open to write it: one a
+running server is writing is its compact in flight.</p>
 </details>
