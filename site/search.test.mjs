@@ -286,7 +286,9 @@ test('chance words in the answer\'s own sections do not move a question with no 
   // nothing of the question. Added here to the answer's own sections, a
   // round at a time until the words alone find it -- so the test does
   // exercise what it holds, whatever the docs say now -- and the question is
-  // still ranked by its meaning, hit for hit, as it was.
+  // still ranked by its meaning, hit for hit, as it was. A round weighs less
+  // in a long section: server#compaction, some 1 600 words against 460 on
+  // average, took 21 in November 2026, so the bound stands well above that.
   for (const [q, page] of [
     ['telefonda veri saklamak', 'docs/mobile'],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction'],
@@ -301,7 +303,7 @@ test('chance words in the answer\'s own sections do not move a question with no 
     assert.ok(own.length > 0, `no section of ${page}`);
     const found = () => search(copy, q).hits.some((h) => h.url === page || h.url.startsWith(`${page}#`));
     let rounds = 0;
-    for (; rounds < 20 && !found(); rounds++) {
+    for (; rounds < 60 && !found(); rounds++) {
       for (const r of own) {
         r.body += CHANCE;
         copy.run('set docs {body: $1} where id = $2', [r.body, r.id]);

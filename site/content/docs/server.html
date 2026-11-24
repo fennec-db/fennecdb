@@ -705,35 +705,23 @@ in the fastest run at half the file dead and not in the slowest, and a
 file kept smaller is not given it -- steadier, never the best case. A file
 that fits in memory is compacted as before.</p>
 
-<p><b>A file past the page cache, read in turn.</b> A compact writes each
-collection's live records in id order. After updates at keys drawn at random
-the records stand in the file in the order of their last writes, so a
-compact that copied them by id read the file a page at a time, at random --
-from the disk, once the file had outgrown the memory the system has for it.
-In a container of 512 MB (<code>docker run --memory 512m</code>), a file of
-a million 1 KB records each updated once, 2.04 GB of which 1.02 live, took
-45 to 51 s to compact and about 530 000 major faults, as in every release from
-0.1.5 to 0.2.0. Past that memory, or while the server waits for the disk, a
-compact now reads the file from its start to its end and puts the records in
-id order on the way: 4.6 to 6.6 s and about 2 000 major faults. It deals
-them, a run of ids at a time, into a scratch file beside the database,
-<code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code> beside
-<code>data.fennec</code>), and reads each run back into memory to put it in
-order. It holds a quarter of that memory, 16 MB at most whatever the file
--- the process peaked at 28 to 30 MB, the copy by id at 27 to 29 -- and on
-the disk as much as the collection's live records, for as long as it writes
-them. It does so only where the disk has room for twice those; otherwise it
-copies by id, as it does for a collection under 4 MB live or over 4 GB (1
-GB where it holds 4 MB), or where something already stands at the scratch
-file's name, which it leaves as it is. A scratch file that fails before the new file is written -- the
-disk filled meanwhile, by another compact or another program -- leaves the
-compact to copy by id, and the server logs it once. The scratch file is
-gone from its directory as soon as it is made, so a crash leaves nothing
-beside the database -- on Windows a power cut can, as can a kill in the
-instant between its making and its unlink elsewhere, an empty one, and the
-next open removes it. The new file is the same, byte for byte, as one
-compacted by id, so scans, opens and replicas read it as before; a file
-that fits in memory is compacted as before.</p>
+<p><b>A file past the page cache, read in turn.</b> After updates at keys
+drawn at random the records stand in the file in the order of their last
+writes, so a compact copying them in id order read a file larger than the
+memory the system has for it a page at a time, at random, from the disk: in
+a container of 512 MB (<code>docker run --memory 512m</code>), a million 1 KB
+records each updated once, 2.04 GB with 1.02 live, took 45 to 51 s and about
+530 000 major faults, as in every release from 0.1.5 to 0.2.0. Past that
+memory a compact now reads the file once, from its start to its end, deals
+the records a run of ids at a time into a scratch file beside it,
+<code>&lt;file&gt;.sorting</code>, and writes each run back in id order: 4.6
+to 6.6 s and about 2 000 major faults, the new file the same byte for byte.
+It holds 16 MB of memory at most and as much disk as the live records; it
+copies by id instead where the disk has no room for twice those, for a
+collection under 4 MB live or over 4 GB, where something already stands at
+the scratch file's name, or once the scratch file fails, which the server
+logs. The scratch file leaves its directory as soon as it is made, so a crash
+leaves nothing beside the database, or an empty one the next open removes.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
@@ -858,7 +846,7 @@ must not change under you.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>8.48 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>8.52 MB</b> on
 amd64, that binary's bytes as CI measures them on every change, and smaller on
 arm64 — since no target is written in, both come out of the same file.
 <code>make docker</code> builds it, and
