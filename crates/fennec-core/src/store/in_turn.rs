@@ -23,7 +23,8 @@
 //!
 //! What it holds, and why: the buffer of one bucket and a place a slot of
 //! the id index's span of it, 4 bytes, while the buckets are read back; the
-//! buckets' buffers, a budget's worth together, while they are dealt; and
+//! buckets' buffers, a budget's worth together, while they are dealt -- at
+//! most 16 MiB, where a compact by id peaked already; and
 //! the collection's live bytes on the disk, once, for as long as its record
 //! is written -- one collection at a time. It is asked only where the
 //! volume gives that beside what the compact still writes, and else the
@@ -35,7 +36,7 @@ use crate::crc::crc32c;
 use crate::engine::ImageOut;
 use crate::fs::Scratch;
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The live bytes below which a store's records are walked by id whatever
 /// the room: at most a thousand pages of 4 KB read at random, a fraction of
@@ -45,16 +46,22 @@ use std::path::{Path, PathBuf};
 pub(crate) const FROM: usize = 4 << 20;
 
 /// The most a bucket holds, and the buckets' buffers together while they
-/// are dealt: a quarter of the room the page cache has, between these.
-const BUDGET_MAX: u64 = 64 << 20;
+/// are dealt: a quarter of the room the page cache has, between these. The
+/// buckets' size moved the time little and the memory much: compacting a
+/// million 1 KB records, 2.04 GB of which 1.02 live, in a container of 512
+/// MB, buckets of 64 MiB took 5.0-8.1 s and the process's anonymous memory
+/// to 76-78 MB, of 32 MiB 5.2-7.9 s and 44-46 MB, of 16 MiB 4.7-6.0 s and
+/// 28-30 MB -- where the walk by id peaked, 27-29.
+const BUDGET_MAX: u64 = 16 << 20;
 const BUDGET_MIN: u64 = 4 << 20;
 
 /// A bucket's buffer while the records are dealt: the budget shared out
-/// between the buckets, never under 64 KiB a write -- past 64 GiB live, at
-/// the most budget, the buffers together grow past it by 64 KiB for each
-/// 64 MiB bucket -- nor over 1 MiB, beyond which a write is no faster. The
-/// unit tests' a few records long, so that they flush, and write records
-/// longer than one, as a large file's do.
+/// between the buckets, never under 64 KiB a write -- past 256 buckets, 4
+/// GiB live at the most budget, the buffers together grow past it, to 1/256
+/// of the live bytes, a third of the 12 bytes a document the id index holds
+/// for documents of 1 KB -- nor over 1 MiB, beyond which a write is no
+/// faster. The unit tests' a few records long, so that they flush, and
+/// write records longer than one, as a large file's do.
 const CHUNK_MIN: usize = if cfg!(test) { 512 } else { 64 << 10 };
 const CHUNK_MAX: usize = 1 << 20;
 
@@ -84,12 +91,13 @@ pub struct InTurn {
 }
 
 impl InTurn {
-    /// What an out writing a compact's file asks, its scratch file to be
-    /// made at `temp`, of a store's records, about `live` bytes of a file
-    /// `file` bytes long: in turn from [`FROM`] where the file is past the
-    /// room the page cache has for it, or the process waits for the disk
-    /// ([`budget`]).
-    pub fn at(temp: &Path, file: u64, live: u64) -> Option<InTurn> {
+    /// What an out writing a compact's file asks of a store's records,
+    /// about `live` bytes of a file `file` bytes long: in turn from [`FROM`]
+    /// where the file is past the room the page cache has for it, or the
+    /// process waits for the disk ([`budget`]), the scratch file made at
+    /// `temp`'s name -- made only then, so an out that asks costs a compact
+    /// that does not copy in turn no allocation.
+    pub fn at(file: u64, live: u64, temp: impl FnOnce() -> PathBuf) -> Option<InTurn> {
         let budget = match ASSUMED.with(|a| a.get()) {
             Some(assumed) => assumed?,
             None if live < FROM as u64 => return None,
@@ -102,7 +110,7 @@ impl InTurn {
             }
         };
         Some(InTurn {
-            temp: temp.to_path_buf(),
+            temp: temp(),
             budget,
         })
     }
@@ -110,7 +118,7 @@ impl InTurn {
 
 /// The memory a compact of a file `file` bytes long copies a store's live
 /// records in, reading the file in turn: a quarter of `room`, the bytes the
-/// page cache could hold of it (`cache::room`), between 4 and 64 MiB, where
+/// page cache could hold of it (`cache::room`), between 4 and 16 MiB, where
 /// the file is past that room or the process waits for the disk
 /// (`cache::faulting`) -- the rule the side file is written past the cache
 /// by (`Beside::past`) -- and `None`, the records walked by id, where it
@@ -612,10 +620,11 @@ fn unlike_written() -> Error {
 mod tests {
     use super::*;
     use crate::engine::ImageOut;
+    use std::path::Path;
 
     /// The rule: in turn only where the walk by id would read the disk --
     /// the file past the room, or the process waiting for it where the
-    /// room is known -- in a quarter of the room, 4 to 64 MiB.
+    /// room is known -- in a quarter of the room, 4 to 16 MiB.
     #[test]
     fn a_compact_reads_in_turn_only_past_the_room() {
         let mb = 1u64 << 20;
@@ -624,8 +633,8 @@ mod tests {
         assert_eq!(budget(10, Some(11), true), Some(4 << 20));
         assert_eq!(budget(10, None, false), None);
         assert_eq!(budget(10, None, true), None);
-        assert_eq!(budget(2048 * mb, Some(400 * mb), false), Some(64 << 20));
-        assert_eq!(budget(2048 * mb, Some(100 * mb), false), Some(25 << 20));
+        assert_eq!(budget(2048 * mb, Some(400 * mb), false), Some(16 << 20));
+        assert_eq!(budget(2048 * mb, Some(40 * mb), false), Some(10 << 20));
     }
 
     /// An out asks for the records in turn only from [`FROM`] live bytes,
@@ -636,16 +645,19 @@ mod tests {
         let temp = Path::new("db.fennec.sorting");
         let from = FROM as u64;
         crate::cache::assume(Some(Some(1 << 20)));
-        assert!(InTurn::at(temp, 2 << 20, from - 1).is_none());
-        let t = InTurn::at(temp, 2 << 20, from).expect("past the room");
+        assert!(InTurn::at(2 << 20, from - 1, || temp.to_path_buf()).is_none());
+        let t = InTurn::at(2 << 20, from, || temp.to_path_buf()).expect("past the room");
         assert_eq!((t.temp.as_path(), t.budget), (temp, 4 << 20));
         crate::cache::assume(Some(None));
-        assert!(InTurn::at(temp, 2 << 20, from).is_none());
+        assert!(InTurn::at(2 << 20, from, || temp.to_path_buf()).is_none());
         assume(Some(Some(7)));
-        assert_eq!(InTurn::at(temp, 1, 1).map(|t| t.budget), Some(7));
+        assert_eq!(
+            InTurn::at(1, 1, || temp.to_path_buf()).map(|t| t.budget),
+            Some(7)
+        );
         assume(Some(None));
         crate::cache::assume(Some(Some(1)));
-        assert!(InTurn::at(temp, 2 << 20, from).is_none());
+        assert!(InTurn::at(2 << 20, from, || temp.to_path_buf()).is_none());
         assume(None);
         crate::cache::assume(None);
     }

@@ -1392,7 +1392,7 @@ impl Sink for FileSink {
                 w: BufWriter::with_capacity(WRITE_BUF, create_private(&tmp)?),
                 at: 0,
                 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
-                in_turn: Some(beside(&self.path, "sorting")),
+                db: Some(&self.path),
             };
             image(&mut out)?;
             let file = out
@@ -1588,17 +1588,21 @@ impl Sink for FileSink {
 
 /// The image written straight into the side file a rewrite renames over the
 /// database: `at` counts what went in, and a patch seeks back to it.
-struct FileImage {
+struct FileImage<'a> {
     w: BufWriter<File>,
     at: u64,
-    /// Where a compact copying a store's records into this image in turn
-    /// makes its scratch file (`store::InTurn`): `<file>.sorting` for a
-    /// rewrite's image and a compact's side file, nothing for any other.
-    #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
-    in_turn: Option<PathBuf>,
+    /// The database's file, for a rewrite's image under the lock: beside
+    /// it, `<file>.sorting`, a compact copying a store's records into this
+    /// image in turn makes its scratch file (`store::InTurn`), the name made
+    /// only then. `None` for a side file's, which asks for itself.
+    #[cfg_attr(
+        not(all(any(unix, windows), target_pointer_width = "64")),
+        allow(dead_code)
+    )]
+    db: Option<&'a Path>,
 }
 
-impl ImageOut for FileImage {
+impl ImageOut for FileImage<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.w.write_all(bytes)?;
         self.at += bytes.len() as u64;
@@ -1622,7 +1626,8 @@ impl ImageOut for FileImage {
 
     #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
     fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
-        crate::store::InTurn::at(self.in_turn.as_deref()?, file, live)
+        let db = self.db?;
+        crate::store::InTurn::at(file, live, || beside(db, "sorting"))
     }
 }
 
@@ -1976,8 +1981,11 @@ impl Drop for Mapping {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub struct SideFile {
     path: PathBuf,
-    out: FileImage,
+    out: FileImage<'static>,
     adopted: bool,
+    /// Whether a compact copies a store's records into it in turn, past the
+    /// page cache ([`Self::copies_in_turn`]).
+    in_turn: bool,
     /// On Linux, whether the file is written past the page cache
     /// ([`Self::past_cache`]), and how far it has been synced and its
     /// pages let go of.
@@ -2019,8 +2027,9 @@ impl SideFile {
             out: FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, file),
                 at: 0,
-                in_turn: None,
+                db: None,
             },
+            in_turn: false,
             adopted: false,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             past: false,
@@ -2102,7 +2111,7 @@ impl SideFile {
     /// (`store::InTurn`), through a scratch file at `<file>.sorting`: this
     /// one's name, `<file>.beside`, with its last part so named.
     pub fn copies_in_turn(&mut self) {
-        self.out.in_turn = Some(self.path.with_extension("sorting"));
+        self.in_turn = true;
     }
 
     /// What is written so far, read back through the handle that wrote it:
@@ -2366,7 +2375,10 @@ impl ImageOut for SideFile {
         self.out.patch(at, bytes)
     }
     fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
-        self.out.in_turn(file, live)
+        match self.in_turn {
+            true => crate::store::InTurn::at(file, live, || self.path.with_extension("sorting")),
+            false => None,
+        }
     }
 }
 
