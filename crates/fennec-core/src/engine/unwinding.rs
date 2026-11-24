@@ -1439,7 +1439,9 @@ mod torn {
     /// is touched: `t`'s graph counts no change. Taken into the store and
     /// refused after, a payload's frame was put back as a torn write --
     /// what an error's put-back asks, which held the rows and indexes as
-    /// before -- its row taken out of the graph and placed in it again.
+    /// before -- its row taken out of the graph and placed in it again. An
+    /// op of neither is refused by its byte, the store's counts as they
+    /// were: `Store::land_frame` is handed none.
     #[test]
     fn a_frame_that_does_not_read_changes_nothing() {
         let (records, after) = landed(|p| p.execute(&write(Write::Over)).map(drop));
@@ -1454,9 +1456,15 @@ mod torn {
                 .map(|(_, g)| g.changes())
                 .collect()
         };
+        let counts = |db: &Database| {
+            let s = &db.collections["t"].store;
+            (s.len(), s.total_bytes(), s.dead_bytes(), s.live_bytes())
+        };
+        let counted = counts(&db);
         let bad = [
             ("a payload no document", Store::frame(OP_PUT, 1, &[0xfe; 4])),
             ("an op of neither", Store::frame(7, 1, &[])),
+            ("op 3", Store::frame(3, 1, &[0x01])),
         ];
         for (what, frame) in &bad {
             for first in [false, true] {
@@ -1469,11 +1477,19 @@ mod torn {
                 let graphed = graphs(&db);
                 let r = db.apply(&framed(REC_DATA, one.cid, &body));
                 assert!(matches!(r, Err(Error::Corrupt(_))), "{tag}: {r:?}");
+                if frame[0] != OP_PUT {
+                    let said = format!("a write op {} is neither a put nor a del", frame[0]);
+                    assert!(
+                        matches!(&r, Err(Error::Corrupt(m)) if *m == said),
+                        "{tag}: {r:?}"
+                    );
+                }
                 assert!(db.failure().is_none(), "{tag}: the replica failed");
                 if !first {
                     assert_eq!(graphs(&db), graphed, "{tag}: the graph touched");
                 }
                 assert_eq!(state(&db), before, "{tag}: put back");
+                assert_eq!(counts(&db), counted, "{tag}: counted");
                 unfed(&db, before.seq, &tag);
             }
         }

@@ -709,6 +709,19 @@ fn cut_frame() -> Error {
     Error::Corrupt("a write record cut short".into())
 }
 
+/// A frame whose op is neither [`OP_PUT`] nor [`OP_DEL`], by its byte and
+/// the frame's place in the file, as an unknown record kind is refused:
+/// a later version's op, or damage below the durable point, which a load
+/// reads unchecked. Taken as a frame that changed nothing, as every
+/// release through 0.2.0 took it, the version before it was counted dead
+/// while the index still pointed at it, the frame counted live, and the
+/// next compact dropped it with no word.
+#[cold]
+#[inline(never)]
+fn unknown_op(op: u8, at: u64) -> Error {
+    Error::Corrupt(format!("unknown write op {op} at {at}"))
+}
+
 /// The segment's bytes to append to.
 #[inline]
 fn grow(b: &mut SegmentBytes) -> &mut Vec<u8> {
@@ -1124,9 +1137,6 @@ impl Store {
     /// The frame put in the active segment and the index pointed at it.
     #[inline(always)]
     fn land_frame(&mut self, op: u8, id: DocId, frame: &[u8], payload_len: usize) {
-        if let Some(old) = self.index.get(id) {
-            self.dead_bytes += dead_frame(id, old);
-        }
         let seg_ix = {
             let _ = self.active();
             self.segments.len() - 1
@@ -1149,8 +1159,14 @@ impl Store {
         data.extend_from_slice(frame);
         self.total_bytes += frame.len();
 
+        // Each arm counts the version it leaves dead: counted before the
+        // match, a frame of neither op left its row's version counted dead
+        // with the index still pointing at it.
         match op {
             OP_PUT => {
+                if let Some(old) = self.index.get(id) {
+                    self.dead_bytes += dead_frame(id, old);
+                }
                 self.index.insert(
                     id,
                     Loc {
@@ -1164,10 +1180,18 @@ impl Store {
                 }
             }
             OP_DEL => {
-                self.index.remove(id);
+                if let Some(old) = self.index.remove(id) {
+                    self.dead_bytes += dead_frame(id, old);
+                }
                 self.dead_bytes += frame.len();
             }
-            _ => {}
+            // Never another: the write path hands `append` and
+            // `append_onto` one of the two, and a replica's apply hands
+            // `append_frame` a primary's frame only once it read its op as
+            // one of them (`Database::apply_frames` refuses any other before
+            // the frame lands). A replay refuses one itself
+            // ([`unknown_op`]).
+            _ => debug_assert!(false, "a frame of op {op} landed"),
         }
     }
 
@@ -1524,17 +1548,23 @@ impl Store {
 
     /// Replays every record from a file/byte image.
     pub fn replay(&mut self, bytes: &[u8]) -> Result<usize> {
-        self.replay_noting(bytes, &mut |_| {})
+        self.replay_noting(bytes, 0, &mut |_| {})
     }
 
     /// [`Self::replay`], handing each record's id to `note` -- how an open
-    /// learns which documents the writes after a checkpoint touched.
+    /// learns which documents the writes after a checkpoint touched. `at`
+    /// is where `bytes` start in the file, for a refusal to say where.
     ///
     /// Each frame is copied as it stands into the segment `append` would
     /// have put it in, with the bookkeeping `append` does: framed afresh
     /// into a `Vec` of its own first, then copied again, a record at a time,
     /// it was 17 of a 25 ms load of 100 000 x 128 read into memory.
-    pub fn replay_noting(&mut self, bytes: &[u8], note: &mut dyn FnMut(DocId)) -> Result<usize> {
+    pub fn replay_noting(
+        &mut self,
+        bytes: &[u8],
+        at: u64,
+        note: &mut dyn FnMut(DocId),
+    ) -> Result<usize> {
         let mut pos = 0usize;
         let mut count = 0usize;
         while pos < bytes.len() {
@@ -1551,23 +1581,17 @@ impl Store {
             }
             let frame = &bytes[start..pos + len];
             pos += len;
-            if let Some(old) = self.index.get(id) {
-                self.dead_bytes += dead_frame(id, old);
-            }
             let rest = bytes.len() - start;
-            let seg = self.active();
-            // A segment the load opens is sized for the records it will
-            // hold, rather than grown by doubling past them.
-            if seg.data.is_empty() {
-                grow(&mut seg.data).reserve(rest.min(SEGMENT_MAX + len));
-            }
-            let off = seg.data.len() + (frame.len() - len);
-            grow(&mut seg.data).extend_from_slice(frame);
-            let seg = self.segments.len() as u32 - 1;
-            self.total_bytes += frame.len();
+            // The op matched before the frame changes anything, once: an op
+            // of neither is refused with the store as it was, and each arm
+            // counts the version it leaves dead.
             match op {
                 OP_PUT => {
                     written_id(id)?;
+                    if let Some(old) = self.index.get(id) {
+                        self.dead_bytes += dead_frame(id, old);
+                    }
+                    let (seg, off) = self.copy_frame(frame, len, rest);
                     let loc = Loc {
                         seg,
                         off: off as u32,
@@ -1579,15 +1603,53 @@ impl Store {
                     }
                 }
                 OP_DEL => {
-                    self.index.remove(id);
+                    if let Some(old) = self.index.remove(id) {
+                        self.dead_bytes += dead_frame(id, old);
+                    }
+                    self.copy_frame(frame, len, rest);
                     self.dead_bytes += frame.len();
                 }
-                _ => {}
+                _ => return Err(unknown_op(op, at + start as u64)),
             }
             note(id);
             count += 1;
         }
         Ok(count)
+    }
+
+    /// A replayed frame, its payload `len` bytes at its end, copied into
+    /// the active segment and counted: the segment and where the payload
+    /// starts in it. `rest`: the bytes the load has left, this frame's
+    /// first. Natively in each of `replay_noting`'s arms; the browser
+    /// module holds it once, a call.
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+    fn copy_frame(&mut self, frame: &[u8], len: usize, rest: usize) -> (u32, usize) {
+        // `active`'s test here and its seal a call, once a segment: with
+        // `active` in both arms, seal and all, it was a call every frame,
+        // 16 instructions a frame more than the replay before, which
+        // inlined it in one place (`fs::open_in_memory` of `file-open`'s
+        // 100 000 rows, +1.3%); so, the same open counts 1.5% fewer. The
+        // browser module calls `active` from its one copy: the test apart
+        // grew it 122 bytes.
+        #[cfg(not(target_arch = "wasm32"))]
+        let seg = {
+            let last = self.segments.len() - 1;
+            match self.segments[last].data.len() < SEGMENT_MAX {
+                true => &mut self.segments[last],
+                false => self.active(),
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let seg = self.active();
+        // A segment the load opens is sized for the records it will hold,
+        // rather than grown by doubling past them.
+        if seg.data.is_empty() {
+            grow(&mut seg.data).reserve(rest.min(SEGMENT_MAX + len));
+        }
+        let off = seg.data.len() + (frame.len() - len);
+        grow(&mut seg.data).extend_from_slice(frame);
+        self.total_bytes += frame.len();
+        (self.segments.len() as u32 - 1, off)
     }
 
     /// [`Self::replay_noting`] over records that stay where they are: the
@@ -1618,15 +1680,19 @@ impl Store {
             if plen > bytes.len() - pos {
                 return Err(cut_frame());
             }
-            // The bookkeeping `append` does, with the payload left in place.
-            let frame_len = pos + plen - start;
-            if let Some(old) = self.index.get(id) {
-                self.dead_bytes += dead_frame(id, old);
-            }
-            self.total_bytes += frame_len;
+            // The bookkeeping `append` does, with the payload left in place,
+            // the op matched first as in `replay_noting`. The frame's length
+            // is worked out in each arm: worked out before the match, beside
+            // the start the refusal names, it took the register holding the
+            // record's bytes, reloaded each frame -- an instruction a record
+            // more, 100 000 an open of `file-open`'s 100 000 rows.
             match op {
                 OP_PUT => {
                     written_id(id)?;
+                    if let Some(old) = self.index.get(id) {
+                        self.dead_bytes += dead_frame(id, old);
+                    }
+                    self.total_bytes += pos + plen - start;
                     self.index
                         .insert(id, Loc::mapped(at + pos as u64, plen as u32));
                     if id >= self.next_id {
@@ -1634,10 +1700,14 @@ impl Store {
                     }
                 }
                 OP_DEL => {
-                    self.index.remove(id);
+                    if let Some(old) = self.index.remove(id) {
+                        self.dead_bytes += dead_frame(id, old);
+                    }
+                    let frame_len = pos + plen - start;
+                    self.total_bytes += frame_len;
                     self.dead_bytes += frame_len;
                 }
-                _ => {}
+                _ => return Err(unknown_op(op, at + start as u64)),
             }
             pos += plen;
             note(id);
@@ -2953,6 +3023,111 @@ mod tests {
             assert!(taken.adopt_index(&base, 4, len, &index));
             assert_eq!(counts(&taken), counts(&st));
             held(&taken, "taken from the index");
+        }
+    }
+
+    /// A store's documents and counts, and its frames as they stand: what a
+    /// refused frame must leave as it was.
+    type Standing = (Vec<(DocId, Option<Loc>)>, [usize; 4], DocId, Vec<u8>);
+
+    fn standing(s: &Store) -> Standing {
+        let ids = s.ids().into_iter().map(|id| (id, s.loc(id))).collect();
+        let counts = [s.len(), s.total_bytes(), s.dead_bytes(), s.live_bytes()];
+        (ids, counts, s.next_id(), s.image())
+    }
+
+    /// Documents 1 to 20 put, 7 written over and 3 deleted: a store whose
+    /// counts a frame refused after them would move.
+    fn twenty() -> Store {
+        let sc = schema();
+        let doc = |i: i64| Document {
+            id: 0,
+            fields: vec![
+                ("a".into(), Value::Text(format!("v{i}"))),
+                ("b".into(), Value::Int(i)),
+            ],
+        };
+        let mut st = Store::new();
+        for id in 1..=20u64 {
+            st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
+        }
+        st.append(OP_PUT, 7, &Store::encode_doc(&sc, &doc(-7)));
+        st.append(OP_DEL, 3, &[]);
+        st
+    }
+
+    /// A frame whose op is neither a put nor a del -- a later version's,
+    /// or damage below the durable point, which a load reads unchecked --
+    /// is refused by its byte and its place, and changes nothing: no count,
+    /// no document, no segment. Replayed as a frame of no effect, it
+    /// counted the version of a document it named dead while the index
+    /// still pointed at it, counted itself live, and a compact dropped it.
+    /// Over a document the store holds and one it does not, and after a
+    /// frame of its own record, which is taken as the open is then refused.
+    #[test]
+    fn an_unknown_op_is_refused_by_its_byte() {
+        let image = twenty().image();
+        for op in [0u8, 3, 0x7f, 0xff] {
+            for id in [5u64, 400] {
+                for after_one in [false, true] {
+                    let what = format!("op {op} on {id}, after one {after_one}");
+                    let mut st = Store::new();
+                    st.replay(&image).unwrap();
+                    let before = standing(&st);
+                    let mut record = Vec::new();
+                    if after_one {
+                        record = Store::frame(OP_PUT, 8, &[0x01]);
+                    }
+                    let place = record.len() as u64;
+                    record.extend(Store::frame(op, id, &[0x01, 0x02]));
+                    let mut noted = Vec::new();
+                    let r = st.replay_noting(&record, 1_000, &mut |id| noted.push(id));
+                    let said = format!("unknown write op {op} at {}", 1_000 + place);
+                    assert!(
+                        matches!(&r, Err(Error::Corrupt(m)) if *m == said),
+                        "{what}: {r:?}"
+                    );
+                    if after_one {
+                        assert_eq!(noted, [8], "{what}");
+                        continue;
+                    }
+                    assert!(noted.is_empty(), "{what}");
+                    assert_eq!(standing(&st), before, "{what}");
+                }
+            }
+        }
+    }
+
+    /// [`an_unknown_op_is_refused_by_its_byte`] for a record replayed where
+    /// it lies in the file, whose place the refusal names: the store as it
+    /// was, no stretch of the file taken.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_unknown_op_in_the_file_is_refused_by_its_byte() {
+        let image = twenty().image();
+        for op in [0u8, 3, 0x7f, 0xff] {
+            for id in [5u64, 400] {
+                let what = format!("op {op} on {id}");
+                let bad = Store::frame(op, id, &[0x01, 0x02]);
+                let file = [vec![0u8; 4], image.clone(), bad.clone()].concat();
+                let base: Base = std::sync::Arc::new(file);
+                let mut st = Store::new();
+                st.replay_mapped(&base, 4, image.len() as u64, &mut |_| {})
+                    .unwrap();
+                let before = standing(&st);
+                let stretches = st.base.as_ref().map(|b| b.1.clone());
+                let at = 4 + image.len() as u64;
+                let mut noted = Vec::new();
+                let r = st.replay_mapped(&base, at, bad.len() as u64, &mut |id| noted.push(id));
+                let said = format!("unknown write op {op} at {at}");
+                assert!(
+                    matches!(&r, Err(Error::Corrupt(m)) if *m == said),
+                    "{what}: {r:?}"
+                );
+                assert!(noted.is_empty(), "{what}");
+                assert_eq!(standing(&st), before, "{what}");
+                assert_eq!(st.base.as_ref().map(|b| b.1.clone()), stretches, "{what}");
+            }
         }
     }
 

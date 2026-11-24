@@ -658,6 +658,31 @@ The replay stopped there as at a torn tail, as it did before records had
 lengths, and the frames after it vanished while the open went on with the
 records after them (found in the review of the fuzzer's pull request,
 `a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied`).
+A frame's op is a put (1) or a del (2), and the replay refuses any other
+by its byte and the frame's place in the file ("unknown write op 3 at
+4096") before the frame changes anything: a later version's op, or damage
+below the durable point, which the replay reads unchecked, is never read
+as another. It matches the op once (`Store::replay_noting`,
+`replay_mapped`), each arm counting the version it leaves dead as well as
+the frame itself, and counts no more than before (instructions from
+`proc_pid_rusage` under a bump allocator, medians of 6 runs): `file-open`'s
+100 000 rows mapped -0.02%, read into memory -1.5% (`copy_frame` tests
+`active`'s seal inline, where `active` whole in both arms was a call a
+frame, +1.3%), and a del through `Store::append` -3.4%, its dead count
+taken from `remove`'s answer instead of a second lookup. The browser
+module grew 400 bytes, fennec-server's code some 690. A replica's apply
+refuses one before the frame lands (`Database::apply_frames`, "a write op
+3 is neither a put nor a del"), so `Store::land_frame` is only ever handed
+a put or a del, its other arm a `debug_assert`. An image's index,
+which an open takes in the place of the walk (`Store::adopt_index`), reads
+no op: it describes a record of puts alone, as this version writes one.
+Every release from 0.1.0 through 0.2.0 replayed such a frame as one that
+changed nothing: it counted the version before it dead while the index
+still pointed at it, counted itself live, and the next compact dropped it
+with no word (`store::tests::an_unknown_op_is_refused_by_its_byte`,
+`an_unknown_op_in_the_file_is_refused_by_its_byte`). Replicas before 0.2.0
+applied one the same way; 0.2.0's apply refuses it
+(`a_frame_that_does_not_read_changes_nothing`).
 A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
 append in flight looks torn from outside. Zeros to the end of the

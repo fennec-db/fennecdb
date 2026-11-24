@@ -59,7 +59,11 @@ from before writes each plain record it takes with a checksum of its own,
 so its file, its archive and every restore from it stay checked.</p>
 
 <p>Inside a data record, each document is
-<code>[op][doc-id][length][fields]</code>, each field a tagged value. A
+<code>[op][doc-id][length][fields]</code>, each field a tagged value. The
+op is 1 for a put and 2 for a delete. An open refuses any other it reads,
+naming its byte and where it is (<code>unknown write op 3 at
+4096</code>), and a replica one its primary sends: neither takes it as a
+write that changes nothing. A
 <code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
 indices, each as its distance from the one before, then the weights as
 <code>f32</code>. An object, in a <code>json</code> field, is
