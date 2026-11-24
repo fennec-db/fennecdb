@@ -21,6 +21,11 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+mod in_turn;
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+pub use in_turn::{assume as assume_in_turn, break_scratch, copied, fell_back, Broken, InTurn};
+
 pub const OP_PUT: u8 = 1;
 pub const OP_DEL: u8 = 2;
 
@@ -2088,7 +2093,8 @@ impl Store {
     }
 
     /// The live records, framed afresh, in id order: what `compact` writes
-    /// into the new file. Nothing is gathered in memory on the way.
+    /// into the new file ([`Self::compact_live`]), walked by id, nothing
+    /// gathered in memory on the way.
     pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
         let mut head = Vec::with_capacity(16);
         for id in self.index.iter() {
@@ -2104,6 +2110,21 @@ impl Store {
             out.write(payload)?;
         }
         Ok(())
+    }
+
+    /// [`Self::write_live`]'s bytes into a compact's file: where `out` asks
+    /// for them in turn -- the old file past the page cache ([`in_turn`]) --
+    /// read from the old file's start to its end, else walked by id. A
+    /// method apart from `write_live`, which an image a pin sends calls
+    /// alone: the check inlined beside its loop there cost the loop a
+    /// register, a pinned image of 10 000 rows 19 000 to 25 000 instructions
+    /// more (macOS's counts).
+    pub fn compact_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
+        #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+        if self.wrote_in_turn(out)? {
+            return Ok(());
+        }
+        self.write_live(out)
     }
 
     /// Whether the records are read from a mapped file rather than held in

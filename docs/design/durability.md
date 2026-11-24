@@ -390,10 +390,11 @@ sink is asked, the copy as it was and taking writes; refused by the sink,
 as a compact's is, the database fails. A side file a crash left -- a
 replica's `.taking`, a checkpoint's or a compact's `.compacting`, a
 compact's or an index's `.beside`, the shell's `.saving` of a `.save` over
-the file (`fs::LEFT_BESIDE`), an install's `.importing` -- is removed by
-its owner alone: the open that writes the database (`FileSink::create`,
-all but `.importing`), and a node as it starts, under each tenant's lock
-taken without waiting (`tenants::sweep_left`, all five), so a tenant no
+the file, a compact's scratch `.sorting` (`fs::LEFT_BESIDE`), an install's
+`.importing` -- is removed by its owner alone: the open that writes the
+database (`FileSink::create`, all but `.importing`), and a node as it
+starts, under each tenant's lock taken without waiting
+(`tenants::sweep_left`, all six), so a tenant no
 request opens again keeps none; never a tool that only looks
 (`open_read_only`: `--read-only`, `fennec types`), nor one whose tenant's
 lock another process holds
@@ -432,7 +433,11 @@ by a database at the name never opened to be written -- a copy put there
 by hand, which no lock file marks -- and a first open of the name in
 another process landing between the look and the `unlink`; and a database
 it keeps is still at the name its neighbour's next rewrite of that kind
-writes over (`create_private` removes what is there). A link is not looked
+writes over (`create_private` removes what is there) -- but a compact's
+scratch file's: `fs::Scratch` makes `.sorting` by its open alone and
+through no link (`create_new` and `private_beside`'s `O_NOFOLLOW`), and
+where anything stands at the name leaves it and copies by id
+([storage.md](storage.md#reading-the-file-in-turn)). A link is not looked
 at: whoever writes the file it names keeps that name, whose lock is beside
 that file (`lock_path` follows a link) -- one to the database itself goes
 as a link. What the open removed or kept it says, as it says a torn tail's
@@ -612,7 +617,8 @@ modes differ; `swap_in` takes the writer's handle where it opened
 `.taking`'s where it opened them again with `O_NOFOLLOW`, and
 `still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
 backup's and an unseal's rename. The open that writes a file looks for
-four names beside it where it removed one: four `lstat`s where one
+four names beside it where it removed one -- five since a compact's scratch
+`.sorting` joined them -- four `lstat`s where one
 `unlink` was, each failing where nothing was left, a side file's lock file
 looked at only where one is there, and the names made in one buffer sized
 for the longest -- the perf gate's `file-open`, an open of 100 000 rows,
@@ -624,7 +630,13 @@ another one, read 3 779 623 against 3 779 735. Made by `beside` each, as
 #682 first made them, the four names asked nine calls and 882 bytes more
 than main there.) Its time is not quoted: the runs were made at a load of
 6.3, and a second round's, at 2.4 to 3.3, put both sides inside each
-other's spread. Release `fennec-server` on macOS: 4 288 bytes more
+other's spread. The fifth name, `.sorting`, counted against main's four on
+macOS (an open of 100 000 rows, as `file-open` makes it, 6 runs a side
+alternating, release builds over a bump allocator): 122.47 million
+instructions against 122.45 (medians), inside both sides' spread, 122.44-
+122.50 and 122.42-122.52; the allocator asked alike, 100 105 calls for
+7 450 309 bytes, the names' buffer sized for `.compacting` either way.
+Release `fennec-server` on macOS: 4 288 bytes more
 `__text` than main's (5 023 616 to 5 027 904), where the second round's
 lock module made it 6 144. By symbol, in builds that keep them (4 224
 bytes more there): the sweep's own functions 1 836 (`sweep_beside` 764,

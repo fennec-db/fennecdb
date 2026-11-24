@@ -58,6 +58,22 @@ server's compaction meets again is logged once and counted.
 (`cache::room`): once a third of what it writes is dead and the file
 reached `ROOM_SHARE` of that room or the process faults
 (`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
+Past that room or faulting, a compact copies a collection of 4 MiB live
+or more reading the old file [in
+turn](../../../../docs/design/storage.md#reading-the-file-in-turn)
+(`store::in_turn`, asked by the image under the lock and the side file
+beside it, `ImageOut::in_turn`) and writes the bytes the walk by id
+writes, the records in id order whatever read them: through buckets of a
+quarter of the room, 16 MiB at most, dealt through buffers of 16 MiB
+together at most whatever the file (`BUCKETS_MOST`), and a scratch file
+`<file>.sorting` made by its open alone, following no link
+(`fs::Scratch`), only where the volume holds twice the live bytes --
+unlinked at once on a Unix, deleted on close on Windows; else, past 256
+buckets, or where the scratch file fails before a byte of the new file is
+written (said once), by id. One failing after, or reading back other than
+its sum, fails the compact as a write of its new file does.
+`tests/in_turn.rs` and `store::in_turn::tests` hold it to the walk by id,
+byte for byte.
 
 **[Dead bytes are whole frames](../../../../docs/design/storage.md#dead-bytes-are-whole-frames)**
 Live bytes are the live frames to the byte: a version written over or deleted adds its head and its payload to

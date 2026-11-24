@@ -1,11 +1,11 @@
 | target | stripped shared library |
 | --- | ---: |
-| `x86_64-unknown-linux-gnu` | 3.55 MB (3551032 bytes) |
-| `aarch64-linux-android` | 3.13 MB (3125664 bytes) |
-| `armv7-linux-androideabi` | 2.21 MB (2213192 bytes) |
-| `x86_64-linux-android` | 3.56 MB (3556352 bytes) |
-| `aarch64-apple-ios` | 3.08 MB (3076656 bytes) |
-| `aarch64-apple-ios-sim` | 3.07 MB (3067808 bytes) |
-| `x86_64-apple-ios` | 3.36 MB (3361088 bytes) |
-| `aarch64-apple-darwin` | 3.08 MB (3084432 bytes) |
-| `x86_64-apple-darwin` | 3.37 MB (3365392 bytes) |
+| `x86_64-unknown-linux-gnu` | 3.58 MB (3581200 bytes) |
+| `aarch64-linux-android` | 3.15 MB (3152216 bytes) |
+| `armv7-linux-androideabi` | 2.21 MB (2213216 bytes) |
+| `x86_64-linux-android` | 3.59 MB (3586584 bytes) |
+| `aarch64-apple-ios` | 3.09 MB (3093120 bytes) |
+| `aarch64-apple-ios-sim` | 3.08 MB (3084400 bytes) |
+| `x86_64-apple-ios` | 3.39 MB (3389840 bytes) |
+| `aarch64-apple-darwin` | 3.12 MB (3117536 bytes) |
+| `x86_64-apple-darwin` | 3.39 MB (3390064 bytes) |

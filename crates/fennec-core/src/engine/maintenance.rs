@@ -1063,7 +1063,7 @@ impl Beside {
                 let mut data = Summed::begin(side, REC_DATA, p.cid, bytes)?;
                 placed.push(Some(data.at()));
                 match p.compact {
-                    true => p.store.write_live(&mut data)?,
+                    true => p.store.compact_live(&mut data)?,
                     false => p.store.write_image(&mut data)?,
                 }
                 data.end()?;
@@ -1325,6 +1325,11 @@ fn rewrite_beside(
             if b.mapped && room.is_some_and(|r| need > r || crate::cache::faulting()) {
                 b.past = true;
                 b.side.past_cache();
+            }
+            // Past the room, the old file read from its start to its end
+            // rather than at random by id (`store::InTurn`).
+            if b.mapped {
+                b.side.copies_in_turn();
             }
             let mut watching = Watching {
                 db,
