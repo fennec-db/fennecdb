@@ -24,13 +24,16 @@
 //!
 //! What it holds, and why: the buffer of one bucket and a place a slot of
 //! the id index's span of it, 4 bytes, while the buckets are read back; the
-//! buckets' buffers, a budget's worth together, while they are dealt -- at
-//! most 16 MiB, where a compact by id peaked already; and
-//! the collection's live bytes on the disk, once, for as long as its record
-//! is written -- one collection at a time. It is asked only where the
-//! volume gives that beside what the compact still writes, and else the
-//! records are walked by id, as they are below [`FROM`] or where the room is
-//! not known.
+//! buckets' buffers while they are dealt, 16 MiB together at the most
+//! whatever the file ([`BUCKETS_MOST`]) -- where a compact by id peaked
+//! already; and the collection's live bytes on the disk, once, for as long
+//! as its record is written -- one collection at a time. It is asked only
+//! where the volume gives that beside what the compact still writes, and
+//! else the records are walked by id, as they are below [`FROM`], past
+//! [`BUCKETS_MOST`] buckets or where the room is not known. A scratch file
+//! that fails before a byte of the new file is written leaves them to the
+//! walk by id too, said once ([`walked_by_id`]); one that fails after fails
+//! the compact, as a write of the new file does.
 
 use super::*;
 use crate::crc::crc32c;
@@ -57,14 +60,25 @@ const BUDGET_MAX: u64 = 16 << 20;
 const BUDGET_MIN: u64 = 4 << 20;
 
 /// A bucket's buffer while the records are dealt: the budget shared out
-/// between the buckets, never under 64 KiB a write -- past 256 buckets, 4
-/// GiB live at the most budget, the buffers together grow past it, to 1/256
-/// of the live bytes, a third of the 12 bytes a document the id index holds
-/// for documents of 1 KB -- nor over 1 MiB, beyond which a write is no
-/// faster. The unit tests' a few records long, so that they flush, and
-/// write records longer than one, as a large file's do.
+/// between the buckets, never under 64 KiB a write nor over 1 MiB, beyond
+/// which a write is no faster. The unit tests' a few records long, so that
+/// they flush, and write records longer than one, as a large file's do.
 const CHUNK_MIN: usize = if cfg!(test) { 512 } else { 64 << 10 };
 const CHUNK_MAX: usize = 1 << 20;
+
+/// The most buckets the records are dealt into, so that the buffers
+/// together hold at most [`BUDGET_MAX`], 16 MiB, whatever the file: 256 of
+/// [`CHUNK_MIN`] each, or the budget shared out between fewer. Past them
+/// -- 4 GiB of live records in a collection at the most budget, 1 GiB at
+/// the least -- the records are walked by id. Where the buffers took
+/// [`CHUNK_MIN`] each past 256 buckets, the deal held 1/256 of the live
+/// bytes: 400 MiB for 100 GB of documents of 100 KB. The unit tests' a
+/// thousand, so that buckets of a record each are dealt.
+const BUCKETS_MOST: usize = if cfg!(test) {
+    1024
+} else {
+    BUDGET_MAX as usize / CHUNK_MIN
+};
 
 /// What a bucket is read back through, a read at a time: the unit tests'
 /// a few records long, so that frames cross from one read to the next.
@@ -139,6 +153,9 @@ thread_local! {
     /// The stores this thread copied in turn: through a scratch file, and in
     /// memory ([`copied`]).
     static COPIED: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    /// The stores this thread walked by id once their scratch file failed
+    /// ([`fell_back`]).
+    static FELL_BACK: Cell<u32> = const { Cell::new(0) };
     /// What a test has the next scratch file of this thread do wrong
     /// ([`break_scratch`]).
     static BROKEN: Cell<Option<Broken>> = const { Cell::new(None) };
@@ -160,14 +177,23 @@ pub fn copied() -> (u32, u32) {
     COPIED.with(|c| c.get())
 }
 
+/// How many stores this thread has walked by id once their scratch file
+/// failed before a byte of the new file was written ([`walked_by_id`]).
+#[doc(hidden)]
+pub fn fell_back() -> u32 {
+    FELL_BACK.with(|f| f.get())
+}
+
 /// What a test has the next scratch file on this thread do wrong: refuse
-/// its first write, as a full disk would, or hand back a byte other than
-/// the one written, as a failing disk would.
+/// its first write, as a full disk would, or hand back the `k`th bucket
+/// other than it was written, as a failing disk would -- its last byte, or
+/// its first frame's length the longest a varint says.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Broken {
     Write,
-    Byte,
+    Byte(usize),
+    Length(usize),
 }
 
 /// Has the next scratch file on this thread do `what` wrong ([`Broken`]).
@@ -236,24 +262,37 @@ fn head_into(head: &mut Vec<u8>, id: DocId, len: usize) {
 impl Store {
     /// [`Self::compact_live`] reading the file in turn, where `out` asks it
     /// ([`ImageOut::in_turn`]): `false`, nothing written, where the records
-    /// are to be walked by id -- not mapped, under [`FROM`], not asked, no
-    /// room on the volume, or a walk that did not meet every live record
-    /// as the index has it, which the walk by id copies as it always did.
+    /// are to be walked by id -- not mapped, under [`FROM`], not asked, past
+    /// [`BUCKETS_MOST`] buckets, no room on the volume, a scratch file that
+    /// failed before the new file was written, or a walk that did not meet
+    /// every live record as the index has it, which the walk by id copies
+    /// as it always did.
     pub(super) fn wrote_in_turn(&self, out: &mut dyn ImageOut) -> Result<bool> {
         let Some((base, _)) = &self.base else {
             return Ok(false);
         };
-        // About the live bytes: a superseded record's frame head is left
-        // out of `dead_bytes` (`live_len`), which this need not count.
-        let live = self.total_bytes.saturating_sub(self.dead_bytes) as u64;
+        // The live frames to the byte, kept as writes land: the room check
+        // and the buckets' budget need no walk of the index for it.
+        let live = self.live_bytes() as u64;
         let Some(t) = out.in_turn((**base).as_ref().len() as u64, live) else {
             return Ok(false);
         };
-        let buckets = self.buckets(t.budget);
+        let Some(buckets) = self.buckets(t.budget, BUCKETS_MOST) else {
+            return Ok(false);
+        };
+        // The sparse ids sorted once, as `IdIndex::iter` sorts them, each
+        // bucket given its run of them.
+        let mut sparse: Vec<(DocId, u32)> = self
+            .index
+            .sparse
+            .iter()
+            .map(|(&id, l)| (id, l.len))
+            .collect();
+        sparse.sort_unstable_by_key(|e| e.0);
         let done = match buckets.len() {
             0 => return Ok(false),
-            1 => self.in_memory(&buckets[0], out)?,
-            _ => self.through_scratch(&t, &buckets, out)?,
+            1 => self.in_memory(&buckets[0], &sparse, out)?,
+            _ => self.through_scratch(&t, &buckets, &sparse, out)?,
         };
         if done {
             COPIED.with(|c| {
@@ -270,8 +309,9 @@ impl Store {
     /// The live records cut into buckets of ids, each at most `cap` bytes
     /// of frames -- or one record, where it is longer -- laid out as the
     /// data record lays them: in id order, each frame where the one before
-    /// it ends ([`after`], as `live_len` counts them).
-    fn buckets(&self, cap: usize) -> Vec<Bucket> {
+    /// it ends ([`after`], as `live_len` counts them). `None` once they are
+    /// more than `most`.
+    fn buckets(&self, cap: usize, most: usize) -> Option<Vec<Bucket>> {
         let mut all = Vec::new();
         let mut b = Bucket {
             first: 0,
@@ -285,6 +325,9 @@ impl Store {
             };
             let framed = after(0, id, l.len as u64) + l.len as u64;
             if b.n > 0 && b.len + framed > cap as u64 {
+                if all.len() + 1 >= most {
+                    return None;
+                }
                 let at = b.at + b.len;
                 let next = Bucket {
                     first: id,
@@ -303,12 +346,13 @@ impl Store {
         if b.n > 0 {
             all.push(b);
         }
-        all
+        Some(all)
     }
 
     /// Where each live record of ids `first` to `end` (not included) goes
-    /// in their bucket, by id, from 0.
-    fn places(&self, first: DocId, end: DocId) -> Places {
+    /// in their bucket, by id, from 0: `sparse` every sparse id and its
+    /// length, ascending, of which the bucket's run is found by halving.
+    fn places(&self, first: DocId, end: DocId, sparse: &[(DocId, u32)]) -> Places {
         let dense = &self.index.dense;
         let slot = |id: DocId| (id.max(1) - 1).min(dense.len() as u64) as usize;
         let (lo, hi) = (slot(first), slot(end));
@@ -325,17 +369,12 @@ impl Store {
                 false => placed((lo + i) as u64 + 1, l.len),
             });
         }
-        let mut sparse: Vec<(DocId, u32)> = self
-            .index
-            .sparse
+        let from = sparse.partition_point(|e| e.0 < first);
+        let to = sparse.partition_point(|e| e.0 < end);
+        let sparse = sparse[from..to]
             .iter()
-            .filter(|(&id, _)| id >= first && id < end)
-            .map(|(&id, l)| (id, l.len))
+            .map(|&(id, len)| (id, placed(id, len)))
             .collect();
-        sparse.sort_unstable_by_key(|e| e.0);
-        for e in &mut sparse {
-            e.1 = placed(e.0, e.1);
-        }
         Places {
             first: lo as u64 + 1,
             dense: d,
@@ -347,7 +386,8 @@ impl Store {
     /// their place in the file, then the segments in turn -- its id and its
     /// payload: each frame read, and kept where the id index points at it.
     /// `false` where the walk did not meet every live record: a frame that
-    /// does not read, or a record outside the stretches and the segments.
+    /// does not read, or a record outside the stretches and the segments --
+    /// a pinned store's, which keeps no stretch.
     fn each_standing(&self, mut f: impl FnMut(DocId, &[u8]) -> Result<()>) -> Result<bool> {
         let mut met = 0usize;
         if let Some((base, stretches)) = &self.base {
@@ -392,9 +432,14 @@ impl Store {
 
     /// The live records of one bucket put at their places in memory as
     /// they are read, and written out: no scratch file.
-    fn in_memory(&self, b: &Bucket, out: &mut dyn ImageOut) -> Result<bool> {
+    fn in_memory(
+        &self,
+        b: &Bucket,
+        sparse: &[(DocId, u32)],
+        out: &mut dyn ImageOut,
+    ) -> Result<bool> {
         let mut dest = vec![0u8; b.len as usize];
-        let mut places = self.places(b.first, DocId::MAX);
+        let mut places = self.places(b.first, DocId::MAX, sparse);
         let mut astray = false;
         let mut head = Vec::with_capacity(HEAD_MAX);
         let met = self.each_standing(|id, payload| {
@@ -419,15 +464,17 @@ impl Store {
 
     /// The live records dealt into the buckets' stretches of a scratch file
     /// as they are read, then each bucket read back in turn, its records
-    /// put at their places, and written out. A write or a read of the
-    /// scratch file that fails, or a bucket that does not read back as it
-    /// was written, fails the copy, as a write of the new file does; one
-    /// that cannot be made, or finds no room on the volume, leaves the
-    /// records to the walk by id.
+    /// put at their places, and written out. A scratch file that cannot be
+    /// made or finds no room on the volume, or that fails before the first
+    /// bucket is written out -- a write or a read refused, a bucket that
+    /// does not read back as it was written -- leaves the records to the
+    /// walk by id, nothing of the new file written ([`walked_by_id`]); one
+    /// that fails after fails the copy, as a write of the new file does.
     fn through_scratch(
         &self,
         t: &InTurn,
         buckets: &[Bucket],
+        sparse: &[(DocId, u32)],
         out: &mut dyn ImageOut,
     ) -> Result<bool> {
         let total = buckets.last().map_or(0, |b| b.at + b.len);
@@ -435,6 +482,49 @@ impl Store {
             return Ok(false);
         };
         let broken = BROKEN.with(|b| b.take());
+        let sums = match self.deal(t, buckets, &mut scratch, broken) {
+            Ok(Some(sums)) => sums,
+            Ok(None) => return Ok(false),
+            Err(e) => return Ok(walked_by_id(&t.temp, &e)),
+        };
+        let most = buckets.iter().map(|b| b.len).max().unwrap_or(0);
+        let mut dest = vec![0u8; most as usize];
+        let mut read = Vec::with_capacity(READ);
+        for (k, b) in buckets.iter().enumerate() {
+            let end = buckets.get(k + 1).map_or(DocId::MAX, |n| n.first);
+            let dest = &mut dest[..b.len as usize];
+            let back = match broken {
+                Some(Broken::Byte(at)) if at == k => flip_last(&mut scratch, b),
+                Some(Broken::Length(at)) if at == k => longest_length(&mut scratch, b),
+                _ => Ok(()),
+            }
+            .and_then(|()| {
+                let places = self.places(b.first, end, sparse);
+                self.read_back(&scratch, b, places, &mut read, dest, sums[k])
+            });
+            match back {
+                Ok(()) => {}
+                // Nothing of the new file written yet.
+                Err(e) if k == 0 => return Ok(walked_by_id(&t.temp, &e)),
+                Err(e) => return Err(e),
+            }
+            scratch.let_go(b.at, b.len);
+            out.write(dest)?;
+        }
+        Ok(true)
+    }
+
+    /// The live records dealt into the buckets' stretches of `scratch`, a
+    /// buffer a bucket, summed as they go: each bucket's sum, or `None`
+    /// where a record went astray or the walk missed one, the scratch file
+    /// then left as it is.
+    fn deal(
+        &self,
+        t: &InTurn,
+        buckets: &[Bucket],
+        scratch: &mut Scratch,
+        broken: Option<Broken>,
+    ) -> Result<Option<Vec<u32>>> {
         let chunk = (t.budget / buckets.len()).clamp(CHUNK_MIN, CHUNK_MAX);
         let mut bufs: Vec<Vec<u8>> = buckets.iter().map(|_| Vec::with_capacity(chunk)).collect();
         // What each bucket has written, and the sum of it.
@@ -463,15 +553,15 @@ impl Store {
             }
             sums[k] = crc32c(crc32c(sums[k], &head), payload);
             if buf.len() + framed > chunk && !buf.is_empty() {
-                write(&mut scratch, b.at + put[k], buf)?;
+                write(scratch, b.at + put[k], buf)?;
                 put[k] += buf.len() as u64;
                 buf.clear();
             }
             match framed > chunk {
                 // Longer than a buffer: written as it is.
                 true => {
-                    write(&mut scratch, b.at + put[k], &head)?;
-                    write(&mut scratch, b.at + put[k] + head.len() as u64, payload)?;
+                    write(scratch, b.at + put[k], &head)?;
+                    write(scratch, b.at + put[k] + head.len() as u64, payload)?;
                     put[k] += framed as u64;
                 }
                 false => {
@@ -483,50 +573,99 @@ impl Store {
         })?;
         for (k, b) in buckets.iter().enumerate() {
             if !bufs[k].is_empty() {
-                write(&mut scratch, b.at + put[k], &bufs[k])?;
+                write(scratch, b.at + put[k], &bufs[k])?;
                 put[k] += bufs[k].len() as u64;
             }
         }
-        drop(bufs);
-        if !met || astray || buckets.iter().zip(&put).any(|(b, &p)| p != b.len) {
-            return Ok(false);
-        }
-        // The last byte of the second bucket, a payload's: one only its
-        // sum tells.
-        if broken == Some(Broken::Byte) {
-            let at = buckets[1].at + buckets[1].len - 1;
-            let mut byte = [0u8];
-            scratch.read_at(at, &mut byte)?;
-            scratch.write_at(at, &[!byte[0]])?;
-        }
-        let most = buckets.iter().map(|b| b.len).max().unwrap_or(0);
-        let mut dest = vec![0u8; most as usize];
-        let mut read = Vec::with_capacity(READ);
-        for (k, b) in buckets.iter().enumerate() {
-            let end = buckets.get(k + 1).map_or(DocId::MAX, |n| n.first);
-            let mut places = self.places(b.first, end);
-            let mut region = Region {
-                scratch: &scratch,
-                at: b.at,
-                end: b.at + b.len,
-                buf: read,
-                pos: 0,
-                sum: 0,
-            };
-            let dest = &mut dest[..b.len as usize];
-            for _ in 0..b.n {
-                region.frame(self, &mut places, dest)?;
-            }
-            if !region.read_whole() || region.sum != sums[k] {
-                return Err(unlike_written());
-            }
-            read = region.buf;
-            read.clear();
-            scratch.let_go(b.at, b.len);
-            out.write(dest)?;
-        }
-        Ok(true)
+        let whole = met && !astray && buckets.iter().zip(&put).all(|(b, &p)| p == b.len);
+        Ok(whole.then_some(sums))
     }
+
+    /// Bucket `b`'s stretch of `scratch` read back through `read`, each
+    /// frame put at its place in `dest`, and held to the sum it was dealt
+    /// with.
+    fn read_back(
+        &self,
+        scratch: &Scratch,
+        b: &Bucket,
+        mut places: Places,
+        read: &mut Vec<u8>,
+        dest: &mut [u8],
+        sum: u32,
+    ) -> Result<()> {
+        read.clear();
+        let mut region = Region {
+            scratch,
+            at: b.at,
+            end: b.at + b.len,
+            buf: std::mem::take(read),
+            pos: 0,
+            sum: 0,
+        };
+        let mut done = Ok(());
+        for _ in 0..b.n {
+            done = region.frame(self, &mut places, dest);
+            if done.is_err() {
+                break;
+            }
+        }
+        let whole = region.read_whole() && region.sum == sum;
+        *read = region.buf;
+        done?;
+        match whole {
+            true => Ok(()),
+            false => Err(unlike_written()),
+        }
+    }
+}
+
+/// A test's flipped byte: the last of bucket `b`, a payload's, one only
+/// its sum tells.
+fn flip_last(scratch: &mut Scratch, b: &Bucket) -> Result<()> {
+    let at = b.at + b.len - 1;
+    let mut byte = [0u8];
+    scratch.read_at(at, &mut byte)?;
+    scratch.write_at(at, &[!byte[0]])
+}
+
+/// A test's length read back: the first frame's of bucket `b`, `u64::MAX`
+/// less one, written over its own and the payload's first bytes.
+fn longest_length(scratch: &mut Scratch, b: &Bucket) -> Result<()> {
+    let mut head = [0u8; HEAD_MAX];
+    scratch.read_at(b.at, &mut head)?;
+    let mut p = 1;
+    get_uvarint(&head, &mut p)?;
+    let mut long = head[..p].to_vec();
+    put_uvarint(&mut long, u64::MAX - 1);
+    scratch.write_at(b.at, &long)
+}
+
+/// The records of a store whose scratch file failed with `e` before a byte
+/// of the new file was written, left to the walk by id: `false`, said on
+/// stderr where the words are news -- a line a scratch file at `temp` and
+/// its failure, so a disk that fails every compact says it once, and each
+/// database's once -- as a server's line is written (fennec-http's `log!`),
+/// never panicking where stderr is gone. Nothing of the database's own
+/// file was touched: the scratch file, unlinked, gives its room back as it
+/// closes, before the walk writes a record. A room the volume was asked for
+/// is a snapshot, which a node compacting several tenants at once passes
+/// for each; the first scratch write the disk then refuses ends here.
+#[cold]
+fn walked_by_id(temp: &std::path::Path, e: &Error) -> bool {
+    use std::io::Write;
+    static SAID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    FELL_BACK.with(|f| f.set(f.get() + 1));
+    let line = format!(
+        "{}: a compact's scratch file failed before its new file was written ({e}); the \
+         collection's records were copied by id instead",
+        temp.display()
+    );
+    let mut said = SAID.lock().unwrap_or_else(|p| p.into_inner());
+    if said.as_deref() != Some(line.as_str()) {
+        let _ = std::io::stderr().write_all(format!("{line}\n").as_bytes());
+        *said = Some(line);
+    }
+    false
 }
 
 /// A bucket's stretch of the scratch file read back a buffer at a time,
@@ -577,11 +716,17 @@ impl Region<'_> {
             Some(at) if op == OP_PUT => at as usize,
             _ => return Err(unlike_written()),
         };
-        let end = at + p + len;
+        // The length held to the index's before it is added to: read off a
+        // failing disk it may be any `u64`, and `at + p + len` overflowed
+        // into a panic under the lock, which fails the database
+        // (`compact_unwound`). Both under 2^32 then, the sum cannot.
         let fits = st.index.get(id).is_some_and(|l| l.len as usize == len)
-            && after(0, id, len as u64) == p as u64
-            && end <= dest.len();
+            && after(0, id, len as u64) == p as u64;
         if !fits {
+            return Err(unlike_written());
+        }
+        let end = at + p + len;
+        if end > dest.len() {
             return Err(unlike_written());
         }
         dest[at..at + p].copy_from_slice(&held[..p]);
@@ -748,10 +893,22 @@ mod tests {
         st
     }
 
-    fn temp(tag: &str) -> PathBuf {
+    /// A test's directory, removed as the test ends, failing or not.
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scratch file's name in a directory of the test's own.
+    fn temp(tag: &str) -> (Dir, PathBuf) {
         let dir = std::env::temp_dir().join(format!("fennec-in-turn-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("db.fennec.sorting")
+        let path = dir.join("db.fennec.sorting");
+        (Dir(dir), path)
     }
 
     /// The copy in turn writes the bytes the walk by id writes, through a
@@ -765,7 +922,7 @@ mod tests {
         let mut by_id = Vec::new();
         st.write_live(&mut by_id).unwrap();
         assert_eq!(by_id.len(), st.live_len());
-        let path = temp("same");
+        let (_dir, path) = temp("same");
         let before = copied();
         for budget in [1, 700, 4_000, 20_000, 1 << 20] {
             let mut out = Asking {
@@ -779,27 +936,203 @@ mod tests {
         }
         let (s, m) = copied();
         assert_eq!((s - before.0, m - before.1), (4, 1));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// A scratch file that refuses a write fails the copy, and one that
-    /// reads back a byte other than it was given fails it too, naming it;
-    /// neither leaves its name.
+    /// A scratch file that refuses a write, or reads the first bucket back
+    /// otherwise than it was written -- a byte, or a length no record has,
+    /// which summed before it is held to the index's overflows -- leaves
+    /// the records to the walk by id, nothing of the new file written; one
+    /// that reads a later bucket back so fails the copy, as a write of the
+    /// new file does. None leaves its name.
     #[test]
-    fn a_scratch_file_that_fails_fails_the_copy() {
+    fn a_scratch_file_that_fails_before_the_new_file_leaves_the_walk_by_id() {
         let st = scattered();
-        let path = temp("broken");
-        for what in [Broken::Write, Broken::Byte] {
+        let (_dir, path) = temp("broken");
+        let before = fell_back();
+        let broken = [
+            Broken::Write,
+            Broken::Byte(0),
+            Broken::Length(0),
+            Broken::Byte(1),
+            Broken::Length(1),
+        ];
+        for what in broken {
             break_scratch(Some(what));
             let mut out = Asking {
                 bytes: Vec::new(),
                 temp: path.clone(),
                 budget: 4_000,
             };
-            let e = st.wrote_in_turn(&mut out).unwrap_err();
-            assert!(matches!(e, Error::Io(_)), "{what:?}: {e}");
+            match what {
+                Broken::Byte(1) | Broken::Length(1) => {
+                    let e = st.wrote_in_turn(&mut out).unwrap_err();
+                    assert!(matches!(e, Error::Io(_)), "{what:?}: {e}");
+                    assert!(!out.bytes.is_empty(), "{what:?}: the first bucket written");
+                }
+                _ => {
+                    assert!(!st.wrote_in_turn(&mut out).unwrap(), "{what:?}");
+                    assert!(out.bytes.is_empty(), "{what:?}: written");
+                }
+            }
             assert!(!path.exists());
         }
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert_eq!(fell_back() - before, 3);
+    }
+
+    /// `st`'s records laid in a mapped file, as an open that maps it reads
+    /// them: one stretch, after 4 bytes of another record.
+    fn mapped(st: &Store) -> Store {
+        let image = st.image();
+        let base: Base = std::sync::Arc::new([vec![7u8; 4], image.clone()].concat());
+        let mut m = Store::new();
+        m.replay_mapped(&base, 4, image.len() as u64, &mut |_| {})
+            .unwrap();
+        m
+    }
+
+    /// The copy in turn of `st` in buckets of `budget` bytes, held to the
+    /// walk by id byte for byte.
+    fn same_in_turn(st: &Store, budget: usize, path: &Path) {
+        let mut by_id = Vec::new();
+        st.write_live(&mut by_id).unwrap();
+        let mut out = Asking {
+            bytes: Vec::new(),
+            temp: path.to_path_buf(),
+            budget,
+        };
+        assert!(st.wrote_in_turn(&mut out).unwrap(), "{budget}");
+        assert!(out.bytes == by_id, "budget {budget}");
+    }
+
+    /// Sparse ids -- each more than `MAX_DENSE_GAP` past the one before, so
+    /// none joins the dense array -- spread over several buckets, written
+    /// out of their order and again, each bucket given its run of them.
+    #[test]
+    fn sparse_ids_over_several_buckets_go_to_their_places() {
+        let mut st = Store::new();
+        for id in 1..=40u64 {
+            st.append(OP_PUT, id, &vec![b'd'; 30 + id as usize]);
+        }
+        let far = |k: u64| 100_000 + k * 5_003;
+        for k in (0..200u64).rev() {
+            st.append(
+                OP_PUT,
+                far(k),
+                &vec![b'a' + (k % 26) as u8; 20 + (k * 7 % 90) as usize],
+            );
+        }
+        for k in (0..200u64).step_by(3) {
+            st.append(OP_PUT, far(k), &[b'z'; 40]);
+        }
+        for k in (1..200u64).step_by(17) {
+            st.append(OP_DEL, far(k), &[]);
+        }
+        let st = mapped(&st);
+        assert!(st.index.sparse.len() > 150 && st.index.dense.len() == 40);
+        let (_dir, path) = temp("sparse");
+        for budget in [1, 900, 3_000] {
+            let buckets = st.buckets(budget, BUCKETS_MOST).unwrap();
+            let sparse = buckets.iter().filter(|b| b.first > 40).count();
+            assert!(
+                sparse >= 3,
+                "budget {budget}: {sparse} buckets of sparse ids"
+            );
+            same_in_turn(&st, budget, &path);
+        }
+        assert!(!path.exists());
+    }
+
+    /// Past [`BUCKETS_MOST`] buckets the records are walked by id, nothing
+    /// written and no scratch file made: the buffers would hold more than
+    /// their bound.
+    #[test]
+    fn past_the_most_buckets_the_records_are_walked_by_id() {
+        let mut st = Store::new();
+        for id in 1..=(BUCKETS_MOST as u64 + 10) {
+            st.append(OP_PUT, id, b"a record");
+        }
+        let st = mapped(&st);
+        assert!(st.buckets(1, BUCKETS_MOST).is_none());
+        assert_eq!(
+            st.buckets(1, BUCKETS_MOST + 10).unwrap().len(),
+            BUCKETS_MOST + 10
+        );
+        // Two records of 11 or 12 framed bytes a bucket.
+        assert_eq!(
+            st.buckets(24, BUCKETS_MOST).unwrap().len(),
+            BUCKETS_MOST / 2 + 5
+        );
+        let (_dir, path) = temp("most");
+        let before = (copied(), fell_back());
+        let mut out = Asking {
+            bytes: Vec::new(),
+            temp: path.clone(),
+            budget: 1,
+        };
+        assert!(!st.wrote_in_turn(&mut out).unwrap());
+        assert!(out.bytes.is_empty());
+        assert_eq!((copied(), fell_back()), before);
+        same_in_turn(&st, 24, &path);
+    }
+
+    /// A walk that misses a live record -- a pinned store's, which keeps no
+    /// stretch of the mapped file -- leaves the records to the walk by id,
+    /// nothing written, in memory or through a scratch file.
+    #[test]
+    fn a_walk_that_misses_a_record_leaves_the_walk_by_id() {
+        let st = scattered().pinned();
+        assert!(st.base.as_ref().unwrap().1.is_empty());
+        let (_dir, path) = temp("pinned");
+        let before = copied();
+        for budget in [4_000, 1 << 20] {
+            let mut out = Asking {
+                bytes: Vec::new(),
+                temp: path.clone(),
+                budget,
+            };
+            assert!(!st.wrote_in_turn(&mut out).unwrap(), "{budget}");
+            assert!(out.bytes.is_empty(), "{budget}");
+        }
+        assert_eq!(copied(), before);
+        assert!(!path.exists());
+    }
+
+    /// Whatever stands at the scratch file's name -- a database a user
+    /// named so, its lock beside it, or a link -- is left as it is, and the
+    /// records are walked by id.
+    #[cfg(unix)]
+    #[test]
+    fn what_stands_at_the_scratch_files_name_is_left_as_it_is() {
+        let st = scattered();
+        let (_dir, path) = temp("standing");
+        let theirs = path.with_extension("theirs");
+        std::fs::write(&path, b"a database of its own").unwrap();
+        std::fs::write(crate::fs::beside(&path, "lock"), b"").unwrap();
+        std::fs::write(&theirs, b"what a link leads to").unwrap();
+        let before = copied();
+        for standing in ["file", "link"] {
+            if standing == "link" {
+                assert_eq!(std::fs::read(&path).unwrap(), b"a database of its own");
+                std::fs::remove_file(&path).unwrap();
+                std::os::unix::fs::symlink(&theirs, &path).unwrap();
+            }
+            let mut out = Asking {
+                bytes: Vec::new(),
+                temp: path.clone(),
+                budget: 4_000,
+            };
+            assert!(!st.wrote_in_turn(&mut out).unwrap(), "{standing}");
+            assert!(out.bytes.is_empty(), "{standing}");
+            assert!(
+                std::fs::symlink_metadata(&path).is_ok(),
+                "{standing}: removed"
+            );
+        }
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"what a link leads to");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(copied(), before);
     }
 }

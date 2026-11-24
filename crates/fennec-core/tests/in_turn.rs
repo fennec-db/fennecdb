@@ -4,14 +4,15 @@
 //! byte: under the lock and beside the database, through a scratch file and
 //! in memory, over records an image, a spilled block, a tail the stores took
 //! in from the file and writes still in memory hold. A scratch file that
-//! fails fails the compact as a write of its new file does, and none leaves
-//! a name beside the database.
+//! fails before the new file is written leaves the records to the walk by
+//! id, and after fails the compact as a write of its new file does; none
+//! leaves a name beside the database.
 
 #![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::fs::{beside, open};
 use fennec_core::prelude::*;
-use fennec_core::store::{assume_in_turn, break_scratch, copied, Broken};
+use fennec_core::store::{assume_in_turn, break_scratch, copied, fell_back, Broken};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -29,14 +30,29 @@ fn answer(db: &Database, sql: &str) -> ResultSet {
         .clone()
 }
 
-fn tmp(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fennecdb-in-turn-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{tag}.fennec"));
-    for side in ["", ".sorting", ".beside", ".compacting", ".lock"] {
-        let _ = std::fs::remove_file(format!("{}{side}", path.display()));
+/// A test's directory, `fennecdb-in-turn-<pid>-<test>`, removed as the
+/// test ends, failing or not: each test its own, as the tests of the
+/// binary run at once.
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(test: &str) -> Dir {
+        let dir =
+            std::env::temp_dir().join(format!("fennecdb-in-turn-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
     }
-    path
+
+    fn file(&self, tag: &str) -> PathBuf {
+        self.0.join(format!("{tag}.fennec"))
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 const ALL: [&str; 2] = ["get t order id", "get u order id"];
@@ -129,11 +145,12 @@ fn nothing_beside(path: &Path) {
 /// opened again.
 #[test]
 fn a_compact_in_turn_writes_the_file_a_compact_by_id_writes() {
+    let dir = Dir::new("same");
     for beside_it in [false, true] {
         let mut files = Vec::new();
         let mut before = None;
         for budget in [None, Some(16 << 10)] {
-            let path = tmp(&format!("same-{beside_it}-{}", budget.is_some()));
+            let path = dir.file(&format!("same-{beside_it}-{}", budget.is_some()));
             let db = scattered(&path);
             let answers: Vec<ResultSet> = ALL.iter().map(|q| answer(&db, q)).collect();
             assert_eq!(before.get_or_insert_with(|| answers.clone()), &answers);
@@ -159,7 +176,6 @@ fn a_compact_in_turn_writes_the_file_a_compact_by_id_writes() {
                 assert_eq!(&answer(&db, q), a, "{q}, opened again");
             }
             drop(db);
-            let _ = std::fs::remove_file(&path);
         }
         assert!(
             files[0] == files[1],
@@ -168,55 +184,101 @@ fn a_compact_in_turn_writes_the_file_a_compact_by_id_writes() {
     }
 }
 
-/// A scratch file that refuses a write, or reads back otherwise than it was
-/// written, fails the compact as a write of its new file does: beside the
-/// database the compact alone, which leaves the file as it was and the
-/// database writing; under the lock the database too, as any failed rewrite
-/// there does, its writes refused until it is opened again. Either way the
-/// file opens to what it held, and nothing is left beside it.
+/// A scratch file that refuses a write, or reads its first bucket back
+/// otherwise than it was written -- before a byte of the new file is
+/// written -- leaves the records to the walk by id: the compact writes the
+/// file a compact by id writes, under the lock and beside the database,
+/// and nothing is left beside it.
 #[test]
-fn a_scratch_file_that_fails_fails_the_compact_as_its_write_would() {
-    for broken in [Broken::Write, Broken::Byte] {
-        for beside_it in [false, true] {
+fn a_scratch_file_that_fails_before_the_new_file_leaves_the_walk_by_id() {
+    let dir = Dir::new("before");
+    for beside_it in [false, true] {
+        let by_id = {
+            let path = dir.file(&format!("by-id-{beside_it}"));
+            assume_in_turn(Some(None));
+            let (db, r) = compact(scattered(&path), beside_it);
+            assume_in_turn(None);
+            r.unwrap();
+            drop(db);
+            std::fs::read(&path).unwrap()
+        };
+        for broken in [Broken::Write, Broken::Byte(0)] {
             let how = format!("{broken:?}, beside {beside_it}");
-            let path = tmp(&format!("broken-{broken:?}-{beside_it}"));
+            let path = dir.file(&format!("before-{broken:?}-{beside_it}"));
             let db = scattered(&path);
             let answers: Vec<ResultSet> = ALL.iter().map(|q| answer(&db, q)).collect();
-            let was = std::fs::read(&path).unwrap();
+            let (was, fell) = (copied(), fell_back());
             assume_in_turn(Some(Some(16 << 10)));
             break_scratch(Some(broken));
-            let (mut db, r) = compact(db, beside_it);
+            let (db, r) = compact(db, beside_it);
             break_scratch(None);
             assume_in_turn(None);
-            let e = r.expect_err(&how);
-            assert!(matches!(e, Error::Io(_)), "{how}: {e}");
+            r.unwrap_or_else(|e| panic!("{how}: {e}"));
+            assert!(db.failure().is_none(), "{how}");
+            // `u` in memory still; `t` walked by id.
+            assert_eq!(copied(), (was.0, was.1 + 1), "{how}");
+            assert_eq!(fell_back(), fell + 1, "{how}");
+            for (q, a) in ALL.iter().zip(&answers) {
+                assert_eq!(&answer(&db, q), a, "{how}: {q}");
+            }
+            drop(db);
             nothing_beside(&path);
             assert!(
-                std::fs::read(&path).unwrap() == was,
-                "{how}: the file changed"
+                std::fs::read(&path).unwrap() == by_id,
+                "{how}: not the file a compact by id writes"
             );
-            let put = fennec_ql::parse_one("put u {k: 999}").unwrap();
-            match beside_it {
-                true => {
-                    assert!(db.failure().is_none(), "{how}");
-                    db.execute(&put).unwrap();
-                }
-                false => {
-                    assert!(db.failure().is_some(), "{how}");
-                    assert!(matches!(db.execute(&put), Err(Error::Io(_))), "{how}");
-                }
+        }
+    }
+}
+
+/// A scratch file that reads a bucket back otherwise than it was written
+/// once the new file is being written fails the compact as a write of its
+/// new file does: beside the database the compact alone, which leaves the
+/// file as it was and the database writing; under the lock the database
+/// too, as any failed rewrite there does, its writes refused until it is
+/// opened again. Either way the file opens to what it held, and nothing is
+/// left beside it.
+#[test]
+fn a_scratch_file_that_fails_after_fails_the_compact_as_its_write_would() {
+    let dir = Dir::new("after");
+    let broken = Broken::Byte(1);
+    for beside_it in [false, true] {
+        let how = format!("{broken:?}, beside {beside_it}");
+        let path = dir.file(&format!("after-{beside_it}"));
+        let db = scattered(&path);
+        let answers: Vec<ResultSet> = ALL.iter().map(|q| answer(&db, q)).collect();
+        let was = std::fs::read(&path).unwrap();
+        assume_in_turn(Some(Some(16 << 10)));
+        break_scratch(Some(broken));
+        let (mut db, r) = compact(db, beside_it);
+        break_scratch(None);
+        assume_in_turn(None);
+        let e = r.expect_err(&how);
+        assert!(matches!(e, Error::Io(_)), "{how}: {e}");
+        nothing_beside(&path);
+        assert!(
+            std::fs::read(&path).unwrap() == was,
+            "{how}: the file changed"
+        );
+        let put = fennec_ql::parse_one("put u {k: 999}").unwrap();
+        match beside_it {
+            true => {
+                assert!(db.failure().is_none(), "{how}");
+                db.execute(&put).unwrap();
             }
-            drop(db);
-            let db = open(&path).unwrap();
-            for (q, a) in ALL.iter().zip(&answers) {
-                let got = answer(&db, q);
-                match (beside_it, *q) {
-                    (true, "get u order id") => assert_eq!(got.rows.len(), a.rows.len() + 1),
-                    _ => assert_eq!(&got, a, "{how}: {q}"),
-                }
+            false => {
+                assert!(db.failure().is_some(), "{how}");
+                assert!(matches!(db.execute(&put), Err(Error::Io(_))), "{how}");
             }
-            drop(db);
-            let _ = std::fs::remove_file(&path);
+        }
+        drop(db);
+        let db = open(&path).unwrap();
+        for (q, a) in ALL.iter().zip(&answers) {
+            let got = answer(&db, q);
+            match (beside_it, *q) {
+                (true, "get u order id") => assert_eq!(got.rows.len(), a.rows.len() + 1),
+                _ => assert_eq!(&got, a, "{how}: {q}"),
+            }
         }
     }
 }

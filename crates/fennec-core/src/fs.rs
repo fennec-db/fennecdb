@@ -302,7 +302,8 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// the shell's `.save` over the file (fennec-cli's `save`), and the scratch
 /// file a compact past the page cache sorts a collection's records through
 /// ([`Scratch`]: on Windows, as large as the collection's live records,
-/// where a power cut stops it). Removed by the
+/// where a power cut stops it, and empty where a kill falls between a
+/// Unix's open of it and its unlink). Removed by the
 /// open that writes the file ([`FileSink`]'s) and by a node as it starts,
 /// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
 /// that only looks, nor where a lock file stands beside the side file
@@ -1391,7 +1392,6 @@ impl Sink for FileSink {
             let mut out = FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, create_private(&tmp)?),
                 at: 0,
-                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
                 db: Some(&self.path),
             };
             image(&mut out)?;
@@ -2130,15 +2130,16 @@ impl SideFile {
 
 /// The scratch file a compact past the page cache deals a collection's live
 /// records into as it reads the old file in turn, and reads back a bucket
-/// at a time (`store::in_turn`). Made beside the database, and gone from its
-/// name at once: unlinked on a Unix, and on Windows, where an open file
-/// keeps its name, opened to be deleted as its last handle closes
-/// (`FILE_FLAG_DELETE_ON_CLOSE`), the process's end included -- so a crash
-/// leaves nothing beside the file, but on Windows a power cut, or a kill
-/// between a Unix's open and its unlink, whose `.sorting` the writing open
-/// removes ([`LEFT_BESIDE`]). Written and read past the page cache as a
-/// side file past it is ([`SideFile::past_cache`]): its pages would push out
-/// the old file's, which every read needs until the swap.
+/// at a time (`store::in_turn`). Made beside the database by its open
+/// alone, and gone from its name at once: unlinked on a Unix, and on
+/// Windows, where an open file keeps its name, opened to be deleted as its
+/// last handle closes (`FILE_FLAG_DELETE_ON_CLOSE`), the process's end
+/// included -- so a crash leaves nothing beside the file, but on Windows a
+/// power cut, and a kill between a Unix's open and its unlink an empty
+/// one, whose `.sorting` the writing open removes ([`LEFT_BESIDE`]).
+/// Written and read past the page cache as a side file past it is
+/// ([`SideFile::past_cache`]): its pages would push out the old file's,
+/// which every read needs until the swap.
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub struct Scratch {
     file: File,
@@ -2150,18 +2151,27 @@ pub struct Scratch {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 impl Scratch {
     /// Made at `path` where its volume gives this process `need` bytes:
-    /// `None`, and nothing at the name, where it cannot be made, the volume
-    /// cannot be asked or has less room -- or, on Windows, another compact's
-    /// is there, held open.
+    /// `None`, the records walked by id, where it cannot be made, the volume
+    /// cannot be asked or has less room. Made by this open alone (`O_CREAT
+    /// | O_EXCL`, `create_new`), following no link (`O_NOFOLLOW` on a
+    /// Unix): whatever stands at the name -- a database a user named so,
+    /// whose lock `fs::remove_left` keeps it by, held or not, a link, on
+    /// Windows another compact's held open -- is left as it is, and so is
+    /// the name but where the unlink right after the open fails, an empty
+    /// file then that the writing open removes. `create_private`, which a
+    /// side file written whole is made by, removes what stands there first.
     pub fn create(path: &Path, need: u64) -> Option<Scratch> {
         #[cfg(unix)]
         let file = {
-            let file = create_private(path).ok()?;
+            let file = private_beside(OpenOptions::new().read(true).write(true).create_new(true))
+                .open(path)
+                .ok()?;
             std::fs::remove_file(path).ok()?;
             file
         };
         // Shared with no other open, as the `tempfile` crate makes its
-        // unnamed files there: nothing else has a use for it.
+        // unnamed files there: nothing else has a use for it. `CREATE_NEW`
+        // fails on a link at the name as on a file.
         #[cfg(windows)]
         let file = {
             use std::os::windows::fs::OpenOptionsExt;

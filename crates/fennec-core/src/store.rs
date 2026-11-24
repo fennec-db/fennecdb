@@ -24,7 +24,7 @@ use std::sync::Mutex;
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 mod in_turn;
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
-pub use in_turn::{assume as assume_in_turn, break_scratch, copied, Broken, InTurn};
+pub use in_turn::{assume as assume_in_turn, break_scratch, copied, fell_back, Broken, InTurn};
 
 pub const OP_PUT: u8 = 1;
 pub const OP_DEL: u8 = 2;
