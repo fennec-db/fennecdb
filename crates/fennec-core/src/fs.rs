@@ -293,6 +293,21 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The side files whatever writes a database under `<file>.lock` writes
+/// beside it ([`beside`]) that a crash leaves there, each as large as the
+/// database and never read again: a replica's image as it arrives
+/// (`Sink::image_side`), a rewrite under the lock (`rewrite_with`: a
+/// checkpoint, a compact the sink writes whole), a rewrite beside the
+/// database (`Sink::side`: `compact`, `create index`, the auto-compact) and
+/// the shell's `.save` over the file (fennec-cli's `save`). Removed by the
+/// open that writes the file ([`FileSink`]'s) and by a node as it starts,
+/// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
+/// that only looks. A crash in a compact beside a 1.4 GB database left its
+/// `.beside` until the next compact, which the auto-compact starts only
+/// once half the file is dead: the disk the database took, doubled
+/// meanwhile (the soak harness, P6).
+pub const LEFT_BESIDE: [&str; 4] = ["taking", "compacting", "beside", "saving"];
+
 /// `options` made to make a file its owner's alone: mode 0600 on a Unix,
 /// whatever the umask, set by the `open` that makes it -- never a `chmod`
 /// after, which leaves the file a moment in the umask's mode, long enough
@@ -906,14 +921,27 @@ impl FileSink {
                 .truncate(false),
         )
         .open(&path)?;
-        // An image a replica's follower was taking beside the file when its
-        // process ended (`Sink::image_side`), as large as the database and
-        // never read: removed by whoever opens the file to write it, its
-        // owner under `<file>.lock` -- a primary's, a copy's, an app's, the
-        // shell's -- never by a tool that only looks. Left to the follower
-        // as it started, a copy started again as a primary kept it for good.
+        // What a process writing the file left beside it as it ended
+        // ([`LEFT_BESIDE`]): an image its follower was taking, a rewrite's
+        // `.compacting`, a compact's or an index's `.beside`, a `.save`'s
+        // `.saving`, each as large as the database and never read. Removed
+        // by whoever opens the file to write it, its owner under
+        // `<file>.lock` -- a primary's, a copy's, an app's, the shell's --
+        // never by a tool that only looks (`open_read_only`). None is being
+        // written as this open runs: the lock, which a `.save` takes too,
+        // refuses a second holder of the file in this process as in another,
+        // and this database rewrites nothing before it is open.
+        // `unlink` follows no link: one put at a name goes, not the file it
+        // names. A directory there stays (`remove_file` removes none), and
+        // the next rewrite of that name fails on it, as before: no file of
+        // ours. Left to the follower as it started, a copy started again as
+        // a primary kept its `.taking` for good; left to the next compact, a
+        // crash in one doubled the disk the database took until a compact
+        // ran again.
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::fs::remove_file(beside(&path, "taking"));
+        for side in LEFT_BESIDE {
+            let _ = std::fs::remove_file(beside(&path, side));
+        }
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]

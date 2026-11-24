@@ -270,16 +270,26 @@ fn claimed(name: &str, by: &str) -> Refused {
     )
 }
 
-/// What an install or a copy's image left beside a tenant's file as the
-/// node's last process ended in the middle of it -- `<t>.fennec.importing`
-/// ([`Tenants::import_from`]), `<t>.fennec.taking` (a follower's, which the
-/// tenant's open removes too) -- each as large as the tenant and never
-/// read: removed as the node starts, each under the tenant's lock taken
-/// without waiting, so one another process holds the lock of -- its own
-/// install under way, a shell's open -- stays. Before, a crash's
-/// `.importing` stayed until an install of the name came again. A tenant
-/// whose file is a link had both written beside the file the link leads
-/// to (`fs::resolved`), as its open writes that one and its lock is taken
+/// The side files [`sweep_left`] looks for beside a tenant's file.
+const SWEPT: [&str; 5] = {
+    let [taking, compacting, beside, saving] = fennec_core::fs::LEFT_BESIDE;
+    ["importing", taking, compacting, beside, saving]
+};
+
+/// What an install, a copy's image or a rewrite left beside a tenant's
+/// file as the node's last process ended in the middle of it --
+/// `<t>.fennec.importing` ([`Tenants::import_from`]), and what the
+/// tenant's open removes too ([`fennec_core::fs::LEFT_BESIDE`]): a
+/// follower's `.taking`, a checkpoint's or a compact's `.compacting`, a
+/// compact's or an index's `.beside`, a shell's `.saving` -- each as large
+/// as the tenant and never read: removed as the node starts, each under
+/// the tenant's lock taken without waiting, so one another process holds
+/// the lock of -- its own install under way, a shell's open -- stays, and
+/// one beside a tenant no request opens again goes all the same. Before, a
+/// crash's `.importing` stayed until an install of the name came again, a
+/// compact's `.beside` until the tenant's next compact. A tenant whose file
+/// is a link had them written beside the file the link leads to
+/// (`fs::resolved`), as its open writes that one and its lock is taken
 /// there: looked for there, under the same lock. Looked for in the
 /// directory alone, as until the image review's second round, they stayed
 /// beside a linked tenant's file for good.
@@ -298,7 +308,7 @@ fn sweep_left(dir: &Path) {
                 let file = fennec_core::fs::resolved(&linked);
                 if file != linked {
                     if let Ok(_held) = fennec_abi::lock::hold(&linked) {
-                        for side in ["importing", "taking"] {
+                        for side in SWEPT {
                             let _ = std::fs::remove_file(fennec_core::fs::beside(&file, side));
                         }
                     }
@@ -306,9 +316,9 @@ fn sweep_left(dir: &Path) {
             }
             continue;
         }
-        let Some(file) = name
-            .strip_suffix(".importing")
-            .or_else(|| name.strip_suffix(".taking"))
+        let Some(file) = SWEPT
+            .iter()
+            .find_map(|side| name.strip_suffix(side).and_then(|n| n.strip_suffix('.')))
         else {
             continue;
         };

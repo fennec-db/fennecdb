@@ -388,12 +388,37 @@ not map, and renamed it in). A replica's image is held to its name first
 in `Database::adopt_side` too, so that one put there is refused before the
 sink is asked, the copy as it was and taking writes; refused by the sink,
 as a compact's is, the database fails. A side file a crash left -- a
-replica's `.taking`, an install's `.importing` -- is removed by its owner
-alone: the open that writes the database (`FileSink::create`), and a node
-as it starts, under each tenant's lock taken without waiting
-(`tenants::sweep_left`); never a tool that only looks, nor one whose
-tenant's lock another process holds
-([replication.md](replication.md#an-image-taken-as-it-arrives)).
+replica's `.taking`, a checkpoint's or a compact's `.compacting`, a
+compact's or an index's `.beside`, the shell's `.saving` of a `.save` over
+the file (`fs::LEFT_BESIDE`), an install's `.importing` -- is removed by
+its owner alone: the open that writes the database (`FileSink::create`,
+all but `.importing`), and a node as it starts, under each tenant's lock
+taken without waiting (`tenants::sweep_left`, all five), so a tenant no
+request opens again keeps none; never a tool that only looks
+(`open_read_only`: `--read-only`, `fennec types`), nor one whose tenant's
+lock another process holds
+([replication.md](replication.md#an-image-taken-as-it-arrives)). Nothing
+of this process can be writing one as the open runs: `<file>.lock`, which
+a `.save` takes too, refuses a second holder of the file in a process as in
+two, and a database rewrites nothing before its open returns. The removal
+is an `unlink`, which follows no link: one put at the name goes, the file
+it names as it was; a directory there stays, and the next rewrite of that
+name fails on it as it did before. Until the P6 soak's second run, a
+compact's `.beside`, a rewrite's `.compacting` and a `.save`'s `.saving`
+stayed until the next writer of the name made it again -- every release,
+`.compacting` from 0.1.0, `.beside` from 0.1.5 and `.saving` in 0.2.0 --
+and the soak, killed during a compaction, kept a 1.4 GB `.beside` beside
+its database through minutes 91 to 102, no compact running: a crash in a
+compact doubles the disk a database takes for as long as no compact runs,
+and the auto-compact waits for half the file to be dead. fennec-core's
+`tests/side_files.rs` kills a compact beside the database once its side
+file is made (`compacts_until_killed`, a child process ending with no
+destructor run) and holds the file left until the open that writes, past
+a read-only open; puts every name at its place before a mapped, an
+in-memory and a server's open; and puts a link and a directory at each,
+the link removed and its file kept, the directory kept and the database
+opened. fennec-http's two `sweep_left` tests put `.compacting`, `.beside`
+and `.saving` beside a tenant's file and a linked one's.
 The rename itself goes by the name, so `swap_in` first holds the name to the
 handle's file (`still_named`, its device and inode against an `lstat`; on
 Windows the volume's serial number and the file's index against the name
@@ -529,7 +554,14 @@ modes differ; `swap_in` takes the writer's handle where it opened
 `.compacting` by name (one `open` fewer), a `dup` of `.beside`'s and
 `.taking`'s where it opened them again with `O_NOFOLLOW`, and
 `still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
-backup's and an unseal's rename. The image a
+backup's and an unseal's rename. The open that writes a file removes four
+names beside it where it removed one: three more `unlink`s, each failing
+where nothing was left, and their names' allocations -- the perf gate's
+`file-open`, an open of 100 000 rows, asked the allocator 200 123 times
+for 3 779 720 bytes against 200 114 and 3 779 252 with `.taking` alone
+(natively, three runs a side alike), +9 calls and +468 bytes, 0.005% and
+0.012%; its time, taken at a load of 37-40 from others' work, was
+discarded. The image a
 restore or a consolidating round of an archive with no key starts from
 (never a request) is copied by `copy_file_range` on Linux, as
 `fs::copy` copied it: std's `io::copy` from a `File` into a
