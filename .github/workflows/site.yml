@@ -60,8 +60,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-site-cargo-
+          key: v2-site-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-site-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # build.py minifies the JS and CSS through esbuild when it finds it on
       # PATH and ships the readable source when it does not, so this step is

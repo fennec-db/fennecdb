@@ -43,15 +43,22 @@ fn reference(table: &std::collections::HashMap<u32, String>, s: &str, f: CaseFol
     out
 }
 
-/// The capitals the toolchain's Unicode (17.0) assigned after the table's
+/// The capitals the toolchain's Unicode (18.0) assigned after the table's
 /// (16.0), their small letters with them, which the table leaves alone as
-/// unassigned: three Latin letters and Beria Erfe's. A toolchain on a
-/// Unicode past 17 fails here, naming the code point to look up.
-const NEWER: [(u32, u32); 4] = [
+/// unassigned: 17.0's three Latin letters and Beria Erfe's; 18.0's four
+/// Latin capitals, the Latin Extended-G capitals and the long s ligature
+/// folding to `ss`, each as 18.0's CaseFolding.txt folds it. A toolchain
+/// on a Unicode past 18 fails here, naming the code point to look up.
+const NEWER: [(u32, u32); 9] = [
     (0xA7CE, 0xA7CE),
     (0xA7D2, 0xA7D2),
     (0xA7D4, 0xA7D4),
+    (0xA7DD, 0xA7DD),
+    (0xA7E2, 0xA7E2),
+    (0xAB6C, 0xAB6D),
     (0x16EA0, 0x16EB8),
+    (0x1DF40, 0x1DF7E),
+    (0x1DF95, 0x1DF95),
 ];
 
 #[test]

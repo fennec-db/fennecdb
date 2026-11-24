@@ -8,11 +8,16 @@ The install channels', the toolchain's and the workflows' invariants, for `tools
 
 **[The compiler CI tests with is the one that ships.](../docs/design/crates.md#toolchain)**
 `rust-toolchain.toml` names an exact release, never `stable`; every rust
-image a Dockerfile or script names is that release by digest, the file
-kept in the build (`tools/toolchain_check.py`, the fmt job), and
-`release.yml` stops where a binary's `rustc -V` differs from it or the
-image's. A bump is a pull request of its own carrying `make wasm-sizes`,
-the size report, `make instr-compare` and `make float-test`.
+image a Dockerfile or script names is that release by digest, and every
+toolchain a script names to rustup that release or a nightly pinned to a
+date, the file kept in the build (`tools/toolchain_check.py`, the fmt
+job), and `release.yml` stops where a binary's `rustc -V` differs from it
+or the image's. Each stable release is taken, a pull request of its own
+-- none in the two weeks before a tag -- carrying `make wasm-sizes`, the
+size report, `make instr-compare` and `make float-test`. One moving
+`char::UNICODE_VERSION` fails `case::tests::the_unicode_version_is_the_one_the_answers_are_of`,
+owes what its message lists and ships in a minor release, never a patch
+([compatibility.md](../docs/design/compatibility.md#unicode)).
 
 ### Integrations and deploy
 

@@ -83,6 +83,12 @@ path = "tests/refused_counts.rs"
 name = "tls_failures"
 path = "tests/tls_failures.rs"
 
+# Apart: the one shutdown (`conn::end_all`) is the process's own, never
+# undone, and would end the other tests' connections.
+[[test]]
+name = "tls_ending"
+path = "tests/tls_ending.rs"
+
 # Apart: the scheduler's counts and the statements' shapes are the
 # process's own.
 [[test]]

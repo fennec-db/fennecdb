@@ -114,6 +114,16 @@ says to review the crate and write the list again. Not `cargo deny`: a
 dependency of its own, for the one question asked. A change that would
 take another dependency anywhere argues its case first, as this one did.
 
+**A week's cooldown.** `.cargo/config.toml` sets `[registry]
+global-min-publish-age = "7 days"` (stable since Cargo 1.100.0): a `cargo
+update` takes no release published within the week, the newest old enough
+instead -- under it the dry run held `zeroize` at 1.9.1 where 1.9.2 was 4
+days old -- since a compromised release of a crate is usually found and
+pulled within days, and these crates come in only by an update. It bounds
+resolution alone: every version Cargo.lock holds builds as it is, a lock of
+versions younger than the bound included, and `deps_check.py` reads the
+same tree.
+
 **Build scripts.** Three crates of that tree run one: ring's compiles its
 C and assembly, libc's and rustls's probe the compiler.
 `tools/image-cargo.sh`, which builds the images' binaries and holds each
@@ -931,8 +941,14 @@ the file rustup added the wasm32 target at every run.
 is X.Y.Z -- not `stable`, `beta`, a nightly, nor X.Y, which follows its
 newest patch; every rust image a Dockerfile or a script names (a shell
 script, a Makefile, a workflow, a Python script, outside comments) is
-`rust:X.Y.Z-...@sha256:...` of that release; no Dockerfile removes the file
-or sets `RUSTUP_TOOLCHAIN`; every FROM of the two images names a digest,
+`rust:X.Y.Z-...@sha256:...` of that release; every toolchain a script
+names to rustup -- `RUSTUP_TOOLCHAIN` in a workflow's env or before a
+command, `rustup toolchain install`, `rustup install`, `rustup default` -- is
+that release or a nightly pinned to a date, each other one named by file and
+line (perf-holdout.yml names its release three times, and the bump to
+1.100.0 first left them at 1.99.1, nothing holding them; a variable, such as
+the perf gate's base toolchain, is the script's to answer for); no
+Dockerfile removes the file or sets `RUSTUP_TOOLCHAIN`; every FROM of the two images names a digest,
 but `scratch` and a stage of the file's own. `release.yml`'s `binaries` job
 holds each entry's `rustc -V` to the file's release and, on Linux, to the
 `rustc -V` that resolves in the Dockerfile's rust image over the tag's tree,
@@ -942,10 +958,14 @@ names the compiler each side was built by (`size_report.py`, the base by its
 own toolchain file), and `site/build.py` names the one beside the sizes it
 holds.
 
-A bump is deliberate, not each stable release: a release taken for what it
-brings, in a pull request of its own that carries in its body `make
-wasm-sizes`, the size report, `make instr-compare` and `make float-test`
-([RELEASING.md](../../RELEASING.md#a-toolchain-bump) lists how). What a
+Each stable release is taken, one pull request a bump, carrying in its
+body `make wasm-sizes`, the size report, `make instr-compare` and `make
+float-test` ([RELEASING.md](../../RELEASING.md#a-toolchain-bump) lists how),
+and none in the two weeks before a release tag, so that the compiler a
+release ships has run main's CI for two weeks. Taking a release only for
+what it brings, at most every second one, was weighed and not adopted:
+each moves the figures and the lints a little, some the Unicode version,
+and two releases' moves at once are harder to read apart than one's. What a
 compiler can move here is what fennec-core does for itself: it writes and
 reads numbers with its own code (`num.rs`, `json.rs`), held to the standard
 library's `{}` by three `#[ignore]`d tests over every `f32`, 10^8 random
@@ -954,7 +974,11 @@ too long for every pull request: `float-tests.yml` runs them weekly, by
 hand, and on a pull request changing `rust-toolchain.toml`, `num.rs` or
 `json.rs`, so a bump's own pull request runs them. Its case fold and
 Unicode tables are held to the standard library's by plain tests, which a
-bump meets in its own CI.
+bump meets in its own CI, and one names the Unicode version the answers are
+of, `case::tests::the_unicode_version_is_the_one_the_answers_are_of`
+(18.0.0 under 1.100.0): a release that moves it fails that test by name,
+its message listing what follows, and ships in a minor release whose notes
+name the letters that moved ([compatibility.md](compatibility.md#unicode)).
 
 Rejected: following `stable` and fixing what a release breaks once it has
 landed -- main went red on every pull request with no change, and a

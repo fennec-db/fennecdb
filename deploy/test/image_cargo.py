@@ -36,6 +36,15 @@ Each fails with its part taken out: times kept in the copy (`rsync -t`,
 COPY's way), the check, a unit's record kept only once the whole build
 has succeeded, or the libraries a compile was handed (--extern) left out
 of its record.
+
+Before any of it, on this machine and with no Docker, the wrapper is handed
+the compiles of another layout than Cargo 1.100.0's build-dir -- the deps/
+of the Cargo before it, a unit directory whose hash is not 16 hex digits,
+an extra-filename that is not `-<that hash>` -- and refuses each in words
+naming the layout it reads and the compiler it met, so that the next
+change of layout fails by name rather than at "cannot tell which unit
+this is"; a compile of that layout, with or without the extra-filename,
+is recorded.
 """
 
 import os
@@ -103,6 +112,54 @@ def in_volume(command):
                    check=True, capture_output=True, timeout=120)
 
 
+def held_layouts():
+    """The wrapper, handed a stand-in rustc's compiles, refuses another
+    layout than build/<package>/<16-hex hash>/out by name, and records
+    one of it."""
+    top = tempfile.mkdtemp(prefix="image-cargo-layout-")
+    try:
+        rustc = os.path.join(top, "rustc")
+        with open(rustc, "w") as f:
+            f.write('#!/bin/sh\ncase $1 in -V) echo "rustc 1.101.0 (a stand-in)" ;; esac\n')
+        os.chmod(rustc, 0o755)
+        records = os.path.join(top, "records")
+        os.makedirs(records)
+        source = os.path.join(top, "lib.rs")
+        write(top, {"lib.rs": "pub fn a() {}\n"})
+        hex16 = "0123456789abcdef"
+
+        def wrap(out, extra):
+            os.makedirs(out, exist_ok=True)
+            d = f"a{extra or ''}.d"
+            write(out, {d: f"{out}/{d}: {source}\n\n{source}:\n"})
+            args = [rustc, "--crate-name", "a", "--edition=2021", source, "--out-dir", out]
+            if extra is not None:
+                args += ["-C", f"extra-filename={extra}"]
+            p = subprocess.run(["sh", SCRIPT] + args, env=dict(os.environ, FENNEC_IMAGE_RECORDS=records),
+                               capture_output=True, text=True, timeout=60)
+            return p.returncode, p.stderr
+
+        target = os.path.join(top, "target", "release")
+        for what, out, extra in (
+                ("deps/, the layout before Cargo 1.100", os.path.join(target, "deps"), "-" + hex16),
+                ("a unit's hash not 16 hex digits", os.path.join(target, "build", "a", "0123", "out"),
+                 "-0123"),
+                ("a unit outside build/", os.path.join(target, "units", "a", hex16, "out"), "-" + hex16),
+                ("an extra-filename not the unit's hash",
+                 os.path.join(target, "build", "a", hex16, "out"), "-fedcba9876543210")):
+            code, err = wrap(out, extra)
+            named = ("build/<package>/<16-hex hash>/out" in err and "rustc 1.101.0 (a stand-in)" in err
+                     and f"compiled into {out}," in err)
+            expect(f"a compile into {what}", (code, named), (1, True), err)
+        for what, extra in (("with its hash as extra-filename", "-" + hex16), ("with none", None)):
+            code, err = wrap(os.path.join(target, "build", "a", hex16, "out"), extra)
+            kept = os.path.isfile(os.path.join(records, "a-" + hex16))
+            expect(f"a compile into build/a/<hash>/out {what}", (code, kept), (0, True), err)
+            os.remove(os.path.join(records, "a-" + hex16))
+    finally:
+        shutil.rmtree(top)
+
+
 def held_dockerfiles():
     """Each Dockerfile runs the script once and no `cargo build` of its own,
     and copies every binary it installs from /built."""
@@ -127,6 +184,7 @@ def expect(what, got, want, err):
 
 
 def main():
+    held_layouts()
     held_dockerfiles()
     subprocess.run(["docker", "build", "-q", "-t", IMAGE, "-"], input=BASE, text=True,
                    check=True, capture_output=True, timeout=600)
@@ -186,8 +244,10 @@ def main():
         write(tree, {"a/src/lib.rs": lib(5)})
         code, out, err = build(tree, "c")
         expect("the library changed, built for it alone", (code, out), (0, "c 5"), err)
-        in_volume("touch -d '2030-01-01 00:00:00' /work/target/release/deps/b-* "
-                  "/work/target/release/.fingerprint/b-*/* /work/target/release/b")
+        # Cargo's build-dir (1.100.0 on): a unit's outputs and fingerprint
+        # in build/<package>/<hash>/, a binary's output named for its crate.
+        in_volume("touch -d '2030-01-01 00:00:00' /work/target/release/build/b/*/out/b* "
+                  "/work/target/release/build/b/*/fingerprint/* /work/target/release/b")
         code, out, err = build(tree)
         named = "compiled from other bytes" in err and ".rlib: FAILED" in err and "/liba-" in err
         expect("a binary kept from another build of its library",

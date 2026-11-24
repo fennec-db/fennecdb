@@ -2540,8 +2540,8 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                     ));
                     continue;
                 }
-                for f in 0..FIELDS {
-                    if !may_hold(model, (*key, f as u8), *s, *e, got.1[f]) {
+                for (f, &held) in got.1.iter().enumerate() {
+                    if !may_hold(model, (*key, f as u8), *s, *e, held) {
                         v.wrong(format!(
                             "read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
                         ));

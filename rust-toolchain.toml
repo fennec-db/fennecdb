@@ -7,5 +7,5 @@
 # own, carrying `make wasm-sizes`, the size report, `make instr-compare` and
 # `make float-test` (RELEASING.md, "A toolchain bump").
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 targets = ["wasm32-unknown-unknown"]
