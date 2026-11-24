@@ -4586,11 +4586,25 @@ impl Taking {
 pub struct CollectionStats {
     pub name: String,
     pub documents: usize,
+    /// Every record the collection holds, live and dead, in bytes: what the
+    /// file's data record of it takes (`Store::total_bytes`). The browser
+    /// module's `stats()` says it as `bytes`.
     pub bytes: usize,
+    /// The versions written over and the deleted rows, each whole frame,
+    /// and the deletes: what a compact gives back (`Store::dead_bytes`).
     pub dead_bytes: usize,
     pub segments: usize,
     pub vector_indexes: Vec<VectorIndexStats>,
     pub text_indexes: Vec<TextIndexStats>,
+}
+
+impl CollectionStats {
+    /// The live records' bytes: what a compact keeps of the collection, and
+    /// `fennec_data_bytes`. That gauge said `bytes` through 0.2.0, the dead
+    /// records with the live, so an alert on half of them dead never fired.
+    pub fn live_bytes(&self) -> usize {
+        self.bytes.saturating_sub(self.dead_bytes)
+    }
 }
 
 /// State of a single vector index. The arena size scales directly with the

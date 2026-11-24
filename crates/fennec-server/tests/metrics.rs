@@ -182,6 +182,43 @@ fn the_scrape_takes_the_servers_tokens() {
     assert_eq!(s.ask(s.metrics, "GET", "/t", Some(TOKEN), "").0, 404);
 }
 
+/// `fennec_data_bytes` is a collection's live records and
+/// `fennec_dead_bytes` the versions written over and the rows deleted:
+/// what a compact keeps, to the byte, and what it gives back. Through 0.2.0
+/// the first said every record, the dead ones too, so the alert the
+/// monitoring page gives, `dead / (data + dead) > 0.5`, could never fire.
+#[test]
+fn the_data_bytes_are_the_live_records() {
+    let s = node("live.fennec", &["--auto-compact", "off"]);
+    let mut c = s.server.http().with_token(TOKEN);
+    c.run("create collection t (name text, n int)");
+    let docs: Vec<String> = (0..300)
+        .map(|i| format!("{{name: \"row {i}\", n: {i}}}"))
+        .collect();
+    c.run(&format!("put t [{}]", docs.join(", ")));
+    for name in ["a", "a longer name", "short"] {
+        c.run(&format!("set t {{name: \"{name}\"}} where n < 200"));
+    }
+    c.run("del t where n >= 250");
+    let bytes = |m: &HashMap<String, f64>| {
+        (
+            value(m, r#"fennec_data_bytes{collection="t"}"#),
+            value(m, r#"fennec_dead_bytes{collection="t"}"#),
+        )
+    };
+    let (data, dead) = bytes(&s.scrape());
+    assert!(data > 0.0 && dead / (data + dead) > 0.5, "{data} {dead}");
+
+    c.run("compact");
+    let m = s.scrape();
+    assert_eq!(
+        bytes(&m),
+        (data, 0.0),
+        "the live records, as the compact kept them"
+    );
+    assert_eq!(value(&m, r#"fennec_documents{collection="t"}"#), 250.0);
+}
+
 /// Which statements are slow is told by thresholds no statement can miss --
 /// 0, every one, and a minute, none -- not by how long they take. At 20 ms
 /// the test counted on a put of 20 000 rows taking longer and on the create

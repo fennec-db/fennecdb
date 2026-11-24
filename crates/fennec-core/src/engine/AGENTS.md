@@ -58,3 +58,12 @@ server's compaction meets again is logged once and counted.
 (`cache::room`): once a third of what it writes is dead and the file
 reached `ROOM_SHARE` of that room or the process faults
 (`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
+
+**[Dead bytes are whole frames](../../../../docs/design/storage.md#dead-bytes-are-whole-frames)**
+Live bytes are the live frames to the byte: a version written over or deleted adds its head and its payload to
+`dead_bytes`, through `store::dead_frame` alone; counting a payload alone,
+or a writer adding a dead version any other way, leaves its head counted
+live, and `Garbage::live`, `fennec_data_bytes` and the compact's trigger
+read it high. `store::tests::the_live_bytes_are_the_live_frames_to_the_byte`
+holds it through appends, an undone block and every load; a file an older
+build wrote counts its dead heads short until its next compact.
