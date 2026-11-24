@@ -483,8 +483,9 @@ as it is.</p>
 each a put framed afresh. Where the file is larger than the memory the
 system has for its pages, it reads the file from its start to its end rather
 than a document at a time by id, and sorts the documents through a scratch
-file, <code>&lt;file&gt;.fennec.sorting</code>, gone from its directory as
-soon as it is made: the new file is the same, byte for byte (<a
+file, <code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code>
+beside <code>data.fennec</code>), gone from its directory as soon as it is
+made: the new file is the same, byte for byte (<a
 href="/docs/server#compaction">how long each takes</a>).</p>
 
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint

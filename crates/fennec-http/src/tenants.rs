@@ -282,8 +282,9 @@ const SWEPT: [&str; 6] = {
 /// tenant's open removes too ([`fennec_core::fs::LEFT_BESIDE`]): a
 /// follower's `.taking`, a checkpoint's or a compact's `.compacting`, a
 /// compact's or an index's `.beside`, a shell's `.saving`, a compact's
-/// `.sorting` on Windows -- each as large as the tenant or its live
-/// records, and never read: removed as the node starts, each under
+/// `.sorting` on Windows, or empty after a kill between a Unix's open of
+/// it and its unlink -- each as large as the tenant or its live records,
+/// or none, and never read: removed as the node starts, each under
 /// the tenant's lock taken without waiting, so one another process holds
 /// the lock of -- its own install under way, a shell's open -- stays, and
 /// one beside a tenant no request opens again goes all the same; a file

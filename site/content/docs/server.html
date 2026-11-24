@@ -717,16 +717,23 @@ a million 1 KB records each updated once, 2.04 GB of which 1.02 live, took
 compact now reads the file from its start to its end and puts the records in
 id order on the way: 4.6 to 6.6 s and about 2 000 major faults. It deals
 them, a run of ids at a time, into a scratch file beside the database,
-<code>&lt;file&gt;.sorting</code>, and reads each run back into memory to put
-it in order. It holds a quarter of that memory, 16 MB at most -- the process
-peaked at 28 to 30 MB, the copy by id at 27 to 29 -- and on the disk as much
-as the collection's live records, for as long as it writes them. It does so only where the disk has room for twice those; otherwise it
-copies by id, as it does for a collection under 4 MB. The scratch file is
+<code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code> beside
+<code>data.fennec</code>), and reads each run back into memory to put it in
+order. It holds a quarter of that memory, 16 MB at most whatever the file
+-- the process peaked at 28 to 30 MB, the copy by id at 27 to 29 -- and on
+the disk as much as the collection's live records, for as long as it writes
+them. It does so only where the disk has room for twice those; otherwise it
+copies by id, as it does for a collection under 4 MB live or over 4 GB (1
+GB where it holds 4 MB), or where something already stands at the scratch
+file's name, which it leaves as it is. A scratch file that fails before the new file is written -- the
+disk filled meanwhile, by another compact or another program -- leaves the
+compact to copy by id, and the server logs it once. The scratch file is
 gone from its directory as soon as it is made, so a crash leaves nothing
-beside the database -- on Windows a power cut can, and the next open
-removes it. The new file is the same, byte for byte, as one compacted by
-id, so scans, opens and replicas read it as before; a file that fits in
-memory is compacted as before.</p>
+beside the database -- on Windows a power cut can, as can a kill in the
+instant between its making and its unlink elsewhere, an empty one, and the
+next open removes it. The new file is the same, byte for byte, as one
+compacted by id, so scans, opens and replicas read it as before; a file
+that fits in memory is compacted as before.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made

@@ -661,12 +661,15 @@ Then one pass over the store's frames as they stand, the mapped stretches
 by their place in the file and then the segments in turn, keeps each frame
 the id index points at (`each_standing`) and deals it into its bucket's
 stretch of a scratch file beside the database, through a buffer a bucket:
-the budget shared out between them, 64 KiB to 1 MiB each. The scratch
+the budget shared out between them, 64 KiB to 1 MiB each, 256 buckets at
+the most (`BUCKETS_MOST`, below). The scratch
 file is laid out as the data record is, a bucket's stretch where its frames
 go in the record and as long, its frames in the order they were read.
 Then each bucket in turn is read back into one buffer, each frame put at
 its place by its id (`Places`: a slot of the id index's dense span each,
-the sparse ids' sorted), and the buffer written into the new file. Where
+and the bucket's run of the sparse ids, sorted once a store and found by
+halving -- a scan of the sparse map a bucket was buckets times sparse ids),
+and the buffer written into the new file. Where
 one bucket holds the collection, no scratch file is made: the frames are
 put in their places in the buffer as they are read (`in_memory`). The new
 file is the one a compact by id writes, byte for byte, so nothing that
@@ -684,11 +687,18 @@ one register fewer and reloaded the out from the stack every record --
 instruction for instruction.
 
 *What it holds.* In memory, the buckets' buffers while the records are
-dealt -- the budget together up to 256 buckets, 4 GiB live at the most
-budget, and 64 KiB a bucket past them: 1/256 of the live bytes, a third of
-what the id index holds for documents of 1 KB -- then one bucket's buffer,
-4 bytes a slot of its span of the id index and a read buffer of 1 MiB
-while they are read back. The budget's ceiling is measured (below): buckets
+dealt -- the budget shared out between them, each at least 64 KiB, so 16
+MiB together at the most whatever the file: at most 256 buckets
+(`BUCKETS_MOST`, 16 MiB over 64 KiB), past which -- 4 GiB of live records
+in a collection at the most budget, 1 GiB at the least -- the records are
+walked by id, nothing made. The bound is the deal's own: this change's
+second round gave each bucket 64 KiB past 256 of them, which held 1/256 of
+the live bytes -- 400 MiB for 100 GB of documents of 100 KB, a memory the
+room the budget is cut from never weighed -- and a smaller buffer a bucket
+writes the scratch file a smaller piece at a time, at random between the
+buckets; a pass over the file for each 256 buckets is the window rejected
+below. Then one bucket's buffer, 4 bytes a slot of its span of the id
+index and a read buffer of 1 MiB while they are read back. The budget's ceiling is measured (below): buckets
 of 64 MiB took the process's anonymous memory to 76-78 MB, of 32 MiB to
 44-46, of 16 MiB to 28-30, where the walk by id peaks (27-29), and the
 time no further than the runs' spread -- 5.0-8.1, 5.2-7.9 and 4.6-6.6 s.
@@ -701,56 +711,89 @@ scratch, the data record still to come, the records after it and the
 writes landing meanwhile (`fstatvfs`, `fstatfs`, Windows'
 `FILE_FS_FULL_SIZE_INFORMATION`) -- and the records are walked by id
 otherwise, as they are where it cannot be made or the volume cannot be
-asked. A scratch file is written and read past the page cache as a side
+asked. The room is a snapshot, asked as the scratch file is made: a node
+compacting several tenants at once, each on its own thread, can pass it
+for each, as can a volume another program fills meanwhile. Then the
+scratch file's write the disk refuses ends the deal, and the records are
+walked by id (*Its failures*, below), the scratch file's room given back
+as it closes before a record of the walk is written. A scratch file is written and read past the page cache as a side
 file past it is (`F_NOCACHE`; on Linux synced and its pages dropped every
 64 MB, each bucket's dropped once read back): its pages would push out the
 old file's, which the reads need until the swap.
 
-*Its name.* The scratch file is `<file>.sorting`, made by
-`fs::create_private` and unlinked at once on a Unix, and on Windows opened
-to be deleted as its last handle closes (`FILE_FLAG_DELETE_ON_CLOSE`,
-`create_new`): a crash leaves nothing beside the file, the process's end
-closing the handle. What can leave it is a power cut on Windows, or a kill
-in the instant between a Unix's open and its unlink, which leaves it
-empty: `.sorting` is among `fs::LEFT_BESIDE`, which the open that writes
-the file and a node starting remove
-([durability.md](durability.md#files-modes)). On Windows a second compact
-meeting one held open walks by id, its own `create_new` refused.
+*Its name.* The scratch file is `<file>.sorting` -- `data.fennec.sorting`
+beside `data.fennec` -- made by its open alone (`O_CREAT | O_EXCL`,
+`create_new`) and through no link (`O_NOFOLLOW` on a Unix), then unlinked
+at once on a Unix, and on Windows opened to be deleted as its last handle
+closes (`FILE_FLAG_DELETE_ON_CLOSE`): a crash leaves nothing beside the
+file, the process's end closing the handle. What can leave it is a power
+cut on Windows, or a kill in the instant between a Unix's open and its
+unlink, which leaves it empty: `.sorting` is among `fs::LEFT_BESIDE`, which
+the open that writes the file and a node starting remove
+([durability.md](durability.md#files-modes)). Whatever stands at the name
+as a compact starts is left as it is and the records are walked by id: a
+database a user named so, whose lock `fs::remove_left` keeps it by, held or
+not, a link, on Windows another compact's held open. This change's second
+round made the file by `fs::create_private`, which on a Unix removes what
+stands at its name first, as a side file written whole may -- a user's
+database so named too, its lock held beside it.
 
 *Its failures.* A walk that does not meet every live record as the id index
 has it -- a frame that does not read, a record outside the stretches and
-the segments, which no store the tests build has -- leaves the records to
-the walk by id, nothing of the new file written yet. A write or a read of the
-scratch file that fails fails the compact as a write of its new file does:
-beside the database, the compact alone, the side file removed, the
-database writing on; under the lock (a batch's, the shell's), the database
-too, as every rewrite failing there does (`Database::storage`). A bucket
-the scratch file gives back otherwise than it was written -- each
-bucket's frames summed as they are dealt and again as they are read back
-(CRC32C), each frame held to its id's length and place -- is such a
-failure, `Error::Io`, never a record copied wrong. Beside the database the
-reading and the scratch file are the side file's, with no lock held;
-under the lock, the lock's as the walk by id was.
+the segments, as a pinned store's, which keeps no stretch -- leaves the
+records to the walk by id, nothing of the new file written yet. So does a
+scratch file that fails before a byte of the new file is written -- a
+write or a read refused while the records are dealt or the first bucket is
+read back, or that bucket read back otherwise than it was written: nothing
+of the database's own file was touched, so the compact goes on by id,
+said on stderr once a database and failure (`walked_by_id`, a line as a
+server's log writes one), where this change's second round failed the
+compact, and under the lock the database with it. Once the first bucket is
+written into the new file, a write or a read of the scratch file that fails
+fails the compact as a write of its new file does: beside the database,
+the compact alone, the side file removed, the database writing on; under
+the lock (a batch's, the shell's), the database too, as every rewrite
+failing there does (`Database::storage`). A bucket the scratch file gives
+back otherwise than it was written -- each bucket's frames summed as they
+are dealt and again as they are read back (CRC32C), each frame held to its
+id's length and place, the length before it is added to, as a length read
+off a failing disk may be any number and its sum overflowed into a panic
+under the lock (`compact_unwound`) -- is such a failure, `Error::Io`, never
+a record copied wrong. Beside the database the reading and the scratch file
+are the side file's, with no lock held; under the lock, the lock's as the
+walk by id was.
 
 `store::in_turn`'s unit tests hold the copy to the walk by id byte for byte
 over a store reading from two stretches of a mapped file and two segments
 -- ids rewritten within a stretch, from one to the next and into memory,
 deleted, written again, four past the dense array out of their order, one
 longer than a bucket -- in buckets of one record each up to one in memory,
-and a scratch file refusing a write and one handing back a flipped byte to
-a failed copy, neither leaving its name; `tests/in_turn.rs` holds a
-compact in turn to one by id byte for byte under the lock and beside the
-database, over an image, a spilled block, a tail taken in from the file and
-writes in memory, and a broken scratch file to the failures above.
-Nineteen mutations each fail at least one: the segments left out of the
-walk, a place one off, a record dealt into the next bucket, the sums not
-compared, a bucket's last buffer never written, a head's length one off,
-the sparse ids' places unsorted, the buckets written out last first, a
-head put one byte on, a payload never put in memory, the rule's `or` an
-`and`, the 4 MiB floor dropped, `compact_live` never asking, a compact
-under the lock or beside the database calling `write_live` instead, the
-side file never asked or never asking, the image under the lock never
-asking, and the scratch file left at its name.
+and over 188 sparse ids, each more than 4 096 past the one before, in three
+buckets of them and more; a store past `BUCKETS_MOST` buckets and a pinned
+store, whose walk misses its mapped records, to the walk by id with nothing
+written; a file and a link at the scratch file's name to the walk by id,
+each left as it was; and a scratch file refusing a write, or handing back
+the first bucket with a flipped byte or a length of `u64::MAX` less one,
+to the walk by id, and the second bucket so to a failed copy, none leaving
+its name. `tests/in_turn.rs` holds a compact in turn to one by id byte for
+byte under the lock and beside the database, over an image, a spilled
+block, a tail taken in from the file and writes in memory, a broken scratch
+file before the new file is written to the file a compact by id writes,
+and one after to the failures above, each test in a directory of its own
+that goes as it ends. Twenty-six mutations each fail at least one: the
+segments left out of the walk, a place one off, a record dealt into the
+next bucket, the sums not compared, a bucket's last buffer never written, a
+head's length one off, the sparse ids' places unsorted, the buckets written
+out last first, a head put one byte on, a payload never put in memory, the
+rule's `or` an `and`, the 4 MiB floor dropped, `compact_live` never asking,
+a compact under the lock or beside the database calling `write_live`
+instead, the side file never asked or never asking, the image under the
+lock never asking, the scratch file left at its name, a walk that missed a
+record copied all the same, the bound on the buckets dropped, a scratch
+file failing in the deal or in the first bucket failing the compact, a
+bucket's run of sparse ids taken from the first sparse id, the scratch
+file made by `create_private`, and a length read back summed before it is
+held to the index's.
 
 *Measured* (a scratch program over `Database::maintain`, the compact
 beside the database; `docker run --cpus=3`, Linux aarch64 under macOS's

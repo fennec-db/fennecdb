@@ -433,7 +433,11 @@ by a database at the name never opened to be written -- a copy put there
 by hand, which no lock file marks -- and a first open of the name in
 another process landing between the look and the `unlink`; and a database
 it keeps is still at the name its neighbour's next rewrite of that kind
-writes over (`create_private` removes what is there). A link is not looked
+writes over (`create_private` removes what is there) -- but a compact's
+scratch file's: `fs::Scratch` makes `.sorting` by its open alone and
+through no link (`create_new` and `private_beside`'s `O_NOFOLLOW`), and
+where anything stands at the name leaves it and copies by id
+([storage.md](storage.md#reading-the-file-in-turn)). A link is not looked
 at: whoever writes the file it names keeps that name, whose lock is beside
 that file (`lock_path` follows a link) -- one to the database itself goes
 as a link. What the open removed or kept it says, as it says a torn tail's
