@@ -1,7 +1,7 @@
 //! The one shutdown's end of the TLS connections (`conn::end_all`) with a
-//! handshake under way. A binary of its own: the shutdown is the process's
-//! (`conn::ending`, never undone), and would end the other tests'
-//! connections.
+//! handshake under way. A binary of its own, and its one test: the shutdown
+//! is the process's (`conn::ending`, never undone), and would end any other
+//! test's connections -- a second `#[test]` here would meet it.
 #![cfg(feature = "tls")]
 
 use fennec_core::engine::Database;
@@ -95,8 +95,18 @@ fn the_shutdown_waits_for_a_handshake_under_way_and_lets_none_begin() {
     // its `close_notify`.
     let read = listed.read_to_end(&mut Vec::new());
     assert!(read.is_ok(), "the listed connection: {read:?}");
-    // The shutdown waits for the handshake the relay holds.
-    assert_eq!(end.try_recv(), Err(mpsc::TryRecvError::Empty));
+    // The shutdown waits for the handshake the relay holds: it cannot
+    // return while that is counted, however long this waits, and a shutdown
+    // that does not wait returns within a few milliseconds of the listed
+    // connection's end (its poll is 2 ms) -- the `close_notify` the relayed
+    // connection is given at its listing comes whether or not the shutdown
+    // waited, so only this wait tells the two apart. A pass stands on no
+    // time; a second bounds how soon a shutdown that did not wait is caught.
+    assert_eq!(
+        end.recv_timeout(Duration::from_secs(1)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "the shutdown returned with a handshake under way"
+    );
     held.pass_on();
     let read = shaking.read_to_end(&mut Vec::new());
     assert!(read.is_ok(), "the connection in its handshake: {read:?}");

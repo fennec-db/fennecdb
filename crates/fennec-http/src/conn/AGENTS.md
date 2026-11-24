@@ -80,9 +80,10 @@ lock second -- and lets none begin after it, closed before a byte of the
 server's: TLS 1.3 ends the client's handshake before the server's, and a
 session its client had begun was cut bare. One that has sent nothing is
 not waited for: it has no session. A request the server had not read is
-served on Linux, discarded on macOS (`close_notify`, no answer) and reset
-on Windows, as the exit did; nothing is shut mid-handshake. Held by
-fennec-http's `tls_ending`, a binary of its own, by events, never the
-grace. A timeout set where the peer may have reset, bytes of its still to
+served on Linux if it had arrived by the thread's next read (one still on
+the wire goes unanswered), discarded on macOS (`close_notify`, no answer)
+and reset on Windows, as the exit reset it; nothing is shut mid-handshake.
+Held by fennec-http's `tls_ending`, a binary of its own and its one test,
+by events, never the grace. A timeout set where the peer may have reset, bytes of its still to
 read, goes through `conn::unless_gone` (fennec-tls's own in a handshake):
 macOS's EINVAL there never fails a handshake done.

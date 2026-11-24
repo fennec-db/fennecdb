@@ -378,7 +378,8 @@ handshake would begin after the shutdown began is closed before it. A
 client reading a stream to its end can tell that end from one cut short. A
 connection whose write failed gets none, and neither does a stream the
 router relays from a node that broke off. A request the server had not yet
-read when the shutdown came is still served on Linux; on macOS it is
+read when the shutdown came is still served on Linux if it had reached the
+server by then (one still on the way gets no answer); on macOS it is
 dropped, the connection ending with <code>close_notify</code> and no
 answer, and on Windows the connection is reset. Dropped or reset, it never
 ran. On Windows a shutdown also cuts an answer still being written to a

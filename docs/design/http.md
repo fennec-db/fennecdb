@@ -2426,9 +2426,12 @@ queued, and Winsock resets a connection bytes arrive on after it, either
 of which would lose the client's `Finished`. What a client sent that the
 server had not read when its read side was shut -- a request sent right
 after its `Finished`, or, on a listed connection, as the shutdown came --
-goes by the platform: Linux serves it, then sends `close_notify`; macOS
-discards it, the connection ending with its `close_notify` and no answer;
-Windows resets the connection, as the exit did.
+goes by the platform: Linux serves it, then sends `close_notify`, if it
+had arrived by the connection thread's next read -- a read side shut
+answers an empty queue with an end, so a request still on the wire goes
+unanswered, `close_notify` and then a reset; macOS discards it, the
+connection ending with its `close_notify` and no answer; Windows resets
+the connection, as the exit reset it before.
 
 Before, such a connection was neither listed nor waited for, and the exit
 ended it with a TCP end alone:
