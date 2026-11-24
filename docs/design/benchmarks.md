@@ -396,6 +396,51 @@ in, from an operation's send (`own_p50`, `own_p99`, and the reads through
 the replica alone, `replica_p50`, `replica_p99`), beside its times from
 when it was due: whose wait a tail was.
 
+**What a restart's operations waited for.** The fourth dry run of
+2026-11-24 -- 120 minutes at 1 240 a second, 80% of its peak's slowest
+three minutes (1 551), `--sync 250`, `--memory 512m` -- held every
+criterion but three: the eight hours and the last hour's tail, which a
+two-hour run has neither of, and its restarts, the operations due in one
+5.1 s at the p99 against the longest restart, 2.9 s, and two. The tail
+was the kill of minute 60's: its minute's restart p99 5.1 s, the other
+two's 2.9 and 2.5. No read goes through the replica from a kill's
+announcement until it is back and the restart's grace over (`GRACE`, 5 s
+after the server answers again), yet that minute's reads through it took
+5.5 s from their send at the p99, the servers' p99 249 ms; the loop was
+0.4 s behind as the kill was announced (0.0 at the other two), and the
+operations due in the schedule's compact just before it 5.2 s at the p99,
+the other compacts' 0.29-0.70 s. The replica had begun a compaction of
+its own half a second before the announcement (`compacted, 2060.1 MB ->
+1043.4 MB in 25.0s` at 20:10:34) and read its stream's end 4.2 s after
+the kill, at the other kills at once: the reads sent through it before
+the announcement held the connections one by one, and the restart's
+operations waited for one, the server answering again 2.0 s after the
+kill. At minute 118 it compacted again, no kill near (2 066.5 MB to
+1 041.7 in 21.5 s): reads through it 2.7 s at the p99, the minute's p99
+from the schedule 2.2 s, what the servers answered in 261 ms, and every
+operation of it steady. So the replica's own compactions are windows now,
+read from its compaction thread (fennec-http's `link`, `fennec-compact`)
+by a container in its process namespace every 100 ms, as the sampler
+reads the primary's syncer (`watch_replica`): at work in anything but a
+sleep for half a second, a compaction has begun, from its first look, and
+asleep as long it has ended -- the server's look at its files every 5 s
+takes milliseconds. Its metrics tell a compaction only at its end (its
+`fennec_auto_compactions_total` counted, its `fennec_reclaimable_bytes`
+fallen), its log says its time only then, after the reads it held were
+counted, and its side file is written only once its graphs are rebuilt
+and swapped in under the write lock. A read through the replica waiting
+at any moment of one is counted with the compacts, and so is every
+operation its worker takes until back on its schedule (`r_compact_ops`),
+before a restart's window too (`restart_r_compact_ops`): a restart's
+operations are what the restart held. And a restart's reads through the
+replica are apart from the primary's operations (`restart_replica_ops`,
+`p99_restart_replica`): sent only once the replica is back and the grace
+over, they wait out the restart and that, bounded by the longest time
+from a kill to their first chance -- its restart, then the longer of
+`replica_back_ms` and the grace -- and two seconds: 10.1 s on the dry
+run's kills, the primary's 4.9. Its own end line has the two in one
+figure, `p99_restart`, held to the primary's bound, and fails as it did.
+
 **The servers ask a token.** Both, and the backup's read-only server, run
 with `--http-token` and `--replication-token`, two secrets of the run's
 own (32 bytes of `/dev/urandom` each, held in memory), handed to each
@@ -649,7 +694,9 @@ its being there: a kill leaves the side file of a compact it cut, which
 the server started again leaves until its next compact makes it anew, and
 the second dry run read the twelve minutes after its kill of minute 90 as
 a compaction writing, none running, and judged no memory in them (the
-same test says a kill found a compact writing, `kill_compacting`). After each restart the keys written in
+same test says a kill found a compact writing, `kill_compacting`); the
+replica's, for the reads through it, from its compaction thread as well
+(above). After each restart the keys written in
 the 10 s before the kill, or by a write not answered, are read back -- a
 sweep that cannot connect or read is counted (`sweep_failed`), never
 passed over -- and at the end every key, every counter and every session.
@@ -691,12 +738,19 @@ left out; apart from them `restart_ops` and
 `p99_restart`, the operations due from a second before a kill until the
 server answered again and, after it, until their connection was back on
 its schedule -- at 80% the open loop's backlog drains for minutes, its waits
-the restart's -- of a kill the loop met on its schedule, and
+the restart's -- of a kill the loop met on its schedule, the reads through
+the replica among them apart (`restart_replica_ops`,
+`p99_restart_replica`), and
 `restart_behind_ops` and `p99_restart_behind` those of a kill it met more
 than a second behind (`kill_behind_s`, its lag as the kill was announced,
 after the queue the kill waited for), which wait out the backlog first;
 and `compact_ops`, `p99_compact` and `p99_compact_hour`,
-those due while a compact ran and until back on schedule after it;
+those due while a compact ran and until back on schedule after it, and
+the reads through the replica waiting in a compaction of its own and
+their workers' backlog, counted apart too (`r_compact_ops`, those due in a
+restart `restart_r_compact_ops`), with the compactions the watch on its
+compaction thread saw end (`r_compacts_watched`) and whether it was
+watching at the look (`r_watch`);
 `errors`, `refused` (writes refused by their status) and `down`;
 `mismatches`, `lost_writes`, `lost_ms_max`, `backup_differs`; the streams'
 `stream_missing`, `stream_twice`, `stream_order`, `stream_late`,
@@ -732,7 +786,8 @@ about a core all through the third dry run, 2.6 times the server's own
 CPU for the same `/_health` requests where measured beside one). `:start` says
 the run's settings (`replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute) and `peak_auto_compacts`, `:end` closes a
 finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
-`p99_restart` and `restart_ops`, `p99_restart_behind` and
+`p99_restart` and `restart_ops`, `p99_restart_replica` and
+`restart_replica_ops`, `p99_restart_behind` and
 `restart_behind_ops`, and `restart_ms_max` over the run, both files verified after
 both stopped as a supervisor stops them, and `replica_differs`: the same
 read of `usertable`, `counters` and `docs` in id order (`order id`: a page
@@ -827,7 +882,11 @@ replica connected each minute and within 5 s of the primary, its first
 follow within 1 800 s, back after each restart within `--replica-back-max`,
 caught up at the end within 300 s, and holding the primary's rows; every
 restart within `--restart-max` (120 s) and the restarts' operations' p99
-within the run's longest restart and two seconds, over the kills the loop
+within the run's longest restart and two seconds at the primary, and
+through the replica within the longest time from a kill to their first
+chance -- its restart, then the longer of `replica_back_ms` and the grace
+-- and two seconds (a line from before the two were apart holds both in
+`p99_restart`, held to the primary's), over the kills the loop
 met on its schedule (`kill_behind_s` a second at most): at one met behind
 it, every operation due waits out the backlog first, which the open
 loop's own line judges, and its p99 is said apart (`p99_restart_behind`);
@@ -857,7 +916,10 @@ state (a compact writing, an fsync in flight); `--loss-ms` beside the
 largest gap of a write a read showed gone, and whether the run supports it
 or suggests another; `--restart-max` beside the longest restart and its
 parts -- the server's own at the median and at most -- and whether twice
-the longest fits it or what twice the longest is; the clock's offset and
+the longest fits it or what twice the longest is; the replica's own
+compactions by its counter and as the watch on its compaction thread saw
+them, the minutes it did not, and the operations counted with the
+compacts for them; the clock's offset and
 steps; and the load before the run and the minutes another process took a
 core or more on this host, and what the VM did beside the two servers at
 the median -- the run's own forwarding and containers -- and the minutes it
