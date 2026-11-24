@@ -299,7 +299,10 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// (`Sink::image_side`), a rewrite under the lock (`rewrite_with`: a
 /// checkpoint, a compact the sink writes whole), a rewrite beside the
 /// database (`Sink::side`: `compact`, `create index`, the auto-compact) and
-/// the shell's `.save` over the file (fennec-cli's `save`). Removed by the
+/// the shell's `.save` over the file (fennec-cli's `save`), and the scratch
+/// file a compact past the page cache sorts a collection's records through
+/// ([`Scratch`]: on Windows, as large as the collection's live records,
+/// where a power cut stops it). Removed by the
 /// open that writes the file ([`FileSink`]'s) and by a node as it starts,
 /// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
 /// that only looks, nor where a lock file stands beside the side file
@@ -307,7 +310,7 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// `.beside` until the next compact, which the auto-compact starts only
 /// once half the file is dead: the disk the database took, doubled
 /// meanwhile (the soak harness, P6).
-pub const LEFT_BESIDE: [&str; 4] = ["taking", "compacting", "beside", "saving"];
+pub const LEFT_BESIDE: [&str; 5] = ["taking", "compacting", "beside", "saving", "sorting"];
 
 /// A side file the open that writes a file found beside it
 /// ([`LEFT_BESIDE`]), removed or kept, for whoever opened it to say
@@ -1388,6 +1391,8 @@ impl Sink for FileSink {
             let mut out = FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, create_private(&tmp)?),
                 at: 0,
+                #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+                in_turn: Some(beside(&self.path, "sorting")),
             };
             image(&mut out)?;
             let file = out
@@ -1586,6 +1591,11 @@ impl Sink for FileSink {
 struct FileImage {
     w: BufWriter<File>,
     at: u64,
+    /// Where a compact copying a store's records into this image in turn
+    /// makes its scratch file (`store::InTurn`): `<file>.sorting` for a
+    /// rewrite's image and a compact's side file, nothing for any other.
+    #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+    in_turn: Option<PathBuf>,
 }
 
 impl ImageOut for FileImage {
@@ -1608,6 +1618,11 @@ impl ImageOut for FileImage {
         f.write_all(bytes)?;
         f.seek(SeekFrom::End(0))?;
         Ok(())
+    }
+
+    #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        crate::store::InTurn::at(self.in_turn.as_deref()?, file, live)
     }
 }
 
@@ -2004,6 +2019,7 @@ impl SideFile {
             out: FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, file),
                 at: 0,
+                in_turn: None,
             },
             adopted: false,
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2081,6 +2097,14 @@ impl SideFile {
         self.adopted = true;
     }
 
+    /// Lets a compact copy a store's live records into this file reading
+    /// the old one in turn where it is past the page cache
+    /// (`store::InTurn`), through a scratch file at `<file>.sorting`: this
+    /// one's name, `<file>.beside`, with its last part so named.
+    pub fn copies_in_turn(&mut self) {
+        self.out.in_turn = Some(self.path.with_extension("sorting"));
+    }
+
     /// What is written so far, read back through the handle that wrote it:
     /// an image taken for a database held in memory (`--no-mmap`), which
     /// reads its file whole as its open would.
@@ -2092,6 +2116,212 @@ impl SideFile {
         f.read_to_end(&mut bytes)?;
         f.seek(SeekFrom::End(0))?;
         Ok(bytes)
+    }
+}
+
+/// The scratch file a compact past the page cache deals a collection's live
+/// records into as it reads the old file in turn, and reads back a bucket
+/// at a time (`store::in_turn`). Made beside the database, and gone from its
+/// name at once: unlinked on a Unix, and on Windows, where an open file
+/// keeps its name, opened to be deleted as its last handle closes
+/// (`FILE_FLAG_DELETE_ON_CLOSE`), the process's end included -- so a crash
+/// leaves nothing beside the file, but on Windows a power cut, or a kill
+/// between a Unix's open and its unlink, whose `.sorting` the writing open
+/// removes ([`LEFT_BESIDE`]). Written and read past the page cache as a
+/// side file past it is ([`SideFile::past_cache`]): its pages would push out
+/// the old file's, which every read needs until the swap.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+pub struct Scratch {
+    file: File,
+    /// On Linux, the bytes written since its pages were last let go of.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsynced: u64,
+}
+
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+impl Scratch {
+    /// Made at `path` where its volume gives this process `need` bytes:
+    /// `None`, and nothing at the name, where it cannot be made, the volume
+    /// cannot be asked or has less room -- or, on Windows, another compact's
+    /// is there, held open.
+    pub fn create(path: &Path, need: u64) -> Option<Scratch> {
+        #[cfg(unix)]
+        let file = {
+            let file = create_private(path).ok()?;
+            std::fs::remove_file(path).ok()?;
+            file
+        };
+        // Shared with no other open, as the `tempfile` crate makes its
+        // unnamed files there: nothing else has a use for it.
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+            private(OpenOptions::new().read(true).write(true).create_new(true))
+                .share_mode(0)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(path)
+                .ok()?
+        };
+        if free_bytes(&file)? < need {
+            return None;
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::fd::AsRawFd;
+            const F_NOCACHE: i32 = 48;
+            // Advice: refused, the file is written through the cache.
+            // SAFETY: the descriptor is the scratch file's, open across the
+            // call; `F_NOCACHE` takes an `int` and touches no memory of ours.
+            unsafe { fcntl(file.as_raw_fd(), F_NOCACHE, 1i32) };
+        }
+        Some(Scratch {
+            file,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            unsynced: 0,
+        })
+    }
+
+    /// `bytes` written at `at`. On Linux, every [`PAST_STEP`] written the
+    /// file is synced and its pages let go of, as a side file past the
+    /// cache's are: a written page stays in the cache until it is on disk.
+    pub fn write_at(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        std::os::unix::fs::FileExt::write_all_at(&self.file, bytes, at)?;
+        #[cfg(windows)]
+        {
+            let mut done = 0;
+            while done < bytes.len() {
+                let n = std::os::windows::fs::FileExt::seek_write(
+                    &self.file,
+                    &bytes[done..],
+                    at + done as u64,
+                )?;
+                if n == 0 {
+                    return Err(crate::error::Error::Io(
+                        "a compact's scratch file took no byte of a write".into(),
+                    ));
+                }
+                done += n;
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            self.unsynced += bytes.len() as u64;
+            if self.unsynced >= PAST_STEP {
+                self.file.sync_data()?;
+                self.let_go(0, 0);
+                self.unsynced = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// `into.len()` bytes read from `at`, all of them or an error.
+    pub fn read_at(&self, at: u64, into: &mut [u8]) -> Result<()> {
+        #[cfg(unix)]
+        std::os::unix::fs::FileExt::read_exact_at(&self.file, into, at)?;
+        #[cfg(windows)]
+        {
+            let mut done = 0;
+            while done < into.len() {
+                let n = std::os::windows::fs::FileExt::seek_read(
+                    &self.file,
+                    &mut into[done..],
+                    at + done as u64,
+                )?;
+                if n == 0 {
+                    return Err(crate::error::Error::Io(
+                        "a compact's scratch file ended before its bucket".into(),
+                    ));
+                }
+                done += n;
+            }
+        }
+        Ok(())
+    }
+
+    /// On Linux, the cached pages of the `len` bytes at `at` let go of --
+    /// all of them where `len` is 0 -- once read back; advice, as a side
+    /// file's is. Nothing elsewhere: macOS reads past the cache
+    /// (`F_NOCACHE`), and Windows asks nothing of it.
+    pub fn let_go(&self, at: u64, len: u64) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use std::os::fd::AsRawFd;
+            const POSIX_FADV_DONTNEED: i32 = 4;
+            // SAFETY: the descriptor is the scratch file's, open across the
+            // call; the advice is about its cached pages, none of ours.
+            unsafe {
+                posix_fadvise(
+                    self.file.as_raw_fd(),
+                    at as i64,
+                    len as i64,
+                    POSIX_FADV_DONTNEED,
+                )
+            };
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let _ = (at, len);
+    }
+}
+
+/// The bytes the volume `file` is on gives this process: `f_bavail` blocks
+/// of `f_frsize` on Linux and Android (`fstatvfs`, whose first eleven
+/// fields are eight bytes each on a 64-bit target, glibc's, musl's and
+/// bionic's alike), of `f_bsize` on Apple's systems (`fstatfs`, the 64-bit
+/// layout: a `u32` block size, an `i32`, then the counts of blocks, free
+/// and available, eight bytes each), the units given the caller on Windows
+/// (`FILE_FS_FULL_SIZE_INFORMATION`); `None` where it cannot be asked.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+fn free_bytes(file: &File) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd;
+        extern "C" {
+            fn fstatvfs(fd: i32, buf: *mut [u64; 32]) -> i32;
+        }
+        // Larger than any `struct statvfs` (112 bytes), 8-aligned as it is.
+        let mut b = [0u64; 32];
+        // SAFETY: the descriptor is open across the call, and `b` is a
+        // writable buffer longer than the struct the call fills; it keeps
+        // no pointer.
+        let ok = unsafe { fstatvfs(file.as_raw_fd(), &mut b) } == 0;
+        ok.then(|| b[4].saturating_mul(b[1]))
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        extern "C" {
+            // The 64-bit inode layout: the only one on arm64 and on iOS, by
+            // this name on an Intel Mac's.
+            #[cfg_attr(
+                all(target_os = "macos", target_arch = "x86_64"),
+                link_name = "fstatfs$INODE64"
+            )]
+            fn fstatfs(fd: i32, buf: *mut [u64; 272]) -> i32;
+        }
+        // Larger than `struct statfs` (2 168 bytes), 8-aligned as it is.
+        let mut b = [0u64; 272];
+        // SAFETY: the descriptor is open across the call, and `b` is a
+        // writable buffer longer than the struct the call fills; it keeps
+        // no pointer.
+        let ok = unsafe { fstatfs(file.as_raw_fd(), &mut b) } == 0;
+        ok.then(|| b[3].saturating_mul(b[0] as u32 as u64))
+    }
+    #[cfg(windows)]
+    {
+        windows::free_bytes(file)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    )))]
+    {
+        let _ = file;
+        None
     }
 }
 
@@ -2134,6 +2364,9 @@ impl ImageOut for SideFile {
     }
     fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
         self.out.patch(at, bytes)
+    }
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        self.out.in_turn(file, live)
     }
 }
 

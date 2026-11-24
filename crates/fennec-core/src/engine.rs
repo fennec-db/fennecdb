@@ -1403,6 +1403,10 @@ impl ImageOut for Summed<'_> {
         self.sum = crc32c(self.sum, bytes);
         self.out.write(bytes)
     }
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        self.out.in_turn(file, live)
+    }
     fn write_kept(&mut self, kept: Kept) -> Result<()> {
         self.sum = crc32c(self.sum, kept.bytes());
         self.out.write_kept(kept)
@@ -2715,6 +2719,17 @@ pub trait ImageOut {
         Err(Error::Io(
             "an image's out told of what it does not hold".into(),
         ))
+    }
+    /// Whether a store's live records, about `live` bytes of a file `file`
+    /// bytes long, are copied into this out reading their file in turn
+    /// ([`crate::store::InTurn`]), and through which scratch file: asked by
+    /// a compact's file alone -- the image under the lock, the side file
+    /// beside the database -- and there only past the page cache. `None`,
+    /// the records walked by id, for every other.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        let _ = (file, live);
+        None
     }
 }
 

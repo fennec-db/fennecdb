@@ -451,6 +451,36 @@ fn remote_device(f: &File) -> bool {
     done >= 0 && info[1] & FILE_REMOTE_DEVICE != 0
 }
 
+/// `NtQueryVolumeInformationFile`'s class for `FILE_FS_FULL_SIZE_INFORMATION`.
+#[cfg(target_pointer_width = "64")]
+const FILE_FS_FULL_SIZE_INFORMATION: i32 = 7;
+
+/// The bytes the volume `f` is on gives its caller, its quota counted
+/// (`FILE_FS_FULL_SIZE_INFORMATION`: the units in all, those the caller may
+/// take and those free, eight bytes each, then the sectors a unit and the
+/// bytes a sector, four each): what a compact asks before it sorts a
+/// collection's records through a scratch file beside the database
+/// (`fs::Scratch`). `None` where the volume does not answer.
+#[cfg(target_pointer_width = "64")]
+pub(super) fn free_bytes(f: &File) -> Option<u64> {
+    let mut status = [0usize; 2];
+    let mut info = [0u64; 4];
+    // SAFETY: the handle is open across the call; `status` is an
+    // `IO_STATUS_BLOCK`, two pointers wide, and `info` the class's 32
+    // bytes, 8-aligned as its counts are.
+    let done = unsafe {
+        NtQueryVolumeInformationFile(
+            f.as_raw_handle(),
+            &mut status,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            FILE_FS_FULL_SIZE_INFORMATION,
+        )
+    };
+    let unit = (info[3] & 0xffff_ffff).saturating_mul(info[3] >> 32);
+    (done >= 0).then(|| info[1].saturating_mul(unit))
+}
+
 /// `FILE_REMOTE_PROTOCOL_INFO`, 116 bytes, where the redirector answers it.
 fn remote_protocol(f: &File) -> io::Result<[u32; 29]> {
     let mut info = [0u32; 29];

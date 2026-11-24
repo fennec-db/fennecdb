@@ -1326,6 +1326,11 @@ fn rewrite_beside(
                 b.past = true;
                 b.side.past_cache();
             }
+            // Past the room, the old file read from its start to its end
+            // rather than at random by id (`store::InTurn`).
+            if b.mapped {
+                b.side.copies_in_turn();
+            }
             let mut watching = Watching {
                 db,
                 tokens: b.parts.iter().map(|p| p.token).collect(),

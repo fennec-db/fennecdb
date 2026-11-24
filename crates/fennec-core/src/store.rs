@@ -21,6 +21,11 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+mod in_turn;
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+pub use in_turn::{assume as assume_in_turn, break_scratch, copied, Broken, InTurn};
+
 pub const OP_PUT: u8 = 1;
 pub const OP_DEL: u8 = 2;
 
@@ -2041,8 +2046,15 @@ impl Store {
     }
 
     /// The live records, framed afresh, in id order: what `compact` writes
-    /// into the new file. Nothing is gathered in memory on the way.
+    /// into the new file. Walked by id, nothing is gathered in memory on the
+    /// way; where `out` asks for them in turn -- a compact's file, the old
+    /// one past the page cache ([`in_turn`]) -- the same bytes are written
+    /// reading the old file from its start to its end.
     pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
+        #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+        if self.wrote_in_turn(out)? {
+            return Ok(());
+        }
         let mut head = Vec::with_capacity(16);
         for id in self.index.iter() {
             let Some(loc) = self.index.get(id) else {
