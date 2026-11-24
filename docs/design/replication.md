@@ -459,7 +459,10 @@ statements and their marks -- and takes each collection's documents as
 the mapped file and the segments shared. Its length is known then, so the
 message's head says it; `PinnedImage::write_to` writes it with no lock
 held, each collection's live records read from its pinned store a document
-at a time (`Store::write_live`, the same call the snapshot makes), into the
+at a time (`Store::write_live`, the walk by id a snapshot's records take
+too: a compact past the page cache reads its file in turn through
+`Store::compact_live`, which this never calls --
+[storage.md](storage.md#reading-the-file-in-turn)), into the
 connection's buffer. A record's sum is made as it is written out
 (`Framing::Later`: `Summed` marks where a record begins and where its sum
 goes, and the writer carries the sum over the bytes between): summed as

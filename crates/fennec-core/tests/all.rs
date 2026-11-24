@@ -40,6 +40,7 @@ mod having;
 mod highlight;
 mod hooked;
 mod in_param;
+mod in_turn;
 mod insert;
 mod int_range;
 mod json;

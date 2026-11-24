@@ -64,10 +64,13 @@ whole, these following no link at their name, an archive's records, a
 backup, an unseal, a compact's swap and a replica's image held to their
 writer's handle before their rename (`still_named`, the handle
 `Sink::adopt` is handed), one a crash left beside a database removed by its
-owner alone (`fs::LEFT_BESIDE`'s `.taking`, `.compacting`, `.beside` and
-`.saving` by the open that writes it, a link there unlinked, never
-followed; those and `.importing` by a node under the tenant's lock,
-`sweep_left`), never one with a `.lock` beside it, held or not, which no
+owner alone (`fs::LEFT_BESIDE`'s `.taking`, `.compacting`, `.beside`,
+`.saving` and a compact's scratch `.sorting`, which `fs::Scratch` makes
+`O_EXCL` through no link, leaving whatever stands there, and unlinks at
+once or on Windows deletes on close, by the open that writes it, a
+link there unlinked, never followed; those and `.importing` by a node
+under the tenant's lock, `sweep_left`), never one with a `.lock` beside
+it, held or not, which no
 writer of ours makes there -- a database a user named so -- looked at,
 never opened (`fs::remove_left`), each removal and each file so kept said
 (`Database::swept_on_open`, `Swept::said`: a server's, a node's and the

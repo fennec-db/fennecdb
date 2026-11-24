@@ -11,16 +11,21 @@
 pub use fennec_abi::lock::FileLock;
 use fennec_abi::lock::{self, Holder, Refused};
 
-/// What takes the lock, for what a refusal tells it to do instead.
+/// What takes the lock, for what a refusal tells it to do instead. A way a
+/// feature takes is there only with it: a build without the feature warned
+/// that the way was never constructed (`make small`, `backup` alone).
 #[derive(Clone, Copy)]
 pub enum Way {
     /// The shell over the file: `fennec <file>`, `-c`, a script.
     Shell,
     /// `fennec mcp --file`.
+    #[cfg(feature = "mcp")]
     Mcp,
     /// `fennec import` into the file.
+    #[cfg(feature = "import")]
     Import,
     /// `fennec backup` or `fennec restore` into the file.
+    #[cfg(feature = "backup")]
     Copy,
     /// `.save <path>`.
     Save,
@@ -60,6 +65,7 @@ pub fn take(path: &str, way: Way) -> Result<FileLock, String> {
             (Way::Shell, lock) => format!(
                 "could not take {lock}: {e}\n  `fennec --read-only {path}` reads it without a lock"
             ),
+            #[cfg(feature = "mcp")]
             (Way::Mcp, lock) => {
                 format!("could not take {lock}: {e}\n  --read-only reads it without a lock")
             }
@@ -75,6 +81,7 @@ fn instead(path: &str, way: Way, holder: Option<&Holder>) -> String {
     let program = holder.and_then(|h| h.program.as_deref());
     let first = match (way, program) {
         (Way::Shell, Some("fennec-server")) => "query it over HTTP, or stop the server first",
+        #[cfg(feature = "mcp")]
         (Way::Mcp, Some("fennec-server")) => {
             "reach it through the server (--url http://<its address>/_mcp), or stop the server first"
         }
@@ -86,8 +93,11 @@ fn instead(path: &str, way: Way, holder: Option<&Holder>) -> String {
     };
     let then = match way {
         Way::Shell => format!("; `fennec --read-only {path}` reads it as it stands"),
+        #[cfg(feature = "mcp")]
         Way::Mcp => "; --read-only reads it as it stands".into(),
+        #[cfg(feature = "import")]
         Way::Import => ", or import into another file (--file <path>)".into(),
+        #[cfg(feature = "backup")]
         Way::Copy => ", or write another file".into(),
         Way::Save => ", or save to another path".into(),
     };

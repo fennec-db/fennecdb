@@ -479,6 +479,15 @@ vectors: nothing else takes a tombstone out, and every write that changes a
 document's vector, or deletes it, leaves one. A graph without them is kept
 as it is.</p>
 
+<p><code>compact</code> writes each collection's live documents in id order,
+each a put framed afresh. Where the file is larger than the memory the
+system has for its pages, it reads the file from its start to its end rather
+than a document at a time by id, and sorts the documents through a scratch
+file, <code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code>
+beside <code>data.fennec</code>), gone from its directory as soon as it is
+made: the new file is the same, byte for byte (<a
+href="/docs/server#compaction">how long each takes</a>).</p>
+
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record
 cut short inside it, or an image longer than the file, is refused as a damaged
@@ -489,7 +498,8 @@ meanwhile go into it as a data record at the end of the image, and its header
 takes the counter as it stands when it is renamed into place. A side file left
 by a crash — compaction's <code>.beside</code>, a checkpoint's
 <code>.compacting</code>, a replica's <code>.taking</code>, the shell's
-<code>.saving</code>, each as large as the live data — is removed the next
+<code>.saving</code>, each as large as the live data, and on Windows the
+<code>.sorting</code> a compact past the page cache sorts through — is removed the next
 time the file is opened to be written (a server's start, the shell, an app),
 and a <code>--dir</code> node removes its tenants' as it starts; a read-only
 open (<code>--read-only</code>, <code>fennec types</code>) leaves it. The

@@ -695,8 +695,14 @@ fn render(source: Source) -> String {
                 "gauge",
                 "A collection's live records, in bytes.",
             );
+            // The live records alone, as the help says: `c.bytes` holds the
+            // dead ones too, and a dashboard adds `fennec_dead_bytes` to it.
             for c in &stats {
-                out.sample("fennec_data_bytes", &[("collection", &c.name)], c.bytes);
+                out.sample(
+                    "fennec_data_bytes",
+                    &[("collection", &c.name)],
+                    c.live_bytes(),
+                );
             }
             out.family(
                 "fennec_dead_bytes",

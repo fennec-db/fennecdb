@@ -170,8 +170,9 @@ million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
 a live record a few to a page among dead ones, and one read in five waited
 for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
 loaded). `Database::garbage` is the file's bytes as written (`appended`)
-against the live records' (`Store::total_bytes - dead_bytes`, which the
-stores counted as writes landed already and an image's index carries) and
+against the live records' (`Store::live_bytes`, `total_bytes - dead_bytes`,
+which the stores counted as writes landed already and an image's index
+carries: [whole frames](#dead-bytes-are-whole-frames)) and
 what the last compact kept besides the documents (`kept`: schemas,
 counters, graphs, the file less every record the stores hold -- the
 versions a compact beside the writes copied and saw written over are dead,
@@ -233,6 +234,55 @@ the CPU alone, nothing moved. A database
 read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
+
+### Dead bytes are whole frames
+
+A version written over or deleted adds its whole frame to `dead_bytes`,
+head and payload, the head's length worked out from the id and the
+payload's length as `put_uvarint` writes them, each the shortest
+(`store::dead_frame`). So `Store::live_bytes`, `total_bytes - dead_bytes`,
+is the live frames to the byte -- what a compact writes of the documents,
+`Garbage::live`, and `fennec_data_bytes` (`CollectionStats::live_bytes`),
+read at a scrape with no walk of the index: through appends, a block put
+back, the walks a load makes in memory and in the file and an image's
+index (`store::tests::the_live_bytes_are_the_live_frames_to_the_byte`),
+and over HTTP against what a compact keeps (fennec-server's
+`the_data_bytes_are_the_live_records`). Through 0.2.0 a version written
+over or deleted left its payload's length alone, its head of 3 bytes or
+more counted live -- that test's 250 rows of 3 409 bytes, 200 of them
+written over three times and 50 deleted, read as 5 628 -- and
+`fennec_data_bytes` (`fenec_data_bytes` from 0.1.5 to 0.1.12) said
+`CollectionStats::bytes`, every record dead or alive, where its help and
+the monitoring page said the live ones: a P6 soak's server said 1 907 MiB
+of a 1 950 MiB file just before it compacted at half dead, and the page's
+alert, `dead / (data + dead) > 0.5`, could not fire.
+`CollectionStats::bytes` keeps its meaning, every record's bytes, which
+the browser module's `stats()` answers as `bytes` and @fennecdb/cloudflare
+reads as what the module holds (`held`); the shell's `.stats` says the
+live and the dead apart, as the studio's sidebar does.
+
+An image an older build wrote carries the payload count in its index,
+which an open takes (`adopt_index`): such a file's live bytes are high by
+its dead versions' heads until its next compact, where a walk of the frames
+counts them whole. `Store::live_len` still walks the index for the length
+`write_live` writes: a file's frame may hold a varint longer than the
+shortest, which no writer here makes and `dead_frame` would count short,
+and a length that is off makes the record after the data one unreadable.
+What it costs: a put over a row runs 14 instructions more of fennec's own
+code, all in `Store::append_onto` (the 530th put of `replays` traced by
+function against main, `make instr-compare TRACE=fennec_http::handle`:
+9 104 -> 9 118 of the request's 17 983). Over eight identities a side,
+`put` read +57 instructions a request (+0.27%) and `batch`, 100 rows
+written over a request, +2 611 (+0.26%), each inside two standard errors.
+A varint's length is protobuf's `(log2 * 9 + 73) / 64`
+(`store::varint_len`), an add and a shift: with `div_ceil(7)`, which
+divides, the put's own code was 29 more, and `after`, which an image's
+index asks once a document as it is written and as an open takes it, is
+cheaper by as much. The browser module grew 91 bytes, `dead_frame` held
+once there (`inline(never)`), where a copy in each of its three callers
+grew it 141; on aarch64 macOS fennec-server's code grew 128 bytes and
+`fennec`'s shrank 128, both files the same size to the byte. CI's perf
+job holds the cost.
 
 ### Dropped places
 
@@ -583,6 +633,214 @@ records hold (none, by the count above), a compact ordering the records by
 heat (a uniform workload has none; YCSB's hottest quarter of 16 KB pages
 takes 77% of reads in id order against 96% by heat, which matters only
 once the live records outgrow memory, and E's scans want id order).
+
+### Reading the file in turn
+
+**A compact of a file past the page cache reads it in turn, and writes
+what a compact by id writes** (`store::in_turn`). The new file lays each
+collection's live records in id order, so `Store::write_live` walked the id
+index and copied each record from wherever its last write had put it:
+after updates at keys drawn at random, a page of the mapped file at a time,
+at random. Past the page cache each was a read from the disk -- the P6
+soak's dry run 3, a server in a container of 512 MB over a 2 GB file of
+1.0-1.1 GB live, took 110-344 s a compact at 139-180k major faults a
+minute, the writer at 1 500-2 000 ops/s meanwhile, against 3-6 s where the
+file fitted. Every release that mapped the file compacted so, 0.1.5 to
+0.2.0. Now, where the file is past the room `cache::room` gives it or the
+process waits for the disk (`cache::faulting`) -- the rule the side file
+is written past the cache by -- and the collection holds 4 MiB live or
+more (`in_turn::FROM`), the records are read from the old file's start to
+its end and put in id order on the way, in the same bytes.
+
+Each record's place in the new data record is known before a byte of it
+is read: the frames are laid in id order, each where the one before it
+ends, so a walk of the id index sums them (`Store::buckets`) and cuts them
+into buckets of ids, each at most the budget -- a quarter of the room,
+between 4 and 16 MiB (`in_turn::budget`) -- or one record longer than it.
+Then one pass over the store's frames as they stand, the mapped stretches
+by their place in the file and then the segments in turn, keeps each frame
+the id index points at (`each_standing`) and deals it into its bucket's
+stretch of a scratch file beside the database, through a buffer a bucket:
+the budget shared out between them, 64 KiB to 1 MiB each, 256 buckets at
+the most (`BUCKETS_MOST`, below). The scratch
+file is laid out as the data record is, a bucket's stretch where its frames
+go in the record and as long, its frames in the order they were read.
+Then each bucket in turn is read back into one buffer, each frame put at
+its place by its id (`Places`: a slot of the id index's dense span each,
+and the bucket's run of the sparse ids, sorted once a store and found by
+halving -- a scan of the sparse map a bucket was buckets times sparse ids),
+and the buffer written into the new file. Where
+one bucket holds the collection, no scratch file is made: the frames are
+put in their places in the buffer as they are read (`in_memory`). The new
+file is the one a compact by id writes, byte for byte, so nothing that
+reads it changes: the image's index, `relocate_live`, an open, a scan, a
+replica. The choice is `Store::compact_live`'s, which a compact's data
+record is written through, and it is made by the out (`ImageOut::in_turn`,
+which a rewrite's image under the lock and a compact's side file beside the
+database answer, and nothing else): a snapshot's out asks nothing, and an
+image a pin sends (`pin_image`) is written out by `Store::write_live`, the
+walk by id, which asks nothing. The two are methods apart on purpose:
+with the check inside `write_live`, inlined or not, the walk's loop kept
+one register fewer and reloaded the out from the stack every record --
+19 000 to 25 000 instructions more of 5.67 million for a pinned image of
+10 000 rows (macOS's counts) -- and with it apart the loop is main's,
+instruction for instruction.
+
+*What it holds.* In memory, the buckets' buffers while the records are
+dealt -- the budget shared out between them, each at least 64 KiB, so 16
+MiB together at the most whatever the file: at most 256 buckets
+(`BUCKETS_MOST`, 16 MiB over 64 KiB), past which -- 4 GiB of live records
+in a collection at the most budget, 1 GiB at the least -- the records are
+walked by id, nothing made. The bound is the deal's own: this change's
+second round gave each bucket 64 KiB past 256 of them, which held 1/256 of
+the live bytes -- 400 MiB for 100 GB of documents of 100 KB, a memory the
+room the budget is cut from never weighed -- and a smaller buffer a bucket
+writes the scratch file a smaller piece at a time, at random between the
+buckets; a pass over the file for each 256 buckets is the window rejected
+below. Then one bucket's buffer, 4 bytes a slot of its span of the id
+index and a read buffer of 1 MiB while they are read back. The budget's ceiling is measured (below): buckets
+of 64 MiB took the process's anonymous memory to 76-78 MB, of 32 MiB to
+44-46, of 16 MiB to 28-30, where the walk by id peaks (27-29), and the
+time no further than the runs' spread -- 5.0-8.1, 5.2-7.9 and 4.6-6.6 s.
+The first round's list of the live records by place held 16 bytes a
+document more, 16 MB a million. On the disk, the
+collection's live bytes once, for as long as its record is written, one
+collection at a time: the scratch file is made only where the volume gives
+twice the live bytes and 64 MiB beside what is written so far -- the
+scratch, the data record still to come, the records after it and the
+writes landing meanwhile (`fstatvfs`, `fstatfs`, Windows'
+`FILE_FS_FULL_SIZE_INFORMATION`) -- and the records are walked by id
+otherwise, as they are where it cannot be made or the volume cannot be
+asked. The room is a snapshot, asked as the scratch file is made: a node
+compacting several tenants at once, each on its own thread, can pass it
+for each, as can a volume another program fills meanwhile. Then the
+scratch file's write the disk refuses ends the deal, and the records are
+walked by id (*Its failures*, below), the scratch file's room given back
+as it closes before a record of the walk is written. A scratch file is written and read past the page cache as a side
+file past it is (`F_NOCACHE`; on Linux synced and its pages dropped every
+64 MB, each bucket's dropped once read back): its pages would push out the
+old file's, which the reads need until the swap.
+
+*Its name.* The scratch file is `<file>.sorting` -- `data.fennec.sorting`
+beside `data.fennec` -- made by its open alone (`O_CREAT | O_EXCL`,
+`create_new`) and through no link (`O_NOFOLLOW` on a Unix), then unlinked
+at once on a Unix, and on Windows opened to be deleted as its last handle
+closes (`FILE_FLAG_DELETE_ON_CLOSE`): a crash leaves nothing beside the
+file, the process's end closing the handle. What can leave it is a power
+cut on Windows, or a kill in the instant between a Unix's open and its
+unlink, which leaves it empty: `.sorting` is among `fs::LEFT_BESIDE`, which
+the open that writes the file and a node starting remove
+([durability.md](durability.md#files-modes)). Whatever stands at the name
+as a compact starts is left as it is and the records are walked by id: a
+database a user named so, whose lock `fs::remove_left` keeps it by, held or
+not, a link, on Windows another compact's held open. This change's second
+round made the file by `fs::create_private`, which on a Unix removes what
+stands at its name first, as a side file written whole may -- a user's
+database so named too, its lock held beside it.
+
+*Its failures.* A walk that does not meet every live record as the id index
+has it -- a frame that does not read, a record outside the stretches and
+the segments, as a pinned store's, which keeps no stretch -- leaves the
+records to the walk by id, nothing of the new file written yet. So does a
+scratch file that fails before a byte of the new file is written -- a
+write or a read refused while the records are dealt or the first bucket is
+read back, or that bucket read back otherwise than it was written: nothing
+of the database's own file was touched, so the compact goes on by id,
+said on stderr once a database and failure (`walked_by_id`, a line as a
+server's log writes one), where this change's second round failed the
+compact, and under the lock the database with it. Once the first bucket is
+written into the new file, a write or a read of the scratch file that fails
+fails the compact as a write of its new file does: beside the database,
+the compact alone, the side file removed, the database writing on; under
+the lock (a batch's, the shell's), the database too, as every rewrite
+failing there does (`Database::storage`). A bucket the scratch file gives
+back otherwise than it was written -- each bucket's frames summed as they
+are dealt and again as they are read back (CRC32C), each frame held to its
+id's length and place, the length before it is added to, as a length read
+off a failing disk may be any number and its sum overflowed into a panic
+under the lock (`compact_unwound`) -- is such a failure, `Error::Io`, never
+a record copied wrong. Beside the database the reading and the scratch file
+are the side file's, with no lock held; under the lock, the lock's as the
+walk by id was.
+
+`store::in_turn`'s unit tests hold the copy to the walk by id byte for byte
+over a store reading from two stretches of a mapped file and two segments
+-- ids rewritten within a stretch, from one to the next and into memory,
+deleted, written again, four past the dense array out of their order, one
+longer than a bucket -- in buckets of one record each up to one in memory,
+and over 188 sparse ids, each more than 4 096 past the one before, in three
+buckets of them and more; a store past `BUCKETS_MOST` buckets and a pinned
+store, whose walk misses its mapped records, to the walk by id with nothing
+written; a file and a link at the scratch file's name to the walk by id,
+each left as it was; and a scratch file refusing a write, or handing back
+the first bucket with a flipped byte or a length of `u64::MAX` less one,
+to the walk by id, and the second bucket so to a failed copy, none leaving
+its name. `tests/in_turn.rs` holds a compact in turn to one by id byte for
+byte under the lock and beside the database, over an image, a spilled
+block, a tail taken in from the file and writes in memory, a broken scratch
+file before the new file is written to the file a compact by id writes,
+and one after to the failures above, each test in a directory of its own
+that goes as it ends. Twenty-six mutations each fail at least one: the
+segments left out of the walk, a place one off, a record dealt into the
+next bucket, the sums not compared, a bucket's last buffer never written, a
+head's length one off, the sparse ids' places unsorted, the buckets written
+out last first, a head put one byte on, a payload never put in memory, the
+rule's `or` an `and`, the 4 MiB floor dropped, `compact_live` never asking,
+a compact under the lock or beside the database calling `write_live`
+instead, the side file never asked or never asking, the image under the
+lock never asking, the scratch file left at its name, a walk that missed a
+record copied all the same, the bound on the buckets dropped, a scratch
+file failing in the deal or in the first bucket failing the compact, a
+bucket's run of sparse ids taken from the first sparse id, the scratch
+file made by `create_private`, and a length read back summed before it is
+held to the index's.
+
+*Measured* (a scratch program over `Database::maintain`, the compact
+beside the database; `docker run --cpus=3`, Linux aarch64 under macOS's
+Docker, the 1-minute load under 3 at each run's start, main and this
+change in ABBA order). A file of a million documents of 1 KB, each
+updated once at a random key: 2.04 GB, 1.02 live. In a container of 512
+MB, past the room: by id, 44.9-51.1 s over 10 runs, 526 000-531 000 major
+faults, the process's anonymous memory peaking at 27-29 MB and the
+volume's use at 977 MB over the old file (the new one); in turn, with
+buckets of 16 MiB, 4.6-6.6 s over 10 runs, 1 550-2 630 major faults, 28-30
+MB, 1 921-1 945 MB (the scratch file beside the new one). Of a compact in
+turn, dealing the records took 2.9-3.2 s and reading the buckets back and
+writing them 1.7-1.9 (16 MiB). A scratch file left to the kernel's
+writeback, against one synced and its pages dropped every 64 MB: 5.0-8.5
+s against 5.0-6.5, the writeback stalling the deal (2.6-5.0 s against
+2.8-3.2). Half a million such documents in a container of 2.5 GB, which
+fits: 1.1-2.1 s on main, 1.0-2.8 on this change, by id both, no fault, 16
+MB. Both compacts' files are the same bytes (`cmp`, every pair), so are
+their images' indexes (4 001 502 and 2 000 758 bytes), their opens (a
+warm open 2.7-6.3 ms, the small one 1.5-2.0, by either binary) and their
+scans: a scan of the large one in id order took 74-76 ms where the read
+before had left it in the page cache and 283-736 ms where it had left less
+of it, by either binary on either file; the small one 35-38 ms. `fennec-server`
+(aarch64 macOS, release) grew 16 592 bytes, the browser module none (863
+088 bytes: `store::in_turn` and `fs::Scratch` are a 64-bit Unix's and
+Windows' with `std-fs`). The perf gate's `file-compact` shape (10 000
+rows, under `FROM`), counted by a copy of it on macOS, gave 10.21 million
+instructions on both, heap bytes equal, and a pinned image of the same
+rows 5.65 million against 5.68.
+
+*Rejected.* Laying the new file in the order the records stood in the old
+one (this change's first round): the copy read the file in turn and needed
+no scratch file, but the file kept the order of the last writes -- a scan
+in id order of a million records past the page cache took 2.0-31.7 s
+against 0.21-0.59, the image's index 7.75 MB against 4.00 (a place out of
+id order 4-5 varint bytes, not 1), a warm open 4.7-6.3 ms against 3.5-3.7,
+and the list of the live records by place 16 bytes a document beside 8
+more to index them, 46-53 MB of anonymous memory against 27-30. A list of
+the live records sorted by place, to read only the pages holding one: 16
+bytes a document where the walk of the frames holds nothing, and it reads
+dead pages alike once updates have left a live record on most. A pass over
+the file a window of ids at a time: sixteen passes of 2 GB for 64 MB
+windows. The scratch file's bytes put at their places as they are dealt,
+the file then copied out whole: written at random, a page past the cache is
+read back to be written again. A scratch file a bucket: a descriptor each,
+past a few hundred buckets more than a process may hold, and a name each
+to leave.
 
 ## File format
 
