@@ -1,7 +1,8 @@
 //! A compact of a file past the page cache copies a store's live records
 //! reading the file in turn (docs/design/storage.md#reading-the-file-in-turn):
 //! the same bytes, in id order, that [`Store::write_live`]'s walk by id
-//! writes, read from the old file from its start to its end.
+//! writes, read from the old file from its start to its end
+//! ([`Store::compact_live`]).
 //!
 //! By id, the walk reads the mapped file wherever each id's last write put
 //! its record: once updates at random keys have moved the records out of id
@@ -233,7 +234,7 @@ fn head_into(head: &mut Vec<u8>, id: DocId, len: usize) {
 }
 
 impl Store {
-    /// [`Self::write_live`] reading the file in turn, where `out` asks it
+    /// [`Self::compact_live`] reading the file in turn, where `out` asks it
     /// ([`ImageOut::in_turn`]): `false`, nothing written, where the records
     /// are to be walked by id -- not mapped, under [`FROM`], not asked, no
     /// room on the volume, or a walk that did not meet every live record

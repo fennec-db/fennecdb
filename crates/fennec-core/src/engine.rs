@@ -1386,7 +1386,7 @@ impl<'a> Summed<'a> {
     }
 
     /// `store`'s live records, `len` bytes, as the record's body
-    /// ([`Store::write_live`]): written, or held by an out that writes
+    /// ([`Store::compact_live`]): written, or held by an out that writes
     /// them as it writes the image out ([`Later::Live`]).
     pub(crate) fn write_live(&mut self, store: &Store, len: usize) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1394,7 +1394,7 @@ impl<'a> Summed<'a> {
             return self.out.later(Later::Live(store, len));
         }
         let _ = len;
-        store.write_live(self)
+        store.compact_live(self)
     }
 }
 

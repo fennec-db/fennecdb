@@ -1063,7 +1063,7 @@ impl Beside {
                 let mut data = Summed::begin(side, REC_DATA, p.cid, bytes)?;
                 placed.push(Some(data.at()));
                 match p.compact {
-                    true => p.store.write_live(&mut data)?,
+                    true => p.store.compact_live(&mut data)?,
                     false => p.store.write_image(&mut data)?,
                 }
                 data.end()?;

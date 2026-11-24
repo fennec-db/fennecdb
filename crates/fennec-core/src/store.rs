@@ -2046,15 +2046,9 @@ impl Store {
     }
 
     /// The live records, framed afresh, in id order: what `compact` writes
-    /// into the new file. Walked by id, nothing is gathered in memory on the
-    /// way; where `out` asks for them in turn -- a compact's file, the old
-    /// one past the page cache ([`in_turn`]) -- the same bytes are written
-    /// reading the old file from its start to its end.
+    /// into the new file ([`Self::compact_live`]), walked by id, nothing
+    /// gathered in memory on the way.
     pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
-        #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
-        if self.wrote_in_turn(out)? {
-            return Ok(());
-        }
         let mut head = Vec::with_capacity(16);
         for id in self.index.iter() {
             let Some(loc) = self.index.get(id) else {
@@ -2069,6 +2063,21 @@ impl Store {
             out.write(payload)?;
         }
         Ok(())
+    }
+
+    /// [`Self::write_live`]'s bytes into a compact's file: where `out` asks
+    /// for them in turn -- the old file past the page cache ([`in_turn`]) --
+    /// read from the old file's start to its end, else walked by id. A
+    /// method apart from `write_live`, which an image a pin sends calls
+    /// alone: the check inlined beside its loop there cost the loop a
+    /// register, a pinned image of 10 000 rows 19 000 to 25 000 instructions
+    /// more (macOS's counts).
+    pub fn compact_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
+        #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+        if self.wrote_in_turn(out)? {
+            return Ok(());
+        }
+        self.write_live(out)
     }
 
     /// Whether the records are read from a mapped file rather than held in
