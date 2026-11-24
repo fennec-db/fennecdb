@@ -561,9 +561,11 @@ where nothing was left, and their names' allocations -- the perf gate's
 for 3 779 720 bytes against 200 114 and 3 779 252 with `.taking` alone
 (natively, three runs a side alike), +9 calls and +468 bytes, 0.005% and
 0.012%; its time, taken at a load of 37-40 from others' work, was
-discarded. The image a
-restore or a consolidating round of an archive with no key starts from
-(never a request) is copied by `copy_file_range` on Linux, as
+discarded. Release `fennec-server` on macOS: 1 088 bytes more `__text`
+(5 023 616 to 5 024 704), the file the same to the byte (7 206 608),
+against a file as large as the database a crash in a compact no longer
+leaves. The image a restore or a consolidating round of an archive with no
+key starts from (never a request) is copied by `copy_file_range` on Linux, as
 `fs::copy` copied it: std's `io::copy` from a `File` into a
 `BufWriter<File>` is its `kernel_copy`, which flushes the empty buffer and
 hands both descriptors to the kernel. On APFS it is cloned again, as
