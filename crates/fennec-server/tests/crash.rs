@@ -79,3 +79,27 @@ fn a_killed_server_links_its_vectors_after_the_open() {
     let db = fennec_core::fs::open_serving(&path, true, Box::new(Ok)).expect("reopen");
     assert_eq!(db.unlinked(), 0);
 }
+
+/// What a process writing the file left beside it as it ended -- a
+/// compact's image, a `.save`'s -- goes as the next server opens the file,
+/// a line in its log for each, naming it and its size: nothing else said a
+/// file as large as the database went, or that one had been there.
+#[test]
+fn a_server_logs_what_a_crash_left_beside_its_file_as_it_removes_it() {
+    let path = tmp("crash", "left.fennec");
+    let file = path.to_str().unwrap();
+    let (beside, saving) = (format!("{file}.beside"), format!("{file}.saving"));
+    std::fs::write(&beside, vec![7u8; 4096]).unwrap();
+    std::fs::write(&saving, b"part of a .save").unwrap();
+    let server = start(&["--file", file]);
+    let log = server.log.lock().unwrap().clone();
+    for (name, bytes) in [(&beside, 4096), (&saving, 15)] {
+        let line = format!(
+            "{name}: removed, {bytes} bytes a process writing {file} left beside it as it ended"
+        );
+        assert!(log.contains(&line), "{line}\n{log}");
+        assert!(!std::path::Path::new(name).exists(), "{name} left");
+    }
+    let (_, log) = server.signal(SIGTERM);
+    assert_eq!(log.matches(": removed, ").count(), 2, "{log}");
+}

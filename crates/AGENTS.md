@@ -66,10 +66,13 @@ writer's handle before their rename (`still_named`, the handle
 owner alone (`fs::LEFT_BESIDE`'s `.taking`, `.compacting`, `.beside` and
 `.saving` by the open that writes it, a link there unlinked, never
 followed; those and `.importing` by a node under the tenant's lock,
-`sweep_left`); `create_dir_private` or `create_dir_new` for a directory --
-`0600`, a directory `0700`, whatever the umask, from the call that makes
-it, or for a clone, which takes its source's owner-only mode, on its
-handle before it is handed back: never a `chmod` by name.
+`sweep_left`), never one whose own `.lock` a holder has
+(`fs::remove_left`, which asks fennec-abi's `lock::unless_held`), each
+removal said (`Database::swept_on_open`); `create_dir_private` or
+`create_dir_new` for a directory -- `0600`, a directory `0700`, whatever
+the umask, from the call that makes it, or for a clone, which takes its
+source's owner-only mode, on its handle before it is handed back: never a
+`chmod` by name.
 A file renamed over another is given that one's mode before the rename, by
 an `fchmod` of its open handle (`mode_like`), a group's bits only where it
 is of that group, nothing from a file another user owns; nothing is

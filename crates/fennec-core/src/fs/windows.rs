@@ -506,6 +506,8 @@ pub(super) fn cut_and_open(
     // cut finds nothing to cut, and the server's log and a test's
     // `cut_on_open` read None on Windows alone.
     let said = db.cut_on_open().cloned();
+    // And what it removed beside the file, which the open after finds gone.
+    let swept = db.swept_on_open().to_vec();
     let marked = db.marks_cut();
     drop(db);
     sink.mapping = None;
@@ -544,6 +546,7 @@ pub(super) fn cut_and_open(
     let _cutting = Cutting;
     let mut db = super::open_mapped_into(db, path, wrap)?;
     db.said_cut(said);
+    db.said_swept(swept);
     Ok(db)
 }
 

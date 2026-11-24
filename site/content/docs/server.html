@@ -708,7 +708,8 @@ The write lock is then held for the last of those writes, the side file's
 fsync and the rename. A compact the process is killed in leaves its side file,
 <code>&lt;file&gt;.beside</code>, as large as the live data: the server removes
 it as it next opens the file, and a <code>--dir</code> node its tenants' as it
-starts. The server looks for a compact due every 5 s, and a
+starts, logging a line for each with its size. The server looks for a compact
+due every 5 s, and a
 look waits for a write under way rather than pass a compact over. A replica
 compacts its own file the same way: a compact changes no document, and an
 image its primary sends meanwhile fails the compact rather than be written

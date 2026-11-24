@@ -1468,6 +1468,16 @@ fn main() {
                             c.records
                         );
                     }
+                    // What the open removed beside the file: an image a
+                    // compact, a checkpoint, a copy or a `.save` was writing
+                    // as the process before ended, a line each.
+                    for s in db.swept_on_open() {
+                        fennec_http::log!(
+                            "{}: removed, {} bytes a process writing {path} left beside it as it ended",
+                            s.path.display(),
+                            s.bytes
+                        );
+                    }
                     #[cfg(windows)]
                     say_volume(path, mmap);
                     db

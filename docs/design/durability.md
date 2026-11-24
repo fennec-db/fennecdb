@@ -403,7 +403,35 @@ a `.save` takes too, refuses a second holder of the file in a process as in
 two, and a database rewrites nothing before its open returns. The removal
 is an `unlink`, which follows no link: one put at the name goes, the file
 it names as it was; a directory there stays, and the next rewrite of that
-name fails on it as it did before. Until the P6 soak's second run, a
+name fails on it as it did before. A file at one of those names whose own
+lock a holder has -- `<file>.beside.lock`, a database a user named so
+beside another, served or written -- stays too (`fs::remove_left`, the
+open's and `sweep_left`'s alike): removed, its writer went on writing a
+file no name reached (#682's review; so for a `.taking` since #680). A
+link is not asked: whoever writes the file it names keeps that name, and
+asked, its lock would be that file's (`lock_path` follows a link) -- one
+to the database itself kept by the open asking, which holds it. The
+lock is asked only once something is at the name, so
+an open with nothing left makes one `lstat` a name where it made one
+`unlink`. It is asked through fennec-abi's lock module
+(`lock::unless_held`, which every `lock::hold` hands fennec-core through
+`fs::ask_locks_with` before the open the hold guards): only that module
+knows which locks this process holds, and a descriptor of one of those
+lock files opened and closed in fennec-core would let this process's
+record lock go. It opens the lock file only once this process holds none
+of it, under its list's guard so no hold here takes it meanwhile; takes
+it without waiting where it is free, never from a holder, for the
+removal, so nothing opens the file as it goes; and makes none where none
+is there. A lock file a crash or a close left unlocked keeps nothing; one
+that cannot be opened (another user's, a link at its name) cannot be
+tried, and keeps the file. A process that took no lock through that
+module -- fennec-core's own tests, a bench -- has none to ask, and keeps a
+side file a lock file stands beside. What the open removed it says, as it
+says a torn tail's cut (`Database::swept_on_open`: each name and the
+bytes it held, an empty `Vec`, nothing allocated, where nothing was
+left): fennec-server logs a line each as it opens its file, a node a line
+each as a tenant's open removes one and as `sweep_left` does at its
+start. Until the P6 soak's second run, a
 compact's `.beside`, a rewrite's `.compacting` and a `.save`'s `.saving`
 stayed until the next writer of the name made it again -- every release,
 `.compacting` from 0.1.0, `.beside` from 0.1.5 and `.saving` in 0.2.0 --
@@ -417,8 +445,18 @@ destructor run) and holds the file left until the open that writes, past
 a read-only open; puts every name at its place before a mapped, an
 in-memory and a server's open; and puts a link and a directory at each,
 the link removed and its file kept, the directory kept and the database
-opened. fennec-http's two `sweep_left` tests put `.compacting`, `.beside`
-and `.saving` beside a tenant's file and a linked one's.
+opened, and each open's `swept_on_open` holds what it removed, the next
+open nothing. fennec-abi's `a_side_file_whose_own_lock_is_held_stays`
+holds a `.beside`'s own lock in this process and then in another: the
+file stays each time, the holder's lock with it, and once both let go,
+the lock file left unlocked, it goes, said with its size, beside a
+`.saving` with no lock file, beside which none is made, and a link at
+`.taking` to the database itself, whose lock the test holds (a Unix's);
+run with the ask taken out, it fails at its first open. fennec-core's
+`with_no_lock_to_ask_a_side_file_beside_a_lock_file_stays` holds a
+process with no lock module to ask. fennec-http's two `sweep_left` tests
+put `.compacting`, `.beside` and `.saving` beside a tenant's file and a
+linked one's, the first one whose own lock is held, kept.
 The rename itself goes by the name, so `swap_in` first holds the name to the
 handle's file (`still_named`, its device and inode against an `lstat`; on
 Windows the volume's serial number and the file's index against the name

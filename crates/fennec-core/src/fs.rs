@@ -302,11 +302,112 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// the shell's `.save` over the file (fennec-cli's `save`). Removed by the
 /// open that writes the file ([`FileSink`]'s) and by a node as it starts,
 /// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
-/// that only looks. A crash in a compact beside a 1.4 GB database left its
+/// that only looks, nor where a holder has the side file's own lock
+/// ([`remove_left`]). A crash in a compact beside a 1.4 GB database left its
 /// `.beside` until the next compact, which the auto-compact starts only
 /// once half the file is dead: the disk the database took, doubled
 /// meanwhile (the soak harness, P6).
 pub const LEFT_BESIDE: [&str; 4] = ["taking", "compacting", "beside", "saving"];
+
+/// A side file the open that writes a file removed beside it
+/// ([`LEFT_BESIDE`]), for whoever opened it to say
+/// ([`Database::swept_on_open`]): a server logs each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Swept {
+    /// Its name: beside the file a link at the database's name leads to,
+    /// where the open writes ([`resolved`]).
+    pub path: PathBuf,
+    /// The bytes it held, or a link's own where one was there.
+    pub bytes: u64,
+}
+
+/// How a side file's own lock is asked before the file goes
+/// ([`ask_locks_with`]): `unless_held(side, remove)` runs `remove` unless a
+/// holder has `<side>.lock`, and says whether it ran.
+pub type UnlessHeld = fn(&Path, &mut dyn FnMut()) -> bool;
+
+/// What [`remove_left`] asks a side file's lock with, once a process's
+/// first lock is taken ([`ask_locks_with`]).
+#[cfg(not(target_arch = "wasm32"))]
+static UNLESS_HELD: std::sync::OnceLock<UnlessHeld> = std::sync::OnceLock::new();
+
+/// Tells [`remove_left`] how to ask a side file's own lock: fennec-abi's
+/// `lock::unless_held`, set by its lock module as it takes a lock, before
+/// any open that lock guards. That module alone knows which locks this
+/// process holds, and a descriptor of a lock file this process holds,
+/// opened and closed here, would let its record lock go: fennec-core
+/// cannot try one itself. Set once a process; a later call changes nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ask_locks_with(unless_held: UnlessHeld) {
+    let _ = UNLESS_HELD.set(unless_held);
+}
+
+/// Removes the side file at `side` a crash left beside a database
+/// ([`LEFT_BESIDE`], a node's `.importing`), and says what it held: `None`
+/// where nothing is there, where a directory is -- no file of ours, which
+/// the next rewrite of the name fails on as it did before -- or where a
+/// holder has `<side>.lock`: a database a user named so, beside another,
+/// served or written, whose writer a removal would leave writing a file
+/// no name reaches (#682's review). The lock is asked only once something
+/// is there, so an open with nothing left makes one `lstat` a name where it
+/// made one `unlink`. It is asked through fennec-abi's lock module
+/// ([`ask_locks_with`]), which takes it for the removal where it is free --
+/// never from a holder, in this process or another, and never waiting --
+/// so nothing opens the file as it goes, and makes no lock file where none
+/// is there; one a crash or a close left unlocked keeps nothing. A process
+/// that took no lock through that module (fennec-core's own tests, a
+/// bench) has none to ask, and keeps a side file a lock file stands beside.
+/// The removal is an `unlink`, which follows no link: one put at the name
+/// goes, asking no lock, the file it names as it was.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_left(side: &Path) -> Option<u64> {
+    let meta = std::fs::symlink_metadata(side).ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    // A link goes as a link, asking no lock: whoever writes the file it
+    // names keeps that file's name. Asked, the lock would have been that
+    // file's (`lock_path` follows a link), and a link to the database
+    // itself kept by the open asking, which holds its lock.
+    if meta.file_type().is_symlink() {
+        return std::fs::remove_file(side).ok().map(|()| meta.len());
+    }
+    let mut removed = false;
+    let mut remove = || removed = std::fs::remove_file(side).is_ok();
+    match UNLESS_HELD.get() {
+        Some(unless_held) => {
+            unless_held(side, &mut remove);
+        }
+        None if std::fs::symlink_metadata(beside(side, "lock")).is_err() => remove(),
+        None => {}
+    }
+    removed.then_some(meta.len())
+}
+
+/// What a process writing the file at `path` left beside it as it ended
+/// ([`LEFT_BESIDE`]), removed ([`remove_left`]), in that order. Each name is
+/// made in one buffer, sized once for the longest, which a Unix's `lstat`
+/// reads off the stack: where nothing was left the buffer is the one call
+/// to the allocator, one fewer than `.taking`'s name alone made by
+/// [`beside`], where the four so made asked nine more (the perf gate's
+/// `file-open`, #682's review).
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_beside(path: &Path) -> Vec<Swept> {
+    let mut swept = Vec::new();
+    let longest = LEFT_BESIDE.iter().map(|s| s.len()).max().unwrap_or(0);
+    let mut name = std::ffi::OsString::with_capacity(path.as_os_str().len() + 1 + longest);
+    for side in LEFT_BESIDE {
+        name.clear();
+        name.push(path);
+        name.push(".");
+        name.push(side);
+        if let Some(bytes) = remove_left(Path::new(&name)) {
+            let path = PathBuf::from(&name);
+            swept.push(Swept { path, bytes });
+        }
+    }
+    swept
+}
 
 /// `options` made to make a file its owner's alone: mode 0600 on a Unix,
 /// whatever the umask, set by the `open` that makes it -- never a `chmod`
@@ -899,16 +1000,23 @@ impl FileSink {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>)> {
-        let (mut file, path) = FileSink::create(path)?;
+        let (sink, existing, _) = FileSink::open_sweeping(path)?;
+        Ok((sink, existing))
+    }
+
+    /// [`Self::open`], and what it removed beside the file ([`Swept`]).
+    fn open_sweeping(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>, Vec<Swept>)> {
+        let (mut file, path, swept) = FileSink::create(path)?;
         let mut existing = Vec::new();
         file.read_to_end(&mut existing)?;
         file.seek(SeekFrom::End(0))?;
-        Ok((FileSink::over(file, path), existing))
+        Ok((FileSink::over(file, path), existing, swept))
     }
 
     /// Opens the file for reading and appending, creating it with the magic
-    /// alone when it is missing or empty.
-    fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf)> {
+    /// alone when it is missing or empty, and removes what a crash left
+    /// beside it: what it removed comes back with it.
+    fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf, Vec<Swept>)> {
         // The file a link leads to, kept as the sink's path: every rewrite
         // renames over it, leaving the link a link.
         let path = resolved(path.as_ref());
@@ -931,17 +1039,16 @@ impl FileSink {
         // written as this open runs: the lock, which a `.save` takes too,
         // refuses a second holder of the file in this process as in another,
         // and this database rewrites nothing before it is open.
-        // `unlink` follows no link: one put at a name goes, not the file it
-        // names. A directory there stays (`remove_file` removes none), and
-        // the next rewrite of that name fails on it, as before: no file of
-        // ours. Left to the follower as it started, a copy started again as
-        // a primary kept its `.taking` for good; left to the next compact, a
-        // crash in one doubled the disk the database took until a compact
-        // ran again.
+        // A link at a name goes, not the file it names; a directory there,
+        // and a file whose own lock another holder has -- a database a user
+        // named so -- stay ([`remove_left`]). Left to the follower as it
+        // started, a copy started again as a primary kept its `.taking` for
+        // good; left to the next compact, a crash in one doubled the disk
+        // the database took until a compact ran again.
         #[cfg(not(target_arch = "wasm32"))]
-        for side in LEFT_BESIDE {
-            let _ = std::fs::remove_file(beside(&path, side));
-        }
+        let swept = sweep_beside(&path);
+        #[cfg(target_arch = "wasm32")]
+        let swept = Vec::new();
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
@@ -959,7 +1066,7 @@ impl FileSink {
             #[cfg(unix)]
             crate::synclog::recover(&file, &crate::synclog::path_for(&path))?;
         }
-        Ok((file, path))
+        Ok((file, path, swept))
     }
 
     /// A sink appending to `file`, which is positioned at its end.
@@ -2146,7 +2253,8 @@ fn open_in_memory_into(
     path: impl AsRef<Path>,
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
-    let (mut sink, existing) = FileSink::open(path)?;
+    let (mut sink, existing, swept) = FileSink::open_sweeping(path)?;
+    db.said_swept(swept);
     // A new file is loaded too, as a mapped one is: it holds the magic by
     // now, which the bytes the database counts as its file's must include.
     if existing.len() >= MAGIC.len() {
@@ -2181,7 +2289,8 @@ fn open_mapped_into(
     path: impl AsRef<Path>,
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
-    let (mut file, path) = FileSink::create(path)?;
+    let (mut file, path, swept) = FileSink::create(path)?;
+    db.said_swept(swept);
     let len = file.seek(SeekFrom::End(0))? as usize;
     let mapping = Arc::new(Mapping::with_room(&file, len)?);
     let mut sink = FileSink::over(file, path);

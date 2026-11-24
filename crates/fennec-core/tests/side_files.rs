@@ -9,7 +9,7 @@
 #![cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 
 use fennec_core::engine::ImageOut;
-use fennec_core::fs::{beside, SideFile, LEFT_BESIDE};
+use fennec_core::fs::{beside, SideFile, Swept, LEFT_BESIDE};
 use fennec_core::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -180,8 +180,42 @@ fn an_image_a_crash_left_goes_as_the_file_is_opened_to_be_written() {
             let at = beside(&path, side);
             assert!(!at.exists(), "{how}: the open to write left .{side}");
         }
+        let said = LEFT_BESIDE.map(|side| Swept {
+            path: beside(&path, side),
+            bytes: (image.len() / 2) as u64,
+        });
+        assert_eq!(db.swept_on_open(), &said[..], "{how}: what it said");
         assert_eq!(rows(&db), ["[Int(1)]"], "{how}: the database as it was");
+        drop(db);
+        let again = open(&path).unwrap();
+        assert!(again.swept_on_open().is_empty(), "{how}: an open after");
     }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// The open asks a side file's own lock through fennec-abi's lock module
+/// (`fs::ask_locks_with`), which a process that took no lock through it --
+/// these tests, a bench -- has not told it of: with none to ask, a side
+/// file a lock file stands beside, a database a user may have open, stays,
+/// and one with none goes.
+#[test]
+fn with_no_lock_to_ask_a_side_file_beside_a_lock_file_stays() {
+    let d = dir("unasked");
+    let path = d.join("db.fennec");
+    drop(fennec_core::fs::open(&path).unwrap());
+    let (kept, gone) = (beside(&path, "beside"), beside(&path, "saving"));
+    std::fs::write(&kept, b"a database a user named so").unwrap();
+    std::fs::write(beside(&kept, "lock"), b"").unwrap();
+    std::fs::write(&gone, b"part of a .save").unwrap();
+    let db = fennec_core::fs::open(&path).unwrap();
+    assert!(kept.exists(), "a file beside its own lock file removed");
+    assert!(!gone.exists(), "a .save's left");
+    let said = [Swept {
+        path: gone,
+        bytes: 15,
+    }];
+    assert_eq!(db.swept_on_open(), &said[..]);
+    drop(db);
     let _ = std::fs::remove_dir_all(d);
 }
 
@@ -254,6 +288,8 @@ fn a_compact_killed_mid_write_leaves_its_file_to_the_next_open() {
     assert!(left.exists(), "a tool that only looks removed it");
     let db = fennec_core::fs::open(&path).unwrap();
     assert!(!left.exists(), "the open to write left it");
+    let said: Vec<_> = db.swept_on_open().iter().map(|s| &s.path).collect();
+    assert_eq!(said, [&left], "what the open said it removed");
     assert_eq!(rows(&db), held, "the database as the compact found it");
     drop(db);
     let _ = std::fs::remove_dir_all(d);
