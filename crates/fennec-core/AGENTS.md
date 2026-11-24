@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- and the storage rules of its handover, maintenance beside the database and compaction are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/AGENTS.md](src/text/AGENTS.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's invariants, for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- and the storage rules of its handover, maintenance beside the database and compaction are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/AGENTS.md](src/text/AGENTS.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -43,8 +43,9 @@ Unchecked, zeros to the end are cut only from a head after a nonzero byte
 or the image's end (`zero_tail`); a torn image refused, an unknown kind
 names its byte; the file only grows; a looking tool opens
 `fs::open_read_only`, writing nothing. A new record or index kind, type
-tag or graph version is a number older binaries refuse, never misread (a
-graph's: rebuilds).
+tag, data op or graph version is a number older binaries refuse, never
+misread (a graph's: rebuilds; an op's: the image's index under a new
+`FRAMES_*` mark, which `adopt_index`, reading no op, leaves to the walk).
 
 **[A value read off the bytes nests no deeper than JSON's
 limit.](../../docs/design/crates.md#how-deep-a-value-nests)**
