@@ -14,10 +14,10 @@
 # from the repository's root, on a machine doing nothing else, one sync mode
 # a run: first the peak the mix reaches as fast as it is answered
 # (PEAK_MINUTES, long enough for the file to double and the server to
-# compact it on its own: its operations over its time, which a soak's
-# rate must hold through both), then the soak open loop at each of
-# FRACTIONS of it, in turn: 8 hours each, 17 for one sync mode as it
-# comes. A fraction that failed its report ends the run there, unless
+# compact it on its own: its slowest three minutes, which a soak's rate
+# must hold through both, the mean beside them), then the soak open loop
+# at each of FRACTIONS of it, in turn: 8 hours each, 17 for one sync mode
+# as it comes. A fraction that failed its report ends the run there, unless
 # KEEP_GOING=1. Each setting is an environment variable:
 #
 #   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=30 RECORDS=1000000
@@ -96,7 +96,10 @@ MINUTES=${MINUTES:-480}
 FRACTIONS=${FRACTIONS:-50 80}
 # Four minutes of a freshly loaded file measured its best: the second dry
 # run of 2026-11-23 held 80% of them twelve minutes, until the file passed
-# 1.8 GB under 512 MB and both servers compacted on their own.
+# 1.8 GB under 512 MB and both servers compacted on their own. The third,
+# at 80% of thirty minutes' mean, fell behind through each compaction and
+# never drained it before the next: the rate is now a fraction of the
+# peak's slowest stretch, a compaction's (`ycsb soak`'s `peak`).
 PEAK_MINUTES=${PEAK_MINUTES:-30}
 RECORDS=${RECORDS:-1000000}
 MEMORY=${MEMORY:-512m}
@@ -278,14 +281,19 @@ stopped_at_once() {
     fi
 }
 stopped_at_once "$RUN-s$sync-peak"
+# `peak` is the slowest three minutes in a row, which the rate must hold
+# through the server's own compactions; the mean and where the stretch
+# began are said beside it.
 peak=$(awk '$1 == "peak" {print $2}' "$peaks")
+mean=$(awk '$1 == "peak_mean" {print $2}' "$peaks")
+at=$(awk '$1 == "peak_slowest_at" {print $2}' "$peaks")
 own=$(awk '$1 == "peak_compacts" {print $2}' "$peaks")
 rm -f "$peaks"
 [ -n "$peak" ] || {
     echo "no peak measured" >&2
     exit 1
 }
-echo "$(date '+%F %H:%M') the peak is $peak operations a second, over $PEAK_MINUTES minutes and ${own:-no} compactions of the server's own"
+echo "$(date '+%F %H:%M') the peak is $peak operations a second at its slowest, from minute ${at:-?} (${mean:-?} over $PEAK_MINUTES minutes), and ${own:-no} compactions of the server's own"
 [ "${own:-0}" = 0 ] &&
     echo "$(date '+%F %H:%M') the server did not compact on its own in the peak: its rate may not hold through one (PEAK_MINUTES)"
 
