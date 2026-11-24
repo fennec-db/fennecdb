@@ -237,8 +237,9 @@ pub fn ending() -> bool {
 /// waits for them up to `grace`. A connection in the middle of an answer
 /// sends its end after it, if the process is still there. Before, the
 /// process exiting closed them all with a TCP end alone, which a TLS client
-/// reads as a stream cut short. A connection in its handshake is waited for
-/// too, and ends as its handshake does (`open::Shaking`).
+/// reads as a stream cut short. A connection in its handshake -- its first
+/// record's byte come -- is waited for too, and ends as its handshake does;
+/// one that has sent nothing is not (`open::Shaking`).
 pub fn end_all(grace: Duration) {
     // Sequentially consistent, against a handshake's count
     // ([`open::Shaking::begin`]): either it sees this, or the wait below
@@ -293,14 +294,22 @@ mod open {
     /// [`end_all`]: super::end_all
     static SHAKING: AtomicUsize = AtomicUsize::new(0);
 
-    /// A connection counted in its handshake, from before its first byte
-    /// is read to after it is listed ([`note`]): the one shutdown either
-    /// waits for its handshake and lists it, read side shut, or finds it
-    /// not begun. A TLS 1.3 client's handshake is done once it has the
-    /// server's `Finished`, the server's only once it reads the client's:
-    /// a shutdown landing between them found the connection neither
-    /// listed nor waited for, and the exit cut a session its client had
-    /// begun with no `close_notify`.
+    /// A connection counted in its handshake, from the peek that saw its
+    /// record's first byte -- nothing read nor written yet -- to after it
+    /// is listed ([`note`]): the one shutdown either waits for its
+    /// handshake and lists it, read side shut, or finds it not begun. A
+    /// TLS 1.3 client's handshake is done once it has the server's
+    /// `Finished`, the server's only once it reads the client's: a
+    /// shutdown landing between them found the connection neither listed
+    /// nor waited for, and the exit cut a session its client had begun
+    /// with no `close_notify`. One still in the peek is not waited for:
+    /// the server has written it nothing, so its client has no session to
+    /// cut; the exit closes it, or a first byte that comes after the
+    /// shutdown began is refused ([`Shaking::begin`]). A client that sent
+    /// that byte and stalls holds the shutdown up to its grace
+    /// ([`END_GRACE`], half a second).
+    ///
+    /// [`END_GRACE`]: super::END_GRACE
     pub(super) struct Shaking(());
 
     impl Shaking {
@@ -324,9 +333,11 @@ mod open {
         }
     }
 
-    /// `sock` listed, its handshake done; its read side shut where the
-    /// shutdown has begun: [`shut_reading`] ran before this, under the same
-    /// lock, and this connection ends as those it shut do.
+    /// `sock` listed, its handshake done. Where the shutdown has begun its
+    /// read side is shut by whichever of this and [`shut_reading`] takes
+    /// the list's lock second -- here once that ran before, seeing
+    /// [`ending`](super::ending) through the lock -- and this connection
+    /// ends as those it shut do.
     #[cfg(any(unix, windows))]
     pub(super) fn note(sock: &TcpStream) {
         use super::sock::AsRawFd;
@@ -461,9 +472,6 @@ impl Conn {
     fn secured(stream: TcpStream, tls: &Tls) -> Option<Conn> {
         use std::time::Instant;
         let deadline = Instant::now() + tls.handshake;
-        // Counted until it is listed, so the one shutdown waits for its
-        // handshake ([`open::Shaking`]); none begun once that is ending.
-        let shaking = open::Shaking::begin()?;
         // The first byte, looked at before rustls reads it: a handshake's
         // record is 0x16, and a plain request's method a capital letter,
         // which rustls would answer with an alert its client prints as a
@@ -499,6 +507,14 @@ impl Conn {
                 return None;
             }
         }
+        // Counted from its record's first byte until it is listed, so the
+        // one shutdown waits for its handshake ([`open::Shaking`]); none
+        // begun once that is ending, its socket closed before a byte of
+        // ours. Not before the peek: a connection that has sent nothing --
+        // a scan, a balancer's connection made ahead -- would hold every
+        // shutdown for the whole grace, and the server, having written
+        // nothing, leaves its client no session to cut.
+        let shaking = open::Shaking::begin()?;
         let left = deadline.saturating_duration_since(Instant::now());
         let tls = match tls.server.accept_within(stream, left) {
             Ok(t) => t,
