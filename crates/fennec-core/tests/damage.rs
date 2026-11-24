@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 
 const LEVELS: usize = 100_000;
 const REC_DATA: u8 = 3;
+const REC_BLOCK: u8 = 9;
+const REC_SPILL: u8 = 10;
+const REC_LAND: u8 = 11;
 const DEEP: &str = "a value nests more than 64 levels deep";
 
 /// Every record a database appends, in order.
@@ -91,6 +94,25 @@ fn file(records: &[Vec<u8>]) -> Vec<u8> {
         f.extend_from_slice(r);
     }
     f
+}
+
+/// Where the body of the record at the front of `record` starts, past its
+/// kind, collection id and length, checked or not.
+fn body_at(record: &[u8]) -> usize {
+    let mut p = 1;
+    get_uvarint(record, &mut p).unwrap();
+    get_uvarint(record, &mut p).unwrap();
+    p
+}
+
+/// A record as a block, a spill or a land holds it: plain, no claim and no
+/// sum.
+fn inner(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
+    let mut r = vec![kind];
+    put_uvarint(&mut r, cid as u64);
+    put_uvarint(&mut r, body.len() as u64);
+    r.extend_from_slice(body);
+    r
 }
 
 #[test]
@@ -221,6 +243,122 @@ fn a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied
         assert_eq!(memory.load(&torn).unwrap(), whole);
         assert_eq!(rows(&memory), 1);
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A frame whose op is neither a put (1) nor a del (2) -- a later
+/// version's, or damage the replay reads unchecked -- is refused by its
+/// byte and its place in the file wherever the file holds it: a data record
+/// of its own, a block's, a spill's and a land's, each replayed from where
+/// its bytes lie (`load_from`'s `at`, `load_block`'s inner records), read
+/// into memory and mapped. A replica refuses it before it lands, the block
+/// put back whole, and a mapped database handed an image walks it where
+/// its file then holds it (`repoint_at`). Replayed as a frame that changed
+/// nothing, as every release through 0.2.0 did, it left the version before
+/// it counted dead with the index still pointing at it, and the next
+/// compact dropped the frame with no word.
+#[test]
+fn a_frame_of_an_op_neither_a_put_nor_a_del_is_refused_where_a_file_is_opened_and_applied() {
+    let (create, cid) = made("create collection d (n int)", "put d {n: 1}");
+    let mut n = Vec::new();
+    fennec_core::codec::encode_value(&mut n, &Value::Int(1));
+    // A whole put of document 1, then a frame of op 3 over it, `third` bytes
+    // into the record.
+    let (mut body, mut third) = (Vec::new(), 0);
+    for op in [fennec_core::store::OP_PUT, 3] {
+        third = body.len();
+        body.push(op);
+        put_uvarint(&mut body, 1);
+        put_uvarint(&mut body, n.len() as u64);
+        body.extend_from_slice(&n);
+    }
+    // Where the records after the create start in the file, and where the
+    // frame starts in the data record a block, a spill or a land holds.
+    let from = file(&create).len();
+    let data = inner(REC_DATA, cid, &body);
+    let in_data = body_at(&data) + third;
+    let alone = fennec_core::engine::record(REC_DATA, cid, &body);
+    let block = fennec_core::engine::record(REC_BLOCK, 0, &data);
+    let spill = fennec_core::engine::record(REC_SPILL, 0, &data);
+    let mut named = Vec::new();
+    for v in [1, from + body_at(&spill), data.len()] {
+        put_uvarint(&mut named, v as u64);
+    }
+    let land = fennec_core::engine::record(REC_LAND, 0, &named);
+    let landed = fennec_core::engine::record(REC_LAND, 0, &[&[0u8][..], &data[..]].concat());
+    // Each way: the records after the create, where in them the frame
+    // starts, and the record a primary's feed sends of them.
+    let ways = [
+        (
+            "a data record",
+            vec![alone.clone()],
+            body_at(&alone) + third,
+            alone.clone(),
+        ),
+        (
+            "a block",
+            vec![block.clone()],
+            body_at(&block) + in_data,
+            block,
+        ),
+        (
+            "a spill",
+            vec![spill.clone(), land.clone()],
+            body_at(&spill) + in_data,
+            fennec_core::engine::landed_block(&[&data], &land).unwrap(),
+        ),
+        (
+            "a land",
+            vec![landed.clone()],
+            body_at(&landed) + 1 + in_data,
+            fennec_core::engine::landed_block(&[], &landed).unwrap(),
+        ),
+    ];
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-op-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    for (i, (what, records, at, fed)) in ways.iter().enumerate() {
+        let said = format!("unknown write op 3 at {}", from + at);
+        let refused = |r: Result<()>| match r {
+            Err(Error::Corrupt(m)) => assert_eq!(m, said, "{what}"),
+            other => panic!("{what}: {other:?}"),
+        };
+        let bytes = file(&[&create[..], &records[..]].concat());
+        refused(Database::new().load(&bytes).map(drop));
+        let path = dir.join(format!("{i}.fennec"));
+        std::fs::write(&path, &bytes).unwrap();
+        refused(fennec_core::fs::open(&path).map(drop));
+
+        let mut replica = Database::new();
+        replica.apply(&create.concat()).unwrap();
+        match replica.apply(fed) {
+            Err(Error::Corrupt(m)) => {
+                assert_eq!(m, "a write op 3 is neither a put nor a del", "{what}")
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+        assert_eq!(rows(&replica), 0, "{what}");
+    }
+
+    // A mapped database handed an image to adopt walks it once it is its
+    // file, no places coming with it (`repoint_at`): handed one other than
+    // the image its new contents were loaded from, which no caller does,
+    // the walk meets the frame where the file holds it.
+    let path = dir.join("adopt.fennec");
+    std::fs::write(&path, file(&create)).unwrap();
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    if db.is_mapped() {
+        let mut fresh = Database::new();
+        fresh.load(&file(&create)).unwrap();
+        match db.adopt(fresh, &file(&[&create[..], &[alone.clone()][..]].concat())) {
+            Err(Error::Corrupt(m)) => assert_eq!(
+                m,
+                format!("unknown write op 3 at {}", from + body_at(&alone) + third)
+            ),
+            other => panic!("adopt: {other:?}"),
+        }
+    }
+    drop(db);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
