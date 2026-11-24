@@ -185,7 +185,7 @@ cleanup() {
     rm -f "$ENV_MARKER" "$ENV_MARKER.hung" "$ENV_PROGRESS"
     for n in $names; do
         cs=
-        for c in server replica server-look replica-look verify backup restored sampler; do
+        for c in server replica server-look replica-look verify backup restored sampler replica-watch; do
             cs="$cs $n-$c"
         done
         # shellcheck disable=SC2086
@@ -256,7 +256,7 @@ hung() {
 soak_names() {
     names="$names $1"
     ENV_VOLUME=$1-data
-    ENV_KILL="$1-server $1-replica $1-server-look $1-replica-look $1-verify $1-backup $1-restored $1-sampler"
+    ENV_KILL="$1-server $1-replica $1-server-look $1-replica-look $1-verify $1-backup $1-restored $1-sampler $1-replica-watch"
     : >"$ENV_PROGRESS"
 }
 

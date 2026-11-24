@@ -142,6 +142,14 @@ const REPLICA_SETTLE: usize = 5;
 /// the backlog, not the restart (`Shared::restart_behind`).
 const ON_SCHEDULE_S: f64 = 1.0;
 
+/// How often the replica's compaction thread is looked at
+/// (`watch_replica`), and how long it must be at work -- or asleep again --
+/// for a compaction of the replica's own to have begun or ended: its look
+/// at the files every 5 s (fennec-http's `link`, `AUTO_COMPACT_EVERY`)
+/// takes milliseconds, a compaction tens of seconds.
+const R_WATCH_EVERY: u64 = 100_000_000;
+const R_WATCH_SURE: u64 = 500_000_000;
+
 /// The minutes of the peak's slowest stretch, which the soak's rate is a
 /// fraction of (`slowest_stretch`): shorter than a compaction of the file
 /// under the run's memory -- the third dry run of 2026-11-24's took 110 to
@@ -577,6 +585,7 @@ impl Kit {
             "backup",
             "restored",
             "sampler",
+            "replica-watch",
         ]
         .iter()
         .map(|c| format!("{}-{c}", self.name))
@@ -1911,29 +1920,62 @@ enum Class {
     Steady,
     Compact,
     Restart,
+    /// The replica's own compaction's: counted with the compacts
+    /// (`Hists::record`), and apart (`r_compact_ops`).
+    ReplicaCompact,
+}
+
+/// The windows an operation's class is read from, each `(from, to)` in ns
+/// from the start, `to` `u64::MAX` while one is open: the latest restart's
+/// and the schedule's latest compact's, and the latest compaction the
+/// replica ran on its own (`watch_replica`).
+#[derive(Clone, Copy)]
+struct Windows {
+    restart: (u64, u64),
+    compact: (u64, u64),
+    replica: (u64, u64),
 }
 
 /// An operation's class: a restart's from a second before its kill until
 /// the server answered again, and after that until its worker is back on
 /// its schedule -- the open loop's backlog drains for minutes at 80%, its
 /// waits the restart's, not the steady tail's -- and a compact's alike;
-/// the steady otherwise. `at` is when it was due, `on_time` whether the
-/// worker reached it before it was due (it waited for it), `owed` the
-/// worker's own: the window it is still draining.
+/// the steady otherwise. `at` is when it was due, `done` when it was
+/// answered, `via_replica` whether it was a read through the replica,
+/// `on_time` whether the worker reached it before it was due (it waited
+/// for it), `owed` the worker's own: the window it is still draining.
+///
+/// A read through the replica waiting -- for its worker or its answer --
+/// at any moment of a compaction of the replica's own is that
+/// compaction's, and its worker's backlog after it: the fourth dry run of
+/// 2026-11-24 had reads through the replica answered in 2.7 s at the p99
+/// of its minute 118, the replica compacting, and every connection held
+/// on one -- the minute's p99 from the schedule 2.2 s, what the servers
+/// answered in 261 ms, and all of it steady. The compaction's is taken
+/// before a restart's window: at its kill of minute 60 the replica had
+/// begun compacting half a second before the kill was announced, its
+/// stream's end read 4.2 s after the kill, and the operations due in the
+/// restart waited for a worker until it answered -- their p99 5.1 s
+/// against the restart's bound of 4.9, the servers answering in 249 ms.
 fn class(
     at: u64,
+    done: u64,
+    via_replica: bool,
     on_time: bool,
-    restart: (u64, u64),
-    compact: (u64, u64),
+    w: &Windows,
     owed: &mut Option<Class>,
 ) -> Class {
     if on_time {
         *owed = None;
     }
     let within = |w: (u64, u64)| at >= w.0 && at <= w.1;
-    let c = if within(restart) || *owed == Some(Class::Restart) {
+    let c = if *owed == Some(Class::ReplicaCompact) {
+        Class::ReplicaCompact
+    } else if within(w.restart) || *owed == Some(Class::Restart) {
         Class::Restart
-    } else if within(compact) || *owed == Some(Class::Compact) {
+    } else if via_replica && at <= w.replica.1 && done >= w.replica.0 {
+        Class::ReplicaCompact
+    } else if within(w.compact) || *owed == Some(Class::Compact) {
         Class::Compact
     } else {
         Class::Steady
@@ -1942,6 +1984,82 @@ fn class(
         *owed = Some(c);
     }
     c
+}
+
+/// A compaction of the replica's own as its compaction thread's watch
+/// tells it (`watch_replica`): `A <arch>` once, `S <syscall>` at each
+/// change of what the thread is in. Asleep between the server's looks at
+/// its files, at work in anything else -- `running`, `-1` outside a call,
+/// a read, a lock's wait -- through every part of a compaction, its graphs
+/// rebuilt before its side file is written too. Either state is taken
+/// once held `R_WATCH_SURE`, dated from its first look: a compaction from
+/// a poll and a little before it, its end from the first look asleep.
+#[derive(Default)]
+struct CompactWatch {
+    arch: String,
+    /// The thread settled at work: a compaction under way.
+    open: bool,
+    /// The first look at the other state, not yet held long enough.
+    since: Option<u64>,
+}
+
+/// A change `CompactWatch` settled on, at its time in ns from the start.
+#[derive(Debug, PartialEq, Eq)]
+enum Edge {
+    Began(u64),
+    Ended(u64),
+}
+
+/// Whether the replica's compaction thread is asleep in `n`, the syscall
+/// `/proc/<task>/syscall` names, by the VM's architecture: nanosleep,
+/// clock_nanosleep and restart_syscall (a sleep a signal cut, resumed).
+/// `running`, and `-1` for a thread waiting outside a call, are at work.
+fn asleep(arch: &str, n: &str) -> bool {
+    let Ok(n) = n.parse::<u64>() else {
+        return false;
+    };
+    match arch {
+        "x86_64" => [35, 230, 219].contains(&n),
+        _ => [101, 115, 128].contains(&n),
+    }
+}
+
+impl CompactWatch {
+    /// A line of the watch's, read at `t`.
+    fn line(&mut self, l: &str, t: u64) -> Option<Edge> {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        match w.as_slice() {
+            ["A", a] => {
+                self.arch = a.to_string();
+                None
+            }
+            ["S", n] => {
+                let busy = !asleep(&self.arch, n);
+                if busy == self.open {
+                    self.since = None;
+                } else if self.since.is_none() {
+                    self.since = Some(t);
+                }
+                self.tick(t)
+            }
+            _ => None,
+        }
+    }
+
+    /// Time gone by to `t` with no change said: the other state, held long
+    /// enough, is taken.
+    fn tick(&mut self, t: u64) -> Option<Edge> {
+        let s = self.since?;
+        if t.saturating_sub(s) < R_WATCH_SURE {
+            return None;
+        }
+        self.since = None;
+        self.open = !self.open;
+        Some(match self.open {
+            true => Edge::Began(s.saturating_sub(2 * R_WATCH_EVERY)),
+            false => Edge::Ended(s),
+        })
+    }
 }
 
 /// How far the open loop is behind its schedule at `now` (ns from the
@@ -1965,17 +2083,27 @@ fn behind_s(slots: &[Slot], now: u64) -> Option<f64> {
 /// A worker's latencies: an operation is timed from when it was due, and
 /// counted apart where it was a restart's or a compact's (`class`) -- a
 /// restart's where the loop was behind its schedule at the kill apart
-/// again (`restart_behind`): those wait out the backlog, not the restart.
-/// Beside them each operation's own time, from its send to its answer
-/// (`own`), and that of the reads through the replica alone (`replica`):
-/// what the servers answered in, without the schedule's wait.
+/// again (`restart_behind`): those wait out the backlog, not the restart;
+/// and the reads through the replica among a restart's apart from the
+/// primary's operations (`restart_replica`): none goes through it from
+/// the kill's announcement until it is back and the restart's grace is
+/// over, so one due in a restart waited out the replica's return, which
+/// the report bounds apart. Beside them each operation's own time, from
+/// its send to its answer (`own`), and that of the reads through the
+/// replica alone (`replica`): what the servers answered in, without the
+/// schedule's wait. And the operations counted with the compacts for a
+/// compaction of the replica's own (`r_compact`), those due in a restart's
+/// window among them (`restart_r_compact`).
 struct Hists {
     steady: Hist,
     restart: Hist,
+    restart_replica: Hist,
     restart_behind: Hist,
     compact: Hist,
     own: Hist,
     replica: Hist,
+    r_compact: u64,
+    restart_r_compact: u64,
 }
 
 impl Hists {
@@ -1983,19 +2111,44 @@ impl Hists {
         Hists {
             steady: Hist::new(),
             restart: Hist::new(),
+            restart_replica: Hist::new(),
             restart_behind: Hist::new(),
             compact: Hist::new(),
             own: Hist::new(),
             replica: Hist::new(),
+            r_compact: 0,
+            restart_r_compact: 0,
         }
     }
     fn merge(&mut self, o: &Hists) {
         self.steady.merge(&o.steady);
         self.restart.merge(&o.restart);
+        self.restart_replica.merge(&o.restart_replica);
         self.restart_behind.merge(&o.restart_behind);
         self.compact.merge(&o.compact);
         self.own.merge(&o.own);
         self.replica.merge(&o.replica);
+        self.r_compact += o.r_compact;
+        self.restart_r_compact += o.restart_r_compact;
+    }
+
+    /// An operation of class `c` that took `took` from when it was due:
+    /// `via_replica` a read through the replica, `behind` the latest kill
+    /// met with the loop behind its schedule (`Shared::restart_behind`),
+    /// `in_restart` due in a restart's window.
+    fn record(&mut self, c: Class, via_replica: bool, behind: bool, in_restart: bool, took: u64) {
+        match c {
+            Class::Restart if behind => self.restart_behind.record(took),
+            Class::Restart if via_replica => self.restart_replica.record(took),
+            Class::Restart => self.restart.record(took),
+            Class::Compact => self.compact.record(took),
+            Class::ReplicaCompact => {
+                self.compact.record(took);
+                self.r_compact += 1;
+                self.restart_r_compact += in_restart as u64;
+            }
+            Class::Steady => self.steady.record(took),
+        }
     }
 }
 
@@ -2056,6 +2209,14 @@ struct Shared {
     restart_to: AtomicU64,
     compact_from: AtomicU64,
     compact_to: AtomicU64,
+    /// The latest compaction the replica ran on its own, as its
+    /// compaction thread's watch saw it (`watch_replica`); whether the
+    /// watch is looking at that thread now, and the compactions it saw end
+    /// since the minute's line took them.
+    r_compact_from: AtomicU64,
+    r_compact_to: AtomicU64,
+    r_watched: AtomicBool,
+    r_compacts_seen: AtomicU64,
     /// Whether the open loop was behind its schedule (`ON_SCHEDULE_S`)
     /// as the latest kill was announced: its operations then wait out the
     /// backlog before the restart, and are counted apart from those of a
@@ -2148,6 +2309,10 @@ impl Shared {
             restart_to: AtomicU64::new(u64::MAX),
             compact_from: AtomicU64::new(u64::MAX),
             compact_to: AtomicU64::new(u64::MAX),
+            r_compact_from: AtomicU64::new(u64::MAX),
+            r_compact_to: AtomicU64::new(u64::MAX),
+            r_watched: AtomicBool::new(false),
+            r_compacts_seen: AtomicU64::new(0),
             restart_behind: AtomicBool::new(false),
             next: AtomicU64::new(0),
             max_seq: AtomicU64::new(0),
@@ -2325,6 +2490,9 @@ struct Worker<'a> {
     life: Option<u64>,
     rc: Option<http::Http>,
     rng: Rng,
+    /// Whether the operation under way was a read through the replica: its
+    /// class and its restart's part are the replica's (`class`).
+    via_replica: bool,
 }
 
 impl Worker<'_> {
@@ -2464,6 +2632,7 @@ impl Worker<'_> {
     /// it, so its answer is held to the registers as the primary's is.
     fn read(&mut self, key: u64, replica: bool) -> bool {
         let sh = self.sh;
+        self.via_replica = replica;
         let (s, after) = sh.sent_after(|| sh.max_seq.load(Ordering::SeqCst));
         let headers = match replica {
             true => format!("Fennec-After: {after}\r\n"),
@@ -2833,6 +3002,7 @@ fn work(sh: &Shared, w: usize) {
         life: None,
         rc: None,
         rng: Rng::new(SEED ^ 0x534F_414B ^ (w as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        via_replica: false,
     };
     let mut zipf = Scrambled::new();
     let mut value = String::with_capacity(super::FIELD_LEN);
@@ -2864,29 +3034,28 @@ fn work(sh: &Shared, w: usize) {
         // checker reads past it (`safe`).
         let sent = Instant::now();
         slot.inflight.store(sh.ns(), Ordering::SeqCst);
+        me.via_replica = false;
         let ok = me.op(&mut value, &mut zipf);
         slot.inflight.store(u64::MAX, Ordering::SeqCst);
         slot.done.fetch_add(1, Ordering::Relaxed);
         let at = due.saturating_duration_since(sh.t0).as_nanos() as u64;
-        let c = class(
-            at,
-            on_time,
-            window(&sh.restart_from, &sh.restart_to),
-            window(&sh.compact_from, &sh.compact_to),
-            &mut owed,
-        );
+        let w = Windows {
+            restart: window(&sh.restart_from, &sh.restart_to),
+            compact: window(&sh.compact_from, &sh.compact_to),
+            replica: window(&sh.r_compact_from, &sh.r_compact_to),
+        };
+        let c = class(at, sh.ns(), me.via_replica, on_time, &w, &mut owed);
         if ok {
             let took = due.elapsed().as_nanos() as u64;
             let mut h = slot.hists.lock().unwrap();
             h.own.record(sent.elapsed().as_nanos() as u64);
-            match c {
-                Class::Restart if sh.restart_behind.load(Ordering::Relaxed) => {
-                    h.restart_behind.record(took)
-                }
-                Class::Restart => h.restart.record(took),
-                Class::Compact => h.compact.record(took),
-                Class::Steady => h.steady.record(took),
-            }
+            h.record(
+                c,
+                me.via_replica,
+                sh.restart_behind.load(Ordering::Relaxed),
+                at >= w.restart.0 && at <= w.restart.1,
+                took,
+            );
             drop(h);
             sh.ops.fetch_add(1, Ordering::Relaxed);
         }
@@ -4179,6 +4348,151 @@ fn in_sync(lines: &[String]) -> Option<u64> {
     })
 }
 
+/// Watches the replica's compaction thread (fennec-http's `link`, named
+/// `fennec-compact`) from a container in its process namespace, as the
+/// sampler watches the primary's syncer, for the run's length: each
+/// compaction the replica runs on its own opens a window from about its
+/// start to its end (`Shared::r_compact_from`, `CompactWatch`), which the
+/// reads through the replica are classed by as they are answered
+/// (`class`). Its metrics say only that one ended -- its
+/// `fennec_auto_compactions_total` counted, its `fennec_reclaimable_bytes`
+/// fallen at the swap -- and its log the same, the compaction's time with
+/// it: a read held at the start is answered seconds before either, and
+/// the minute's figures are written as each minute ends. Its side file
+/// (`<file>.beside`, the minute's `r_compacting`) is written only once the
+/// graphs holding tombstones are rebuilt and swapped in under the write
+/// lock (fennec-core's `compact_online`), and a stall there would come
+/// before it. Started again 5 s after the container ends -- the replica
+/// started again after a death, a thread not yet there -- until the run
+/// stops; said once each time it goes, and as it comes back.
+fn watch_replica(sh: &Shared, kit: &Kit) {
+    use std::process::{Command, Stdio};
+    let name = format!("{}-replica-watch", kit.name);
+    let script = format!(
+        "echo \"A $(uname -m)\"; t=; \
+         for d in /proc/1/task/*; do read -r c < \"$d/comm\" && [ \"$c\" = fennec-compact ] && t=$d; done; \
+         [ -n \"$t\" ] || {{ echo N; exit 0; }}; prev=; \
+         while read -r n _ < \"$t/syscall\"; do \
+           if [ \"$n\" != \"$prev\" ]; then echo \"S $n\"; prev=$n; fi; \
+           usleep {} 2>/dev/null || sleep 0.1; \
+         done",
+        R_WATCH_EVERY / 1_000
+    );
+    let mut down_said = false;
+    while !sh.stop.load(Ordering::Relaxed) {
+        docker(&["rm", "-f", &name]);
+        let child = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                &name,
+                &format!("--pid=container:{}", kit.replica()),
+                // Reading another user's task's syscall is a ptrace's right.
+                "--cap-add",
+                "SYS_PTRACE",
+                ALPINE,
+                "sh",
+                "-c",
+                &script,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut why = "docker run failed".to_string();
+        if let Ok(mut child) = child {
+            let (tx, lines) = mpsc::channel::<(u64, String)>();
+            if let Some(out) = child.stdout.take() {
+                let t0 = sh.t0;
+                std::thread::spawn(move || {
+                    for l in BufReader::new(out).lines().map_while(Result::ok) {
+                        if tx.send((t0.elapsed().as_nanos() as u64, l)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            let mut w = CompactWatch::default();
+            why = "its container ended".into();
+            loop {
+                if sh.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let edge = match lines.recv_timeout(Duration::from_nanos(R_WATCH_EVERY)) {
+                    Ok((t, l)) => {
+                        if l == "N" {
+                            why = "no fennec-compact thread in the replica".into();
+                        } else if l.starts_with("S ") && !sh.r_watched.swap(true, Ordering::SeqCst)
+                        {
+                            if down_said {
+                                say("the replica's compaction thread watched again".into());
+                            }
+                            down_said = false;
+                        }
+                        w.line(&l, t)
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => w.tick(sh.ns()),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                replica_compaction(sh, edge);
+            }
+            // Gone with a compaction under way: it ends here for the
+            // reads, a window never left open.
+            if w.open {
+                replica_compaction(sh, Some(Edge::Ended(sh.ns())));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        sh.r_watched.store(false, Ordering::SeqCst);
+        docker(&["rm", "-f", &name]);
+        if sh.stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if !down_said {
+            say(format!(
+                "the replica's compactions are not watched: {why}; looked at again every 5 s"
+            ));
+            down_said = true;
+        }
+        for _ in 0..50 {
+            if sh.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// A compaction of the replica's own begun or ended, as its window for
+/// the reads through it, and said on the log.
+fn replica_compaction(sh: &Shared, edge: Option<Edge>) {
+    match edge {
+        Some(Edge::Began(from)) => {
+            sh.r_compact_to.store(u64::MAX, Ordering::SeqCst);
+            sh.r_compact_from.store(from, Ordering::SeqCst);
+            say(format!(
+                "the replica began a compaction of its own in minute {}",
+                from / 60_000_000_000 + 1
+            ));
+        }
+        Some(Edge::Ended(to)) => {
+            sh.r_compact_to.store(to, Ordering::SeqCst);
+            sh.r_compacts_seen.fetch_add(1, Ordering::Relaxed);
+            let from = sh.r_compact_from.load(Ordering::SeqCst);
+            say(format!(
+                "the replica's compaction of its own ended in minute {}, {:.1} s",
+                to / 60_000_000_000 + 1,
+                to.saturating_sub(from) as f64 / 1e9
+            ));
+        }
+        None => {}
+    }
+}
+
 fn run(o: &Opts) {
     if let Some(p) = &o.progress {
         *PROGRESS.lock().unwrap() = std::fs::OpenOptions::new()
@@ -4376,6 +4690,10 @@ fn run(o: &Opts) {
         let sh = Arc::clone(&sh);
         handles.push(std::thread::spawn(move || subscribe(&sh, i)));
     }
+    {
+        let (sh, kit) = (Arc::clone(&sh), bench.0.clone());
+        handles.push(std::thread::spawn(move || watch_replica(&sh, &kit)));
+    }
     let doings = Arc::new(Doings::default());
     let (jobs, side_jobs) = mpsc::channel::<Job>();
     let side = Side {
@@ -4401,8 +4719,10 @@ fn run(o: &Opts) {
     // minutes.
     let mut hours: VecDeque<(Hist, Hist)> = VecDeque::new();
     // The restarts' operations over the run: those of the kills the loop
-    // met on its schedule, which the report judges, and the others.
+    // met on its schedule, which the report judges -- the primary's and
+    // the reads through the replica apart -- and the others.
     let (mut restarts, mut restarts_behind) = (Hist::new(), Hist::new());
+    let mut restarts_replica = Hist::new();
     let mut prev_majflt = None;
     let mut prev_oom = 0;
     // Each server's own compactions (`fennec_auto_compactions_total`), its
@@ -4443,6 +4763,7 @@ fn run(o: &Opts) {
             idle += (s.done.swap(0, Ordering::Relaxed) == 0) as u64;
         }
         restarts.merge(&h.restart);
+        restarts_replica.merge(&h.restart_replica);
         restarts_behind.merge(&h.restart_behind);
         let ops = sh.ops.swap(0, Ordering::Relaxed);
         if hours.len() == 60 {
@@ -4650,6 +4971,11 @@ fn run(o: &Opts) {
             ("steady_ops", h.steady.n.to_string()),
             ("restart_ops", h.restart.n.to_string()),
             ("p99_restart", format!("{:.0}", h.restart.pct(0.99))),
+            ("restart_replica_ops", h.restart_replica.n.to_string()),
+            (
+                "p99_restart_replica",
+                format!("{:.0}", h.restart_replica.pct(0.99)),
+            ),
             ("restart_behind_ops", h.restart_behind.n.to_string()),
             (
                 "p99_restart_behind",
@@ -4658,6 +4984,16 @@ fn run(o: &Opts) {
             ("compact_ops", h.compact.n.to_string()),
             ("p99_compact", format!("{:.0}", h.compact.pct(0.99))),
             ("p99_compact_hour", format!("{:.0}", chour.pct(0.99))),
+            ("r_compact_ops", h.r_compact.to_string()),
+            ("restart_r_compact_ops", h.restart_r_compact.to_string()),
+            (
+                "r_compacts_watched",
+                sh.r_compacts_seen.swap(0, Ordering::Relaxed).to_string(),
+            ),
+            (
+                "r_watch",
+                (sh.r_watched.load(Ordering::SeqCst) as u8).to_string(),
+            ),
             ("errors", errors.to_string()),
             ("refused", sh.refused.swap(0, Ordering::Relaxed).to_string()),
             ("down", down.to_string()),
@@ -5159,6 +5495,11 @@ fn run(o: &Opts) {
         ("catchup_s", catchup.unwrap_or(-1.0).to_string()),
         ("p99_restart", format!("{:.0}", restarts.pct(0.99))),
         ("restart_ops", restarts.n.to_string()),
+        (
+            "p99_restart_replica",
+            format!("{:.0}", restarts_replica.pct(0.99)),
+        ),
+        ("restart_replica_ops", restarts_replica.n.to_string()),
         (
             "p99_restart_behind",
             format!("{:.0}", restarts_behind.pct(0.99)),
@@ -6252,9 +6593,25 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // dry run of 2026-11-24 held its p99 of 145 s to the backlog at the
     // look before its kill of minute 60, 114 s, and failed -- the kill
     // waited five minutes for a compact, the loop 166 s behind when it came.
+    // A read through the replica due in one waits longer by design: none
+    // is sent through it from the kill's announcement until it says it is
+    // back (`replica_back_ms`, from the server's answering again) and the
+    // restart's grace is over, so its bound is the longest of a restart
+    // and that wait, and two seconds. A line written before the two were
+    // apart holds them together in `p99_restart`, held to the primary's.
     let restart_max = settings.map_or(0, |s| s.restart_max) as f64;
     let slow = broke(&|m| get(m, "restart_ms").is_some_and(|x| x > restart_max * 1e3));
     let p99r = end.and_then(|m| get(m, "p99_restart"));
+    let p99rr = end.and_then(|m| get(m, "p99_restart_replica"));
+    let rr_ops = end.and_then(|m| get(m, "restart_replica_ops"));
+    let grace_ms = GRACE as f64 / 1e6;
+    let rbound = minutes
+        .iter()
+        .filter_map(|(_, m)| Some(get(m, "restart_ms")? + get(m, "replica_back_ms")?.max(grace_ms)))
+        .fold(0.0f64, f64::max)
+        / 1e3
+        + 2.0;
+    let held_by_replica = sum("restart_r_compact_ops");
     let longest = end
         .and_then(|m| get(m, "restart_ms_max"))
         .unwrap_or(0.0)
@@ -6296,14 +6653,26 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             p99b.map_or("?".into(), |x| format!("{:.1} s", x / 1e6))
         ),
     };
+    let through_replica = match (p99rr, rr_ops) {
+        (None, _) => {
+            ", the reads through the replica among them (no figure of their own on this run's lines)"
+                .to_string()
+        }
+        (Some(y), Some(n)) if n > 0.0 => format!(
+            " at the primary and {:.1} s of {rbound:.1} through the replica",
+            y / 1e6
+        ),
+        (Some(_), _) => format!(" at the primary and none through the replica (its bound {rbound:.1})"),
+    };
     v.push((
         CRITERIA[13],
         settings.is_some()
             && slow.is_empty()
             && (kills_seen.is_empty() || on_time > 0)
-            && p99r.is_some_and(|x| x <= bound * 1e6),
+            && p99r.is_some_and(|x| x <= bound * 1e6)
+            && p99rr.is_none_or(|y| rr_ops == Some(0.0) || y <= rbound * 1e6),
         format!(
-            "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; {}{apart}; {:.0} met a restart",
+            "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; {}{apart}{}; {:.0} met a restart",
             longest / 1e3,
             minutes_said(&slow),
             median(&starts) / 1e3,
@@ -6315,13 +6684,19 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                     kills_seen.len()
                 ),
                 (Some(x), true) => format!(
-                    "p99 of the operations due in one {:.1} s of {bound:.1}{}",
+                    "p99 of the operations due in one {:.1} s of {bound:.1}{through_replica}{}",
                     x / 1e6,
                     match kills_seen.is_empty() {
                         true => ", no kill".to_string(),
                         false => format!(", over the {on_time} kills the loop met on its schedule"),
                     }
                 ),
+            },
+            match held_by_replica > 0.0 {
+                true => format!(
+                    "; {held_by_replica:.0} due in one counted with the compacts, their workers held by reads through the replica as it compacted on its own"
+                ),
+                false => String::new(),
             },
             sum("down")
         ),
@@ -6630,6 +7005,34 @@ fn notes(
                     (twice / 10.0).ceil() as u64 * 10
                 ),
             }
+        ));
+    }
+    // The replica's own compactions, as its counter has them and as its
+    // compaction thread's watch saw them: the reads through it waiting in
+    // one, and the backlog of the workers they held, counted with the
+    // compacts (`class`). A run before the watch has none of it.
+    if minutes.iter().any(|(_, m)| get(m, "r_watch").is_some()) {
+        let total = |k: &str| -> f64 {
+            minutes
+                .iter()
+                .filter_map(|(_, m)| get(m, k))
+                .fold(0.0, |a, x| a + x)
+        };
+        let unwatched: Vec<u64> = minutes
+            .iter()
+            .filter(|(_, m)| get(m, "r_watch") == Some(0.0))
+            .map(|(k, _)| *k)
+            .collect();
+        out.push(format!(
+            "the replica's own compactions: {:.0} by its counter, {:.0} seen at its compaction thread{}; {:.0} operations counted with the compacts for them, {:.0} of them due in a restart",
+            total("r_auto_compacts"),
+            total("r_compacts_watched"),
+            match unwatched.is_empty() {
+                true => String::new(),
+                false => format!(" (not watched at minutes {})", list(&unwatched)),
+            },
+            total("r_compact_ops"),
+            total("restart_r_compact_ops")
         ));
     }
     let offs: Vec<f64> = minutes
@@ -7266,6 +7669,7 @@ mod tests {
                 ("clock_off_ms", 3.0),
                 ("clock_rtt_ms", 2.0),
                 ("clock_step", 0.0),
+                ("r_watch", 1.0),
             ] {
                 x.entry(k).or_insert(val);
             }
@@ -7282,6 +7686,8 @@ mod tests {
             ("keys", 1_100_000.0),
             ("catchup_s", 4.0),
             ("p99_restart", 21e6),
+            ("p99_restart_replica", 0.0),
+            ("restart_replica_ops", 0.0),
             ("restart_ms_max", 20_000.0),
             ("verify_failed", 0.0),
             ("replica_verify_failed", 0.0),
@@ -7579,6 +7985,19 @@ mod tests {
                 vec![CRITERIA[13]],
             ),
             (
+                // Each restart 20 s, the replica back 3 s after it, within
+                // the 5 s grace: 25 s from a kill to the reads through it
+                // again, and two -- 27 s.
+                "the reads through the replica due in a restart held past its return",
+                Box::new(|m, x| {
+                    if m == u64::MAX {
+                        x.insert("p99_restart_replica", 30e6);
+                        x.insert("restart_replica_ops", 40.0);
+                    }
+                }),
+                vec![CRITERIA[13]],
+            ),
+            (
                 // Every kill met with the loop behind: no restart's own
                 // operations to judge, only the backlog's.
                 "the loop behind its schedule at every kill",
@@ -7828,6 +8247,41 @@ mod tests {
                     if m == 31 {
                         x.insert("lost_writes", 3.0);
                         x.insert("lost_ms_max", 412.0);
+                    }
+                }),
+            ),
+            (
+                // Past the primary's bound of 22 s, within the replica's
+                // return and two, 27 s.
+                "reads through the replica due in a restart, held until it was back",
+                Box::new(|m, x| {
+                    if m == u64::MAX {
+                        x.insert("p99_restart_replica", 26e6);
+                        x.insert("restart_replica_ops", 40.0);
+                    }
+                }),
+            ),
+            (
+                // A line from before the reads through the replica were
+                // apart: held to the primary's bound together.
+                "a run's lines with no figure for the replica's part",
+                Box::new(|m, x| {
+                    if m == u64::MAX {
+                        x.remove("p99_restart_replica");
+                        x.remove("restart_replica_ops");
+                    }
+                }),
+            ),
+            (
+                // The replica's compaction held every connection as the
+                // kill of minute 60 came: its operations the compaction's.
+                "a restart's operations held by the replica's compaction",
+                Box::new(|m, x| {
+                    if m == 61 {
+                        x.insert("r_compact_ops", 9_000.0);
+                        x.insert("restart_r_compact_ops", 8_000.0);
+                        x.insert("r_compacts_watched", 1.0);
+                        x.insert("r_auto_compacts", 1.0);
                     }
                 }),
             ),
@@ -8165,6 +8619,7 @@ mod tests {
             life: None,
             rc: None,
             rng: Rng::new(1),
+            via_replica: false,
         };
         assert!(w.doc_write(7, "7,\"w1\",[0.5]"));
         assert!(
@@ -8310,6 +8765,7 @@ mod tests {
                 life: None,
                 rc: None,
                 rng: Rng::new(1),
+                via_replica: false,
             };
             assert!(!w.read(5, false));
             assert_eq!(sh.faulted().is_some(), fault, "{status}");
@@ -8369,19 +8825,186 @@ mod tests {
     fn an_operation_is_the_restarts_until_its_worker_is_back_on_schedule() {
         let mut owed = None;
         let (r, none) = ((100, 200), (u64::MAX, u64::MAX));
-        assert_eq!(class(150, false, r, none, &mut owed), Class::Restart);
+        let w = |compact| Windows {
+            restart: r,
+            compact,
+            replica: none,
+        };
+        let class = |at, on_time, w: &Windows, owed: &mut Option<Class>| {
+            class(at, at + 5, false, on_time, w, owed)
+        };
+        assert_eq!(class(150, false, &w(none), &mut owed), Class::Restart);
         // Due after the server answered again, its worker still behind
         // with the backlog the restart left: the restart's.
-        assert_eq!(class(210, false, r, none, &mut owed), Class::Restart);
-        assert_eq!(class(230, false, r, none, &mut owed), Class::Restart);
+        assert_eq!(class(210, false, &w(none), &mut owed), Class::Restart);
+        assert_eq!(class(230, false, &w(none), &mut owed), Class::Restart);
         // Back on its schedule: steady from there.
-        assert_eq!(class(240, true, r, none, &mut owed), Class::Steady);
-        assert_eq!(class(250, false, r, none, &mut owed), Class::Steady);
+        assert_eq!(class(240, true, &w(none), &mut owed), Class::Steady);
+        assert_eq!(class(250, false, &w(none), &mut owed), Class::Steady);
         // A compact's alike.
         let c = (300, 400);
-        assert_eq!(class(350, true, r, c, &mut owed), Class::Compact);
-        assert_eq!(class(410, false, r, c, &mut owed), Class::Compact);
-        assert_eq!(class(420, true, r, c, &mut owed), Class::Steady);
+        assert_eq!(class(350, true, &w(c), &mut owed), Class::Compact);
+        assert_eq!(class(410, false, &w(c), &mut owed), Class::Compact);
+        assert_eq!(class(420, true, &w(c), &mut owed), Class::Steady);
+    }
+
+    #[test]
+    fn a_restarts_reads_through_the_replica_are_held_to_the_replicas_bound() {
+        let none = (u64::MAX, u64::MAX);
+        let w = Windows {
+            restart: (100, 200),
+            compact: none,
+            replica: none,
+        };
+        let mut h = Hists::new();
+        // A read through the replica due in the restart, sent once the
+        // replica was back -- its worker behind the restart's backlog --
+        // and a primary operation due in it: the restart's, each its part.
+        let mut owed = None;
+        let c = class(150, 9_000, true, false, &w, &mut owed);
+        assert_eq!(c, Class::Restart);
+        h.record(c, true, false, true, 8_850);
+        let mut owed = None;
+        let c = class(160, 2_000, false, true, &w, &mut owed);
+        assert_eq!(c, Class::Restart);
+        h.record(c, false, false, true, 1_840);
+        assert_eq!((h.restart_replica.n, h.restart.n), (1, 1));
+        assert_eq!((h.restart_replica.max, h.restart.max), (8_850, 1_840));
+        // A kill met behind its schedule: the backlog's, wherever the
+        // operation went, as before.
+        h.record(Class::Restart, true, true, true, 1);
+        h.record(Class::Restart, false, true, true, 1);
+        assert_eq!(
+            (h.restart_behind.n, h.restart_replica.n, h.restart.n),
+            (2, 1, 1)
+        );
+        // Merged as the minute's line merges them.
+        let mut all = Hists::new();
+        all.merge(&h);
+        all.merge(&h);
+        assert_eq!((all.restart_replica.n, all.restart.n), (2, 2));
+    }
+
+    #[test]
+    fn a_read_through_the_compacting_replica_is_the_compactions_and_so_is_its_backlog() {
+        let none = (u64::MAX, u64::MAX);
+        // The replica compacting from 1 000 on, its end not yet seen.
+        let w = Windows {
+            restart: none,
+            compact: none,
+            replica: (1_000, u64::MAX),
+        };
+        let mut owed = None;
+        // A primary operation due in it: not the replica's compaction's.
+        assert_eq!(
+            class(1_100, 1_110, false, true, &w, &mut owed),
+            Class::Steady
+        );
+        // A read through the replica due in it: the compaction's.
+        assert_eq!(
+            class(1_200, 1_400, true, true, &w, &mut owed),
+            Class::ReplicaCompact
+        );
+        assert_eq!(
+            class(1_500, 1_510, false, true, &w, &mut owed),
+            Class::Steady
+        );
+        // One sent before it began and held into it: the compaction's too,
+        // and every operation its worker takes behind its schedule after.
+        assert_eq!(
+            class(900, 3_000, true, true, &w, &mut owed),
+            Class::ReplicaCompact
+        );
+        assert_eq!(
+            class(1_600, 3_010, false, false, &w, &mut owed),
+            Class::ReplicaCompact
+        );
+        // Back on its schedule: steady.
+        assert_eq!(
+            class(3_100, 3_110, false, true, &w, &mut owed),
+            Class::Steady
+        );
+        // One answered before it began, and one due after it ended: not.
+        assert_eq!(class(800, 950, true, true, &w, &mut owed), Class::Steady);
+        let ended = Windows {
+            replica: (1_000, 5_000),
+            ..w
+        };
+        assert_eq!(
+            class(5_100, 5_300, true, true, &ended, &mut owed),
+            Class::Steady
+        );
+        // The fourth dry run's minute 61: a worker held by a read through
+        // the compacting replica takes the operations due in the restart
+        // behind it -- the compaction's, not the restart's; one that was
+        // not held, the restart's.
+        let both = Windows {
+            restart: (2_000, 4_000),
+            compact: none,
+            replica: (1_000, u64::MAX),
+        };
+        let mut held = None;
+        assert_eq!(
+            class(1_500, 6_000, true, true, &both, &mut held),
+            Class::ReplicaCompact
+        );
+        assert_eq!(
+            class(2_100, 6_010, false, false, &both, &mut held),
+            Class::ReplicaCompact
+        );
+        let mut free = None;
+        assert_eq!(
+            class(2_200, 4_100, false, true, &both, &mut free),
+            Class::Restart
+        );
+        // Counted with the compacts, and apart; those due in a restart's
+        // window apart again.
+        let mut h = Hists::new();
+        h.record(Class::ReplicaCompact, true, false, false, 4_500);
+        h.record(Class::ReplicaCompact, false, false, true, 3_910);
+        assert_eq!(
+            (h.compact.n, h.r_compact, h.restart_r_compact, h.steady.n),
+            (2, 2, 1, 0)
+        );
+    }
+
+    #[test]
+    fn the_replicas_compaction_thread_says_when_it_compacts() {
+        let s = 1_000_000_000u64;
+        let ms = 1_000_000u64;
+        let mut w = CompactWatch::default();
+        assert_eq!(w.line("A aarch64", 0), None);
+        assert_eq!(w.line("S 101", s), None);
+        // The server's look at its files every 5 s: at work a moment,
+        // asleep again -- no compaction.
+        assert_eq!(w.line("S running", 5 * s), None);
+        assert_eq!(w.line("S 101", 5 * s + 100 * ms), None);
+        assert_eq!(w.tick(7 * s), None);
+        // A compaction: at work, in one call and another, held past the
+        // bound -- dated from its first look, and a little before it.
+        assert_eq!(w.line("S 98", 10 * s), None);
+        assert_eq!(w.line("S -1", 10 * s + 200 * ms), None);
+        assert_eq!(w.tick(10 * s + 400 * ms), None);
+        assert_eq!(
+            w.tick(10 * s + 500 * ms),
+            Some(Edge::Began(10 * s - 200 * ms))
+        );
+        assert_eq!(w.tick(15 * s), None);
+        // A moment asleep within it ends nothing.
+        assert_eq!(w.line("S 115", 20 * s), None);
+        assert_eq!(w.line("S running", 20 * s + 100 * ms), None);
+        assert_eq!(w.tick(21 * s), None);
+        // Its end: asleep, held -- dated from its first look asleep.
+        assert_eq!(w.line("S 115", 35 * s), None);
+        assert_eq!(w.tick(35 * s + 600 * ms), Some(Edge::Ended(35 * s)));
+        assert_eq!(w.tick(40 * s), None);
+        // The sleeps by the VM's architecture; at work otherwise.
+        assert!(asleep("x86_64", "35") && asleep("x86_64", "230") && asleep("x86_64", "219"));
+        assert!(!asleep("x86_64", "101") && !asleep("x86_64", "0"));
+        assert!(asleep("aarch64", "101") && asleep("aarch64", "115") && asleep("aarch64", "128"));
+        assert!(
+            !asleep("aarch64", "running") && !asleep("aarch64", "-1") && !asleep("aarch64", "63")
+        );
     }
 
     #[test]
@@ -8791,5 +9414,107 @@ mod tests {
             }
         });
         assert!(n.contains("the run suggests --loss-ms 900"), "{n}");
+        let n = notes(&|m, x| {
+            if m == 118 {
+                x.insert("r_auto_compacts", 1.0);
+                x.insert("r_compacts_watched", 1.0);
+                x.insert("r_compact_ops", 4_200.0);
+            }
+            if m == 200 {
+                x.insert("r_watch", 0.0);
+            }
+        });
+        assert!(
+            n.contains("the replica's own compactions: 1 by its counter, 1 seen at its compaction thread (not watched at minutes 200); 4200 operations counted with the compacts for them, 0 of them due in a restart"),
+            "{n}"
+        );
+    }
+
+    /// The fourth dry run of 2026-11-24, 120 minutes at 1 240 a second
+    /// under `--sync 250`, its kills' figures as its lines wrote them: the
+    /// restarts 2.9, 2.0 and 2.5 s, the replica back 4.4, 6.1 and 5.4 s
+    /// after each, the loop 0.0, 0.4 and 0.0 s behind at each announcement,
+    /// and its end line's `p99_restart` of 5.07 s over 19 719 operations.
+    fn fourth_dry_run(split: Option<(f64, f64, f64)>) -> String {
+        let tweak = move |m: u64, x: &mut HashMap<&'static str, f64>| {
+            let kill = |x: &mut HashMap<&'static str, f64>, f: [f64; 6]| {
+                for (k, v) in [
+                    "restart_ms",
+                    "start_ms",
+                    "kill_ms",
+                    "verify_ms",
+                    "replica_back_ms",
+                    "kill_behind_s",
+                ]
+                .into_iter()
+                .zip(f)
+                {
+                    x.insert(k, v);
+                }
+            };
+            match m {
+                31 => kill(x, [2_912.0, 621.0, 319.0, 1_945.0, 4_399.0, 0.0]),
+                61 => kill(x, [2_004.0, 275.0, 310.0, 1_394.0, 6_083.0, 0.4]),
+                91 => kill(x, [2_512.0, 519.0, 330.0, 1_630.0, 5_448.0, 0.0]),
+                u64::MAX => {
+                    x.insert("p99_restart", 5_066_719.0);
+                    x.insert("restart_ops", 19_719.0);
+                    x.insert("p99_restart_behind", 0.0);
+                    x.insert("restart_behind_ops", 0.0);
+                    x.insert("restart_ms_max", 2_912.0);
+                    x.remove("p99_restart_replica");
+                    x.remove("restart_replica_ops");
+                    if let Some((p, rp, rn)) = split {
+                        x.insert("p99_restart", p);
+                        x.insert("p99_restart_replica", rp);
+                        x.insert("restart_replica_ops", rn);
+                    }
+                }
+                _ => {}
+            }
+        };
+        synthetic(120, &tweak)
+    }
+
+    #[test]
+    fn the_fourth_dry_runs_restarts_under_the_split_verdict() {
+        let restart = |text: &str| -> (bool, String) {
+            let j = judge(text, None);
+            let v = j[0].verdicts.iter().find(|v| v.0 == CRITERIA[13]).unwrap();
+            (v.1, v.2.clone())
+        };
+        // Its own end line: one figure for every operation due in a
+        // restart, the reads through the replica among them, held to the
+        // primary's bound -- the longest restart, 2.9 s, and two. Still a
+        // failure: its minute 61's operations waited for the replica's
+        // compaction, which only a run that classes them so can say.
+        let (ok, said) = restart(&fourth_dry_run(None));
+        assert!(!ok, "{said}");
+        assert!(
+            said.contains("p99 of the operations due in one 5.1 s of 4.9, the reads through the replica among them (no figure of their own on this run's lines), over the 3 kills the loop met on its schedule"),
+            "{said}"
+        );
+        // The replica's bound: from each kill until reads go through it
+        // again -- its restart and the longer of the replica's return and
+        // the grace, 2.0 + 6.1 s at minute 61 -- and two.
+        let (ok, said) = restart(&fourth_dry_run(Some((2_868_904.0, 0.0, 0.0))));
+        assert!(ok, "{said}");
+        assert!(
+            said.contains("p99 of the operations due in one 2.9 s of 4.9 at the primary and none through the replica (its bound 10.1)"),
+            "{said}"
+        );
+        // Reads through the replica due in a restart held 9.5 s: within
+        // its bound, past the primary's; 10.5 s past both.
+        let (ok, said) = restart(&fourth_dry_run(Some((2_868_904.0, 9_500_000.0, 25.0))));
+        assert!(ok, "{said}");
+        assert!(
+            said.contains("and 9.5 s of 10.1 through the replica"),
+            "{said}"
+        );
+        let (ok, said) = restart(&fourth_dry_run(Some((2_868_904.0, 10_500_000.0, 25.0))));
+        assert!(!ok, "{said}");
+        // The primary's past its bound fails whatever the replica's.
+        let (ok, _) = restart(&fourth_dry_run(Some((5_066_719.0, 0.0, 0.0))));
+        assert!(!ok);
     }
 }
