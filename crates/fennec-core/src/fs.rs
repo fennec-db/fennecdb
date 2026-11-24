@@ -293,6 +293,115 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The side files whatever writes a database under `<file>.lock` writes
+/// beside it ([`beside`]) that a crash leaves there, each as large as the
+/// database and never read again: a replica's image as it arrives
+/// (`Sink::image_side`), a rewrite under the lock (`rewrite_with`: a
+/// checkpoint, a compact the sink writes whole), a rewrite beside the
+/// database (`Sink::side`: `compact`, `create index`, the auto-compact) and
+/// the shell's `.save` over the file (fennec-cli's `save`). Removed by the
+/// open that writes the file ([`FileSink`]'s) and by a node as it starts,
+/// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
+/// that only looks, nor where a lock file stands beside the side file
+/// ([`remove_left`]). A crash in a compact beside a 1.4 GB database left its
+/// `.beside` until the next compact, which the auto-compact starts only
+/// once half the file is dead: the disk the database took, doubled
+/// meanwhile (the soak harness, P6).
+pub const LEFT_BESIDE: [&str; 4] = ["taking", "compacting", "beside", "saving"];
+
+/// A side file the open that writes a file found beside it
+/// ([`LEFT_BESIDE`]), removed or kept, for whoever opened it to say
+/// ([`Database::swept_on_open`]): a server, a node and the router log each,
+/// the shell says each on its stderr, in the words of [`Swept::said`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Swept {
+    /// Its name: beside the file a link at the database's name leads to,
+    /// where the open writes ([`resolved`]).
+    pub path: PathBuf,
+    /// The bytes it held, or a link's own where one was there.
+    pub bytes: u64,
+    /// Kept, not removed: a lock file stands beside it (`<path>.lock`),
+    /// which no writer of ours makes beside a side file -- so a database a
+    /// user named so, opened once to be written, served or not.
+    pub kept: bool,
+}
+
+impl Swept {
+    /// The line an opener says it in, `file` the database as it was named
+    /// to it: the same in a server's log, a node's, the router's and on the
+    /// shell's stderr, so a search for one finds them all.
+    pub fn said(&self, file: &dyn std::fmt::Display) -> String {
+        let (side, bytes) = (self.path.display(), self.bytes);
+        match self.kept {
+            false => format!(
+                "{side}: removed, {bytes} bytes a process writing {file} left beside it as it ended"
+            ),
+            true => format!(
+                "{side}: kept: a lock file beside it, as a database of that name has; \
+                 {bytes} bytes beside {file}, to delete with its lock if it is no database"
+            ),
+        }
+    }
+}
+
+/// Removes the side file at `side` a crash left beside a database
+/// ([`LEFT_BESIDE`], a node's `.importing`), and says what it held: `None`
+/// where nothing is there, or where a directory is -- no file of ours,
+/// which the next rewrite of the name fails on as it did before. One with
+/// a lock file beside it (`<side>.lock`, held or not) is kept and said so
+/// ([`Swept::kept`]): no writer of ours makes a lock beside a side file,
+/// so one there is a database a user named so, beside another, opened to
+/// be written -- served, or stopped, never deleted -- whose writer a
+/// removal would have left writing a file no name reaches (#682's
+/// reviews). The lock file is looked at, never opened: a descriptor of a
+/// lock this process holds, closed, would let its record lock go, and
+/// another process's is its own. Looked at only once something is at the
+/// name, so an open with nothing left makes one `lstat` a name where it
+/// made one `unlink`. A crash's own leftover has no lock file beside it,
+/// and goes. The removal is an `unlink`, which follows no link: one put at
+/// the name goes, its lock not looked at -- whoever writes the file it
+/// names keeps that file's name, whose lock is beside that file
+/// (fennec-abi's `lock_path` follows a link) -- the file as it was.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_left(side: &Path) -> Option<Swept> {
+    let meta = std::fs::symlink_metadata(side).ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    let kept =
+        !meta.file_type().is_symlink() && std::fs::symlink_metadata(beside(side, "lock")).is_ok();
+    if !kept {
+        std::fs::remove_file(side).ok()?;
+    }
+    Some(Swept {
+        path: side.to_path_buf(),
+        bytes: meta.len(),
+        kept,
+    })
+}
+
+/// What a process writing the file at `path` left beside it as it ended
+/// ([`LEFT_BESIDE`]), removed or kept ([`remove_left`]), in that order.
+/// Each name is made in one buffer, sized once for the longest, which a
+/// Unix's `lstat` reads off the stack: where nothing was left the buffer is
+/// the one call to the allocator, one fewer than `.taking`'s name alone
+/// made by [`beside`], where the four so made asked nine more (the perf
+/// gate's `file-open`, #682's review).
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_beside(path: &Path) -> Vec<Swept> {
+    let mut swept = Vec::new();
+    let longest = LEFT_BESIDE.iter().map(|s| s.len()).max().unwrap_or(0);
+    let mut name = std::ffi::OsString::with_capacity(path.as_os_str().len() + 1 + longest);
+    for side in LEFT_BESIDE {
+        name.clear();
+        name.push(path);
+        name.push(".");
+        name.push(side);
+        swept.extend(remove_left(Path::new(&name)));
+    }
+    swept
+}
+
 /// `options` made to make a file its owner's alone: mode 0600 on a Unix,
 /// whatever the umask, set by the `open` that makes it -- never a `chmod`
 /// after, which leaves the file a moment in the umask's mode, long enough
@@ -884,16 +993,24 @@ impl FileSink {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>)> {
-        let (mut file, path) = FileSink::create(path)?;
+        let (sink, existing, _) = FileSink::open_sweeping(path)?;
+        Ok((sink, existing))
+    }
+
+    /// [`Self::open`], and what it removed or kept beside the file
+    /// ([`Swept`]).
+    fn open_sweeping(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>, Vec<Swept>)> {
+        let (mut file, path, swept) = FileSink::create(path)?;
         let mut existing = Vec::new();
         file.read_to_end(&mut existing)?;
         file.seek(SeekFrom::End(0))?;
-        Ok((FileSink::over(file, path), existing))
+        Ok((FileSink::over(file, path), existing, swept))
     }
 
     /// Opens the file for reading and appending, creating it with the magic
-    /// alone when it is missing or empty.
-    fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf)> {
+    /// alone when it is missing or empty, and removes what a crash left
+    /// beside it: what it removed or kept comes back with it.
+    fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf, Vec<Swept>)> {
         // The file a link leads to, kept as the sink's path: every rewrite
         // renames over it, leaving the link a link.
         let path = resolved(path.as_ref());
@@ -906,14 +1023,26 @@ impl FileSink {
                 .truncate(false),
         )
         .open(&path)?;
-        // An image a replica's follower was taking beside the file when its
-        // process ended (`Sink::image_side`), as large as the database and
-        // never read: removed by whoever opens the file to write it, its
-        // owner under `<file>.lock` -- a primary's, a copy's, an app's, the
-        // shell's -- never by a tool that only looks. Left to the follower
-        // as it started, a copy started again as a primary kept it for good.
+        // What a process writing the file left beside it as it ended
+        // ([`LEFT_BESIDE`]): an image its follower was taking, a rewrite's
+        // `.compacting`, a compact's or an index's `.beside`, a `.save`'s
+        // `.saving`, each as large as the database and never read. Removed
+        // by whoever opens the file to write it, its owner under
+        // `<file>.lock` -- a primary's, a copy's, an app's, the shell's --
+        // never by a tool that only looks (`open_read_only`). None is being
+        // written as this open runs: the lock, which a `.save` takes too,
+        // refuses a second holder of the file in this process as in another,
+        // and this database rewrites nothing before it is open.
+        // A link at a name goes, not the file it names; a directory there,
+        // and a file with a lock file beside it -- a database a user named
+        // so -- stay ([`remove_left`]). Left to the follower as it
+        // started, a copy started again as a primary kept its `.taking` for
+        // good; left to the next compact, a crash in one doubled the disk
+        // the database took until a compact ran again.
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::fs::remove_file(beside(&path, "taking"));
+        let swept = sweep_beside(&path);
+        #[cfg(target_arch = "wasm32")]
+        let swept = Vec::new();
         if file.metadata()?.len() == 0 {
             // A log left beside a file of that name is not this one's.
             #[cfg(unix)]
@@ -931,7 +1060,7 @@ impl FileSink {
             #[cfg(unix)]
             crate::synclog::recover(&file, &crate::synclog::path_for(&path))?;
         }
-        Ok((file, path))
+        Ok((file, path, swept))
     }
 
     /// A sink appending to `file`, which is positioned at its end.
@@ -2118,7 +2247,8 @@ fn open_in_memory_into(
     path: impl AsRef<Path>,
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
-    let (mut sink, existing) = FileSink::open(path)?;
+    let (mut sink, existing, swept) = FileSink::open_sweeping(path)?;
+    db.said_swept(swept);
     // A new file is loaded too, as a mapped one is: it holds the magic by
     // now, which the bytes the database counts as its file's must include.
     if existing.len() >= MAGIC.len() {
@@ -2153,7 +2283,8 @@ fn open_mapped_into(
     path: impl AsRef<Path>,
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
-    let (mut file, path) = FileSink::create(path)?;
+    let (mut file, path, swept) = FileSink::create(path)?;
+    db.said_swept(swept);
     let len = file.seek(SeekFrom::End(0))? as usize;
     let mapping = Arc::new(Mapping::with_room(&file, len)?);
     let mut sink = FileSink::over(file, path);

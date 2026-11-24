@@ -1476,13 +1476,16 @@ fn a_reclaim_during_an_install_of_its_name_judges_nothing() {
 }
 
 /// What a node's last process left beside its tenants' files as it ended
-/// -- an install's `.importing`, a copy's `.taking`, each as large as the
-/// tenant -- goes as the node starts, under each tenant's lock taken
+/// -- an install's `.importing`, a copy's `.taking`, a rewrite's
+/// `.compacting`, a compact's `.beside`, a shell's `.saving`, each as large
+/// as the tenant -- goes as the node starts, under each tenant's lock taken
 /// without waiting: one whose lock another holds stays, its own (this
 /// process stands in for another's here: the lock refuses a second holder
-/// in one process as in two, fennec-abi's tests holding the second). A file
-/// of no tenant's name is let be. Before, a crash's `.importing` stayed
-/// until an install of the name came again.
+/// in one process as in two, fennec-abi's tests holding the second), and
+/// one with a lock file beside it, held or not, a database a user named so.
+/// A file of no tenant's name is let be. Before, a crash's `.importing`
+/// stayed until an install of the name came again, a compact's `.beside`
+/// until the tenant's next compact.
 #[test]
 fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
     let dir = scratch("left");
@@ -1493,26 +1496,43 @@ fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
         p
     };
     let (importing, taking) = (left("a.fennec.importing"), left("b.fennec.taking"));
+    let (compacting, beside) = (left("d.fennec.compacting"), left("e.fennec.beside"));
+    let saving = left("f.fennec.saving");
     let (held, other) = (left("c.fennec.importing"), left("notes.importing"));
+    let held_beside = left("c.fennec.beside");
     let lock = fennec_abi::lock::hold(dir.join("c.fennec")).unwrap();
+    let named = left("g.fennec.beside");
+    let its_own = fennec_abi::lock::hold(&named).unwrap();
+    let stopped = left("h.fennec.compacting");
+    std::fs::write(fennec_core::fs::beside(&stopped, "lock"), b"").unwrap();
     let tenants = Tenants::new(&dir).expect("dir");
     assert!(!importing.exists(), "an install's file left");
     assert!(!taking.exists(), "a copy's image left");
+    assert!(!compacting.exists(), "a rewrite's image left");
+    assert!(!beside.exists(), "a compact's image left");
+    assert!(!saving.exists(), "a shell's .save left");
+    assert!(
+        held_beside.exists(),
+        "a compact's image whose tenant's lock another holds removed"
+    );
     assert!(
         held.exists(),
         "a file whose tenant's lock another holds removed"
     );
     assert!(other.exists(), "a file of no tenant's removed");
-    drop((tenants, lock));
+    assert!(named.exists(), "a file whose own lock a holder has removed");
+    assert!(stopped.exists(), "a file beside its own lock file removed");
+    drop((tenants, lock, its_own));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A tenant whose file is a link has an install's image and a copy's
-/// written beside the file the link leads to, as its open writes that one
-/// and its lock is taken there (`fs::resolved`): what a crash left there
-/// goes as the node starts too, under the tenant's lock -- one whose lock
-/// another holds stays -- the file and the link as they were. Looked for in
-/// the node's directory alone, they stayed for good.
+/// A tenant whose file is a link has an install's image, a copy's, a
+/// rewrite's and a `.save`'s written beside the file the link leads to, as
+/// its open writes that one and its lock is taken there (`fs::resolved`):
+/// what a crash left there goes as the node starts too, under the tenant's
+/// lock -- one whose lock another holds stays -- the file and the link as
+/// they were. Looked for in the node's directory alone, they stayed for
+/// good.
 #[cfg(unix)]
 #[test]
 fn a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file() {
@@ -1530,10 +1550,11 @@ fn a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file() {
             std::fs::write(&p, b"part of an image").unwrap();
             p
         };
-        (file, left("importing"), left("taking"))
+        let rewrites = [left("compacting"), left("beside"), left("saving")];
+        (file, left("importing"), left("taking"), rewrites)
     };
-    let (file, importing, taking) = linked("a");
-    let (_, held, _) = linked("b");
+    let (file, importing, taking, rewrites) = linked("a");
+    let (_, held, _, _) = linked("b");
     let lock = fennec_abi::lock::hold(dir.join("b.fennec")).unwrap();
     let tenants = Tenants::new(&dir).expect("dir");
     assert!(
@@ -1541,6 +1562,9 @@ fn a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file() {
         "an install's file left beside the link's"
     );
     assert!(!taking.exists(), "a copy's image left beside the link's");
+    for r in rewrites {
+        assert!(!r.exists(), "{} left beside the link's", r.display());
+    }
     assert!(
         held.exists(),
         "a file whose tenant's lock another holds removed"

@@ -278,7 +278,17 @@ fn main() {
                 false => fennec_core::fs::open(p),
             };
             match opened {
-                Ok(db) => db,
+                Ok(db) => {
+                    // What the open removed beside the file, or kept for a
+                    // lock file beside it, in the line a server logs: a
+                    // file as large as the database gone, or one still
+                    // there, said where the shell says anything. A
+                    // read-only open looks at none.
+                    for s in db.swept_on_open() {
+                        eprintln!("{}", s.said(p));
+                    }
+                    db
+                }
                 Err(e) => {
                     eprintln!("could not open {p}: {e}");
                     exit::now(Code::Failed);

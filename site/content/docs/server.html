@@ -122,6 +122,9 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 open, before anything writes the file or runs beside it, so a failed start
 has written only <code>&lt;file&gt;.lock</code> and what an open writes — the
 file, or a node's directory, made empty where there was none, a torn tail cut,
+the side files a process writing it left as it ended removed and logged with
+their sizes (<a href="file-format.html#maintenance-operations">which, and when
+one is kept</a>),
 and on Linux the writes a crashed server had made durable written back from
 its sync log — and, started as root, the owner of a volume it handed to
 <code>--user</code> before it read the rest of its flags; a supervisor restarting

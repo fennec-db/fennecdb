@@ -538,6 +538,43 @@ fn a_second_shell_is_refused_until_the_first_has_quit() {
     assert!(text(&out.stdout).contains("1 records"));
 }
 
+/// What a crash left beside a file -- a compact's image -- goes as the
+/// shell opens the file to write it, and a file there with a lock file
+/// beside it, a database a user named so, stays: each said on the shell's
+/// stderr in the line a server logs, once an open, the kept one at every
+/// open. A `--read-only` open removes nothing, and says nothing.
+#[test]
+fn the_shell_says_what_its_open_removed_or_kept_beside_the_file() {
+    let d = Dir::new("swept");
+    let p = d.file("swept.fennec");
+    let out = fennec(&[&p, "-c", "create collection notes (body text)"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (beside, named) = (format!("{p}.beside"), format!("{p}.saving"));
+    std::fs::write(&beside, vec![7u8; 4096]).unwrap();
+    std::fs::write(&named, b"a database a user named so").unwrap();
+    std::fs::write(format!("{named}.lock"), b"").unwrap();
+    let out = fennec(&["--read-only", &p, "-c", "collections"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "", "a read-only open");
+    assert!(Path::new(&beside).exists(), "a read-only open removed it");
+    let removed =
+        format!("{beside}: removed, 4096 bytes a process writing {p} left beside it as it ended");
+    let kept = format!(
+        "{named}: kept: a lock file beside it, as a database of that name has; \
+         26 bytes beside {p}, to delete with its lock if it is no database"
+    );
+    let out = fennec(&[&p, "-c", "collections"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), format!("{removed}\n{kept}\n"));
+    assert!(!Path::new(&beside).exists(), "the shell's open left it");
+    assert!(
+        Path::new(&named).exists(),
+        "a file beside its lock file removed"
+    );
+    let out = fennec(&[&p, "-c", "collections"]);
+    assert_eq!(text(&out.stderr), format!("{kept}\n"), "the open after");
+}
+
 /// Every way the program writes a database file meets the lock: the shell
 /// with `-c`, piped or with nothing to read, a read too (the lock is taken
 /// at the open), `fennec import`, `backup` and `restore` into it, `fennec mcp

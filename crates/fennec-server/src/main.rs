@@ -1468,6 +1468,13 @@ fn main() {
                             c.records
                         );
                     }
+                    // What the open removed beside the file -- an image a
+                    // compact, a checkpoint, a copy or a `.save` was writing
+                    // as the process before ended -- or kept for a lock file
+                    // beside it, a line each.
+                    for s in db.swept_on_open() {
+                        fennec_http::log!("{}", s.said(path));
+                    }
                     #[cfg(windows)]
                     say_volume(path, mmap);
                     db

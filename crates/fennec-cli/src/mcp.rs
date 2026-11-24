@@ -217,6 +217,12 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> Code {
         fennec_core::VERSION,
         if read_only { ", read only" } else { "" }
     );
+    // What the open removed beside the file, or kept for a lock file beside
+    // it, on stderr beside the line above, in the line a server logs: stdout
+    // is the agent's.
+    for s in db.read().unwrap_or_else(|e| e.into_inner()).swept_on_open() {
+        eprintln!("fennec mcp: {}", s.said(&path));
+    }
     let served = mcp::serve_lines(&ctx, io::stdin().lock(), io::stdout().lock());
     let mut code = match served {
         Ok(()) => Code::Ok,

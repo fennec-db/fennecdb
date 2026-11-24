@@ -1105,6 +1105,106 @@ mod tests {
         }
     }
 
+    /// A side file a crash left beside a database goes as the database is
+    /// opened to be written (`fennec_core::fs::LEFT_BESIDE`), but not one
+    /// with a lock file beside it, held or not: no writer of ours makes one
+    /// there, so it is a database a user named so. Held by another process,
+    /// it stays as it was, and its holder keeps the lock -- this process's
+    /// hold is refused after the open, the lock file looked at, never
+    /// opened. Let go, its lock file left as a close or a crash leaves one,
+    /// it stays all the same, said kept at each open. Its lock file gone, it
+    /// goes, said with its size, beside a `.saving` with no lock file,
+    /// beside which none is made, and, on a Unix, a link at `.taking` to the
+    /// database itself, whose lock the opener holds: a link goes as a link,
+    /// no lock looked at. Without the look at the lock file, the first open
+    /// fails it.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_side_file_with_a_lock_file_beside_it_stays() {
+        use fennec_core::fs::Swept;
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let p = scratch("swept.fennec");
+        let (side, saving) = (format!("{p}.beside"), format!("{p}.saving"));
+        let kept = b"a database a user named so";
+        let said = |at: &str, bytes: usize, kept: bool| Swept {
+            path: at.into(),
+            bytes: bytes as u64,
+            kept,
+        };
+        // The database's own lock first, as every writer takes it before
+        // its open.
+        let ours = hold(&p).unwrap();
+        std::fs::write(&side, kept).unwrap();
+        let mut other = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lock::tests::holds_for_another_process"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(HOLD, &side)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(other.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains(HELD) {
+            line.clear();
+            let read = out.read_line(&mut line).unwrap();
+            assert!(read > 0, "the other process ended before it held the lock");
+        }
+        let held = [said(&side, kept.len(), true)];
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &held[..], "held by another process");
+        drop(db);
+        assert_eq!(
+            std::fs::read(&side).unwrap(),
+            kept,
+            "held by another process"
+        );
+        assert!(
+            matches!(hold(&side), Err(Refused::Held)),
+            "the other process's lock let go"
+        );
+        drop(other.stdin.take());
+        other.wait().unwrap();
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &held[..], "let go");
+        drop(db);
+        assert_eq!(std::fs::read(&side).unwrap(), kept, "let go");
+        std::fs::remove_file(format!("{side}.lock")).unwrap();
+        let part = b"part of a .save";
+        std::fs::write(&saving, part).unwrap();
+        let mut want = Vec::new();
+        #[cfg(unix)]
+        {
+            let link = format!("{p}.taking");
+            std::os::unix::fs::symlink(&p, &link).unwrap();
+            want.push(said(&link, p.len(), false));
+        }
+        want.extend([
+            said(&side, kept.len(), false),
+            said(&saving, part.len(), false),
+        ]);
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &want[..], "no lock file");
+        drop(db);
+        assert!(
+            std::path::Path::new(&p).is_file(),
+            "the database a link named"
+        );
+        assert!(
+            std::fs::symlink_metadata(&side).is_err(),
+            "no lock file: it stayed"
+        );
+        assert!(
+            std::fs::symlink_metadata(&saving).is_err(),
+            "no lock file: .saving stayed"
+        );
+        let made = std::path::Path::new(&format!("{saving}.lock")).exists();
+        assert!(!made, "a lock file made beside a side file");
+        drop(ours);
+    }
+
     #[test]
     fn a_holder_reads_as_a_refusal_names_it() {
         let h = |program: Option<&str>, pid| Holder {

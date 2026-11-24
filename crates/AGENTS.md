@@ -64,12 +64,18 @@ whole, these following no link at their name, an archive's records, a
 backup, an unseal, a compact's swap and a replica's image held to their
 writer's handle before their rename (`still_named`, the handle
 `Sink::adopt` is handed), one a crash left beside a database removed by its
-owner alone (`.taking` by the open that writes it, `.importing` by a node
-under the tenant's lock, `sweep_left`); `create_dir_private` or
+owner alone (`fs::LEFT_BESIDE`'s `.taking`, `.compacting`, `.beside` and
+`.saving` by the open that writes it, a link there unlinked, never
+followed; those and `.importing` by a node under the tenant's lock,
+`sweep_left`), never one with a `.lock` beside it, held or not, which no
+writer of ours makes there -- a database a user named so -- looked at,
+never opened (`fs::remove_left`), each removal and each file so kept said
+(`Database::swept_on_open`, `Swept::said`: a server's, a node's and the
+router's log, the shell's stderr); `create_dir_private` or
 `create_dir_new` for a directory -- `0600`, a directory `0700`, whatever
 the umask, from the call that makes it, or for a clone, which takes its
-source's owner-only mode, on its handle before it is handed back: never
-a `chmod` by name.
+source's owner-only mode, on its handle before it is handed back: never a
+`chmod` by name.
 A file renamed over another is given that one's mode before the rename, by
 an `fchmod` of its open handle (`mode_like`), a group's bits only where it
 is of that group, nothing from a file another user owns; nothing is
