@@ -20,11 +20,18 @@ RUN npm run build
 # ------------------------------------------------------------------ backend
 FROM golang:1.26.5-alpine AS backend
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
-RUN --mount=type=cache,target=/root/go/pkg/mod go install github.com/magefile/mage@v1.17.2
+# proxy.golang.org drops a stream now and then -- "stream error: stream ID 741;
+# INTERNAL_ERROR; received from peer" failed CI's monitoring job, a required
+# check, on 2026-11-24 -- and neither `go install` nor `go mod download` tries
+# again. What a pass fetched stays in the module cache, so the next takes only
+# the rest; three passes, 10 and 20 s apart.
+RUN --mount=type=cache,target=/root/go/pkg/mod \
+    for i in 1 2 3; do go install github.com/magefile/mage@v1.17.2 && exit 0; sleep $((i * 10)); done; exit 1
 WORKDIR /src/integrations/grafana
 COPY integrations/go/ /src/integrations/go/
 COPY integrations/grafana/go.mod integrations/grafana/go.sum ./
-RUN --mount=type=cache,target=/root/go/pkg/mod go mod download
+RUN --mount=type=cache,target=/root/go/pkg/mod \
+    for i in 1 2 3; do go mod download && exit 0; sleep $((i * 10)); done; exit 1
 COPY integrations/grafana/Magefile.go integrations/grafana/package.json ./
 COPY integrations/grafana/src/plugin.json ./src/
 COPY integrations/grafana/pkg/ ./pkg/
