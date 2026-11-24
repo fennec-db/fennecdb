@@ -466,6 +466,11 @@ pub fn open_wrapped(
     let lock = lock_file(path)?;
     let mapped = flags & FENNEC_OPEN_IN_MEMORY == 0;
     let db = fennec_core::fs::open_with(path, mapped, wrap).map_err(|e| failed(&e))?;
+    // What the open removed beside the file, or kept for a lock file beside
+    // it (`swept_on_open`), goes unsaid here, as the torn tail it cut does
+    // (`cut_on_open`): the library writes no line an app did not ask for --
+    // its stderr is the app's -- and `fennec_open` answers a handle, no
+    // notes. Saying them is for fennec.h to grow.
     let h = keep(db, flags & FENNEC_OPEN_NO_SYNC == 0, Some(lock));
     if flags & FENNEC_OPEN_NO_AUTO_COMPACT == 0 {
         let n = native(h)?;

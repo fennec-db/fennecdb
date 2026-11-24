@@ -388,12 +388,94 @@ not map, and renamed it in). A replica's image is held to its name first
 in `Database::adopt_side` too, so that one put there is refused before the
 sink is asked, the copy as it was and taking writes; refused by the sink,
 as a compact's is, the database fails. A side file a crash left -- a
-replica's `.taking`, an install's `.importing` -- is removed by its owner
-alone: the open that writes the database (`FileSink::create`), and a node
-as it starts, under each tenant's lock taken without waiting
-(`tenants::sweep_left`); never a tool that only looks, nor one whose
-tenant's lock another process holds
-([replication.md](replication.md#an-image-taken-as-it-arrives)).
+replica's `.taking`, a checkpoint's or a compact's `.compacting`, a
+compact's or an index's `.beside`, the shell's `.saving` of a `.save` over
+the file (`fs::LEFT_BESIDE`), an install's `.importing` -- is removed by
+its owner alone: the open that writes the database (`FileSink::create`,
+all but `.importing`), and a node as it starts, under each tenant's lock
+taken without waiting (`tenants::sweep_left`, all five), so a tenant no
+request opens again keeps none; never a tool that only looks
+(`open_read_only`: `--read-only`, `fennec types`), nor one whose tenant's
+lock another process holds
+([replication.md](replication.md#an-image-taken-as-it-arrives)). Nothing
+of this process can be writing one as the open runs: `<file>.lock`, which
+a `.save` takes too, refuses a second holder of the file in a process as
+in two, and a database rewrites nothing before its open returns. The
+removal is an `unlink`, which follows no link: one put at the name goes,
+the file it names as it was; a directory there stays, and the next rewrite
+of that name fails on it as it did before. A file at one of those names
+with a lock file beside it -- `<file>.beside.lock`, held or not -- stays
+too, and is said kept at every open that finds it (`fs::remove_left`, the
+open's and `sweep_left`'s alike): no writer of ours makes a lock beside a
+side file, so one there says the name was opened as a database to be
+written -- a user's, beside another, served or stopped -- and a stopped
+database is never deleted. Removed, a served one's writer went on writing
+a file no name reached (#682's first review; so for a `.taking` since
+#680), and a stopped one went with all it held (the second). A crash's own
+leftover has no lock file beside it, and goes. The lock file is looked at,
+an `lstat`, never opened: a descriptor of a lock this process holds,
+opened and closed, would let its record lock go, and another process's
+lock is its holder's. The look is fennec-core's alone, made only once
+something is at the name, so an open with nothing left makes one `lstat` a
+name where it made one `unlink`. The second round asked the lock itself,
+through fennec-abi's lock module, which each `lock::hold` handed
+fennec-core (`fs::ask_locks_with`, `lock::unless_held`), and took it
+without waiting where it was free, for the removal. That removed a stopped
+database whose lock file a close had left unlocked --
+`fennec-server --file x.fennec.beside` stopped yesterday,
+`fennec x.fennec` today -- where a process that took no lock through the
+module kept it; it unlinked a file as large as the database under the
+module's guard, every hold and let-go in the process waiting on it; and
+where no lock file was there it unlinked with no lock held, as the look
+does. The look keeps the database and leaves every lock as it was. It lets
+by a database at the name never opened to be written -- a copy put there
+by hand, which no lock file marks -- and a first open of the name in
+another process landing between the look and the `unlink`; and a database
+it keeps is still at the name its neighbour's next rewrite of that kind
+writes over (`create_private` removes what is there). A link is not looked
+at: whoever writes the file it names keeps that name, whose lock is beside
+that file (`lock_path` follows a link) -- one to the database itself goes
+as a link. What the open removed or kept it says, as it says a torn tail's
+cut (`Database::swept_on_open`: each name, the bytes it held and whether
+it was kept, an empty `Vec`, nothing allocated, where nothing was left), a
+line each in one set of words (`Swept::said`): fennec-server's log as it
+opens its file; a node's as a tenant's open finds one and as `sweep_left`
+does at its start; the router's as it opens its directory and its copy of
+the global one; the shell's stderr; `fennec mcp --file`'s stderr after its
+first line; and `fennec import`'s output among its own lines, each
+headed `beside`. The native library says none, as it says no torn tail's
+cut: it writes no line an app did not ask for, and `fennec_open` answers a
+handle, no notes; saying them is for fennec.h to grow. Until the P6 soak's
+second run, a compact's `.beside`, a rewrite's `.compacting` and a
+`.save`'s `.saving` stayed until the next writer of the name made it again
+-- every release, `.compacting` from 0.1.0, `.beside` from 0.1.5 and
+`.saving` in 0.2.0 -- and the soak, killed during a compaction, kept a
+1.4 GB `.beside` beside its database through minutes 91 to 102, no compact
+running: a crash in a compact doubles the disk a database takes for as
+long as no compact runs, and the auto-compact waits for half the file to
+be dead. fennec-core's `tests/side_files.rs` kills a compact beside the
+database once its side file is made (`compacts_until_killed`, a child
+process ending with no destructor run) and holds the file left until the
+open that writes, past a read-only open; puts every name at its place
+before a mapped, an in-memory and a server's open; and puts a link and a
+directory at each, the link removed and its file kept, the directory kept
+and the database opened, and each open's `swept_on_open` holds what it
+removed, the next open nothing. Its
+`a_side_file_with_a_lock_file_beside_it_stays` puts a lock file no process
+holds beside a `.beside`, and none beside a `.saving`: the `.beside`
+stays, said kept at each open, the `.saving` goes, and once its lock file
+is gone the `.beside` goes too. fennec-abi's test of that name holds the
+`.beside`'s lock in another process: it stays, said kept, and this
+process's hold is refused after the open, the lock its holder's still; let
+go, its lock file left, it stays; its lock file gone, it goes, beside a
+`.saving` with no lock file, beside which none is made, and a link at
+`.taking` to the database itself (a Unix's). Without the look at the lock
+file, each fails at its first open. fennec-http's two `sweep_left` tests
+put `.compacting`, `.beside` and `.saving` beside a tenant's file and a
+linked one's, the first a `.beside` with a held lock beside it, kept; and
+fennec-server's `crash.rs`, fennec-shard's `listen.rs` and fennec-cli's
+`lock.rs` hold the server's, the router's and the shell's lines, a file
+removed and one kept each.
 The rename itself goes by the name, so `swap_in` first holds the name to the
 handle's file (`still_named`, its device and inode against an `lstat`; on
 Windows the volume's serial number and the file's index against the name
@@ -529,10 +611,36 @@ modes differ; `swap_in` takes the writer's handle where it opened
 `.compacting` by name (one `open` fewer), a `dup` of `.beside`'s and
 `.taking`'s where it opened them again with `O_NOFOLLOW`, and
 `still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
-backup's and an unseal's rename. The image a
-restore or a consolidating round of an archive with no key starts from
-(never a request) is copied by `copy_file_range` on Linux, as
-`fs::copy` copied it: std's `io::copy` from a `File` into a
+backup's and an unseal's rename. The open that writes a file looks for
+four names beside it where it removed one: four `lstat`s where one
+`unlink` was, each failing where nothing was left, a side file's lock file
+looked at only where one is there, and the names made in one buffer sized
+for the longest -- the perf gate's `file-open`, an open of 100 000 rows,
+natively, three runs a side alike, asks the allocator 200 113 times for
+3 779 209 bytes against main's 200 114 and 3 779 252: a call and 43 bytes
+fewer. (The bytes hang on the length of the temporary directory's name,
+the file's path being among them: the second round's runs, made under
+another one, read 3 779 623 against 3 779 735. Made by `beside` each, as
+#682 first made them, the four names asked nine calls and 882 bytes more
+than main there.) Its time is not quoted: the runs were made at a load of
+6.3, and a second round's, at 2.4 to 3.3, put both sides inside each
+other's spread. Release `fennec-server` on macOS: 4 288 bytes more
+`__text` than main's (5 023 616 to 5 027 904), where the second round's
+lock module made it 6 144. By symbol, in builds that keep them (4 224
+bytes more there): the sweep's own functions 1 836 (`sweep_beside` 764,
+`remove_left` 428, the report's drop 336, `Swept::said` 176, `said_swept`
+132), the node's `sweep_one` 356, the opens that carry the report 1 928
+(`Tenants::open_as` 804, `fs::open_serving` 444, `replication::open_as`
+312, the database's drop 228, the rest 140), the server's start 204,
+`lock::hold_within` outlined from `serve_dir` 424 fewer (the node's sweep
+now takes it at one type), and 123 other symbols, each within 440 bytes,
+324 more between them. The file is 16 bytes larger (7 206 608 to
+7 206 624), against a file as large as the database a crash in a compact
+no longer leaves, a database a user named so no longer unlinked, served or
+stopped, and a line for each file that goes or stays. The image a restore
+or a consolidating round of an archive with no key starts from (never a
+request) is copied by `copy_file_range` on Linux, as `fs::copy` copied it:
+std's `io::copy` from a `File` into a
 `BufWriter<File>` is its `kernel_copy`, which flushes the empty buffer and
 hands both descriptors to the kernel. On APFS it is cloned again, as
 `fs::copy` cloned it, where the third round of G14's fixes had copied its
@@ -634,7 +742,7 @@ A pass's tenants added to every tenant's gap -- 2 tenants 8 to 15 ms at the medi
 
 **The rig** (`.github/linux-power-cut/`; the load, the check and the replay are `.github/power-cut/`'s, which Windows' rig runs too). The runner's KVM, as Windows'. QEMU runs Ubuntu 24.04's cloud image -- a dated release Canonical keeps, its SHA-256 the one that release's `SHA256SUMS` names, not cached -- set up by cloud-init from a seed disk (`user-data`): one user the host reaches with a key made by the run, nothing installed or upgraded, the timers that would write on their own (apt's, `fstrim`, snapd's) off, and GRUB's recordfail wait -- 30 s at a menu no one sees, after every boot that did not finish -- set to none and put on disk by a clean restart before any cut. The server is this commit's, built as `release.yml` builds the release's (`x86_64-unknown-linux-musl`, the release profile) on a runner beside the guest's first boot and handed over as an artifact: `fennec-server --file /d/t.fennec --http 0.0.0.0:8080 --sync always` (`--sync 250 --cdc` in the default's guest, `--dir /d/n` under `--sync always` or `--sync 250` in the nodes'), its tokens made by the job, copied in as files and read into `FENNEC_HTTP_TOKEN` -- and a node's `FENNEC_ADMIN_TOKEN` and `FENNEC_REPLICATION_TOKEN` -- never printed. `/d` is a disk of its own -- ext4 as `mkfs.ext4` makes it (`data=ordered`), its inode tables and journal written at the making so that nothing initialises behind the cuts, the same mounted `data=writeback` and `data=journal` (`MOUNT_OPTIONS`, held at every mount to what `findmnt` shows, or the cut fails as the rig's: a mount that fell back would test `ordered` under another mode's name), and XFS as `mkfs.xfs` does, a matrix entry each -- and mounted by the rig after each boot, so the journal's recovery is a line the summary keeps (`MOUNT`). Both disks are virtio disks with a write cache the guest must flush (`write-cache=on`: the guest's `queue/write_cache` says `write back`), each image opened `O_DIRECT` on the host, so a guest's flush is the host's `fdatasync`. A cut is `kill -9` of QEMU: the guest's memory, its page cache and the file system's uncommitted journal go with it, and what the guest handed its disks stays -- but for a write into a cluster QEMU had just allocated in the image and not yet written the table of, a write no flush covered, which a volatile cache may lose too. The rig's own files are synced before the first cut.
 
-**The load and the check** are Windows' (`client.py`, [described there](windows.md#the-power-cut)): five cuts a run, each at a time drawn from 2 to 30 s after the first acknowledgement, seeded by the run, each held to what the check before it found, and each held to landing mid-write: a cut with no write in flight -- none sent before the host's clock read after `kill -9` and left unanswered, the check's `INFLIGHT` lines -- landed between writes and held nothing to one cut short, and fails as the rig's (`RIG`), Windows' cuts too. Under `--sync 250` a write is in flight for well under a millisecond, so a kill may find every writer between two writes by chance (run 43594792647's first cut did, every other check passing), and the cut still held the server to the acknowledged writes no `/_changes` page had covered, which the window checks: there the rule fails only a cut with no write in flight and none of those left (`Check.unsynced`). A denser load would only lower the odds, and counting a write tried just after the kill as in flight would count one that found QEMU gone. What may be beside the file after a cut differs: its `.lock`, unlocked; the sync log (`.sync`); a stopped compact's image, `.beside` or `.compacting`, which the next compact writes anew; ext4's `lost+found`; and in a node's directory each tenant's own, its identity (`<t>.instance`) and `schedules.hint`, or the `schedules.hint.writing` it is written again from. Any other file fails the run.
+**The load and the check** are Windows' (`client.py`, [described there](windows.md#the-power-cut)): five cuts a run, each at a time drawn from 2 to 30 s after the first acknowledgement, seeded by the run, each held to what the check before it found, and each held to landing mid-write: a cut with no write in flight -- none sent before the host's clock read after `kill -9` and left unanswered, the check's `INFLIGHT` lines -- landed between writes and held nothing to one cut short, and fails as the rig's (`RIG`), Windows' cuts too. Under `--sync 250` a write is in flight for well under a millisecond, so a kill may find every writer between two writes by chance (run 43594792647's first cut did, every other check passing), and the cut still held the server to the acknowledged writes no `/_changes` page had covered, which the window checks: there the rule fails only a cut with no write in flight and none of those left (`Check.unsynced`). A denser load would only lower the odds, and counting a write tried just after the kill as in flight would count one that found QEMU gone. What may be beside the file after a cut differs: its `.lock`, unlocked; the sync log (`.sync`); a stopped compact's image, `.beside` or `.compacting`, which the server's open after the cut removes ([above](#files-modes); until #682 the next compact wrote it anew); ext4's `lost+found`; and in a node's directory each tenant's own, its identity (`<t>.instance`) and `schedules.hint`, or the `schedules.hint.writing` it is written again from. Any other file fails the run.
 
 **`--sync 250`, the default.** It does not promise every acknowledged write: the server answers a write before it is on disk, and the syncer (`run_syncer`) sleeps 250 ms after each sync, takes the write lock long enough to take what was written, lets it go and fsyncs. A write landing just after a sync took its writes waits out that sync, the sleep and the next, so a cut may take what was answered within 250 ms and two syncs' time of it, and nothing answered before. The guest's server runs with `--cdc`, which keeps the feed a primary keeps for its replicas and hands a consumer only what an fsync covered (`Tee::flush` marks it durable once the fsync returned): it changes nothing the file holds -- its one cost on disk, an fsync of the file as the open finds it, has nothing to cover after a power cut -- and lets the rig see each sync. A thread of the client reads `/_changes` as a long poll and notes when each page's head came and what it held, before any writer starts. The check holds the database to three things beside a file's (whole documents, a batch all there or none, a keyed write there at most once and replayed where it is). Every write a page held is there, whatever its answer said. An acknowledged write gone was answered no longer before the cut than 250 ms and two syncs' own time, each allowed 200 ms (`SYNC_OWN`): 650 ms, a fixed bound. A sync's own time, a gap between pages less the 250 ms of sleep, was 7 to 9 ms at the median over the ten cuts of runs 43438990710 and 43462058075 and 177 ms at the longest (a gap of 427 ms), and two back to back took 282 ms (an acknowledged write handed over 532 ms after its answer): the runner's disk, early in a cut after a boot or for a moment mid-load. The 118 ms the bound leaves past that is its only slack; the host's clock, read before the kill -- earlier than the guest's end -- and at a write's answer -- later than its landing -- only shortens the span measured. A first bound of 50 ms a sync, 350 ms, passed the second run with a write lost 316 ms before its cut, and a cut at the end of its fourth cut's slow syncs would have failed a server doing what it promises. No page may come more than a second after the one before it or the first acknowledged write, nor the cut a second after the last page (`GAP_CEILING`): a second is four times the interval and more than twice the longest gap seen, so a gap past it names a sync 750 ms late, a syncer stopped or stuck. And at the median the pages must come no more than 350 ms apart, a median sync's own time allowed 100 ms (`SYNC_MEDIAN`): a few slow syncs leave the median where it was, and a syncer late at every sync -- every half second, whose losses stay under the bound -- fails it at every cut. None of these numbers is read from the pages being judged. The first version of this check read its bound from them -- the longest of the last four gaps and the gap open at the cut, less 250 ms each, and 50 ms of slack -- and the bound grew with the stall it was to find: #627's review fed it a syncer stopped 3 s before the cut, its acknowledged writes lost from 3.0 s before it, which passed against 3 058 ms, and one syncing every second, its writes lost from 907 ms before the cut, against 1 708 ms. `test_client.py` holds the check to failing both, a syncer every half second and one stuck for a second and a half mid-load, and to passing two slow syncs as the second run met them; `ci.yml`'s `fmt` job runs it on every pull request. And what the cut kept is a prefix of the writes: every acknowledged write it took landed after every one it kept, by the change each was answered as (`Fennec-Seq`) -- the open cuts a torn tail at its first damaged record, never one in the middle. The load is a file's without its spills and compacts: a compact's image is fsynced before its rename and makes every write before it durable, which a compact every fifth of a second would have done in the syncer's place, and a spill's 20 MiB page held the reader past the next sync; `--auto-compact`'s compacts run beside it all the same. A sync holds a quarter of a second's writes, past the 64 KiB [the sync log](#the-sync-log) takes, so the file is fsynced itself and the log is exercised by the other guests; a run in which no cut took an acknowledged write fails as the rig's, having held nothing to the window. The two cuts that rebuild the disk as of its last flush stay, though both runs' found just what the plain cuts did (247 and 120 writes gone, then 502 and 589): a plain cut keeps what the guest handed the disk, flushed or not, so only the rebuilt disk holds a page's writes to the flush its fsync asked for -- a sync that wrote and did not flush would pass every plain cut.
 

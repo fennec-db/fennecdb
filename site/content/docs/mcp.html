@@ -37,8 +37,10 @@ fennec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the t
 <p><code>--file</code> holds the database itself and takes
 <code>notes.fennec.lock</code> while the session lasts — a server, an app or
 the shell over the same file is refused, as it is refused while they hold it: two
-processes writing one file corrupt it. Each write is on the disk before it is
-answered. <code>--read-only</code> takes no lock and writes nothing, and reads
+processes writing one file corrupt it. What a crash left beside the file goes
+as the shell's open removes it, a line each on stderr (<a
+href="shell.html#left-beside">the shell</a>). Each write is on the disk before
+it is answered. <code>--read-only</code> takes no lock and writes nothing, and reads
 the file as it stood when the session began, beside a server writing it (on
 Linux, after the machine went down and before a writer opens the file again,
 without the last durable writes, which wait in the sync log beside it); to

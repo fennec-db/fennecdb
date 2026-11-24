@@ -492,7 +492,7 @@ lock_held() {
 # The names a cut may leave on the data disk, as `boot_check` lists it:
 # the file, its lock, the sync log, and the image a compact it stopped was
 # writing (`.beside` for a compact beside the database, `.compacting` for
-# one under the lock), which the next compact writes anew; ext4's own
+# one under the lock), which the server's open after removes; ext4's own
 # lost+found (XFS keeps none). A node's directory holds each tenant's, its
 # identity (`<t>.instance`) and `schedules.hint`, written again by rename
 # from `schedules.hint.writing`.

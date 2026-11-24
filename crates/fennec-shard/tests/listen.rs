@@ -147,3 +147,60 @@ fn a_ca_or_an_audit_log_is_refused_before_tracing_starts() {
         assert!(!dir.exists(), "{flag}: {said}");
     }
 }
+
+/// What a crash left beside the directory's file -- a compact's image --
+/// goes as the router opens it, and a file there with a lock file beside
+/// it, a database a user named so, stays: each a line in the router's log
+/// before it listens, in the words a server logs its file's in.
+#[test]
+fn a_router_logs_what_its_open_removed_or_kept_beside_the_directory() {
+    let dir = std::env::temp_dir().join(format!("fennec-shard-swept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("shard.fennec");
+    let path = file.to_str().unwrap();
+    let (beside, named) = (format!("{path}.beside"), format!("{path}.compacting"));
+    std::fs::write(&beside, vec![7u8; 4096]).unwrap();
+    std::fs::write(&named, b"a database a user named so").unwrap();
+    std::fs::write(format!("{named}.lock"), b"").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fennec-shard"))
+        .args(["--listen", "127.0.0.1:0", "--directory", path])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut log = String::new();
+    loop {
+        let line = lines
+            .next()
+            .expect("fennec-shard ended before it listened")
+            .unwrap();
+        log.push_str(&line);
+        log.push('\n');
+        if line.contains("listening on: http://") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let removed = format!(
+        "{beside}: removed, 4096 bytes a process writing {path} left beside it as it ended"
+    );
+    let kept = format!(
+        "{named}: kept: a lock file beside it, as a database of that name has; \
+         26 bytes beside {path}, to delete with its lock if it is no database"
+    );
+    for line in [&removed, &kept] {
+        assert_eq!(log.matches(line.as_str()).count(), 1, "{line}\n{log}");
+    }
+    assert!(
+        !std::path::Path::new(&beside).exists(),
+        "the router's open left it"
+    );
+    assert!(
+        std::path::Path::new(&named).exists(),
+        "a file beside its lock file removed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

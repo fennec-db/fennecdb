@@ -688,7 +688,9 @@ What a crash leaves: before the rename, the copy's file as it was and the
 image beside it, whole or not, which the next open never reads and the
 next open to write the file removes (`FileSink::create`) -- its owner's,
 under `<file>.lock`: a primary's, a copy's, an app's or the shell's, never
-a tool that only looks (`open_read_only`); after the rename, the image
+a tool that only looks (`open_read_only`), nor a file at the name with a
+lock file beside it, held or not ([durability.md](durability.md#files-modes));
+after the rename, the image
 with the record saying the copy follows, which the next start opens as a
 copy of the primary's lineage at the image's change -- the image taken
 inside its rename, as before. Until the review only a follower starting
