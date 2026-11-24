@@ -281,9 +281,8 @@ index asks once a document as it is written and as an open takes it, is
 cheaper by as much. The browser module grew 91 bytes, `dead_frame` held
 once there (`inline(never)`), where a copy in each of its three callers
 grew it 141; on aarch64 macOS fennec-server's code grew 128 bytes and
-`fennec`'s shrank 128, both files the same size to the byte. `make
-perf-gate` was not run: it counts under valgrind, which no image on the
-machine held.
+`fennec`'s shrank 128, both files the same size to the byte. CI's perf
+job holds the cost.
 
 ### Dropped places
 
