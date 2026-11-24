@@ -163,6 +163,23 @@ until it is defined again. The epoch is 4, as it was in v0.2.0, and it stays 4
 through 1.x. Raising it is a major version, and its notes name the stored
 statements it breaks.</p>
 
+<h2 id="unicode">Unicode</h2>
+
+<p>A text's case, a <code>@text</code> word and a name follow one Unicode
+version, the one the release was built with: 18.0 today. A minor release may
+move it, and its notes then name every letter whose <code>upper()</code>,
+<code>lower()</code>, <code>nocase</code> fold or word-hood changed; a patch
+release never does. No stored byte depends on it, so a file reads alike in
+every release, and a letter stays a letter. The release that moved to 18.0
+changed <code>upper()</code> of ɷ, ɼ, ꭋ and ꭌ, which now have capitals; the
+rest of its change is letters Unicode 17.0 did not have.</p>
+
+<p>During an upgrade two releases can answer those letters apart: a replica
+and its primary, a router and its nodes, a page's module and the server. A
+name using a letter newer than one side knows is refused there in words
+(<code>invalid collection name</code>), never read as another name; the same
+holds for an SDK's builder, which reads names by its own runtime's Unicode.</p>
+
 <h2>Support</h2>
 
 <p>The latest 1.x minor gets every fix. The previous minor gets security fixes

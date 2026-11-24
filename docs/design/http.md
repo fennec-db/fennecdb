@@ -2398,18 +2398,83 @@ its own `close_notify`, its session its own, and the shutdown waits up to
 descriptor, each let go of under the list's lock before it closes, so a
 shutdown never shuts a descriptor a new connection took
 (`every_tls_end_is_a_close_notify_the_shutdown_s_too`). Before, only a
-refused request's end sent one. On Windows the list keys a socket's
-`SOCKET` (`conn/windows.rs`), and a shut read side wakes no thread blocked
-reading it -- a connection waiting for its request was cut by the exit
-with a reset -- so the socket's pending I/O is cancelled after the
+refused request's end sent one. A handshake under way is waited for too:
+TLS 1.3 ends the client's handshake once it has the server's `Finished`,
+the server's only once it reads the client's, so a client can begin its
+session -- a request to send, an answer to read -- while the server's
+thread is still in `Tls::handshake`, not yet listed. A connection is
+counted from the peek that saw its record's first byte (0x16) until it is
+listed (`open::Shaking`, an atomic beside the list), `end_all` waiting
+until both are empty, up to its grace: a client that sent that byte and
+stalls holds every shutdown `END_GRACE` at most. One listed after the
+shutdown has begun has its read side shut too, by whichever of
+`open::note` and `open::shut_reading` takes the list's lock second --
+`note` where `shut_reading` ran first, seeing `ending()` through the lock
+-- and ends as the others do, its `close_notify` sent. A handshake that
+would begin after the shutdown does not (`Shaking::begin`, sequentially
+consistent with `end_all`'s store: either it sees the shutdown or the wait
+sees its count), its socket closed before a byte of the server's, so no
+client has a session the exit cuts. A connection still in the peek is not
+counted: the server has written it nothing, so its client has no session
+to cut, and the exit closes it -- or its first byte, come after the
+shutdown began, is refused as above. Counted from before the peek, as the
+count first was, a TCP connection that had sent nothing -- a scan, a
+balancer's connection made ahead -- held every shutdown its whole grace,
+where the wait had ended about 2 ms after the list emptied. Nothing is shut
+in the middle of a handshake: macOS's read shutdown discards the bytes
+queued, and Winsock resets a connection bytes arrive on after it, either
+of which would lose the client's `Finished`. What a client sent that the
+server had not read when its read side was shut -- a request sent right
+after its `Finished`, or, on a listed connection, as the shutdown came --
+goes by the platform: Linux serves it, then sends `close_notify`, if it
+had arrived by the connection thread's next read -- a read side shut
+answers an empty queue with an end, so a request still on the wire goes
+unanswered, `close_notify` and then a reset; macOS discards it, the
+connection ending with its `close_notify` and no answer; Windows resets
+the connection, as the exit reset it before.
+
+Before, such a connection was neither listed nor waited for, and the exit
+ended it with a TCP end alone:
+`every_tls_end_is_a_close_notify_the_shutdown_s_too` failed once in a
+merge group on CI's macOS runner (#681): the connection it dials just
+before the `SIGTERM` had a server thread that took the client's `Finished`
+after the syncer's look had begun the shutdown. On this Mac beside busy
+loops it passed 700 runs of 700; its processes at background QoS
+(`taskpolicy -c background`, eight at a time, twelve busy loops) it failed
+36 times in 64, each at that connection, and after, never there in 400
+(once at the stream, its `close_notify` later than `END_GRACE`).
+fennec-http's `tls_ending`, a binary of its own (the shutdown is the
+process's, never undone), holds the handshake's end by events alone: a
+listed connection, one whose client's `Finished` a relay holds, and one
+that has sent nothing, its peek bounded past the shutdown's; `end_all` on
+a thread of its own with a bound only a failure meets (60 s), the order
+asserted by a channel -- the shutdown has not returned once the listed
+connection has read its `close_notify`; the relay lets the `Finished` go,
+the held connection reads its own, and the shutdown returns under its
+bound, the silent connection not waited for -- and then neither the silent
+connection's first byte nor a new connection's gets a handshake. With no
+count it failed 4 runs of 4, at the held connection (no `close_notify`
+before its idle timeout); with the count taken before the peek 4 of 4, the
+shutdown held to its bound by the silent connection; after, it passed 500
+runs of 500 beside twelve busy loops, eight at a time, and 300 of 300 with
+its processes at background QoS. It replaced a fennec-server test that
+held the relay until the shutdown had woken a stream and stood on
+`END_GRACE` as the stream does -- 19 failures in 160 at background QoS,
+none with the grace made 5 s -- timing the grace, which is not the
+property. The count is three atomic operations a TLS handshake, beside its
+milliseconds, and nothing on a plain connection; the release
+`fennec-server` was 7 223 184 bytes either way. On Windows the list
+keys a socket's `SOCKET` (`conn/windows.rs`), and a shut read side wakes no
+thread blocked reading it -- a connection waiting for its request was cut
+by the exit with a reset -- so the socket's pending I/O is cancelled after the
 shutdown (`CancelIoEx`; std makes every socket overlapped), the read after
 it meeting the shut side. The cancel takes every request on the socket,
 not its read alone: a send blocked on a slow reader fails too, and an
 answer in the middle of its write is cut there, with no `close_notify`,
 where on Unix it goes on through the grace. And Winsock resets a TCP
 connection shut for receiving with bytes queued that the server had not
-read, or arriving after (`SD_RECEIVE`): a client that had sent more -- a
-pipelined request -- reads a reset, not a `close_notify`
+read, or arriving after (`SD_RECEIVE`): a client that had sent a request
+the server had not read reads a reset, not a `close_notify`
 ([windows.md](windows.md#7-what-else-windows-differs-in), 7g).
 
 *The key's file.* On Unix a key file open to more than its owner is said

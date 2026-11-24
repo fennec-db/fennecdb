@@ -71,6 +71,19 @@ connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request
 a 400; without the flags the `&Conn` is the `TcpStream` it was, nothing
 added. A failed handshake is counted by reason, logged a minute apart at
 most; an end on purpose sends `close_notify` (`conn::end_all`), never after
-a failed write or `Conn::cut`. A timeout set where the peer may have reset,
-bytes of its still to read, goes through `conn::unless_gone` (fennec-tls's
-own in a handshake): macOS's EINVAL there never fails a handshake done.
+a failed write or `Conn::cut`. The one shutdown waits for a handshake under
+way as for a connection listed, up to its grace (`END_GRACE`, half a second,
+which a stalled one holds it) -- counted from the peek that saw its
+record's first byte until it is listed (`open::Shaking`), its read side
+shut by `open::note` or `open::shut_reading`, whichever takes the list's
+lock second -- and lets none begin after it, closed before a byte of the
+server's: TLS 1.3 ends the client's handshake before the server's, and a
+session its client had begun was cut bare. One that has sent nothing is
+not waited for: it has no session. A request the server had not read is
+served on Linux if it had arrived by the thread's next read (one still on
+the wire goes unanswered), discarded on macOS (`close_notify`, no answer)
+and reset on Windows, as the exit reset it; nothing is shut mid-handshake.
+Held by fennec-http's `tls_ending`, a binary of its own and its one test,
+by events, never the grace. A timeout set where the peer may have reset, bytes of its still to
+read, goes through `conn::unless_gone` (fennec-tls's own in a handshake):
+macOS's EINVAL there never fails a handshake done.

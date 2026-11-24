@@ -1,4 +1,4 @@
-// Written by crates/fennec-core/tools/fold/gen.py from Unicode 17.0.0's
+// Written by crates/fennec-core/tools/fold/gen.py from Unicode 18.0.0's
 // UnicodeData.txt; do not edit. What a Latin or Greek letter folds to under
 // `@text` -- the rule is the script's.
 

@@ -20,3 +20,13 @@
 # (`CARGO_PROFILE_WASM_STRIP=debuginfo`, as `make size-report` does).
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128", "-C", "link-arg=--compress-relocations"]
+
+# A `cargo update` takes no release younger than a week (Cargo 1.100's
+# `registry.global-min-publish-age`, stable since): a compromised release
+# of a crate is usually found and pulled within days, and the crates from
+# outside the workspace -- fennec-tls's rustls, ring and webpki-roots, which
+# fennec-server and the shell ship, and fennec-bench's -- come in only by
+# an update. It bounds what an update picks, falling back to the newest
+# release old enough; what Cargo.lock holds builds as it is.
+[registry]
+global-min-publish-age = "7 days"

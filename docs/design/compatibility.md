@@ -175,6 +175,54 @@ Driven on 2026-11-15 against v0.2.0's aarch64-apple-darwin tarball and the route
 - **The rolling upgrade (e)**: 208 writes sent through the router, 206 acknowledged and every one read back from the primary and the standby, 2 not sent (no connection while the router restarted, or the router's "was not sent" while the primary's node did; a run of e alone saw one, curl's exit 7 as the router restarted) and neither landed, none unknown, no `seq` twice; 50 writes acknowledged after each step, the standby caught up by the runbook's condition before each node. The counts move with the machine's speed and a restart's timing; the classes' rules do not.
 - **Where RELEASING.md was not exact enough to follow**, written there and in the runbook since: a node pair's standby's node goes first; the wait between two nodes' restarts is the standby's status (connected, `behind` 0) or the primary's listing (`sent` its `durable`), not `FennecTenantsWithoutReplica`, which counts only a tenant with no copy at all over 15 minutes; a node holding both primaries and replicas cannot be a reader upgraded before every primary; restarting a primary's node in place costs its tenants' writes for the restart; and "upgrade every router" means building it from the tag, no release publishing `fennec-shard` yet.
 
+## Unicode
+
+The engine decides a text's case, a word and a name by the standard library's Unicode tables, and a release is built by one pinned compiler ([crates.md](crates.md#toolchain)), so a release's answers are of that compiler's Unicode version: 18.0.0 under Rust 1.100.0. One test names it, `case::tests::the_unicode_version_is_the_one_the_answers_are_of`, failing by name when a toolchain bump moves it, its message listing what the bump owes ([RELEASING.md](../../RELEASING.md#a-toolchain-bump)). The clients' builders, the studio and the Worker read names by their own runtime's Unicode, a version of their own. Owning tables pinned to a named version -- the compiler moving no answer -- was weighed and not done before 1.0: the version is named and tested instead.
+
+**What is promised.**
+
+- A 1.x minor release may move the Unicode version its answers follow; a patch release never does.
+- The notes of a minor that moves it name every code point assigned before whose `upper()`, `lower()`, case fold (`nocase`) or word-hood (`@text`, a name) changed, and the ranges that become letters or digits. Rust 1.100.0's move, 17.0.0 to 18.0.0: `upper()` of ɷ, ɼ, ꭋ and ꭌ (U+0277, U+027C, U+AB4B, U+AB4C) answers their new capitals (U+A7DD, U+A7E2, U+AB6C, U+AB6D); everything else that moved is a code point 17.0 left unassigned -- 12 833 new letters (11 328 of them at U+3D000..U+3FC3F), 323 new digits, 20 new capitals with their small letters, and U+1DF95 uppercasing to `SS` and folding to `ss`. No code point stopped being a letter, a digit or a space.
+- No stored byte follows it. The hash, text, ordered and sparse indexes are built at the first read and the HNSW graph holds vectors, so every release reads a file alike; answers move, not files.
+- A name using a letter newer than a peer's Unicode is refused by that older peer in words -- `invalid collection name`, a statement that does not parse, a stored statement marked broken at the open -- never read as another name. A move that took a code point out of the letters or digits would refuse a name an earlier 1.x read, which [FennecQL's row](#the-frozen-surfaces) forbids: a bump that does so is not taken in 1.x.
+
+**Where an answer follows the Unicode of what built it.** The release's compiler (`char`'s tables):
+
+| Site | Asks | What an answer or a refusal there depends on |
+| --- | --- | --- |
+| `fennec-core/src/case.rs`: `lower`, `upper`, `CASE_IGNORABLE` | `to_lowercase`, `to_uppercase`, `is_lowercase`, `is_uppercase`; Final_Sigma's runs, held to them | `lower()` and `upper()` in an answer (`plugin.rs`), and which rows `~` matches (`query::like_match`) |
+| `case.rs`: `fold_char`, `UNLIKE_LOWER` | `to_lowercase`, `to_uppercase` | `nocase`: `=`, `in`, SQL's `like`, `@unique` (a clash or not), `@hash` and `@sorted` keys, an index over several fields (`composite.rs`), `order`, `group`, `facet`, `distinct`; `ilike` on any text; and `fennec-shard/src/fanout.rs:1331`, the router's merge of a `nocase` order across tenants |
+| `text.rs`: `splits_words`, `terms`' lowercase (`stays`, `lower_folded`, `as_written`) | `is_alphanumeric`, `to_lowercase` | where `@text` cuts a word and the term it keeps: the rows `match`, `prefix` and `fuzzy` find, their scores, `facet`'s words |
+| `highlight.rs:117`, `extends` | `is_alphanumeric` in the Indic blocks | where `highlight()`'s mark ends |
+| `fennec-ql/src/lexer.rs` (193, 232, 255, 1190-1215, 1689-1760) | `is_alphabetic`, `is_alphanumeric` | whether a statement parses, by the characters a name may hold; a named statement is parsed again at every open (`named.rs`) |
+| `fennec-core/src/declared.rs:821`, `is_name` | the same | the names a schema declared in code may use, refused at the open |
+| `fennec-http/src/access.rs:1855-1883, 2242` | `is_alphanumeric` | a token's rules: a `$jwt.` claim's name and a grant's field list, refused where the rules are read |
+| `fennec-http/src/mcp/tools.rs:364` | `is_alphabetic`, `is_alphanumeric` | which named statements become an agent's MCP tools, a refusal 400 |
+| `fennec-server/src/main.rs:946` (`--mcp-memory`), `fennec-cli/src/mcp.rs:120` (`fennec mcp --memory`) | the same | whether the flag's collection is a name, the start refused |
+| `fennec-abi/src/sync/shape.rs:21`, `ident` | the same | a native app's replica: whether its shape's collection and field names are names (`invalid collection name: "..."`), so whether it syncs that collection |
+| `fennec-cli/src/langs.rs:128, 143, 220, 621, 984` (`fennec types`) | `to_uppercase`, `is_alphanumeric`, `to_lowercase` | the identifiers of a schema's generated types: a type's Pascal case, a member's name, a Python `TypedDict`'s functional form, camel case, Kotlin's package |
+| White space: `lexer.rs:874, 1451`, `parser.rs:579`, `json.rs:637`, `access.rs:1409-1944`, `fanout.rs:1062`, `tenant_hooks.rs:840`, `fennec-import/src/sqlite.rs`, `fennec-cli/src/main.rs:850`, the protocols' `split_whitespace` and `trim` | `is_whitespace` | where a token ends, which JSON texts parse (a Unicode space between tokens), a SQLite schema's words; White_Space, which 18.0 left as 17.0 had it |
+| Controls: `engine/hooked.rs:606`, `fennec-http/src/idempotent.rs:80`, `fennec-wire/src/client.rs:78` | `is_control` | a hook's key, an `Idempotency-Key`; Unicode's stability policy fixes the controls |
+| `fennec-http/src/openapi.rs` | `is_alphanumeric` | nothing: the routes' patterns are ASCII |
+| Not the compiler's: `text/fold.rs` (`tools/fold/gen.py`, a named UnicodeData.txt), `collate/*.bin` (ICU), `tz/zones.bin` | -- | each its own pinned data |
+
+Each client's own runtime:
+
+| Site | Asks | What it decides |
+| --- | --- | --- |
+| `web/builder.js:119, 122` (`IDENT`, `PATH`), through which `web/fennec.js` and `web/http.js` name a collection, a field, a schema's names and a sync's shape; `web/schema.js:37` | the JavaScript engine's `\p{Alphabetic}`, `\p{N}` | whether the builder sends a name or refuses it (`invalid field name`), nothing sent |
+| `integrations/cloudflare/index.js:440` | the Workers runtime's | the sweep's names |
+| `studio/statements.js:19`, `studio/statements-event.js:24-25, 67`; `studio/editor.js:409` and `studio/statements-views.js:86` (highlighting alone) | the browser's | the name the studio's form offers, whether a condition reads `hook.event` |
+| The builders of Python (`unicodedata`), Go (`unicode`), .NET (`Rune.GetUnicodeCategory`), Swift (`Unicode.Scalar.Properties`), Kotlin (`java.lang.Character`) and Dart (`RegExp(unicode: true)`) | each its runtime's | whether the builder sends a name or refuses it |
+
+**What a deployment of two versions sees.**
+
+- *A rolling upgrade.* Replication ships records, not statements, so the writes land alike; a read answers by the binary that serves it, so a replica and its primary of two releases answer the moved code points apart -- `upper()`, `nocase`, `@text` -- until both run one. A stored statement whose text only the newer lexer reads can be made only on a newer primary, which upgrades last; an older `fennec` that verifies or restores that file marks it broken at the open, in words, and reads the rest. A `@unique nocase` field could hold two values that only the newer fold makes equal, each holding a code point the older release left unassigned: the newer release's bucket, built at the first read, takes both, and a later write of either meets the other.
+- *A router and its nodes.* The router parses no FennecQL; it merges the nodes' rows of a `nocase` order across tenants by its own fold, so beside nodes of another release a row holding a moved code point may stand elsewhere in the merged order than its node put it. No row is lost or repeated.
+- *A page's module against a server.* `fennec.wasm` ships with `web/fennec.js`, so a page's local reads answer by its package's release and the server's by its own: a replica in a page and its server answer the moved code points apart; the writes sync as records.
+- *A native app's library against a server.* The library reads its shape's names by the compiler that built it (`shape.rs`): one older than the server refuses a shape whose collection or field name uses a letter newer than its Unicode, `invalid collection name: "..."`, and cannot sync that collection until the app ships a newer library. A newer library sends an older server a name it refuses in words.
+- *A client's builder.* In a browser, Node or a Worker the JavaScript builder reads a name by its engine's Unicode, and every other SDK by its runtime's, each a version of its own: a builder behind the server's Unicode refuses a name the server takes, nothing sent, and the caller writes that statement as text; one ahead of it sends a name the server refuses in words. None reads a name as another.
+
 ## The grammar epoch
 
 `GRAMMAR_EPOCH` is `pub const GRAMMAR_EPOCH: u32 = 4` in `crates/fennec-core/src/named.rs` (`fennec_ql::GRAMMAR_EPOCH` is that one). A named statement is stored as its text, the epoch it was parsed under and its tree's digest; an open parses it again and marks it broken, its calls refused until it is defined again, where the digest differs. It was 4 at v0.2.0 and is 4 now, but 2, 3 and 4 each marked stored definitions broken. Under 1.x:
