@@ -238,6 +238,15 @@ fn said(e: &impl std::fmt::Display) -> String {
     pg::peer_text(e.to_string().as_bytes(), 4096)
 }
 
+/// What the open of `target` removed beside it -- an image a crash left --
+/// or kept for a lock file beside it, a line each among the run's own, in
+/// the words a server logs it in (`fs::Swept::said`).
+fn said_beside(db: &fennec_core::engine::Database, target: &str) {
+    for s in db.swept_on_open() {
+        println!("beside   {}", s.said(&target));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     source: &str,
@@ -316,6 +325,7 @@ fn run(
     let t0 = std::time::Instant::now();
     let summary = {
         let mut db = fennec_core::fs::open(target)?;
+        said_beside(&db, target);
         let mut tick = |n: u64| {
             if interactive {
                 print!("\r{n} records...");
@@ -373,7 +383,9 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
     // error, as the one-shot import's does; one with a copy is never removed.
     let existed = std::path::Path::new(target).exists();
     let mut copied = false;
-    let db = RwLock::new(fennec_core::fs::open(target)?);
+    let db = fennec_core::fs::open(target)?;
+    said_beside(&db, target);
+    let db = RwLock::new(db);
     stop::on_signals();
 
     let interactive = std::io::stdout().is_terminal();
