@@ -1386,7 +1386,7 @@ impl<'a> Summed<'a> {
     }
 
     /// `store`'s live records, `len` bytes, as the record's body
-    /// ([`Store::write_live`]): written, or held by an out that writes
+    /// ([`Store::compact_live`]): written, or held by an out that writes
     /// them as it writes the image out ([`Later::Live`]).
     pub(crate) fn write_live(&mut self, store: &Store, len: usize) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1394,7 +1394,7 @@ impl<'a> Summed<'a> {
             return self.out.later(Later::Live(store, len));
         }
         let _ = len;
-        store.write_live(self)
+        store.compact_live(self)
     }
 }
 
@@ -1402,6 +1402,10 @@ impl ImageOut for Summed<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.sum = crc32c(self.sum, bytes);
         self.out.write(bytes)
+    }
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        self.out.in_turn(file, live)
     }
     fn write_kept(&mut self, kept: Kept) -> Result<()> {
         self.sum = crc32c(self.sum, kept.bytes());
@@ -2715,6 +2719,17 @@ pub trait ImageOut {
         Err(Error::Io(
             "an image's out told of what it does not hold".into(),
         ))
+    }
+    /// Whether a store's live records, about `live` bytes of a file `file`
+    /// bytes long, are copied into this out reading their file in turn
+    /// ([`crate::store::InTurn`]), and through which scratch file: asked by
+    /// a compact's file alone -- the image under the lock, the side file
+    /// beside the database -- and there only past the page cache. `None`,
+    /// the records walked by id, for every other.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
+        let _ = (file, live);
+        None
     }
 }
 
@@ -7227,7 +7242,7 @@ impl Database {
                 #[cfg(not(target_arch = "wasm32"))]
                 Some(b) if index.is_some_and(|ix| store.adopt_index(b, at, len, ix)) => Ok(0),
                 Some(b) => store.replay_mapped(b, at, len, note),
-                None => store.replay_noting(chunk, note),
+                None => store.replay_noting(chunk, at, note),
             }
         })
     }

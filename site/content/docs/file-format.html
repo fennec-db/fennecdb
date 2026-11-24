@@ -59,7 +59,11 @@ from before writes each plain record it takes with a checksum of its own,
 so its file, its archive and every restore from it stay checked.</p>
 
 <p>Inside a data record, each document is
-<code>[op][doc-id][length][fields]</code>, each field a tagged value. A
+<code>[op][doc-id][length][fields]</code>, each field a tagged value. The
+op is 1 for a put and 2 for a delete. An open refuses any other it reads,
+naming its byte and where it is (<code>unknown write op 3 at
+4096</code>), and a replica one its primary sends: neither takes it as a
+write that changes nothing. A
 <code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
 indices, each as its distance from the one before, then the weights as
 <code>f32</code>. An object, in a <code>json</code> field, is
@@ -431,7 +435,11 @@ than walking the record's frames, whose heads each say where the next one
 starts: a chain of cache misses that was 5.5 ms of a 14.2 ms open at
 100 000 × 128, which opens in 8.4 ms with it. An index that does not fit the
 record — another length, ids out of order, a payload past its end — is
-passed over and the record walked. Every reader of the record, older ones
+passed over and the record walked, and so is one whose first byte, the mark
+of its layout, the binary does not know. The index reads no document's op,
+so a later version that adds an op writes its index under a new mark: an
+older binary walks the record and refuses the op by its byte rather than
+taking the frame for a put. Every reader of the record, older ones
 included, reads the counter and nothing after it.</p>
 </details>
 
@@ -479,6 +487,15 @@ vectors: nothing else takes a tombstone out, and every write that changes a
 document's vector, or deletes it, leaves one. A graph without them is kept
 as it is.</p>
 
+<p><code>compact</code> writes each collection's live documents in id order,
+each a put framed afresh. Where the file is larger than the memory the
+system has for its pages, it reads the file from its start to its end rather
+than a document at a time by id, and sorts the documents through a scratch
+file, <code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code>
+beside <code>data.fennec</code>), gone from its directory as soon as it is
+made: the new file is the same, byte for byte (<a
+href="/docs/server#compaction">how long each takes</a>).</p>
+
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record
 cut short inside it, or an image longer than the file, is refused as a damaged
@@ -489,7 +506,8 @@ meanwhile go into it as a data record at the end of the image, and its header
 takes the counter as it stands when it is renamed into place. A side file left
 by a crash — compaction's <code>.beside</code>, a checkpoint's
 <code>.compacting</code>, a replica's <code>.taking</code>, the shell's
-<code>.saving</code>, each as large as the live data — is removed the next
+<code>.saving</code>, each as large as the live data, and on Windows the
+<code>.sorting</code> a compact past the page cache sorts through — is removed the next
 time the file is opened to be written (a server's start, the shell, an app),
 and a <code>--dir</code> node removes its tenants' as it starts; a read-only
 open (<code>--read-only</code>, <code>fennec types</code>) leaves it. The
