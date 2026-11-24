@@ -8,7 +8,7 @@
 //! its record: once updates at random keys have moved the records out of id
 //! order, that is a page at a time at random, which past the page cache is
 //! a read from the disk each -- a million 1 KB records, each updated once,
-//! 2.04 GB of which 1.02 live, took 46 to 54 s and 530 000 major faults to
+//! 2.04 GB of which 1.02 live, took 45 to 51 s and 530 000 major faults to
 //! compact in a container of 512 MB. Here every live record's place in the
 //! new file is known before a byte of it is read: the frames are laid in id
 //! order, so each one's place is the sum of the frames before it
@@ -51,7 +51,7 @@ pub(crate) const FROM: usize = 4 << 20;
 /// buckets' size moved the time little and the memory much: compacting a
 /// million 1 KB records, 2.04 GB of which 1.02 live, in a container of 512
 /// MB, buckets of 64 MiB took 5.0-8.1 s and the process's anonymous memory
-/// to 76-78 MB, of 32 MiB 5.2-7.9 s and 44-46 MB, of 16 MiB 4.7-6.0 s and
+/// to 76-78 MB, of 32 MiB 5.2-7.9 s and 44-46 MB, of 16 MiB 4.6-6.6 s and
 /// 28-30 MB -- where the walk by id peaked, 27-29.
 const BUDGET_MAX: u64 = 16 << 20;
 const BUDGET_MIN: u64 = 4 << 20;

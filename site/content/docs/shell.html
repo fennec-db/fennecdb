@@ -111,7 +111,8 @@ there beside a running server could leave the file unreadable.</p>
 <p id="left-beside">Opened to be written, a file loses what a crash left
 beside it — a compact's <code>.beside</code>, a checkpoint's
 <code>.compacting</code>, a replica's <code>.taking</code>, a
-<code>.save</code>'s <code>.saving</code>, each as large as the live data — and
+<code>.save</code>'s <code>.saving</code>, each as large as the live data, a
+compact's <code>.sorting</code> on Windows — and
 the shell says so on stderr, a line each, in a server's words:
 <code>notes.fennec.beside: removed, 4096 bytes a process writing notes.fennec
 left beside it as it ended</code>. A file at such a name with a lock file

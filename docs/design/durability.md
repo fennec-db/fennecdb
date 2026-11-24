@@ -390,10 +390,11 @@ sink is asked, the copy as it was and taking writes; refused by the sink,
 as a compact's is, the database fails. A side file a crash left -- a
 replica's `.taking`, a checkpoint's or a compact's `.compacting`, a
 compact's or an index's `.beside`, the shell's `.saving` of a `.save` over
-the file (`fs::LEFT_BESIDE`), an install's `.importing` -- is removed by
-its owner alone: the open that writes the database (`FileSink::create`,
-all but `.importing`), and a node as it starts, under each tenant's lock
-taken without waiting (`tenants::sweep_left`, all five), so a tenant no
+the file, a compact's scratch `.sorting` (`fs::LEFT_BESIDE`), an install's
+`.importing` -- is removed by its owner alone: the open that writes the
+database (`FileSink::create`, all but `.importing`), and a node as it
+starts, under each tenant's lock taken without waiting
+(`tenants::sweep_left`, all six), so a tenant no
 request opens again keeps none; never a tool that only looks
 (`open_read_only`: `--read-only`, `fennec types`), nor one whose tenant's
 lock another process holds

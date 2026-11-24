@@ -63,7 +63,7 @@ turn](../../../../docs/design/storage.md#reading-the-file-in-turn)
 (`store::in_turn`, asked by the image under the lock and the side file
 beside it, `ImageOut::in_turn`) and writes the bytes the walk by id
 writes, the records in id order whatever read them: through buckets of a
-quarter of the room, 64 MiB at most, and a scratch file `.sorting` made
+quarter of the room, 16 MiB at most, and a scratch file `.sorting` made
 only where the volume holds twice the live bytes, unlinked at once,
 else by id. A scratch file that fails, or reads back other than its sum,
 fails the compact as a write of its new file does.
