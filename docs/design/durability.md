@@ -410,10 +410,9 @@ open's and `sweep_left`'s alike): removed, its writer went on writing a
 file no name reached (#682's review; so for a `.taking` since #680). A
 link is not asked: whoever writes the file it names keeps that name, and
 asked, its lock would be that file's (`lock_path` follows a link) -- one
-to the database itself kept by the open asking, which holds it. The
-lock is asked only once something is at the name, so
-an open with nothing left makes one `lstat` a name where it made one
-`unlink`. It is asked through fennec-abi's lock module
+to the database itself kept by the open asking, which holds it. The lock
+is asked only once something is at the name, so an open with nothing left
+makes one `lstat` a name where it made one `unlink`. It is asked through fennec-abi's lock module
 (`lock::unless_held`, which every `lock::hold` hands fennec-core through
 `fs::ask_locks_with` before the open the hold guards): only that module
 knows which locks this process holds, and a descriptor of one of those
@@ -592,19 +591,28 @@ modes differ; `swap_in` takes the writer's handle where it opened
 `.compacting` by name (one `open` fewer), a `dup` of `.beside`'s and
 `.taking`'s where it opened them again with `O_NOFOLLOW`, and
 `still_named` adds an `fstat` and an `lstat` to each, and to a record's, a
-backup's and an unseal's rename. The open that writes a file removes four
-names beside it where it removed one: three more `unlink`s, each failing
-where nothing was left, and their names' allocations -- the perf gate's
-`file-open`, an open of 100 000 rows, asked the allocator 200 123 times
-for 3 779 720 bytes against 200 114 and 3 779 252 with `.taking` alone
-(natively, three runs a side alike), +9 calls and +468 bytes, 0.005% and
-0.012%; its time, taken at a load of 37-40 from others' work, was
-discarded. Release `fennec-server` on macOS: 1 088 bytes more `__text`
-(5 023 616 to 5 024 704), the file the same to the byte (7 206 608),
-against a file as large as the database a crash in a compact no longer
-leaves. The image a restore or a consolidating round of an archive with no
-key starts from (never a request) is copied by `copy_file_range` on Linux, as
-`fs::copy` copied it: std's `io::copy` from a `File` into a
+backup's and an unseal's rename. The open that writes a file looks for
+four names beside it where it removed one: four `lstat`s where one `unlink`
+was, each failing where nothing was left, the side file's lock asked only
+where one is there, and the names made in one buffer sized for the longest
+-- the perf gate's `file-open`, an open of 100 000 rows, asks the allocator
+200 113 times for 3 779 623 bytes against main's 200 114 and 3 779 735
+(natively, three runs a side alike, at a load of 2.4 to 3.3): a call and
+112 bytes fewer. Made by `beside` each, as #682 first made them, the four
+names asked 200 123 times for 3 780 617 bytes, nine calls and 882 bytes
+more. Its time, 8.4 to 9.3 ms against main's 8.8 to 9.6, is inside the
+runs' spread. Release `fennec-server` on macOS: 6 144 bytes more `__text`
+than main's (5 023 616 to 5 029 760), 1 088 of them the first round's
+sweep; by symbol, against that round, `lock::unless_held` 908 bytes,
+`sweep_beside` 816, `remove_left` 600 with its closure, the log's lines
+in a tenant's open 620 and in the server's start 232, the new field's
+drop glue and moved inlining the rest. The file is 16 bytes larger
+(7 206 608 to 7 206 624), against a file as large as the database a crash in a compact
+no longer leaves, a database a user named so no longer unlinked under its
+writer, and a line for each file that goes. The image a restore or a
+consolidating round of an archive with no key starts from (never a
+request) is copied by `copy_file_range` on Linux, as `fs::copy` copied it:
+std's `io::copy` from a `File` into a
 `BufWriter<File>` is its `kernel_copy`, which flushes the empty buffer and
 hands both descriptors to the kernel. On APFS it is cloned again, as
 `fs::copy` cloned it, where the third round of G14's fixes had copied its
