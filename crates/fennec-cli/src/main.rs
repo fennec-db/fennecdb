@@ -872,12 +872,14 @@ fn meta(db: &mut Database, cmd: &str) -> bool {
             }
         }
         ".stats" => {
+            // Live and dead apart, as `/_metrics` and the studio say them:
+            // every record's bytes, shown alone, read as the live ones.
             for s in db.stats() {
                 println!(
-                    "{:<16} {:>8} docs  {:>9}  dead {:>9}  {} segments",
+                    "{:<16} {:>8} docs  {:>9} live  {:>9} dead  {} segments",
                     s.name,
                     s.documents,
-                    human(s.bytes),
+                    human(s.live_bytes()),
                     human(s.dead_bytes),
                     s.segments
                 );

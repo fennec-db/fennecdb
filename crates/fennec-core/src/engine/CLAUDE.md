@@ -67,3 +67,12 @@ quarter of the room, 16 MiB at most, and a scratch file `.sorting` made
 only where the volume holds twice the live bytes, unlinked at once,
 else by id. A scratch file that fails, or reads back other than its sum,
 fails the compact as a write of its new file does.
+
+**[Dead bytes are whole frames](../../../../docs/design/storage.md#dead-bytes-are-whole-frames)**
+Live bytes are the live frames to the byte: a version written over or deleted adds its head and its payload to
+`dead_bytes`, through `store::dead_frame` alone; counting a payload alone,
+or a writer adding a dead version any other way, leaves its head counted
+live, and `Garbage::live`, `fennec_data_bytes` and the compact's trigger
+read it high. `store::tests::the_live_bytes_are_the_live_frames_to_the_byte`
+holds it through appends, an undone block and every load; a file an older
+build wrote counts its dead heads short until its next compact.

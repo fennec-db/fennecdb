@@ -11,15 +11,17 @@
 //! the compact beside the database once [`CompactPolicy::due`] says so: one
 //! rule, here, for the server, the native library and an embedding app.
 //!
-//! What is dead is counted, not estimated, and nothing is added to the write
-//! path for it: every store already counts the bytes of the records it
-//! holds and of the versions it no longer reads (`Store::total_bytes`,
-//! `dead_bytes`, kept as a write lands and carried in an image's index), and
-//! the database the bytes of its file as written (`appended`). The file less
-//! the live records is what a compact gives back -- the dead versions, a
-//! record's head a write, the graph records a server appended in the tail
-//! and the spills of a block put back -- less what the last compact left
-//! that is no document: the schemas, the counters, the graphs.
+//! What is dead is counted, not estimated, and the write path adds no more
+//! than a head's length for it: every store already counts the bytes of
+//! the records it holds and of the versions it no longer reads, each its
+//! whole frame, the head's length worked out from the id and the payload's
+//! (`Store::total_bytes`, `dead_bytes`, kept as a write lands and carried
+//! in an image's index), and the database the bytes of its file as written
+//! (`appended`). The file less the live records is what a compact gives
+//! back -- the dead versions, a record's head a write, the graph records a
+//! server appended in the tail and the spills of a block put back -- less
+//! what the last compact left that is no document: the schemas, the
+//! counters, the graphs.
 
 use super::*;
 use std::sync::RwLock;
@@ -181,7 +183,7 @@ impl Database {
         let live = self
             .collections
             .values()
-            .map(|c| c.store.total_bytes().saturating_sub(c.store.dead_bytes()) as u64)
+            .map(|c| c.store.live_bytes() as u64)
             .sum();
         Garbage {
             file: self.appended.load(Relaxed),
