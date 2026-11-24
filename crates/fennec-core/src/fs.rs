@@ -302,16 +302,17 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// the shell's `.save` over the file (fennec-cli's `save`). Removed by the
 /// open that writes the file ([`FileSink`]'s) and by a node as it starts,
 /// under each tenant's lock (fennec-http's `sweep_left`), never by a tool
-/// that only looks, nor where a holder has the side file's own lock
+/// that only looks, nor where a lock file stands beside the side file
 /// ([`remove_left`]). A crash in a compact beside a 1.4 GB database left its
 /// `.beside` until the next compact, which the auto-compact starts only
 /// once half the file is dead: the disk the database took, doubled
 /// meanwhile (the soak harness, P6).
 pub const LEFT_BESIDE: [&str; 4] = ["taking", "compacting", "beside", "saving"];
 
-/// A side file the open that writes a file removed beside it
-/// ([`LEFT_BESIDE`]), for whoever opened it to say
-/// ([`Database::swept_on_open`]): a server logs each.
+/// A side file the open that writes a file found beside it
+/// ([`LEFT_BESIDE`]), removed or kept, for whoever opened it to say
+/// ([`Database::swept_on_open`]): a server, a node and the router log each,
+/// the shell says each on its stderr, in the words of [`Swept::said`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Swept {
     /// Its name: beside the file a link at the database's name leads to,
@@ -319,78 +320,73 @@ pub struct Swept {
     pub path: PathBuf,
     /// The bytes it held, or a link's own where one was there.
     pub bytes: u64,
+    /// Kept, not removed: a lock file stands beside it (`<path>.lock`),
+    /// which no writer of ours makes beside a side file -- so a database a
+    /// user named so, opened once to be written, served or not.
+    pub kept: bool,
 }
 
-/// How a side file's own lock is asked before the file goes
-/// ([`ask_locks_with`]): `unless_held(side, remove)` runs `remove` unless a
-/// holder has `<side>.lock`, and says whether it ran.
-pub type UnlessHeld = fn(&Path, &mut dyn FnMut()) -> bool;
-
-/// What [`remove_left`] asks a side file's lock with, once a process's
-/// first lock is taken ([`ask_locks_with`]).
-#[cfg(not(target_arch = "wasm32"))]
-static UNLESS_HELD: std::sync::OnceLock<UnlessHeld> = std::sync::OnceLock::new();
-
-/// Tells [`remove_left`] how to ask a side file's own lock: fennec-abi's
-/// `lock::unless_held`, set by its lock module as it takes a lock, before
-/// any open that lock guards. That module alone knows which locks this
-/// process holds, and a descriptor of a lock file this process holds,
-/// opened and closed here, would let its record lock go: fennec-core
-/// cannot try one itself. Set once a process; a later call changes nothing.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn ask_locks_with(unless_held: UnlessHeld) {
-    let _ = UNLESS_HELD.set(unless_held);
+impl Swept {
+    /// The line an opener says it in, `file` the database as it was named
+    /// to it: the same in a server's log, a node's, the router's and on the
+    /// shell's stderr, so a search for one finds them all.
+    pub fn said(&self, file: &dyn std::fmt::Display) -> String {
+        let (side, bytes) = (self.path.display(), self.bytes);
+        match self.kept {
+            false => format!(
+                "{side}: removed, {bytes} bytes a process writing {file} left beside it as it ended"
+            ),
+            true => format!(
+                "{side}: kept: a lock file beside it, as a database of that name has; \
+                 {bytes} bytes beside {file}, to delete with its lock if it is no database"
+            ),
+        }
+    }
 }
 
 /// Removes the side file at `side` a crash left beside a database
 /// ([`LEFT_BESIDE`], a node's `.importing`), and says what it held: `None`
-/// where nothing is there, where a directory is -- no file of ours, which
-/// the next rewrite of the name fails on as it did before -- or where a
-/// holder has `<side>.lock`: a database a user named so, beside another,
-/// served or written, whose writer a removal would leave writing a file
-/// no name reaches (#682's review). The lock is asked only once something
-/// is there, so an open with nothing left makes one `lstat` a name where it
-/// made one `unlink`. It is asked through fennec-abi's lock module
-/// ([`ask_locks_with`]), which takes it for the removal where it is free --
-/// never from a holder, in this process or another, and never waiting --
-/// so nothing opens the file as it goes, and makes no lock file where none
-/// is there; one a crash or a close left unlocked keeps nothing. A process
-/// that took no lock through that module (fennec-core's own tests, a
-/// bench) has none to ask, and keeps a side file a lock file stands beside.
-/// The removal is an `unlink`, which follows no link: one put at the name
-/// goes, asking no lock, the file it names as it was.
+/// where nothing is there, or where a directory is -- no file of ours,
+/// which the next rewrite of the name fails on as it did before. One with
+/// a lock file beside it (`<side>.lock`, held or not) is kept and said so
+/// ([`Swept::kept`]): no writer of ours makes a lock beside a side file,
+/// so one there is a database a user named so, beside another, opened to
+/// be written -- served, or stopped, never deleted -- whose writer a
+/// removal would have left writing a file no name reaches (#682's
+/// reviews). The lock file is looked at, never opened: a descriptor of a
+/// lock this process holds, closed, would let its record lock go, and
+/// another process's is its own. Looked at only once something is at the
+/// name, so an open with nothing left makes one `lstat` a name where it
+/// made one `unlink`. A crash's own leftover has no lock file beside it,
+/// and goes. The removal is an `unlink`, which follows no link: one put at
+/// the name goes, its lock not looked at -- whoever writes the file it
+/// names keeps that file's name, whose lock is beside that file
+/// (fennec-abi's `lock_path` follows a link) -- the file as it was.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn remove_left(side: &Path) -> Option<u64> {
+pub fn remove_left(side: &Path) -> Option<Swept> {
     let meta = std::fs::symlink_metadata(side).ok()?;
     if meta.is_dir() {
         return None;
     }
-    // A link goes as a link, asking no lock: whoever writes the file it
-    // names keeps that file's name. Asked, the lock would have been that
-    // file's (`lock_path` follows a link), and a link to the database
-    // itself kept by the open asking, which holds its lock.
-    if meta.file_type().is_symlink() {
-        return std::fs::remove_file(side).ok().map(|()| meta.len());
+    let kept =
+        !meta.file_type().is_symlink() && std::fs::symlink_metadata(beside(side, "lock")).is_ok();
+    if !kept {
+        std::fs::remove_file(side).ok()?;
     }
-    let mut removed = false;
-    let mut remove = || removed = std::fs::remove_file(side).is_ok();
-    match UNLESS_HELD.get() {
-        Some(unless_held) => {
-            unless_held(side, &mut remove);
-        }
-        None if std::fs::symlink_metadata(beside(side, "lock")).is_err() => remove(),
-        None => {}
-    }
-    removed.then_some(meta.len())
+    Some(Swept {
+        path: side.to_path_buf(),
+        bytes: meta.len(),
+        kept,
+    })
 }
 
 /// What a process writing the file at `path` left beside it as it ended
-/// ([`LEFT_BESIDE`]), removed ([`remove_left`]), in that order. Each name is
-/// made in one buffer, sized once for the longest, which a Unix's `lstat`
-/// reads off the stack: where nothing was left the buffer is the one call
-/// to the allocator, one fewer than `.taking`'s name alone made by
-/// [`beside`], where the four so made asked nine more (the perf gate's
-/// `file-open`, #682's review).
+/// ([`LEFT_BESIDE`]), removed or kept ([`remove_left`]), in that order.
+/// Each name is made in one buffer, sized once for the longest, which a
+/// Unix's `lstat` reads off the stack: where nothing was left the buffer is
+/// the one call to the allocator, one fewer than `.taking`'s name alone
+/// made by [`beside`], where the four so made asked nine more (the perf
+/// gate's `file-open`, #682's review).
 #[cfg(not(target_arch = "wasm32"))]
 fn sweep_beside(path: &Path) -> Vec<Swept> {
     let mut swept = Vec::new();
@@ -401,10 +397,7 @@ fn sweep_beside(path: &Path) -> Vec<Swept> {
         name.push(path);
         name.push(".");
         name.push(side);
-        if let Some(bytes) = remove_left(Path::new(&name)) {
-            let path = PathBuf::from(&name);
-            swept.push(Swept { path, bytes });
-        }
+        swept.extend(remove_left(Path::new(&name)));
     }
     swept
 }
@@ -1004,7 +997,8 @@ impl FileSink {
         Ok((sink, existing))
     }
 
-    /// [`Self::open`], and what it removed beside the file ([`Swept`]).
+    /// [`Self::open`], and what it removed or kept beside the file
+    /// ([`Swept`]).
     fn open_sweeping(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>, Vec<Swept>)> {
         let (mut file, path, swept) = FileSink::create(path)?;
         let mut existing = Vec::new();
@@ -1015,7 +1009,7 @@ impl FileSink {
 
     /// Opens the file for reading and appending, creating it with the magic
     /// alone when it is missing or empty, and removes what a crash left
-    /// beside it: what it removed comes back with it.
+    /// beside it: what it removed or kept comes back with it.
     fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf, Vec<Swept>)> {
         // The file a link leads to, kept as the sink's path: every rewrite
         // renames over it, leaving the link a link.
@@ -1040,8 +1034,8 @@ impl FileSink {
         // refuses a second holder of the file in this process as in another,
         // and this database rewrites nothing before it is open.
         // A link at a name goes, not the file it names; a directory there,
-        // and a file whose own lock another holder has -- a database a user
-        // named so -- stay ([`remove_left`]). Left to the follower as it
+        // and a file with a lock file beside it -- a database a user named
+        // so -- stay ([`remove_left`]). Left to the follower as it
         // started, a copy started again as a primary kept its `.taking` for
         // good; left to the next compact, a crash in one doubled the disk
         // the database took until a compact ran again.

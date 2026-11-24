@@ -286,10 +286,10 @@ const SWEPT: [&str; 5] = {
 /// the tenant's lock taken without waiting, so one another process holds
 /// the lock of -- its own install under way, a shell's open -- stays, and
 /// one beside a tenant no request opens again goes all the same; a file
-/// whose own lock a holder has -- a database a user named so -- stays too
-/// ([`sweep_one`], each removal logged). Before, a crash's `.importing`
-/// stayed until an install of the name came again, a compact's `.beside`
-/// until the tenant's next compact. A tenant whose file
+/// with a lock file beside it -- a database a user named so -- stays too
+/// ([`sweep_one`], each removal and each so kept logged). Before, a
+/// crash's `.importing` stayed until an install of the name came again, a
+/// compact's `.beside` until the tenant's next compact. A tenant whose file
 /// is a link had them written beside the file the link leads to
 /// (`fs::resolved`), as its open writes that one and its lock is taken
 /// there: looked for there, under the same lock. Looked for in the
@@ -311,7 +311,7 @@ fn sweep_left(dir: &Path) {
                 if file != linked {
                     if let Ok(_held) = fennec_abi::lock::hold(&linked) {
                         for side in SWEPT {
-                            sweep_one(&fennec_core::fs::beside(&file, side));
+                            sweep_one(&fennec_core::fs::beside(&file, side), &linked);
                         }
                     }
                 }
@@ -325,24 +325,22 @@ fn sweep_left(dir: &Path) {
             continue;
         };
         if file.ends_with(".fennec") {
-            if let Ok(_held) = fennec_abi::lock::hold(dir.join(file)) {
-                sweep_one(&e.path());
+            let file = dir.join(file);
+            if let Ok(_held) = fennec_abi::lock::hold(&file) {
+                sweep_one(&e.path(), &file);
             }
         }
     }
 }
 
-/// A side file [`sweep_left`] found beside a tenant's file, removed as the
-/// tenant's open removes one ([`fennec_core::fs::remove_left`]): kept where
-/// it is a directory or a holder has its own lock -- a database a user
-/// named so, served or written -- and said in the log, with its size, where
-/// it went.
-fn sweep_one(side: &Path) {
-    if let Some(bytes) = fennec_core::fs::remove_left(side) {
-        crate::log!(
-            "removed {}, {bytes} bytes the node's last process left beside a tenant's file as it ended",
-            side.display()
-        );
+/// A side file [`sweep_left`] found beside `file`, a tenant's, removed as
+/// the tenant's open removes one ([`fennec_core::fs::remove_left`]): kept
+/// where it is a directory, or where a lock file stands beside it -- a
+/// database a user named so -- and said in the log, removed or kept, in the
+/// open's words ([`fennec_core::fs::Swept::said`]).
+fn sweep_one(side: &Path, file: &Path) {
+    if let Some(s) = fennec_core::fs::remove_left(side) {
+        crate::log!("{}", s.said(&file.display()));
     }
 }
 
@@ -1779,11 +1777,7 @@ impl Tenants {
             );
         }
         for s in db.swept_on_open() {
-            crate::log!(
-                "tenant {name}: removed {}, {} bytes a process writing its file left beside it as it ended",
-                s.path.display(),
-                s.bytes
-            );
+            crate::log!("tenant {name}: {}", s.said(&path.display()));
         }
         // A file this open made -- a tenant created -- is on disk with its
         // name before anything says the tenant is there, as a file renamed

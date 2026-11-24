@@ -183,6 +183,7 @@ fn an_image_a_crash_left_goes_as_the_file_is_opened_to_be_written() {
         let said = LEFT_BESIDE.map(|side| Swept {
             path: beside(&path, side),
             bytes: (image.len() / 2) as u64,
+            kept: false,
         });
         assert_eq!(db.swept_on_open(), &said[..], "{how}: what it said");
         assert_eq!(rows(&db), ["[Int(1)]"], "{how}: the database as it was");
@@ -193,29 +194,48 @@ fn an_image_a_crash_left_goes_as_the_file_is_opened_to_be_written() {
     let _ = std::fs::remove_dir_all(d);
 }
 
-/// The open asks a side file's own lock through fennec-abi's lock module
-/// (`fs::ask_locks_with`), which a process that took no lock through it --
-/// these tests, a bench -- has not told it of: with none to ask, a side
-/// file a lock file stands beside, a database a user may have open, stays,
-/// and one with none goes.
+/// A side file with a lock file beside it stays, and is said kept, at
+/// each open that writes the database: no writer of ours makes a lock
+/// beside a side file, so one there is a database a user named so, opened
+/// once to be written -- here stopped, its lock file left as a close leaves
+/// one (fennec-abi's `a_side_file_with_a_lock_file_beside_it_stays` holds
+/// it in another process). One with none, a crash's own, goes beside it.
+/// Its lock file gone, it goes too. Without the look at the lock file, the
+/// first open fails it.
 #[test]
-fn with_no_lock_to_ask_a_side_file_beside_a_lock_file_stays() {
-    let d = dir("unasked");
+fn a_side_file_with_a_lock_file_beside_it_stays() {
+    let d = dir("locked");
     let path = d.join("db.fennec");
     drop(fennec_core::fs::open(&path).unwrap());
     let (kept, gone) = (beside(&path, "beside"), beside(&path, "saving"));
-    std::fs::write(&kept, b"a database a user named so").unwrap();
+    let named = b"a database a user named so";
+    std::fs::write(&kept, named).unwrap();
     std::fs::write(beside(&kept, "lock"), b"").unwrap();
     std::fs::write(&gone, b"part of a .save").unwrap();
+    let said = |at: &Path, bytes: usize, kept: bool| Swept {
+        path: at.into(),
+        bytes: bytes as u64,
+        kept,
+    };
+    let held = said(&kept, named.len(), true);
     let db = fennec_core::fs::open(&path).unwrap();
-    assert!(kept.exists(), "a file beside its own lock file removed");
-    assert!(!gone.exists(), "a .save's left");
-    let said = [Swept {
-        path: gone,
-        bytes: 15,
-    }];
-    assert_eq!(db.swept_on_open(), &said[..]);
+    assert_eq!(db.swept_on_open(), [held.clone(), said(&gone, 15, false)]);
     drop(db);
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        named,
+        "a file beside its lock file"
+    );
+    assert!(!gone.exists(), "a .save's left");
+    let db = fennec_core::fs::open(&path).unwrap();
+    assert_eq!(db.swept_on_open(), [held], "the open after");
+    drop(db);
+    assert!(kept.exists(), "a file beside its lock file, the open after");
+    std::fs::remove_file(beside(&kept, "lock")).unwrap();
+    let db = fennec_core::fs::open(&path).unwrap();
+    assert_eq!(db.swept_on_open(), [said(&kept, named.len(), false)]);
+    drop(db);
+    assert!(!kept.exists(), "its lock file gone, it stayed");
     let _ = std::fs::remove_dir_all(d);
 }
 

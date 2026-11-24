@@ -1482,10 +1482,10 @@ fn a_reclaim_during_an_install_of_its_name_judges_nothing() {
 /// without waiting: one whose lock another holds stays, its own (this
 /// process stands in for another's here: the lock refuses a second holder
 /// in one process as in two, fennec-abi's tests holding the second), and
-/// one whose own lock a holder has, a database a user named so. A file of
-/// no tenant's name is let be. Before, a crash's `.importing` stayed until
-/// an install of the name came again, a compact's `.beside` until the
-/// tenant's next compact.
+/// one with a lock file beside it, held or not, a database a user named so.
+/// A file of no tenant's name is let be. Before, a crash's `.importing`
+/// stayed until an install of the name came again, a compact's `.beside`
+/// until the tenant's next compact.
 #[test]
 fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
     let dir = scratch("left");
@@ -1503,6 +1503,8 @@ fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
     let lock = fennec_abi::lock::hold(dir.join("c.fennec")).unwrap();
     let named = left("g.fennec.beside");
     let its_own = fennec_abi::lock::hold(&named).unwrap();
+    let stopped = left("h.fennec.compacting");
+    std::fs::write(fennec_core::fs::beside(&stopped, "lock"), b"").unwrap();
     let tenants = Tenants::new(&dir).expect("dir");
     assert!(!importing.exists(), "an install's file left");
     assert!(!taking.exists(), "a copy's image left");
@@ -1519,6 +1521,7 @@ fn a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants() {
     );
     assert!(other.exists(), "a file of no tenant's removed");
     assert!(named.exists(), "a file whose own lock a holder has removed");
+    assert!(stopped.exists(), "a file beside its own lock file removed");
     drop((tenants, lock, its_own));
     let _ = std::fs::remove_dir_all(&dir);
 }

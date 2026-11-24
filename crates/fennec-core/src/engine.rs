@@ -6114,9 +6114,10 @@ pub struct Database {
     /// carries a sum ([`Self::marks_cut`]).
     #[cfg(feature = "std-fs")]
     marks_cut: bool,
-    /// What the open that writes the file removed beside it, a crash's
-    /// side files, for whoever opened it to say ([`Self::swept_on_open`]):
-    /// empty, and unallocated, where nothing was left.
+    /// What the open that writes the file removed or kept beside it, a
+    /// crash's side files, for whoever opened it to say
+    /// ([`Self::swept_on_open`]): empty, and unallocated, where nothing was
+    /// left.
     #[cfg(feature = "std-fs")]
     swept: Vec<crate::fs::Swept>,
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
@@ -6475,16 +6476,19 @@ impl Database {
         self.cut.as_ref()
     }
 
-    /// What the open that writes the file removed beside it as it opened
+    /// What the open that writes the file found beside it as it opened
     /// it: the side files a process writing it left as it ended
-    /// ([`crate::fs::LEFT_BESIDE`]), each with the bytes it held. For the
-    /// server to say, as [`Self::cut_on_open`].
+    /// ([`crate::fs::LEFT_BESIDE`]), each with the bytes it held, removed,
+    /// or kept for a lock file beside it ([`crate::fs::Swept::kept`]). For
+    /// its opener to say ([`crate::fs::Swept::said`]), as
+    /// [`Self::cut_on_open`].
     #[cfg(feature = "std-fs")]
     pub fn swept_on_open(&self) -> &[crate::fs::Swept] {
         &self.swept
     }
 
-    /// What the open removed beside the file ([`Self::swept_on_open`]).
+    /// What the open removed or kept beside the file
+    /// ([`Self::swept_on_open`]).
     #[cfg(feature = "std-fs")]
     pub(crate) fn said_swept(&mut self, swept: Vec<crate::fs::Swept>) {
         self.swept = swept;
