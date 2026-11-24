@@ -58,3 +58,12 @@ server's compaction meets again is logged once and counted.
 (`cache::room`): once a third of what it writes is dead and the file
 reached `ROOM_SHARE` of that room or the process faults
 (`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
+Past that room or faulting, a compact reads the old file [in
+turn](../../../../docs/design/storage.md#reading-the-file-in-turn)
+(`store::in_turn`, asked by the image under the lock and the side file
+beside it, `ImageOut::in_turn`) and writes the bytes the walk by id
+writes, the records in id order whatever read them: through buckets of a
+quarter of the room, 64 MiB at most, and a scratch file `.sorting` made
+only where the volume holds twice the live bytes, unlinked at once,
+else by id. A scratch file that fails, or reads back other than its sum,
+fails the compact as a write of its new file does.
