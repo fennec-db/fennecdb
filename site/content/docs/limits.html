@@ -139,7 +139,7 @@ right; so does going past the nesting depths and the path length.</p>
 <tr><td><code>vector&lt;N&gt;</code> and <code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's for <code>sparsevec</code>, and a <code>vector&lt;N&gt;</code>'s <code>f32</code>s still fit a document's 4 GiB; refused past it, never cut, a list's too — <code>[vector&lt;N&gt;]</code>, SQL's <code>vector(n)[]</code> — naming the field and the range, as a file's schema is read back; a sparse vector's weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 
 <tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>
-<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>, a database's; each is a connection and a thread; on a tenant node, each tenant's own, and one of the <code>--max-connections</code> every tenant shares</td></tr>
+<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>, a database's; each is a connection and a thread, counted apart from <code>--max-connections</code> once it streams, unless the ceiling is 0; on a tenant node, each tenant's own, and one of the <code>--max-connections</code> every tenant shares</td></tr>
 <tr><td>a tenant's file (<code>--dir</code>)</td><td class="n">none unless set</td><td><code>--tenant-max-bytes</code>, a tenant's own <code>bytes</code>; a write that would take the file past it is refused (507) before it lands; deletes, drops and <code>compact</code> run</td></tr>
 <tr><td>a tenant's rows</td><td class="n">none unless set</td><td><code>--tenant-max-rows</code>, its <code>rows</code>; its collections together, the server's own (<code>_</code>-named) left out; 507</td></tr>
 <tr><td>a tenant's streams</td><td class="n">a quarter of <code>--max-connections</code> unless set</td><td><code>--tenant-max-streams</code>, its <code>streams</code>: subscriptions, <code>/_changes</code> waits and <code>Fennec-After</code> waits together; 429</td></tr>
@@ -294,9 +294,11 @@ time at the next open, never data.</p>
     costs — 50 s at 100 000 × 768.</li>
   <li><b>A server builds an index or compacts beside the database.</b> A
     <code>create index</code> or <code>compact</code> sent on its own to
-    <code>fennec-server</code> or <code>POST /query</code> copies what it reads
-    under the read lock, builds with no lock held, and takes the write lock
-    only to apply the writes made meanwhile and put the result in place. At
+    <code>fennec-server</code> or <code>POST /query</code> takes under the
+    read lock only the collection as it stands, shared rather than copied,
+    reads its documents and builds with no lock held, catches up with the
+    writes made meanwhile beside the queries, and takes the write lock only
+    for the last of them and to put the result in place. At
     100 000 × 128, where either takes about 20 s, reads waited at most 21 ms
     through an HNSW build and 30 ms through a compact — the compact's includes
     rewriting the file — against the full 20 s under the write lock, and
@@ -307,13 +309,40 @@ time at the next open, never data.</p>
     rename it into place. Over 1.8 million × 128, a 1.1 GB file, writes
     waited at most 24 ms, where the rewrite under the lock held them 1.22 s,
     for 67 MB more heap at the peak. The records those documents superseded
-    stay in the new file as dead ones until the next compact. One in a
+    stay in the new file as dead ones until the next compact. Through 0.2.0
+    a compact read the vectors of a graph it rebuilt, and <code>create
+    index</code> its field, under the read lock, which past the page cache
+    held every write — and every read behind a waiting write — for
+    seconds: 0.9 to 2.5 s in a container of 512 MB over a 2 GB file with
+    20 000 vectors, where now they are read with no lock held, no hold of
+    the compact's own passes 0.25 s and a read waited 0.24 to 0.43 s at
+    most. One in a
     batch, or run by the shell or an embedding program, still holds the
     write lock throughout. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
-    fits, and so does a second compact while one writes its file. It cannot
-    be cancelled once begun.</li>
+    fits, and so does a second compact while one writes its file; a compact
+    of every collection places no graph when one of them changed. The
+    vectors written while a graph is built are linked into it in rounds
+    beside the queries, and the write lock links at most about 0.1 s of
+    them at any <code>m</code> and <code>ef_construction</code>, those of
+    the last round — 128 at 768 dimensions, 66 at 1 536, 33 at 3 072 at the
+    defaults, as many fewer as a wider <code>m</code> or
+    <code>ef_construction</code> makes each link cost more: 32 at 768
+    dimensions with <code>m = 32, ef_construction = 400</code>, 10 with
+    48 and 800. Where more were written than that, faster than the rounds
+    could link them, a <code>create index</code> of the graph is refused,
+    saying so, and a compact keeps the graph as it stands until the next,
+    its log line naming it. Settings under which one link costs more than
+    the whole bound — at 768 dimensions <code>m</code> times
+    <code>ef_construction</code> past 409 600 — link none under the lock:
+    any vector written during the last round does so. The documents written during a compact's last
+    round and the handover after it are copied under the write lock with no
+    such bound: beside 1 000-row <code>POST</code>s at 10 000 to 30 000 rows
+    a second that held every write 6.6 to 29 ms, but as fast as three CPUs
+    wrote them 3.8 to 6.4 s, and the copies waiting for the handover took
+    1.5 to 1.7 GB of memory (<a href="/docs/server#compaction">Compaction</a>). It
+    cannot be cancelled once begun.</li>
   <li><b>A file compacts itself once half of it is dead.</b> The server
     (<code>--auto-compact</code>, <a href="/docs/server#compaction">Compaction</a>)
     and the native library (<code>FENNEC_OPEN_NO_AUTO_COMPACT</code> turns it
@@ -540,7 +569,10 @@ HTTPS itself once it is given a certificate.</p>
     the middle; a client that goes away does not cancel it.</li>
   <li><b>A ceiling, not a pool.</b> Every connection is an OS thread.
     <code>--max-connections</code> rejects the excess with 503 rather than
-    queueing it; put a proxy in front if you want a queue. The refused
+    queueing it -- once a subscription streams it is counted under
+    <code>--http-max-streams</code> instead, except on a tenant node or at
+    <code>--http-max-streams 0</code>; put a
+    proxy in front if you want a queue. The refused
     client's request is read off after the 503 and its connection ended
     without a reset, so any HTTP library reads the answer and its
     <code>Retry-After</code>. A connection

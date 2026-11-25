@@ -455,8 +455,10 @@ vectors fit -- which a write takes, holding nodes exactly -- was refused by
 `create index` and by the next open, an open refusing a file it wrote.
 So: `create index` under the lock (`build_graph`), beside the database as
 it is built (`IndexCopy::build`, the refusal carried to `finish_index`) and
-as it catches up with the writes made during the build (`finish_index`,
-which placed them unchecked, a panic under the write lock at the bound);
+as it catches up with the writes made during the build -- each round's
+chunk before it links any, with no lock held (`graph_round`), and the last
+round's under the write lock (`finish_index`), each write counted as a
+node, where they were placed unchecked, a panic at the bound;
 an open rebuilding one, a file holding more vectors in a field than the
 bound's nodes hold, which a release before the bound wrapped, refused as
 damage naming the field; a graph restored from its record that the writes after it may
@@ -466,7 +468,10 @@ made from the rows instead; a replica's graph made again without its
 tombstones (`room_applied`), its refusal damage, as a primary's graph held
 the vectors; and a compact beside the database, whose graph is kept, as
 where a document does not read, where the writes made during its build,
-each taken out and put in again, would pass the bound. A graph record
+each taken out and put in again, would pass the bound -- asked where the
+rounds and the write lock link them, as `create index` asks -- and said in
+its log line (`KeptFor::Full`: ``graph `docs.v` kept, its writes would
+pass 4294967295 nodes``). A graph record
 counting more is rebuilt, and `alloc_links` asserts the bound it never
 meets, counted as the engine counts. A replica's room and a put-back's
 build are a graph's build under the write lock, reached only at the bound
@@ -514,7 +519,10 @@ refusing as damage what its live vectors leave no node for
 way, rows sharing vectors among them
 (`maintenance::tests::create_index_refuses_a_graph_past_its_nodes`), and
 a compact's catch-up
-(`a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph`).
+(`a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph`), each
+written to before a round, which refuses its chunk linking none, and
+during the last, which the write lock refuses, one past the bound and one
+at it.
 
 *What the two cost.* A write tests both bounds in one branch: its
 payload's length against the bound and, in a collection with a graph, each

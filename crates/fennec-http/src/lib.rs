@@ -139,7 +139,9 @@ pub struct Config {
     /// to the network, over TLS or not.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
-    /// a thread.
+    /// a thread. A single database's subscriptions are not among them once
+    /// they stream: `max_streams` counts those apart, unless it is 0. A
+    /// tenant node's are, since its `max_streams` is each tenant's.
     pub max_connections: usize,
     /// Request body ceiling. Bulk `put` bodies can be large, but leaving it
     /// uncapped hands memory to the client.
@@ -162,11 +164,20 @@ pub struct Config {
     pub sync_on_write: bool,
     /// How long a write's `Idempotency-Key` and answer are kept.
     pub idempotency_ttl: Duration,
-    /// Ceiling on concurrent **subscriptions** (0 = unlimited).
+    /// Ceiling on concurrent **subscriptions** (0 = unlimited), a database's:
+    /// on a tenant node each tenant's.
     ///
     /// Counted apart from ordinary requests. Subscriptions are long lived and
     /// each holds a thread; sharing a single ceiling would let
     /// `max_connections` subscribers close the server to ordinary requests.
+    /// So a single database's subscription gives back its connection's
+    /// place under `max_connections` as it takes its own here
+    /// ([`sse::serve`]): its threads are `max_connections` and this at most.
+    /// At 0 a subscription keeps its place under `max_connections`, the one
+    /// ceiling left to bound its thread. A tenant's keeps both -- a node's
+    /// tenants are many, and `max_connections` is the one bound on all of
+    /// their threads -- each tenant's share of them held by its quota of
+    /// streams ([`quota::shared`]).
     pub max_streams: usize,
     /// Interval of the keep-alive line when nothing happens on a subscription.
     /// Proxies and NAT tables drop silent connections.
@@ -1096,8 +1107,9 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     };
     // Bound after the socket, so it is given back first, on every way out
     // -- a panic's unwinding too: a client that saw its connection closed
-    // finds its place free.
-    let _slot = slot;
+    // finds its place free. A file's server's subscription takes it out,
+    // to give it back as its stream is counted apart ([`sse::serve`]).
+    let mut slot = Some(slot);
     let _ = conn.set_read_timeout(cfg.idle_timeout);
     // Once a connection, so an answer pays nothing for it: a write the
     // client takes nothing of for this long returns what went in, the next
@@ -1647,7 +1659,20 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             // with `Fennec-After` waits for that write in `serve`, past this
             // slot and the database's own, before its head.
             let _ = out.set_read_timeout(None);
-            sse::serve(&mut out, db, cfg, hub, &req, &who);
+            // A file's server counts its subscriptions apart, under
+            // `--http-max-streams` alone: the stream gives the connection's
+            // place back as it takes its own. Only where that ceiling bounds
+            // it: at 0 (unlimited) the stream keeps its place, or its thread
+            // would be under no ceiling at all, where `--max-connections`
+            // bounded it before. A tenant's stream keeps it too:
+            // `--http-max-streams` is each tenant's, so the node's
+            // `--max-connections`, which every tenant shares, is the one
+            // bound on all of their threads.
+            let apart = match backend {
+                Backend::Single { .. } if cfg.max_streams > 0 => slot.take(),
+                Backend::Single { .. } | Backend::Tenants(_) | Backend::Metrics { .. } => None,
+            };
+            sse::serve(&mut out, db, cfg, hub, &req, &who, apart);
             return;
         }
         // Reading one's own write on a replica: the request waits until the
@@ -4237,11 +4262,39 @@ fn run_query(
     } else if let Some(built) = {
         let running = trace::span("execute");
         running.attr("fennec.beside", true);
-        let built = Database::maintain(db, &stmt);
+        // A compact says the file's size before and after, as
+        // `--auto-compact`'s line does (`link::said_beside`).
+        let compact = matches!(&*stmt, Statement::Compact(_));
+        let before = compact.then(|| db.read().unwrap_or_else(|e| e.into_inner()).garbage());
+        let began = std::time::Instant::now();
+        let built = Database::maintain_held(db, &stmt);
         if built.is_none() {
             running.forget();
         }
-        built
+        match (&built, before) {
+            (Some((Ok(_), holds)), Some(before)) => {
+                let after = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
+                link::said_beside(
+                    "compact",
+                    format_args!(
+                        "compacted, {:.1} MB -> {:.1} MB",
+                        before.file as f64 / 1e6,
+                        after.file as f64 / 1e6
+                    ),
+                    began.elapsed(),
+                    holds,
+                );
+            }
+            // `index built on `c.f``, or that it was there already.
+            (Some((Ok(Response2::Ok(done)), holds)), None) => link::said_beside(
+                "create index",
+                format_args!("{done}"),
+                began.elapsed(),
+                holds,
+            ),
+            _ => {}
+        }
+        built.map(|(r, _)| r)
     } {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any

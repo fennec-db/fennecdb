@@ -96,6 +96,7 @@ const CALLS: &str = "crates/fennec-core/tests/calls.rs";
 const VECTOR: &str = "crates/fennec-core/src/vector.rs";
 const STORE: &str = "crates/fennec-core/src/store.rs";
 const UNWINDING: &str = "crates/fennec-core/src/engine/unwinding.rs";
+const MAINTENANCE: &str = "crates/fennec-core/src/engine/maintenance.rs";
 const HTTP: &str = "crates/fennec-http/src/lib.rs";
 const MCP_SRC: &str = "crates/fennec-http/src/mcp/mod.rs";
 
@@ -410,6 +411,14 @@ fn rows(problems: &mut Vec<String>) -> Vec<Row> {
                 (
                     UNWINDING,
                     "an_open_counts_a_graphs_nodes_as_the_graph_places_them",
+                ),
+                // `create index` beside the database and a compact's
+                // rebuilt graph, as they are built and as they catch up --
+                // a round's chunk and the last round's writes.
+                (MAINTENANCE, "create_index_refuses_a_graph_past_its_nodes"),
+                (
+                    MAINTENANCE,
+                    "a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph",
                 ),
             ]),
         )

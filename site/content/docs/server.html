@@ -623,8 +623,56 @@ of it is dead and the dead part is at least 64 MB -- or sooner, once a
 third of what the compact writes is dead, where the file has reached three
 quarters of the memory the system has for its pages or the server is
 waiting for the disk, so that its reads stay in memory. The compact runs
-beside the queries, and takes the write lock only to put the new file in
-place. A compact is refused for nothing a document holds: one it cannot
+beside the queries: it reads the documents, rebuilds a vector index that
+holds deleted entries and writes the new file with no lock held, and takes
+the write lock only for the writes of its last moments and to put the new
+file in place. A vector index whose writes outrun its rebuild -- more
+written during its last round of catching up than about 0.1 s of linking
+at any <code>m</code> and <code>ef_construction</code>, 128 vectors at
+768 dimensions, 33 at 3 072 at the defaults, fewer as a wider
+<code>m</code> or <code>ef_construction</code> makes each link cost more
+-- is kept as it stands until
+the next compact, rather than every write held while the compact links
+them, and the log line says so. A sustained ingest of vectors can keep it
+at every compact, its deleted entries growing until a quieter one.</p>
+
+<p>Each compact and <code>create index</code> run beside the queries is
+logged in one line: what was done, how long it took, the longest it held
+the lock -- what every write waited out at most, and every read behind a
+waiting write -- and each hold by name: the build's copy, its rounds of
+catching up and putting it in place, then a compact's file's copy, rounds
+and swap. A compact the server runs on its own names the file or the
+tenant:</p>
+
+<pre data-lang="text" data-label="logs">/data/db.fennec: compacted, 2088.0 MB -&gt; 1067.4 MB in 16.4s, the lock held 182.1ms at most (the build's copy 12.9ms, rounds 670.0µs, put in place 6.1ms; the file's copy 182.1ms, rounds 84.4ms, swap 6.7ms)</pre>
+
+<p>A <code>compact</code> sent as a statement writes the same line naming
+itself, and a <code>create index</code> what it built, each ending with the
+request's id:</p>
+
+<pre data-lang="text" data-label="logs">compact: compacted, 2088.0 MB -&gt; 1067.4 MB in 16.4s, the lock held 182.1ms at most (...) request_id=6f1c0a2e9b7d4c13
+create index: index built on `docs.v` in 3.2s, the lock held 9.8ms at most (the build's copy 1.1ms, rounds 2.0ms, put in place 9.8ms) request_id=0d93b5e1a4c26f87</pre>
+
+<p>A compact that kept a vector index as it stood names it after the
+holds, with how many vectors were written during its last round -- or
+that a document of it could not be read, or that the vectors written
+while it was rebuilt would take it past the
+<a href="/docs/limits">4&nbsp;294&nbsp;967&nbsp;295 nodes</a> an index holds
+(<code>its writes would pass 4294967295 nodes</code>):</p>
+
+<pre data-lang="text" data-label="logs">/data/db.fennec: compacted, 2088.0 MB -&gt; 1067.4 MB in 18.9s, the lock held 191.4ms at most (...); graph `docs.v` kept, 412 behind</pre>
+
+<p>The compact's last moments copy under the write lock the writes made
+during its last round of catching up and during the handover of what the
+rounds copied, which follows it. Beside a steady stream of 1 000-row
+<code>POST</code>s that is milliseconds: 6.6 to 29 ms at 10 000 to 30 000
+rows a second. As fast as three CPUs could write them, the handover took
+9 to 11 s, the copy held every write and read 3.8 to 6.4 s, and the copies
+waiting for the handover took 1.5 to 1.7 GB of memory -- in 512 MB the process
+was killed. Nothing bounds that yet; give a compact's server the memory
+for what is written during it.</p>
+
+<p>A compact is refused for nothing a document holds: one it cannot
 read is copied as it is, and a dropped field's values become
 <code>null</code>s, its place kept. A refusal that stands -- a damaged
 file, a disk that will not take the new one -- is tried again at every
@@ -748,12 +796,12 @@ file before and after and how long it held the lock.</p>
 <table>
 <thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it. Once a subscription streams it is counted under <code>--http-max-streams</code> instead, except on a tenant node or at <code>--http-max-streams 0</code>.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
 <tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request must come within it of its first byte, and a second more for each KiB that came, head and body alike: a client sending 1 KiB a second or more is never cut. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
 <tr><td><code>--write-timeout &lt;s&gt;</code></td><td class="n">30</td><td>The longest a write of an answer waits for its client to take any of it: a client that reads nothing is let go within twice this (0 = never).</td></tr>
-<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart; on a tenant node, each tenant's.</td></tr>
+<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart from <code>--max-connections</code>; on a tenant node, each tenant's, and each one of the node's connections too.</td></tr>
 </tbody>
 </table>
 </div>
@@ -780,11 +828,20 @@ first record's first byte and a record that comes in parts held to the
 same bound. Each such cut is counted
 (<a href="/docs/monitoring#what-is-counted"><code>fennec_client_timeouts_total</code></a>). A
 subscription holds a thread for as long as it lasts, so subscriptions are
-counted apart as well, under <code>--http-max-streams</code>, a database's
-own: on a tenant node each tenant's, where <code>--max-connections</code> is
-what all of them share, and each tenant's streams and held writes take a
-quarter of it at most unless its quota says otherwise
-(<a href="sharding-reference.html#quota-bounds">quotas</a>).</p>
+counted apart, under <code>--http-max-streams</code>, a database's own: once
+a subscription streams it gives its place under <code>--max-connections</code>
+back, and a server holds that many connections and that many streams at
+most -- 64 subscribers leave all 100 connections to ordinary requests. At
+<code>--http-max-streams 0</code> (no ceiling) a subscription keeps its place
+under <code>--max-connections</code>, the one ceiling left on its thread. A
+refused subscription (503 <code>too many subscriptions</code>) held only its
+connection. On a tenant node <code>--http-max-streams</code> is each tenant's,
+so a stream keeps its place too: <code>--max-connections</code> is what all of
+them share, the one bound on every tenant's threads, and each tenant's
+streams and held writes take a quarter of it at most unless its quota says
+otherwise (<a href="sharding-reference.html#quota-bounds">quotas</a>). A
+replica's or an archiver's stream, a <code>/_changes</code> wait and a held
+write (<code>Fennec-Wait</code>) are connections everywhere.</p>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
 requests that <b>grow</b> the data are refused with 507, while reads,

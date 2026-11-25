@@ -461,6 +461,45 @@ fn deleting_a_tenant_ends_its_streams_and_removes_the_file() {
     assert_eq!(call(n.port, "GET", "/t/acme/notes", b"", None).status, 404);
 }
 
+/// A tenant's stream stays one of the node's `--max-connections`: its
+/// `--http-max-streams` is the tenant's own, so the connections every
+/// tenant shares are what bounds all of their threads -- where a file's
+/// server counts its subscriptions apart (`server.rs`'s
+/// `subscriptions_are_counted_apart_from_connections`).
+#[test]
+fn a_tenants_stream_is_one_of_the_nodes_connections() {
+    let n = start(
+        "stream-slot",
+        Config {
+            max_connections: 2,
+            ..admin_cfg()
+        },
+    );
+    create(n.port, "acme");
+    query(n.port, "acme", "create collection notes (title text)");
+    // Each read to its seed, past every place it takes.
+    let streams: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            s.write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut buf = String::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.contains("event: seed") {
+                let k = s.read(&mut chunk).unwrap();
+                assert!(k > 0, "ended before its seed: {buf}");
+                buf.push_str(&String::from_utf8_lossy(&chunk[..k]));
+            }
+            s
+        })
+        .collect();
+    let r = call(n.port, "GET", "/t/acme/notes", b"", None);
+    assert_eq!(r.status, 503, "{}", r.text());
+    assert!(r.text().contains("too many connections"), "{}", r.text());
+    drop(streams);
+}
+
 #[test]
 fn an_idle_tenant_closes_and_reopens_with_its_data() {
     let n = start("idle", admin_cfg());

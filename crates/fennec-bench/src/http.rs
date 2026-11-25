@@ -14,7 +14,36 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// The `Authorization` line every request of this process carries, set
+/// once before the first (`bearer`): a soak's servers ask a token, as a
+/// server reached past loopback must -- with none, one answers only a
+/// `Host` of this machine's (fennec-http's `open_refusal`), and a replica,
+/// a backup or a client reaching it by its container's name is refused.
+/// Unset, nothing: every other bench's requests are as they were.
+static AUTH: OnceLock<String> = OnceLock::new();
+
+/// Every request after this carries `Authorization: Bearer <token>` -- but
+/// one that names its own (`Http::try_request_with`'s `headers`).
+pub fn bearer(token: &str) {
+    let _ = AUTH.set(format!("Authorization: Bearer {token}\r\n"));
+}
+
+/// The line [`bearer`] set, or nothing: for a request written by hand.
+pub fn auth() -> &'static str {
+    AUTH.get().map_or("", String::as_str)
+}
+
+/// [`auth`], but nothing where `headers` names an `Authorization` of its
+/// own: a request carries one.
+fn auth_beside(headers: &str) -> &'static str {
+    match headers.contains("Authorization:") {
+        true => "",
+        false => auth(),
+    }
+}
 
 /// A kept-alive connection to fennec-server's HTTP.
 pub struct Http {
@@ -23,22 +52,112 @@ pub struct Http {
     head: Vec<u8>,
     body: Vec<u8>,
     line: String,
+    /// The last answer's `Fennec-Seq`, the change a write left the
+    /// database at, and whether it said `Retry-After`.
+    seq: Option<u64>,
+    retry_after: bool,
 }
 
 impl Http {
     pub fn connect(addr: &str) -> Http {
         let w = TcpStream::connect(addr).unwrap();
+        Http::over(w).unwrap()
+    }
+
+    /// A connection that may fail, each read and write of it bounded by
+    /// `within`: a client that outlives the server it asks -- a soak's,
+    /// across a `kill -9` -- counts what failed rather than ending.
+    pub fn try_connect(addr: &str, within: Duration) -> std::io::Result<Http> {
+        let to = addr
+            .parse()
+            .map_err(|_| std::io::Error::other(format!("not an address: {addr}")))?;
+        let w = TcpStream::connect_timeout(&to, within)?;
+        w.set_read_timeout(Some(within))?;
+        w.set_write_timeout(Some(within))?;
+        Http::over(w)
+    }
+
+    fn over(w: TcpStream) -> std::io::Result<Http> {
         // A request goes out in one write, and waiting for an ACK to send
         // the next one would be Nagle's 40 ms, not the server's time.
-        w.set_nodelay(true).unwrap();
-        let r = BufReader::with_capacity(1 << 16, w.try_clone().unwrap());
-        Http {
+        w.set_nodelay(true)?;
+        let r = BufReader::with_capacity(1 << 16, w.try_clone()?);
+        Ok(Http {
             w,
             r,
             head: Vec::with_capacity(256),
             body: Vec::new(),
             line: String::new(),
-        }
+            seq: None,
+            retry_after: false,
+        })
+    }
+
+    /// [`Http::request`] that hands back what failed -- the connection
+    /// refused, cut or timed out -- instead of ending the bench.
+    pub fn try_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> std::io::Result<(u16, &[u8])> {
+        self.try_request_with(method, path, content_type, "", body)
+    }
+
+    /// [`Http::try_request`] with header lines of its own, each ending in
+    /// `\r\n`.
+    pub fn try_request_with(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        headers: &str,
+        body: &[u8],
+    ) -> std::io::Result<(u16, &[u8])> {
+        self.head.clear();
+        write!(
+            self.head,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{}{headers}Content-Length: {}\r\n\r\n",
+            auth_beside(headers),
+            body.len()
+        )?;
+        self.head.extend_from_slice(body);
+        self.w.write_all(&self.head)?;
+        let status = self.try_read_answer()?;
+        Ok((status, &self.body))
+    }
+
+    /// `POST /query` of `text` with `params`, as [`Http::try_request`].
+    pub fn try_query(&mut self, text: &str, params: &str) -> std::io::Result<(u16, &[u8])> {
+        self.try_query_with(text, params, "")
+    }
+
+    /// [`Http::try_query`] with header lines of its own.
+    pub fn try_query_with(
+        &mut self,
+        text: &str,
+        params: &str,
+        headers: &str,
+    ) -> std::io::Result<(u16, &[u8])> {
+        let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
+        self.try_request_with(
+            "POST",
+            "/query",
+            "application/json",
+            headers,
+            body.as_bytes(),
+        )
+    }
+
+    /// The last answer's `Fennec-Seq`.
+    pub fn seq(&self) -> Option<u64> {
+        self.seq
+    }
+
+    /// Whether the last answer said when to come back (`Retry-After`).
+    pub fn retry_after(&self) -> bool {
+        self.retry_after
     }
 
     /// Sends one request and reads the whole answer: its status and body.
@@ -65,7 +184,8 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{}{headers}Content-Length: {}\r\n\r\n",
+            auth_beside(headers),
             body.len()
         )
         .unwrap();
@@ -101,7 +221,8 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n",
+            auth(),
             body.len()
         )
         .unwrap();
@@ -164,20 +285,35 @@ impl Http {
     /// The status line, the headers, and a body of `Content-Length` bytes or
     /// in chunks, into `self.body`.
     fn read_answer(&mut self) -> u16 {
+        match self.try_read_answer() {
+            Ok(status) => status,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn try_read_answer(&mut self) -> std::io::Result<u16> {
         let mut status = 0u16;
         let mut len = 0usize;
         let mut chunked = false;
+        let bad = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
+        self.seq = None;
+        self.retry_after = false;
         loop {
             self.line.clear();
-            let n = self.r.read_line(&mut self.line).unwrap();
-            assert!(n > 0, "the server closed the connection");
+            let n = self.r.read_line(&mut self.line)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the server closed the connection",
+                ));
+            }
             let l = self.line.trim_end();
             if status == 0 {
                 status = l
                     .split_whitespace()
                     .nth(1)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| panic!("not an HTTP status line: {l}"));
+                    .ok_or_else(|| bad(format!("not an HTTP status line: {l}")))?;
                 continue;
             }
             if l.is_empty() {
@@ -188,28 +324,33 @@ impl Http {
             };
             let v = v.trim();
             if k.eq_ignore_ascii_case("content-length") {
-                len = v.parse().unwrap();
+                len = v.parse().map_err(|_| bad(format!("Content-Length: {v}")))?;
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
                 chunked = v.eq_ignore_ascii_case("chunked");
+            } else if k.eq_ignore_ascii_case("fennec-seq") {
+                self.seq = v.parse().ok();
+            } else if k.eq_ignore_ascii_case("retry-after") {
+                self.retry_after = true;
             }
         }
         self.body.clear();
         if !chunked {
             self.body.resize(len, 0);
-            self.r.read_exact(&mut self.body).unwrap();
-            return status;
+            self.r.read_exact(&mut self.body)?;
+            return Ok(status);
         }
         loop {
             self.line.clear();
-            self.r.read_line(&mut self.line).unwrap();
-            let size = usize::from_str_radix(self.line.trim_end(), 16).unwrap();
+            self.r.read_line(&mut self.line)?;
+            let size = usize::from_str_radix(self.line.trim_end(), 16)
+                .map_err(|_| bad(format!("a chunk's size: {}", self.line.trim_end())))?;
             let at = self.body.len();
             self.body.resize(at + size, 0);
-            self.r.read_exact(&mut self.body[at..]).unwrap();
+            self.r.read_exact(&mut self.body[at..])?;
             self.line.clear();
-            self.r.read_line(&mut self.line).unwrap();
+            self.r.read_line(&mut self.line)?;
             if size == 0 {
-                return status;
+                return Ok(status);
             }
         }
     }

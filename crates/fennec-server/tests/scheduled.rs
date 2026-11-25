@@ -16,6 +16,15 @@ fn now_ms() -> i64 {
     fennec_core::time::now_ms().unwrap()
 }
 
+/// The start of this hour, the clock read once. Reading it twice, as
+/// `now_ms() - now_ms().rem_euclid(HOUR)` did, took a millisecond between the
+/// two on a loaded macOS runner and put the hour a millisecond before the
+/// slot it ran.
+fn this_hour() -> i64 {
+    let now = now_ms();
+    now - now.rem_euclid(HOUR)
+}
+
 /// A file holding `tick`, every hour, defined a day ago: its latest slot is
 /// due to whoever writes the file next, the 23 before it passed over.
 fn ticking(tag: &str) -> std::path::PathBuf {
@@ -60,7 +69,7 @@ fn a_missed_slot_runs_at_the_first_look_and_the_shutdown_lands_it_whole() {
     }
     let (code, log) = server.terminate();
     assert_eq!(code, 0, "{log}");
-    let hour = now_ms() - now_ms().rem_euclid(HOUR);
+    let hour = this_hour();
     let (ticks, mark) = ran(&path);
     assert_eq!(ticks, 1, "{log}");
     assert!(mark == Some(hour) || mark == Some(hour - HOUR), "{mark:?}");
@@ -202,7 +211,7 @@ fn a_node_learns_its_hint_and_runs_a_tenant_s_missed_slot() {
     let hint = std::fs::read_to_string(dir.join("schedules.hint")).unwrap();
     assert!(hint.lines().any(|l| l.starts_with("acme ")), "{hint}");
     assert!(!hint.contains("beta"), "{hint}");
-    let hour = now_ms() - now_ms().rem_euclid(HOUR);
+    let hour = this_hour();
     let (ticks, mark) = ran(&dir.join("acme.fennec"));
     assert_eq!(ticks, 1, "{log}");
     assert!(mark == Some(hour) || mark == Some(hour - HOUR), "{mark:?}");

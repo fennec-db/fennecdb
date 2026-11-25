@@ -18,22 +18,73 @@ fennec-ql = { path = "../fennec-ql" }
 fennec-http = { path = "../fennec-http" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
 # For the PostgreSQL + pgvector comparison (only in this harness).
-postgres = "0.19"
+postgres = { version = "0.19", optional = true }
 # pgvector's own types for the `postgres` crate, in pgvector's binary
 # format: PostgreSQL's side of `scale`.
-pgvector = { version = "0.4", features = ["postgres"] }
+pgvector = { version = "0.4", features = ["postgres"], optional = true }
 # MongoDB's official driver, its blocking API, for YCSB's MongoDB arm.
-mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "sync"] }
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "sync"], optional = true }
 # Its blocking API runs a Tokio runtime it makes with `Runtime::new`, which
 # needs this feature and does not ask for it.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 # redis-rs, its synchronous connection, for YCSB's Redis arm. Pinned to the
 # patch: the site names the client a figure was measured with, and none of
 # the default features (ACL, streams, scripts, big numbers) is asked for.
-redis = { version = "=1.8.0", default-features = false }
+redis = { version = "=1.8.0", default-features = false, optional = true }
+
+[features]
+# The systems fennecdb is measured against -- SQLite, PostgreSQL and
+# pgvector, MongoDB, Redis -- and so every crate from outside the workspace:
+# on by default. `ycsb` builds without them (`--no-default-features --bin
+# ycsb`), fennecdb in process and fennec-server alone, for the runs made
+# inside a Linux container under a memory limit (ycsb/linux-tools.sh), whose
+# build has the host's registry index and none of those crates' sources.
+default = ["rivals"]
+rivals = ["dep:rusqlite", "dep:postgres", "dep:pgvector", "dep:mongodb", "dep:tokio", "dep:redis"]
 
 [[bin]]
 name = "fennec-bench"
 path = "src/main.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "concurrency"
+path = "src/bin/concurrency.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "load"
+path = "src/bin/load.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "scale"
+path = "src/bin/scale.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "collate"
+path = "src/bin/collate.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "geo"
+path = "src/bin/geo.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "requests"
+path = "src/bin/requests.rs"
+required-features = ["rivals"]
+
+[[bin]]
+name = "roundtrip"
+path = "src/bin/roundtrip.rs"
+required-features = ["rivals"]
+
+[[test]]
+name = "joins_sqlite"
+path = "tests/joins_sqlite.rs"
+required-features = ["rivals"]

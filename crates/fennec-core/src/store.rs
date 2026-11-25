@@ -163,6 +163,23 @@ enum Place {
     Gone,
 }
 
+/// The value at `place` of a payload a [`Snapshot`] handed back, read as
+/// [`Store::read_field`] reads it -- `null` where the payload ends before
+/// it -- for a catch-up that looks its documents up under a lock and reads
+/// them after it. `place` is past the dropped places before the field
+/// (`Schema::place`), as the payload holds them.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn field_at(buf: &[u8], place: usize) -> Result<Value> {
+    let mut pos = 0;
+    for _ in 0..place {
+        skip_field(buf, &mut pos)?;
+    }
+    match pos < buf.len() {
+        true => decode_value(buf, &mut pos),
+        false => Ok(Value::Null),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Snapshot {
     /// Each document in the order it was asked for, its payload or `None`.

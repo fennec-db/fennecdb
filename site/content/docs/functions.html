@@ -170,8 +170,9 @@ with a provider's token, sub signup-function: insert a signup 404 {"error":"coll
     <code>@unique</code> on <code>email</code> and is 409, and the batch, jobs
     and all, is put back.</li>
   <li><b>The client's key is scoped to the caller.</b> The server keeps an
-    <code>Idempotency-Key</code> under the token's subject, which here is every
-    caller's alike, so the Worker puts the caller (a sign-in where there is one,
+    <code>Idempotency-Key</code> under the token's caller -- its issuer, its
+    subject, its tenant and role claims and every claim its rules read --
+    which here is every caller's alike, so the Worker puts the caller (a sign-in where there is one,
     the address where there is not) in front of it: left as it came, one caller's key
     could collide with another's, or replay an answer that was not theirs.</li>
   <li><b>An object goes in as a parameter.</b> Inside an object literal a

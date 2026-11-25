@@ -80,6 +80,7 @@ pub use garbage::{
     compact_when_due, compact_when_due_in, memory, CompactPolicy, Compactor, Garbage, Memory,
     AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO, ROOM_SHARE,
 };
+pub use maintenance::{Holds, KeptFor, KeptGraph};
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 

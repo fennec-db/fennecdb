@@ -39,7 +39,25 @@ on a thread, not under the write lock (`map::Teardown`).
 **[A lone `create index` or `compact` runs beside the database](../../../../docs/design/storage.md#maintenance-beside-the-database)**
 (`Database::maintain`): every write must pass `Database::note`; a schema
 change meanwhile fails it, and an image adopted meanwhile marks every tail
-changed (`Tails::all_changed`).
+changed (`Tails::all_changed`). Under the read lock it takes only what it
+reads from and its tail's token, never a document out of the file: a
+build's store as a pin takes it (`Store::pinned`), charged to the pins'
+budget only while it is read (`Taken`), a compact's graph by graph; a
+rewrite's cloned, its records in the file shared, uncharged -- the store
+the swap puts in place, held the whole rewrite. The copy is read with no
+lock held (`IndexCopy::read`), and the writes made meanwhile during a
+graph's build or a file's rewrite are caught up in rounds, looked up
+under the read lock and read after it (`catch_up_graphs`, `catch_up`),
+the write lock taking the last round's few: a graph's links costing
+`GRAPH_HELD` at most (`link_cost`: by dimensions, `m` and
+`ef_construction`, a saturating `u64`), past which -- or where a round's
+chunk or the last round's writes may take a graph past its nodes, asked
+before any is linked (`past_nodes`) -- a compact keeps the graph and names
+it (`KeptGraph`) and `create index` is refused; a rewrite's
+bounded by the rounds' pace alone. Every collection is asked before any
+graph is placed. Each hold is timed and handed back
+(`Database::maintain_held`), and a server's log names the longest and
+each graph kept.
 
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by

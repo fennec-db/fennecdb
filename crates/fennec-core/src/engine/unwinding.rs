@@ -68,11 +68,11 @@ pub(crate) fn panic_in(dir: char, index: &str) {
 /// its age, not its name alone: a run beside this one, another checkout's,
 /// is writing in its own, a file made and removed a case.
 #[cfg(feature = "std-fs")]
-struct Scratch(std::path::PathBuf);
+pub(crate) struct Scratch(pub(crate) std::path::PathBuf);
 
 #[cfg(feature = "std-fs")]
 impl Scratch {
-    fn new(name: &str) -> Scratch {
+    pub(crate) fn new(name: &str) -> Scratch {
         let parent = std::env::temp_dir().join(name);
         let hour = std::time::Duration::from_secs(3600);
         for e in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
