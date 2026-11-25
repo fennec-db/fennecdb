@@ -169,8 +169,9 @@ const R_WATCH_AGAIN: Duration = Duration::from_secs(5);
 const R_WATCH_ABSENT: Duration = Duration::from_secs(60);
 
 /// How long the watch may be gone with a window of the replica's open
-/// before the window is cut (`bound_r_window`): said as cut, never counted
-/// as an end, its operations counted as if no window had been. The watch's
+/// before the window is lost (`bound_r_window`): said, counted as lost
+/// (`r_compacts_lost`), which no run passes the watch's criterion with,
+/// and its operations counted as if no window had been. The watch's
 /// container is started again 5 s after it ends (`R_WATCH_AGAIN`) and lists
 /// the replica's threads at once, and a replica the run found stopped is
 /// started at that minute's look and answers in seconds: gone a minute,
@@ -198,15 +199,18 @@ const R_COMPACT_PRIMARY_TIMES: u64 = 4;
 const R_COMPACT_FLOOR_MS: u64 = 600_000;
 
 /// The operations a worker holds for windows of the replica's not yet
-/// settled (`Hists::held`) at the most, 24 bytes each: 3 MiB a worker. At
+/// settled (`Hists::held`) at the most, 32 bytes each (`Held`, its `Rec`
+/// nested; a test holds the size): 4 MiB a worker. At
 /// the soak's rates of the dry runs, 1 240-2 093 a second over 32
 /// connections, it is 33-56 minutes of a window every operation of which a
 /// worker owes, past the 20 minutes `plausible_ms` gives the largest file
 /// the soak keeps (2.2 times its 1.1 GB live); the peak owes nothing, and
 /// holds only its reads through the replica. Reached, the window is cut,
 /// said, and its operations counted as if no window had been: before, a
-/// window open for hours held 24 bytes an operation, some 280 MB an hour
-/// at 3 200 a second, rescanned whole at each.
+/// window open for hours held 24 bytes an operation (round ten's layout),
+/// some 280 MB an hour at 3 200 a second, rescanned whole at each. The
+/// most any worker held is on each minute's line and the end line
+/// (`r_held_max`), the run's distance from this.
 const HELD_MAX: usize = 1 << 17;
 
 /// The minutes of the peak's slowest stretch, which the soak's rate is a
@@ -2147,9 +2151,12 @@ struct CompactWatch {
     since: Option<u64>,
     /// A compaction a watch before this one saw begin, its container gone
     /// in it: its end is seen only where this one sees the thread at work
-    /// first, and is cut otherwise -- it ended unseen.
+    /// first, and is lost otherwise -- it ended unseen (`Edge::Lost`).
     resumed: bool,
 }
+
+/// A stretch of the run, `(from, to)` in ns from its start.
+type Span = (u64, u64);
 
 /// A change `CompactWatch` settled on, at its time in ns from the start.
 #[derive(Debug, PartialEq, Eq)]
@@ -2157,10 +2164,15 @@ enum Edge {
     Began(u64),
     /// Its end seen: the thread back asleep.
     Ended(u64),
-    /// Its end not seen: the thread found asleep by a watch after the one
-    /// that saw it begin, gone with the replica's process, or the run
-    /// ended first. Never counted as an end (`r_compacts_cut`).
+    /// Its end not seen: the thread gone with the replica's process, or
+    /// the run ended first. Never counted as an end (`r_compacts_cut`).
     Cut(u64),
+    /// Its end not seen, the watch lost it: the thread found asleep by a
+    /// watch after the one that saw it begin. Cut, and lost besides
+    /// (`r_compacts_lost`): a window the watch lost while it was open is
+    /// never a pass of the watch's criterion -- a thread that never slept
+    /// again, its counter unmoved, agreed with the watch that saw nothing.
+    Lost(u64),
 }
 
 /// Whether the replica's compaction thread is asleep in `n`, the syscall
@@ -2267,7 +2279,7 @@ impl CompactWatch {
         Some(match (self.open, std::mem::take(&mut self.resumed)) {
             (true, _) => Edge::Began(s.saturating_sub(2 * R_WATCH_EVERY)),
             (false, false) => Edge::Ended(s),
-            (false, true) => Edge::Cut(s),
+            (false, true) => Edge::Lost(s),
         })
     }
 
@@ -2316,7 +2328,9 @@ fn behind_s(slots: &[Slot], now: u64) -> Option<f64> {
 /// reference's with one in either would fail a right server or hide a
 /// slower compact of the primary's. And those of a compaction the watch
 /// has not settled yet (`held`), in the order they ended: one its counter
-/// did not move in was none (`settle`).
+/// did not move in was none (`settle`); and the most it held since the
+/// minute's line took its figures (`held_max`), the most of every worker's
+/// on the line (`r_held_max`): how near the run came to `HELD_MAX`.
 struct Hists {
     steady: Hist,
     restart: Hist,
@@ -2328,6 +2342,7 @@ struct Hists {
     r_compact: Hist,
     restart_r_compact: u64,
     held: VecDeque<Held>,
+    held_max: usize,
 }
 
 /// An operation of a replica's compaction the watch has not settled
@@ -2367,10 +2382,13 @@ impl Hists {
             r_compact: Hist::new(),
             restart_r_compact: 0,
             held: VecDeque::new(),
+            held_max: 0,
         }
     }
-    /// `o`'s latencies added in; what `o` holds unsettled is its own.
+    /// `o`'s latencies added in, and the most it held; what `o` holds
+    /// unsettled is its own.
     fn merge(&mut self, o: &Hists) {
+        self.held_max = self.held_max.max(o.held_max);
         self.steady.merge(&o.steady);
         self.restart.merge(&o.restart);
         self.restart_replica.merge(&o.restart_replica);
@@ -2459,6 +2477,7 @@ impl Hists {
                     otherwise,
                     rec: r,
                 });
+                self.held_max = self.held_max.max(self.held.len());
                 (self.held.len() >= HELD_MAX).then_some(window)
             }
         }
@@ -2486,13 +2505,15 @@ fn flush_held(slots: &[Slot], h: &mut Hists, verdict: &dyn Fn(u64) -> Option<boo
 /// The latencies a run keeps across its minutes: each of the last 60
 /// minutes' steady, compacts' and replica compactions' operations, for
 /// the hour's figures, and the restarts' and the replica compactions'
-/// over the run, for the end line's.
+/// over the run, for the end line's, with the most a worker held for a
+/// window of the replica's (`Hists::held_max`).
 struct Kept {
     hours: VecDeque<(Hist, Hist, Hist)>,
     restart: Hist,
     restart_replica: Hist,
     restart_behind: Hist,
     r_compact: Hist,
+    held_max: usize,
 }
 
 /// `p99` of each histogram that holds an operation, named: one that holds
@@ -2515,6 +2536,7 @@ impl Kept {
             restart_replica: Hist::new(),
             restart_behind: Hist::new(),
             r_compact: Hist::new(),
+            held_max: 0,
         }
     }
 
@@ -2531,6 +2553,7 @@ impl Kept {
         self.restart_replica.merge(&h.restart_replica);
         self.restart_behind.merge(&h.restart_behind);
         self.r_compact.merge(&h.r_compact);
+        self.held_max = self.held_max.max(h.held_max);
         if self.hours.len() == 60 {
             self.hours.pop_front();
         }
@@ -2553,6 +2576,7 @@ impl Kept {
             ("compact_ops", h.compact.n.to_string()),
             ("r_compact_ops", h.r_compact.n.to_string()),
             ("restart_r_compact_ops", h.restart_r_compact.to_string()),
+            ("r_held_max", h.held_max.to_string()),
         ];
         if h.steady.n > 0 {
             v.extend([
@@ -2588,13 +2612,14 @@ impl Kept {
 
     /// The end line's figures of the run's restarts and of the replica's
     /// own compactions: the operations of each, and their p99 where there
-    /// were any.
+    /// were any; and the most a worker held for one.
     fn end(&self) -> Vec<(&'static str, String)> {
         let mut v: Vec<(&'static str, String)> = vec![
             ("restart_ops", self.restart.n.to_string()),
             ("restart_replica_ops", self.restart_replica.n.to_string()),
             ("restart_behind_ops", self.restart_behind.n.to_string()),
             ("r_compact_ops", self.r_compact.n.to_string()),
+            ("r_held_max", self.held_max.to_string()),
         ];
         v.extend(p99s(&[
             ("p99_restart", &self.restart),
@@ -2674,27 +2699,40 @@ struct Shared {
     /// When the watch saw the latest window begin, `u64::MAX` once it saw
     /// it end or cut it: what its length is held to its bound by
     /// (`bound_r_window`), whether or not its reads' window was settled
-    /// before; and the number of the latest found open past its bound,
-    /// counted once.
+    /// before -- the watch's compaction open while it is not `u64::MAX`;
+    /// and the numbers of the latest found open past its bound and of the
+    /// latest its watch lost, each counted once.
     r_since: AtomicU64,
     r_overlong: AtomicU64,
+    r_lost: AtomicU64,
     /// Whether the watch is looking at that thread now, and since when it
     /// is not (`u64::MAX` while it is); and since the minute's line took
     /// them, the compactions whose end it saw, the longest of them in ms,
-    /// those cut before their end was seen, the windows its counter did not
-    /// move in, those found open past their bound, and those its counter
-    /// judged across a reset (the replica started again in it), on a base
-    /// read before the window began (`stale`), or not at all (`unread`).
+    /// those whose end it did not see (`Edge::Cut`, `Edge::Lost`), those
+    /// it lost while they were open, the windows its counter did not move
+    /// in, those found open past their bound, and those its counter judged
+    /// across a reset (the replica started again in it), on a base read
+    /// before the window began (`stale`), or not at all (`unread`).
     r_watched: AtomicBool,
     r_down_since: AtomicU64,
     r_compacts_seen: AtomicU64,
     r_compact_ms: AtomicU64,
     r_compacts_cut: AtomicU64,
+    r_compacts_lost: AtomicU64,
     r_compacts_false: AtomicU64,
     r_compacts_overlong: AtomicU64,
     r_compacts_reset: AtomicU64,
     r_compacts_stale: AtomicU64,
     r_compacts_unread: AtomicU64,
+    /// The latest restart's span as the reads through the replica see it
+    /// -- from its kill's announcement until they go through it again --
+    /// and the latest window of the replica's seen to end as a compaction,
+    /// each `(from, to)` in ns once it is over (`restart_met`); and since
+    /// the minute's line took it, the longest such window a restart met,
+    /// its length and the restart's span together, in ms
+    /// (`r_compact_kill_ms`): what its reads are bounded by.
+    r_met: Mutex<(Option<Span>, Option<Span>)>,
+    r_kill_ms: AtomicU64,
     /// The longest a compaction of the replica's can plausibly take at the
     /// latest look (`plausible_ms`), from the replica's file then and the
     /// slowest of the primary's compacts on the run, a GB of the primary's
@@ -2798,16 +2836,20 @@ impl Shared {
             r_verdicts: Mutex::new(Vec::new()),
             r_since: AtomicU64::new(u64::MAX),
             r_overlong: AtomicU64::new(0),
+            r_lost: AtomicU64::new(0),
             r_watched: AtomicBool::new(false),
             r_down_since: AtomicU64::new(0),
             r_compacts_seen: AtomicU64::new(0),
             r_compact_ms: AtomicU64::new(0),
             r_compacts_cut: AtomicU64::new(0),
+            r_compacts_lost: AtomicU64::new(0),
             r_compacts_false: AtomicU64::new(0),
             r_compacts_overlong: AtomicU64::new(0),
             r_compacts_reset: AtomicU64::new(0),
             r_compacts_stale: AtomicU64::new(0),
             r_compacts_unread: AtomicU64::new(0),
+            r_met: Mutex::new((None, None)),
+            r_kill_ms: AtomicU64::new(0),
             r_bound_ms: AtomicU64::new(R_COMPACT_FLOOR_MS),
             p_file: AtomicU64::new(0),
             p_compact_ms_per_gb: AtomicU64::new(0),
@@ -4974,9 +5016,10 @@ fn compactions(addr: &str) -> Option<u64> {
 /// not yet there -- a compaction under way left open for the next to see
 /// whether its thread is still at work (`CompactWatch::after`), and 60 s
 /// after one found no thread so named, until the run stops; said once each
-/// time it goes, and as it comes back. A window whose watch stays gone, or
-/// that stays open past what its file plausibly takes, is cut at a
-/// minute's look (`bound_r_window`).
+/// time it goes, and as it comes back. A window whose watch stays gone is
+/// lost, and one that stays open past what its file plausibly takes is
+/// past its bound, each found at a minute's look and its reads' window cut
+/// (`bound_r_window`).
 fn watch_replica(sh: &Shared, kit: &Kit) {
     use std::process::{Command, Stdio};
     let name = format!("{}-replica-watch", kit.name);
@@ -5145,28 +5188,34 @@ impl Counter {
                 }
                 replica_compaction(sh, edge, count);
             }
-            Some(Edge::Cut(_)) => replica_compaction(sh, edge, Count::Unread),
+            Some(Edge::Cut(_) | Edge::Lost(_)) => replica_compaction(sh, edge, Count::Unread),
         }
     }
 }
 
-/// Why a window of the replica's was cut before the watch saw its end.
+/// Why the reads' window of the replica's was cut before the watch saw
+/// its end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cut {
     /// A worker held `HELD_MAX` operations for it.
     Held,
-    /// Its watch gone `R_WATCH_GONE` and more at a minute's look.
+    /// Its watch gone `R_WATCH_GONE` and more at a minute's look: lost.
     Unwatched,
     /// Open past what a compaction of the replica's file plausibly takes
     /// (`plausible_ms`).
     Overlong,
 }
 
-/// The replica's window `id` cut at `t` for `why`, unless it is settled
-/// already or another has begun: said as cut, never counted as an end
-/// (`r_compacts_cut`), and its operations counted as if no window had
-/// been -- each its class otherwise (`Classes`, `Hists::settle`). Whether
-/// it was.
+/// The reads' window of the replica's `id` cut at `t` for `why`, unless it
+/// is settled already or another has begun: said, and its operations
+/// counted as if no window had been -- each its class otherwise
+/// (`Classes`, `Hists::settle`). Whether it was. It counts nothing: the
+/// compaction's end is still the watch's to see and the counter's to
+/// judge (`replica_compaction`), and its caller counts what it found --
+/// past its bound (`r_compacts_overlong`), or lost (`r_compacts_lost`).
+/// Before, every cut counted as one whose end was not seen
+/// (`r_compacts_cut`): a window that ended past its bound, its end seen,
+/// failed the watch's criterion as "cut before their end was seen".
 fn cut_r_window(sh: &Shared, id: u64, t: u64, why: Cut) -> bool {
     let minute = |t: u64| t / 60_000_000_000 + 1;
     let mut win = sh.r_window.lock().unwrap();
@@ -5182,20 +5231,19 @@ fn cut_r_window(sh: &Shared, id: u64, t: u64, why: Cut) -> bool {
         }
     }
     drop(win);
-    sh.r_compacts_cut.fetch_add(1, Ordering::Relaxed);
     let since = match sh.r_since.load(Ordering::SeqCst) {
         u64::MAX => from,
         s => s,
     };
     let on = t.saturating_sub(since) as f64 / 1e9;
     say(format!(
-        "the replica's compaction window of minute {} cut in minute {}, {on:.1} s on: {}; not counted, its operations counted as if no window had been",
+        "the replica's compaction window of minute {} cut in minute {}, {on:.1} s on: {}; its operations counted as if no window had been",
         minute(since),
         minute(t),
         match why {
             Cut::Held => format!("a worker held {HELD_MAX} operations for it, the most it holds"),
             Cut::Unwatched => format!(
-                "its watch gone {:.0} s",
+                "its watch gone {:.0} s, LOST",
                 t.saturating_sub(sh.r_down_since.load(Ordering::SeqCst)) as f64 / 1e9
             ),
             Cut::Overlong => format!(
@@ -5218,25 +5266,34 @@ fn plausible_ms(r_file: u64, p_ms_per_gb: u64) -> u64 {
     (ms.min(u64::MAX as u128) as u64).max(R_COMPACT_FLOOR_MS)
 }
 
-/// The replica's latest window held to its bounds at the minute's look
-/// `now`, `watched` whether the watch looks at its thread: open past what
+/// The replica's latest compaction held to its bounds at the minute's look
+/// `now`, `watched` whether the watch looks at its thread. Open past what
 /// a compaction of its file plausibly takes (`Shared::r_bound_ms`), the
 /// watch looking, it is no compaction a server ends but a thread that
 /// never sleeps again -- counted (`r_compacts_overlong`), a FAIL of its
-/// own, and cut, never an excuse for its reads; its reads' window open
-/// with the watch gone `R_WATCH_GONE` and more, it is cut. Before, either
-/// stayed open to the run's end, passing as the one open at the last look.
+/// own, and its reads' window cut, never an excuse for them. Open with
+/// the watch gone `R_WATCH_GONE` and more, it is lost (`r_compacts_lost`),
+/// which no run passes the watch's criterion with, and its reads' window
+/// cut. Both are judged by the watch's compaction (`r_since`), not its
+/// reads' window: a thread found past its bound while watched, or one a
+/// worker's held had cut, then its watch gone with it never sleeping
+/// again, was never lost -- its counter unmoved, nothing seen, both
+/// criteria passed.
 fn bound_r_window(sh: &Shared, now: u64, watched: bool) {
-    let (id, from, to) = *sh.r_window.lock().unwrap();
-    if id == 0 {
+    // The two read together: a window begins and ends under the lock.
+    let (id, since) = {
+        let w = sh.r_window.lock().unwrap();
+        (w.0, sh.r_since.load(Ordering::SeqCst))
+    };
+    if id == 0 || since == u64::MAX {
         return;
     }
-    let since = sh.r_since.load(Ordering::SeqCst);
+    let minute = |t: u64| t / 60_000_000_000 + 1;
     let bound = sh
         .r_bound_ms
         .load(Ordering::SeqCst)
         .saturating_mul(1_000_000);
-    if watched && since != u64::MAX && now.saturating_sub(since) > bound {
+    if watched && now.saturating_sub(since) > bound {
         if sh.r_overlong.swap(id, Ordering::SeqCst) != id {
             sh.r_compacts_overlong.fetch_add(1, Ordering::Relaxed);
             // Its reads' window cut before -- a worker's held at the most:
@@ -5245,7 +5302,7 @@ fn bound_r_window(sh: &Shared, now: u64, watched: bool) {
                 say(format!(
                     "the replica's compaction thread at work {:.0} s in minute {}, OPEN PAST the {:.0} s a compaction of its file plausibly takes",
                     now.saturating_sub(since) as f64 / 1e9,
-                    now / 60_000_000_000 + 1,
+                    minute(now),
                     bound as f64 / 1e9
                 ));
             }
@@ -5254,33 +5311,75 @@ fn bound_r_window(sh: &Shared, now: u64, watched: bool) {
     }
     let down = sh.r_down_since.load(Ordering::SeqCst);
     if !watched
-        && from != u64::MAX
-        && to == u64::MAX
         && down != u64::MAX
         && now.saturating_sub(down) >= R_WATCH_GONE
+        && sh.r_lost.swap(id, Ordering::SeqCst) != id
     {
-        cut_r_window(sh, id, now, Cut::Unwatched);
+        sh.r_compacts_lost.fetch_add(1, Ordering::Relaxed);
+        if !cut_r_window(sh, id, now, Cut::Unwatched) {
+            say(format!(
+                "the replica's compaction thread at work from minute {}, its watch gone {:.0} s in minute {}: LOST, its reads' window cut before",
+                minute(since),
+                now.saturating_sub(down) as f64 / 1e9,
+                minute(now)
+            ));
+        }
+    }
+}
+
+/// A restart's span as the reads through the replica see it, or a window
+/// of the replica's seen to end as a compaction, done: where the latest of
+/// each overlap, the window's reads waited out both -- a kill landing in
+/// one, its workers held by the compaction and then by the primary's
+/// restart and the replica's return, or the other way round -- and their
+/// bound is the two together (`r_compact_kill_ms`), not the compaction's
+/// alone. Whichever is done second pairs them. The fifth dry run of
+/// 2026-11-24's kill of minute 60 landed in the replica's compaction of
+/// that minute -- it compacts every 20 minutes or so, the kills come every
+/// 30 -- its 13 888 operations due in the restart all the compaction's.
+fn restart_met(sh: &Shared, restart: Option<Span>, window: Option<Span>) {
+    let mut m = sh.r_met.lock().unwrap();
+    if restart.is_some() {
+        m.0 = restart;
+    }
+    if window.is_some() {
+        m.1 = window;
+    }
+    if let (Some(r), Some(w)) = *m {
+        if r.0 <= w.1 && w.0 <= r.1 {
+            let ns = (w.1 - w.0).saturating_add(r.1 - r.0);
+            sh.r_kill_ms
+                .fetch_max(ns.div_ceil(1_000_000), Ordering::Relaxed);
+        }
     }
 }
 
 /// A compaction of the replica's own begun or ended, as its window for
-/// the reads through it, and said on the log. One whose end was seen is a
-/// compaction where its counter says so (`Count::was`) -- or could not
-/// say, the watch's word -- and none where it says not: its window closed
-/// to nothing, and the operations held for it counted as they would be
+/// the reads through it, and said on the log. One whose end was seen is
+/// judged by its counter (`Count::was`) -- or, where it could not say, by
+/// the watch's word: a compaction where it moved, its length kept
+/// (`r_compact_ms`), and none where it did not, its window closed to
+/// nothing and the operations held for it counted as they would be
 /// otherwise (`Classes`, `Hists::settle`); one judged across a reset, on a
 /// stale base or on no read is counted so on the minute's line and said.
-/// One cut before its end was seen keeps the watch's word for its reads,
-/// and is never counted as an end: a watch that went in the middle of one
-/// and saw it at work again counted it twice, and the run's end one more.
-/// One that ended past what its file plausibly takes is cut as it would
-/// have been at a look (`bound_r_window`); one cut before its end
-/// (`cut_r_window`) is settled already, its end said and nothing more.
+/// One that ended past what its file plausibly takes is counted past its
+/// bound (`r_compacts_overlong`) and its reads' window cut, as a look
+/// would have (`bound_r_window`); its end, seen, is judged by the counter
+/// all the same, and so is that of one whose reads' window was cut before
+/// -- a worker's held, or a look finding it past its bound -- neither
+/// excusing its reads: before, both were counted as cut before their end
+/// was seen (`r_compacts_cut`), and the watch's criterion failed on an end
+/// it saw. One its watch lost at a look (`r_lost`) has its end said and
+/// nothing more. One whose end was not seen keeps the watch's word for its
+/// reads and is counted as cut, never as an end -- a watch that went in
+/// the middle of one and saw it at work again counted it twice, and the
+/// run's end one more -- and as lost where the watch lost it
+/// (`Edge::Lost`).
 fn replica_compaction(sh: &Shared, edge: Option<Edge>, count: Count) {
     let minute = |t: u64| t / 60_000_000_000 + 1;
     let mut win = sh.r_window.lock().unwrap();
     let (id, from, _) = *win;
-    let (to, cut) = match edge {
+    let (to, unseen, lost) = match edge {
         None => return,
         Some(Edge::Began(from)) => {
             *win = (id + 1, from, u64::MAX);
@@ -5292,93 +5391,121 @@ fn replica_compaction(sh: &Shared, edge: Option<Edge>, count: Count) {
             ));
             return;
         }
-        Some(Edge::Ended(to)) => (to, false),
-        Some(Edge::Cut(to)) => (to, true),
+        Some(Edge::Ended(to)) => (to, false, false),
+        Some(Edge::Cut(to)) => (to, true, false),
+        Some(Edge::Lost(to)) => (to, true, true),
     };
-    if id == 0 {
-        return;
-    }
-    let since = sh.r_since.swap(u64::MAX, Ordering::SeqCst);
-    if sh.r_verdict(id).is_some() {
-        drop(win);
-        if since != u64::MAX {
-            say(format!(
-                "the replica's compaction thread {} in minute {}, {:.1} s after it began in minute {}: its window cut before, not counted",
-                if cut { "lost" } else { "asleep again" },
-                minute(to),
-                to.saturating_sub(since) as f64 / 1e9,
-                minute(since)
-            ));
-        }
-        return;
-    }
-    let took = to.saturating_sub(from);
-    let bound = sh
-        .r_bound_ms
-        .load(Ordering::SeqCst)
-        .saturating_mul(1_000_000);
-    if !cut && took > bound {
-        drop(win);
-        if sh.r_overlong.swap(id, Ordering::SeqCst) != id {
-            sh.r_compacts_overlong.fetch_add(1, Ordering::Relaxed);
-        }
-        cut_r_window(sh, id, to, Cut::Overlong);
-        return;
-    }
-    let was = cut || count.was();
-    *win = match was {
-        true => (id, from, to),
-        false => (id, u64::MAX, u64::MAX),
+    let since = match id {
+        0 => u64::MAX,
+        _ => sh.r_since.swap(u64::MAX, Ordering::SeqCst),
     };
-    {
+    if since == u64::MAX {
+        return;
+    }
+    let took = to.saturating_sub(since);
+    // Its reads' window cut before its end: a worker's held, a look past
+    // its bound or with its watch gone.
+    let settled = sh.r_verdict(id).is_some();
+    let verdict = |was: bool| {
         let mut v = sh.r_verdicts.lock().unwrap();
         if v.len() < id as usize {
             v.resize(id as usize, was);
         }
+    };
+    if unseen {
+        sh.r_compacts_cut.fetch_add(1, Ordering::Relaxed);
+        if lost && sh.r_lost.swap(id, Ordering::SeqCst) != id {
+            sh.r_compacts_lost.fetch_add(1, Ordering::Relaxed);
+        }
+        if !settled {
+            *win = (id, from, to);
+            verdict(true);
+        }
+        drop(win);
+        say(format!(
+            "the replica's compaction of its own from minute {} {} in minute {}, {:.1} s on, its end not seen: not counted{}",
+            minute(since),
+            if lost { "LOST by its watch" } else { "cut" },
+            minute(to),
+            took as f64 / 1e9,
+            if settled { ", its reads' window cut before" } else { "" }
+        ));
+        return;
+    }
+    if sh.r_lost.load(Ordering::SeqCst) == id {
+        drop(win);
+        say(format!(
+            "the replica's compaction thread asleep again in minute {}, {:.1} s after it began in minute {}: its watch lost it before, not counted",
+            minute(to),
+            took as f64 / 1e9,
+            minute(since)
+        ));
+        return;
+    }
+    let bound = sh
+        .r_bound_ms
+        .load(Ordering::SeqCst)
+        .saturating_mul(1_000_000);
+    let overlong = took > bound;
+    if overlong && sh.r_overlong.swap(id, Ordering::SeqCst) != id {
+        sh.r_compacts_overlong.fetch_add(1, Ordering::Relaxed);
+    }
+    let was = count.was();
+    // Its reads the compaction's: an end within its bound, its window not
+    // cut before.
+    let held = was && !overlong && !settled;
+    if !settled && !overlong {
+        *win = match was {
+            true => (id, from, to),
+            false => (id, u64::MAX, u64::MAX),
+        };
+        verdict(was);
     }
     drop(win);
-    let judged = match (cut, count) {
-        (true, _) => "",
-        (false, Count::Read { stale: false, .. }) => "",
-        (false, Count::Read { stale: true, .. }) => {
+    if overlong && !settled {
+        cut_r_window(sh, id, to, Cut::Overlong);
+    }
+    let judged = match count {
+        Count::Read { stale: false, .. } => "",
+        Count::Read { stale: true, .. } => {
             sh.r_compacts_stale.fetch_add(1, Ordering::Relaxed);
             ", judged on its counter's read before it began, the read as it began failed"
         }
-        (false, Count::Reset { .. }) => {
+        Count::Reset { .. } => {
             sh.r_compacts_reset.fetch_add(1, Ordering::Relaxed);
             ", its counter lower than as it began -- the replica started again in it -- judged by its count since"
         }
-        (false, Count::Unread) => {
+        Count::Unread => {
             sh.r_compacts_unread.fetch_add(1, Ordering::Relaxed);
             ", its counter not read: the watch's word taken"
         }
     };
-    let said = match (cut, was) {
-        (true, _) => {
-            sh.r_compacts_cut.fetch_add(1, Ordering::Relaxed);
-            format!(
-                "the replica's compaction of its own from minute {} cut in minute {}, {:.1} s on, its end not seen: not counted",
-                minute(from),
-                minute(to),
-                took as f64 / 1e9
-            )
-        }
-        (false, true) => {
+    let reads = match (overlong, settled) {
+        (false, false) => "",
+        (true, _) => ", PAST what a compaction of its file plausibly takes: its reads counted as if no window had been",
+        (false, true) => ", its reads' window cut before: its reads counted as if no window had been",
+    };
+    let said = match was {
+        true => {
             sh.r_compacts_seen.fetch_add(1, Ordering::Relaxed);
-            sh.r_compact_ms
-                .fetch_max(took.div_ceil(1_000_000), Ordering::Relaxed);
+            if held {
+                sh.r_compact_ms
+                    .fetch_max(took.div_ceil(1_000_000), Ordering::Relaxed);
+                restart_met(sh, None, Some((since, to)));
+            }
             format!(
-                "the replica's compaction of its own ended in minute {}, {:.1} s{judged}",
+                "the replica's compaction of its own ended in minute {}, {:.1} s{judged}{reads}",
                 minute(to),
                 took as f64 / 1e9,
             )
         }
-        (false, false) => {
+        false => {
             sh.r_compacts_false.fetch_add(1, Ordering::Relaxed);
             format!(
-                "the replica's compaction thread at work from minute {} for {:.1} s, its compaction counter counting none in it{judged}: no compaction, its reads counted as they would be",
-                minute(from),
-                took as f64 / 1e9
+                "the replica's compaction thread at work from minute {} for {:.1} s, its compaction counter counting none in it{judged}: no compaction, its reads counted as they would be{}",
+                minute(since),
+                took as f64 / 1e9,
+                if overlong { ", PAST what a compaction of its file plausibly takes" } else { "" }
             )
         }
     };
@@ -5649,6 +5776,22 @@ fn run(o: &Opts) {
         // The operations held for a replica's compaction its end settled
         // are counted as it said, the others kept for a later minute's --
         // but the last line's, which settles every one (`flush_held`).
+        //
+        // Settled here, before the watch's counters are read for the line
+        // (`r_compacts_watched` and the rest, below): an end seen between
+        // the two is on this line, its operations on the next. The order
+        // stays, as no other closes it. A worker settles what it holds as
+        // it ends its next operation (`Hists::took`), a few ms after the
+        // end, into the figures the next line takes, so settling after the
+        // counters would leave the same end's operations on the next line
+        // still; only the verdicts, the counters and every worker's settle
+        // under one lock would, on the workers' path. And no verdict pairs
+        // a line's operations with its count: the criteria take the run's
+        // operations (`r_compact_ops`, `p99_r_compact` on the end line)
+        // and the longest window of any line, and a window across a
+        // minute's end has its operations on both lines anyway -- the fifth
+        // dry run's of minute 20 ended on its line 20 and all 144 302 of
+        // its operations were on line 21.
         let verdict = |id: u64| sh.r_verdict(id);
         for s in &sh.slots {
             let mut g = s.hists.lock().unwrap();
@@ -5656,6 +5799,8 @@ fn run(o: &Opts) {
             let held = std::mem::take(&mut g.held);
             let x = std::mem::replace(&mut *g, Hists::new());
             g.held = held;
+            // The next line's most held begins at what is held now.
+            g.held_max = g.held.len();
             drop(g);
             h.merge(&x);
             idle += (s.done.swap(0, Ordering::Relaxed) == 0) as u64;
@@ -5862,6 +6007,10 @@ fn run(o: &Opts) {
                 sh.r_compacts_cut.swap(0, Ordering::Relaxed).to_string(),
             ),
             (
+                "r_compacts_lost",
+                sh.r_compacts_lost.swap(0, Ordering::Relaxed).to_string(),
+            ),
+            (
                 "r_compacts_false",
                 sh.r_compacts_false.swap(0, Ordering::Relaxed).to_string(),
             ),
@@ -5963,6 +6112,10 @@ fn run(o: &Opts) {
         match sh.r_compact_ms.swap(0, Ordering::Relaxed) {
             0 => {}
             ms => v.push(("r_compact_ms", ms.to_string())),
+        }
+        match sh.r_kill_ms.swap(0, Ordering::Relaxed) {
+            0 => {}
+            ms => v.push(("r_compact_kill_ms", ms.to_string())),
         }
         if let Some(ms) = open_ms {
             v.push(("r_compact_open_ms", ms.to_string()));
@@ -6608,6 +6761,15 @@ fn restart(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+    // The restart as the reads through the replica see it: none is sent
+    // through it from the announcement until it is back and the grace
+    // after the server answered is over (`restarting`). A compaction of
+    // the replica's it met held its reads the longer by it (`restart_met`).
+    restart_met(
+        sh,
+        Some((from, sh.ns().max(back.saturating_add(GRACE)))),
+        None,
+    );
 }
 
 // ----------------------------------------------------------------- report
@@ -7508,20 +7670,34 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     // A restart's own time is bounded, and so is the wait of an operation
-    // due in it: no longer than the run's longest restart and two seconds
-    // -- one held longer was held by something else than the restart. The
-    // wait is judged on the kills the loop met on its schedule: at one it
-    // met behind, every operation due waits out the backlog first, which
-    // is the open loop's verdict to judge, not the restart's. The third
-    // dry run of 2026-11-24 held its p99 of 145 s to the backlog at the
-    // look before its kill of minute 60, 114 s, and failed -- the kill
-    // waited five minutes for a compact, the loop 166 s behind when it came.
-    // A read through the replica due in one waits longer by design: none
-    // is sent through it from the kill's announcement until it says it is
-    // back (`replica_back_ms`, from the server's answering again) and the
-    // restart's grace is over, so its bound is the longest of a restart
-    // and that wait, and two seconds. A line written before the two were
-    // apart holds them together in `p99_restart`, held to the primary's.
+    // due in it: no longer than the longest restart it could have been due
+    // in and two seconds -- one held longer was held by something else than
+    // the restart. The wait is judged on the kills the loop met on its
+    // schedule: at one it met behind, every operation due waits out the
+    // backlog first, which is the open loop's verdict to judge, not the
+    // restart's. The third dry run of 2026-11-24 held its p99 of 145 s to
+    // the backlog at the look before its kill of minute 60, 114 s, and
+    // failed -- the kill waited five minutes for a compact, the loop 166 s
+    // behind when it came. A read through the replica due in one waits
+    // longer by design: none is sent through it from the kill's
+    // announcement until it says it is back (`replica_back_ms`, from the
+    // server's answering again) and the restart's grace is over, so its
+    // bound is the longest of a restart and that wait, and two seconds. A
+    // line written before the two were apart holds them together in
+    // `p99_restart`, held to the primary's.
+    //
+    // A kill none of whose operations the two figures hold sets neither
+    // bound: one met behind the schedule, whose operations go to the
+    // backlog's figure (`restart_behind`) or the replica's compaction's,
+    // and one met on it whose every operation was the replica's
+    // compaction's, its workers held by reads through it as the kill came.
+    // Its restart bounds no operation judged, and only loosened the bound
+    // of the others': the fifth dry run of 2026-11-24's kill of minute 60
+    // was both, the loop 15.9 s behind with the replica compacting and its
+    // 13 888 operations all the compaction's, and its restart of 6.0 s set
+    // the bound of 8.0 s the other two kills' operations were held to,
+    // their restarts 3.6 and 3.5 s. Its operations are said, with their
+    // count, as the compaction's.
     let restart_max = settings.map_or(0, |s| s.restart_max) as f64;
     let slow = broke(&|m| get(m, "restart_ms").is_some_and(|x| x > restart_max * 1e3));
     let p99r = end.and_then(|m| get(m, "p99_restart"));
@@ -7529,12 +7705,6 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     let p99rr = end.and_then(|m| get(m, "p99_restart_replica"));
     let rr_ops = end.and_then(|m| get(m, "restart_replica_ops"));
     let grace_ms = GRACE as f64 / 1e6;
-    let rbound = minutes
-        .iter()
-        .filter_map(|(_, m)| Some(get(m, "restart_ms")? + get(m, "replica_back_ms")?.max(grace_ms)))
-        .fold(0.0f64, f64::max)
-        / 1e3
-        + 2.0;
     let held_by_replica = sum("restart_r_compact_ops");
     let longest = end
         .and_then(|m| get(m, "restart_ms_max"))
@@ -7565,17 +7735,124 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         .filter(|x| x.1 > ON_SCHEDULE_S)
         .collect();
     let on_time = kills_seen.len() - behind_at.len();
-    let bound = longest / 1e3 + 2.0;
+    // A kill's own operations: those on its lines, from the line before
+    // its own to the line before the next kill's -- a restart is answered
+    // in seconds, the kills half an hour apart -- `None` where its lines
+    // have no such figure (a run's from before it was written).
+    let of_kill = |k: u64, key: &str| -> Option<f64> {
+        let next = kills_seen
+            .iter()
+            .map(|x| x.0)
+            .find(|&j| j > k)
+            .unwrap_or(u64::MAX);
+        let xs: Vec<f64> = minutes
+            .iter()
+            .filter(|(j, _)| *j + 1 >= k && *j + 1 < next)
+            .filter_map(|(_, m)| get(m, key))
+            .collect();
+        (!xs.is_empty()).then(|| xs.iter().sum())
+    };
+    let judged_in = |k: u64| {
+        Some(of_kill(k, "restart_ops")? + of_kill(k, "restart_replica_ops").unwrap_or(0.0))
+    };
+    let rc_of = |ks: &[u64]| -> f64 {
+        ks.iter()
+            .filter_map(|&k| of_kill(k, "restart_r_compact_ops"))
+            .sum()
+    };
+    // The kills met on the schedule none of whose operations is judged.
+    let none_judged: Vec<u64> = kills_seen
+        .iter()
+        .filter(|x| x.1 <= ON_SCHEDULE_S && judged_in(x.0) == Some(0.0))
+        .map(|x| x.0)
+        .collect();
+    let unbounding: Vec<u64> = behind_at
+        .iter()
+        .map(|x| x.0)
+        .chain(none_judged.iter().copied())
+        .collect();
+    let bounding = minutes
+        .iter()
+        .filter(|(k, _)| !unbounding.contains(k))
+        .map(|x| x.1)
+        .collect::<Vec<_>>();
+    let longest_of = |ms: &[&HashMap<String, f64>],
+                      f: &dyn Fn(&HashMap<String, f64>) -> Option<f64>| {
+        ms.iter().filter_map(|m| f(m)).fold(0.0f64, f64::max)
+    };
+    let all: Vec<&HashMap<String, f64>> = minutes.iter().map(|x| x.1).collect();
+    let back_of = |m: &HashMap<String, f64>| {
+        Some(get(m, "restart_ms")? + get(m, "replica_back_ms")?.max(grace_ms))
+    };
+    // None left to bound -- every kill behind or none judged -- the
+    // longest of all, as before: no operation is judged by it then.
+    let bound = match longest_of(&bounding, &|m| get(m, "restart_ms")) {
+        0.0 => longest,
+        x => x,
+    } / 1e3
+        + 2.0;
+    let rbound = match longest_of(&bounding, &back_of) {
+        0.0 => longest_of(&all, &back_of),
+        x => x,
+    } / 1e3
+        + 2.0;
     let p99b = end.and_then(|m| get(m, "p99_restart_behind"));
+    let ids = |ks: &[u64]| -> (&str, &str, String) {
+        match ks.len() {
+            1 => ("", "it", list(ks)),
+            _ => ("s", "them", list(ks)),
+        }
+    };
+    let behind_rc = rc_of(&behind_at.iter().map(|x| x.0).collect::<Vec<_>>());
     let apart = match behind_at.is_empty() {
         true => String::new(),
-        false => format!(
-            "; {} met behind it, at minutes {} ({:.0} s at the most), whose operations' p99 {} is the backlog's, said apart",
-            behind_at.len(),
-            list(&behind_at.iter().map(|x| x.0).collect::<Vec<_>>()),
-            behind_at.iter().map(|x| x.1).fold(0.0f64, f64::max),
-            p99b.map_or("?".into(), |x| format!("{:.1} s", x / 1e6))
-        ),
+        false => {
+            let ks: Vec<u64> = behind_at.iter().map(|x| x.0).collect();
+            let (_, it, at) = ids(&ks);
+            format!(
+                "; {} met behind it, at minutes {at} ({:.0} s at the most), {}",
+                behind_at.len(),
+                behind_at.iter().map(|x| x.1).fold(0.0f64, f64::max),
+                match (p99b, behind_rc > 0.0) {
+                    (Some(x), false) => format!(
+                        "whose operations' p99 {:.1} s is the backlog's, said apart",
+                        x / 1e6
+                    ),
+                    (Some(x), true) => format!(
+                        "whose operations' p99 {:.1} s is the backlog's, said apart, and {behind_rc:.0} due in {it} the replica's own compaction's, judged with it",
+                        x / 1e6
+                    ),
+                    (None, true) => format!(
+                        "every operation due in {it} gone to the replica's own compaction, {behind_rc:.0} of them, judged with it, and none to the backlog's figure"
+                    ),
+                    (None, false) => format!(
+                        "no figure of the backlog's for the operations due in {it} on this run's lines"
+                    ),
+                }
+            )
+        }
+    };
+    let none_rc = rc_of(&none_judged);
+    let none_said = match none_judged.is_empty() {
+        true => String::new(),
+        false => {
+            let (s, it, at) = ids(&none_judged);
+            format!(
+                "; at minute{s} {at}, met on it, every operation due in {it} gone to the replica's own compaction, {none_rc:.0} of them, judged with it"
+            )
+        }
+    };
+    let unbounding_said = match unbounding.is_empty() {
+        true => String::new(),
+        false => {
+            let mut ks = unbounding.clone();
+            ks.sort_unstable();
+            let (s, it, at) = ids(&ks);
+            format!(
+                "; the restart{s} at minute{s} {at} set{} no bound, none of the operations due in {it} among them",
+                if s.is_empty() { "s" } else { "" }
+            )
+        }
     };
     // A line before the reads through the replica were apart has no
     // figure of their own; one of a run that sent none through it during
@@ -7607,6 +7884,8 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // as the kill came -- judged none, and passed on a p99 of 0 written
     // for none.
     let judged_ops = kills_seen.is_empty() || r_ops.is_some_and(|n| n > 0.0);
+    let judged_kills = on_time - none_judged.len();
+    let held_rest = (held_by_replica - behind_rc - none_rc).max(0.0);
     v.push((
         CRITERIA[13],
         settings.is_some()
@@ -7616,7 +7895,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             && (kills_seen.is_empty() || p99r.is_some_and(|x| x <= bound * 1e6))
             && replica_ok,
         format!(
-            "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; {}{apart}{}; {:.0} met a restart",
+            "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; {}{none_said}{apart}{}; {:.0} met a restart",
             longest / 1e3,
             minutes_said(&slow),
             median(&starts) / 1e3,
@@ -7632,17 +7911,17 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 ),
                 (true, true, _, None) => "no kill, no operation due in one".to_string(),
                 (true, true, _, Some(x)) => format!(
-                    "p99 of the operations due in one {:.1} s of {bound:.1}{through_replica}{}",
+                    "p99 of the operations due in one {:.1} s of {bound:.1}{through_replica}{}{unbounding_said}",
                     x / 1e6,
                     match kills_seen.is_empty() {
                         true => ", no kill".to_string(),
-                        false => format!(", over the {on_time} kills the loop met on its schedule"),
+                        false => format!(", over the {judged_kills} kills the loop met on its schedule"),
                     }
                 ),
             },
-            match held_by_replica > 0.0 {
+            match held_rest > 0.0 {
                 true => format!(
-                    "; {held_by_replica:.0} due in one the replica's own compaction's, their workers held by reads through it as it compacted, judged with it"
+                    "; {held_rest:.0} due in one the replica's own compaction's, their workers held by reads through it as it compacted, judged with it"
                 ),
                 false => String::new(),
             },
@@ -7859,7 +8138,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // watch was looking then: one whose watch had gone at the last look is
     // no measure -- a watch gone in it held it open to the run's end, its
     // length so far hours. The stall itself, the server's (a compaction's
-    // reads waiting on the replica), is said, not judged here.
+    // reads waiting on the replica), is said, not judged here. A
+    // compaction a kill's restart met held its reads the longer by the
+    // restart -- its workers held by it, then by the primary's restart and
+    // the replica's return, or the other way round -- and its bound is the
+    // two together (`r_compact_kill_ms`, `restart_met`): the fifth dry run
+    // of 2026-11-24's kill of minute 60 landed in the replica's compaction
+    // of that minute, 33.5 s, and its restart held reads through the
+    // replica 18 s and more. The replica compacts every 20 minutes or so
+    // and the kills come every 30, so an eight-hour run meets it again.
     let last = minutes.last().map(|x| x.1);
     let alive_at_end = last.is_some_and(|m| get(m, "r_watch") == Some(1.0));
     let open_ms = last.and_then(|m| get(m, "r_compact_open_ms"));
@@ -7869,19 +8156,31 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     };
     let rc_ops = end.and_then(|m| get(m, "r_compact_ops"));
     let rc_p99 = end.and_then(|m| get(m, "p99_r_compact"));
-    let rc_longest = minutes
+    let rc_alone = minutes
         .iter()
         .filter_map(|(_, m)| get(m, "r_compact_ms"))
         .chain(open_ms.filter(|_| alive_at_end))
         .fold(0.0f64, f64::max);
+    let rc_kill = minutes
+        .iter()
+        .filter_map(|(_, m)| get(m, "r_compact_kill_ms"))
+        .fold(0.0f64, f64::max);
+    let rc_longest = rc_alone.max(rc_kill);
     let rc_bound = rc_longest / 1e3 + 2.0;
+    let rc_by = match rc_kill > rc_alone {
+        false => format!("the longest watched, {:.1} s, and two", rc_alone / 1e3),
+        true => format!(
+            "the longest watched with the restart of a kill that landed in it, {:.1} s, and two; the longest alone {:.1} s",
+            rc_kill / 1e3,
+            rc_alone / 1e3
+        ),
+    };
     let (rc_ok, rc_said) = match (rc_ops, rc_p99) {
         (Some(n), Some(p)) if n > 0.0 && rc_longest > 0.0 => (
             p <= rc_bound * 1e6,
             format!(
-                "p99 of the {n:.0} operations they held {:.1} s of {rc_bound:.1} (the longest watched, {:.1} s, and two); {:.0} of them due in a restart{unwatched_open}",
+                "p99 of the {n:.0} operations they held {:.1} s of {rc_bound:.1} ({rc_by}); {:.0} of them due in a restart{unwatched_open}",
                 p / 1e6,
-                rc_longest / 1e3,
                 sum("restart_r_compact_ops")
             ),
         ),
@@ -7913,7 +8212,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // then, or cut by the watch's own going -- or the watch saw and the
     // counter did not, fails: a read through the replica in it was classed
     // by a window that was not there. Those the counter judged across a
-    // reset, on a base read before they began, or not at all are said.
+    // reset, on a base read before they began, or not at all are said. A
+    // window the watch lost while it was open -- gone a minute at a look,
+    // or the thread found asleep by the next container (`r_compacts_lost`)
+    // -- or open at the last look with the watch gone, is unseen, and
+    // fails whatever the counter says: a thread that never slept again,
+    // its watch gone with it, left the counter unmoved and the two agreed.
+    // One past its bound is the next criterion's: its end, seen, is judged
+    // by the counter like any other's, and never counted as cut -- before,
+    // it failed here too, "cut before their end was seen".
     let watch_said = minutes.iter().any(|(_, m)| get(m, "r_watch").is_some());
     let watched_any = minutes.iter().any(|(_, m)| get(m, "r_watch") == Some(1.0));
     let counted = sum("r_auto_compacts");
@@ -7926,9 +8233,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         .map(|(k, _)| *k)
         .collect();
     let agree = watched == counted || open_at_end && counted == watched + 1.0;
+    let lost = sum("r_compacts_lost");
+    let lost_at_end = open_last && !alive_at_end;
+    let many = |n: f64, one: &'static str, more: &'static str| if n == 1.0 { one } else { more };
     v.push((
         CRITERIA[21],
-        watched_any && agree,
+        watched_any && agree && lost == 0.0 && !lost_at_end,
         match (watch_said, watched_any) {
             (false, _) => format!(
                 "not watched: no line says whether the watch looked; {counted:.0} by its counter"
@@ -7937,19 +8247,32 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 "not watched at any look; {counted:.0} by its counter"
             ),
             (true, true) => format!(
-                "{counted:.0} by its counter, {watched:.0} seen to end at its compaction thread{}{}{}{}{}",
+                "{counted:.0} by its counter, {watched:.0} seen to end at its compaction thread{}{}{}{}{}{}",
                 match (open_last, alive_at_end) {
                     (true, true) => "; one open at the last look",
-                    (true, false) => "; one open at the last look, its watch GONE: no allowance",
+                    (true, false) => "; one open at the last look, its watch GONE: unseen, no allowance",
                     (false, _) => "",
+                },
+                match lost {
+                    0.0 => String::new(),
+                    l => format!(
+                        "; {l:.0} LOST by the watch while open, {} end unseen",
+                        many(l, "its", "their")
+                    ),
                 },
                 match sum("r_compacts_cut") {
                     0.0 => String::new(),
-                    c => format!("; {c:.0} cut before their end was seen, not counted"),
+                    c => format!(
+                        "; {c:.0} cut before {} end was seen, not counted",
+                        many(c, "its", "their")
+                    ),
                 },
                 match sum("r_compacts_false") {
                     0.0 => String::new(),
-                    f => format!("; {f:.0} windows its counter did not move in, no compaction"),
+                    f => format!(
+                        "; {f:.0} {} its counter did not move in, no compaction",
+                        many(f, "window", "windows")
+                    ),
                 },
                 [
                     ("r_compacts_reset", "across a reset of its counter, the replica started again in it"),
@@ -8152,8 +8475,16 @@ fn notes(
             .filter(|(_, m)| get(m, "r_watch") == Some(0.0))
             .map(|(k, _)| *k)
             .collect();
+        // The most a worker held for a window before its verdict, of the
+        // most it may (`HELD_MAX`): the end line's, or the lines'.
+        let held_max = end.and_then(|m| get(m, "r_held_max")).or_else(|| {
+            minutes
+                .iter()
+                .filter_map(|(_, m)| get(m, "r_held_max"))
+                .reduce(f64::max)
+        });
         out.push(format!(
-            "the replica's own compactions: {:.0} by its counter, {:.0} seen at its compaction thread{}; {:.0} operations held by them, {:.0} of them due in a restart",
+            "the replica's own compactions: {:.0} by its counter, {:.0} seen at its compaction thread{}; {:.0} operations held by them, {:.0} of them due in a restart{}",
             total("r_auto_compacts"),
             total("r_compacts_watched"),
             match unwatched.is_empty() {
@@ -8161,7 +8492,14 @@ fn notes(
                 false => format!(" (not watched at minutes {})", list(&unwatched)),
             },
             total("r_compact_ops"),
-            total("restart_r_compact_ops")
+            total("restart_r_compact_ops"),
+            match held_max {
+                Some(x) => format!(
+                    "; a worker held {x:.0} operations for one before its verdict at the most, of the {HELD_MAX} it may ({:.1}%)",
+                    x * 100.0 / HELD_MAX as f64
+                ),
+                None => String::new(),
+            }
         ));
     }
     let offs: Vec<f64> = minutes
@@ -10791,26 +11129,36 @@ mod tests {
         assert_eq!(plausible_ms(2_400_000_000, 400_000), 3_840_000);
         assert_eq!(plausible_ms(1_000_000_000, 100_000), 600_000);
         // A window open, its watch gone from 20 s: a minute's look 30 s
-        // after keeps it, one 61 s after cuts it -- as if no window had
-        // been, never counted.
+        // after keeps it, one 61 s after finds it lost -- counted so, once,
+        // its reads as if no window had been, never an end.
         replica_compaction(&sh, Some(Edge::Began(10 * s)), Count::Unread);
         sh.r_down_since.store(20 * s, Ordering::SeqCst);
         bound_r_window(&sh, 50 * s, false);
         assert_eq!(sh.r_verdict(1), None);
         bound_r_window(&sh, 81 * s, false);
+        bound_r_window(&sh, 141 * s, false);
         assert_eq!(sh.r_verdict(1), Some(false));
         assert_eq!(*sh.r_window.lock().unwrap(), (1, u64::MAX, u64::MAX));
-        assert_eq!((n(&sh.r_compacts_cut), n(&sh.r_compacts_seen)), (1, 0));
+        assert_eq!(
+            (
+                n(&sh.r_compacts_lost),
+                n(&sh.r_compacts_cut),
+                n(&sh.r_compacts_seen)
+            ),
+            (1, 0, 0)
+        );
         // The watch back, the thread asleep: its end said, not counted.
-        replica_compaction(&sh, Some(Edge::Ended(90 * s)), moved);
+        replica_compaction(&sh, Some(Edge::Ended(190 * s)), moved);
         assert_eq!((n(&sh.r_compacts_seen), n(&sh.r_compact_ms)), (0, 0));
         assert_eq!(sh.r_since.load(Ordering::SeqCst), u64::MAX);
-        // The watch gone with no window open: nothing to cut.
-        bound_r_window(&sh, 200 * s, false);
-        assert_eq!(n(&sh.r_compacts_cut), 1);
+        // The watch gone with no window open: nothing lost.
+        bound_r_window(&sh, 300 * s, false);
+        assert_eq!(n(&sh.r_compacts_lost), 1);
         // A window the watch sees open past the bound, ten minutes for a
         // small file: a thread that never sleeps again -- counted once,
-        // cut, and never an excuse for its reads.
+        // its reads' window cut, and never an excuse for its reads; never
+        // counted as cut before its end was seen, its end still the
+        // watch's to see.
         sh.r_down_since.store(u64::MAX, Ordering::SeqCst);
         replica_compaction(&sh, Some(Edge::Began(1_000 * s)), Count::Unread);
         bound_r_window(&sh, 1_550 * s, true);
@@ -10818,38 +11166,187 @@ mod tests {
         bound_r_window(&sh, 1_601 * s, true);
         assert_eq!(sh.r_verdict(2), Some(false));
         bound_r_window(&sh, 1_700 * s, true);
-        assert_eq!((n(&sh.r_compacts_overlong), n(&sh.r_compacts_cut)), (1, 2));
-        // Its watch gone a minute meanwhile is no excuse either: judged
-        // only where the watch looks, and cut already.
-        bound_r_window(&sh, 1_800 * s, false);
-        assert_eq!(n(&sh.r_compacts_cut), 2);
+        assert_eq!((n(&sh.r_compacts_overlong), n(&sh.r_compacts_cut)), (1, 0));
+        // Its end seen: judged by its counter like any other's -- the two
+        // agree -- its reads still as if no window had been. Before, it
+        // was counted as cut before its end was seen, and the watch's
+        // criterion failed beside the bound's.
         replica_compaction(&sh, Some(Edge::Ended(1_900 * s)), moved);
-        assert_eq!(n(&sh.r_compacts_seen), 0);
-        // One that ended past it between two looks: the same.
+        assert_eq!(
+            (
+                n(&sh.r_compacts_seen),
+                n(&sh.r_compacts_cut),
+                n(&sh.r_compact_ms)
+            ),
+            (1, 0, 0)
+        );
+        // One that ended past it between two looks: the same, past its
+        // bound once, its end counted, never cut.
         replica_compaction(&sh, Some(Edge::Began(3_000 * s)), Count::Unread);
         replica_compaction(&sh, Some(Edge::Ended(3_700 * s)), moved);
         assert_eq!(sh.r_verdict(3), Some(false));
+        assert_eq!(*sh.r_window.lock().unwrap(), (3, u64::MAX, u64::MAX));
         assert_eq!(
             (
                 n(&sh.r_compacts_overlong),
                 n(&sh.r_compacts_seen),
+                n(&sh.r_compacts_cut),
                 n(&sh.r_compact_ms)
             ),
-            (2, 0, 0)
+            (2, 2, 0, 0)
+        );
+        // Its counter unmoved: no compaction, past its bound all the same.
+        replica_compaction(&sh, Some(Edge::Began(3_800 * s)), Count::Unread);
+        replica_compaction(
+            &sh,
+            Some(Edge::Ended(4_500 * s)),
+            Count::Read {
+                moved: false,
+                stale: false,
+            },
+        );
+        assert_eq!(
+            (n(&sh.r_compacts_overlong), n(&sh.r_compacts_false)),
+            (3, 1)
         );
         // Its reads' window cut before, by a worker's held: past its bound
-        // all the same.
+        // all the same, at a look or at its end between two.
         replica_compaction(&sh, Some(Edge::Began(5_000 * s)), Count::Unread);
-        assert!(cut_r_window(&sh, 4, 5_100 * s, Cut::Held));
+        assert!(cut_r_window(&sh, 5, 5_100 * s, Cut::Held));
         bound_r_window(&sh, 5_700 * s, true);
-        assert_eq!(n(&sh.r_compacts_overlong), 3);
-        // Within its bound, watched: kept, and counted as it ends.
+        assert_eq!(n(&sh.r_compacts_overlong), 4);
         replica_compaction(&sh, Some(Edge::Ended(5_800 * s)), moved);
-        replica_compaction(&sh, Some(Edge::Began(6_000 * s)), Count::Unread);
-        bound_r_window(&sh, 6_020 * s, true);
-        replica_compaction(&sh, Some(Edge::Ended(6_025 * s)), moved);
-        assert_eq!(sh.r_verdict(5), Some(true));
-        assert_eq!((n(&sh.r_compacts_seen), n(&sh.r_compact_ms)), (1, 25_000));
+        replica_compaction(&sh, Some(Edge::Began(5_900 * s)), Count::Unread);
+        assert!(cut_r_window(&sh, 6, 5_910 * s, Cut::Held));
+        replica_compaction(&sh, Some(Edge::Ended(6_550 * s)), moved);
+        assert_eq!(
+            (
+                n(&sh.r_compacts_overlong),
+                n(&sh.r_compacts_seen),
+                n(&sh.r_compacts_cut)
+            ),
+            (5, 4, 0)
+        );
+        // Within its bound, watched: kept, and counted as it ends.
+        replica_compaction(&sh, Some(Edge::Began(7_000 * s)), Count::Unread);
+        bound_r_window(&sh, 7_020 * s, true);
+        replica_compaction(&sh, Some(Edge::Ended(7_025 * s)), moved);
+        assert_eq!(sh.r_verdict(7), Some(true));
+        assert_eq!((n(&sh.r_compacts_seen), n(&sh.r_compact_ms)), (5, 25_000));
+        assert_eq!(n(&sh.r_compacts_lost), 1);
+    }
+
+    #[test]
+    fn a_window_its_watch_lost_while_open_is_never_a_pass() {
+        let s = 1_000_000_000u64;
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let n = |x: &AtomicU64| x.load(Ordering::Relaxed);
+        // A compaction thread that never sleeps again, found past its
+        // bound by a look while watched -- its reads' window cut -- and
+        // its watch gone with it after: lost at the next look a minute
+        // on, which the watch's criterion fails on. Before, judged by its
+        // reads' window alone, cut already, it was never lost, its counter
+        // never moved, and the two criteria passed beside the overlong.
+        sh.watched(true);
+        replica_compaction(&sh, Some(Edge::Began(10 * s)), Count::Unread);
+        bound_r_window(&sh, 700 * s, true);
+        assert_eq!(n(&sh.r_compacts_overlong), 1);
+        sh.watched(false);
+        let down = sh.r_down_since.load(Ordering::SeqCst);
+        bound_r_window(&sh, down + 30 * s, false);
+        assert_eq!(n(&sh.r_compacts_lost), 0);
+        bound_r_window(&sh, down + R_WATCH_GONE, false);
+        bound_r_window(&sh, down + 2 * R_WATCH_GONE, false);
+        assert_eq!((n(&sh.r_compacts_lost), n(&sh.r_compacts_overlong)), (1, 1));
+        // The same thread's watch gone from the start, never past its
+        // bound while watched: lost, its reads' window cut.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        sh.watched(true);
+        replica_compaction(&sh, Some(Edge::Began(10 * s)), Count::Unread);
+        sh.watched(false);
+        let down = sh.r_down_since.load(Ordering::SeqCst);
+        bound_r_window(&sh, down + R_WATCH_GONE, false);
+        assert_eq!(n(&sh.r_compacts_lost), 1);
+        assert_eq!(sh.r_verdict(1), Some(false));
+        // Its container gone in one and the next finding the thread
+        // asleep: cut, its end unseen, and lost; a watch finding it gone
+        // with the replica's process: cut alone.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let mut w = CompactWatch::default();
+        let feed = |w: &mut CompactWatch, l: Option<&str>, t: u64| {
+            let e = match l {
+                Some(l) => w.line(l, t),
+                None => w.tick(t),
+            };
+            replica_compaction(&sh, e, Count::Unread);
+        };
+        for l in ["A x86_64", "T 7", "S 7 230", "S 7 running"] {
+            feed(&mut w, Some(l), s);
+        }
+        feed(&mut w, None, 2 * s);
+        let mut w = CompactWatch::after(&w);
+        for l in ["A x86_64", "T 7", "S 7 230"] {
+            feed(&mut w, Some(l), 20 * s);
+        }
+        assert_eq!(w.tick(21 * s), Some(Edge::Lost(20 * s)));
+        replica_compaction(&sh, Some(Edge::Lost(20 * s)), Count::Unread);
+        feed(&mut w, Some("S 7 running"), 30 * s);
+        feed(&mut w, None, 31 * s);
+        let mut w = CompactWatch::after(&w);
+        for l in ["A x86_64", "T 9"] {
+            feed(&mut w, Some(l), 40 * s);
+        }
+        assert_eq!((n(&sh.r_compacts_cut), n(&sh.r_compacts_lost)), (2, 1));
+        // On the lines: a window lost while open fails the watch's
+        // criterion though the counter and the watch agree, and so does
+        // one open at the last look with its watch gone.
+        let verdict = |text: &str| -> (bool, String) {
+            let j = judge(text, None);
+            let v = j[0].verdicts.iter().find(|v| v.0 == CRITERIA[21]).unwrap();
+            (v.1, v.2.clone())
+        };
+        let (ok, said) = verdict(&synthetic(480, &|m, x| {
+            if m == 200 {
+                x.insert("r_compacts_lost", 1.0);
+                x.insert("r_compacts_overlong", 1.0);
+            }
+        }));
+        assert!(!ok, "{said}");
+        assert!(
+            said.contains("; 1 LOST by the watch while open, its end unseen"),
+            "{said}"
+        );
+        let (ok, said) = verdict(&synthetic(480, &|m, x| {
+            if m == 480 {
+                x.insert("r_watch", 0.0);
+                x.insert("r_compact_open", 1.0);
+                x.insert("r_compact_open_ms", 12_000.0);
+            }
+        }));
+        assert!(!ok, "{said}");
+        // An overlong window whose end was seen, its counter moved: the
+        // bound's criterion fails, the watch's passes, saying nothing of a
+        // cut.
+        let text = synthetic(480, &|m, x| {
+            if m == 200 {
+                x.insert("r_compacts_overlong", 1.0);
+                x.insert("r_compacts_watched", 1.0);
+                x.insert("r_auto_compacts", 1.0);
+            }
+        });
+        assert_eq!(failing(&text), vec![CRITERIA[22]]);
+        let (_, said) = verdict(&text);
+        assert!(!said.contains("cut"), "{said}");
+        // And one window its counter did not move in is one.
+        let (ok, said) = verdict(&synthetic(480, &|m, x| {
+            if m == 200 {
+                x.insert("r_compacts_false", 1.0);
+            }
+        }));
+        assert!(
+            ok && said.contains("; 1 window its counter did not move in"),
+            "{said}"
+        );
     }
 
     #[test]
@@ -10913,7 +11410,24 @@ mod tests {
         assert_eq!((h.steady.n as usize, h.r_compact.n), (HELD_MAX, 0));
         assert_eq!(sh.r_verdict(2), Some(false));
         assert_eq!(*sh.r_window.lock().unwrap(), (2, u64::MAX, u64::MAX));
-        assert_eq!(sh.r_compacts_cut.load(Ordering::Relaxed), 1);
+        // Its reads' window cut, its end still the watch's to see: no
+        // count of an end unseen.
+        assert_eq!(sh.r_compacts_cut.load(Ordering::Relaxed), 0);
+        // The most it held, for the minute's line: all of it, a figure
+        // that stays once the held are settled -- and what each line
+        // writes, the most of every worker's since the last, and the end
+        // line the run's.
+        assert_eq!(h.held_max, HELD_MAX);
+        let mut kept = Kept::new();
+        let mut minute = Hists::new();
+        minute.merge(&Hists::new());
+        minute.merge(&h);
+        let line = kept.minute(&minute);
+        let fig = |v: &[(&str, String)], k: &str| v.iter().find(|x| x.0 == k).map(|x| x.1.clone());
+        assert_eq!(fig(&line, "r_held_max"), Some(HELD_MAX.to_string()));
+        let line = kept.minute(&Hists::new());
+        assert_eq!(fig(&line, "r_held_max"), Some("0".into()));
+        assert_eq!(fig(&kept.end(), "r_held_max"), Some(HELD_MAX.to_string()));
         // Settled already, or another window's begun: no cut.
         assert!(!cut_r_window(&sh, 2, 10 * s, Cut::Held));
         assert!(!cut_r_window(&sh, 1, 10 * s, Cut::Held));
@@ -11794,6 +12308,199 @@ mod tests {
         assert_eq!(
             why,
             "not watched: no line says whether the watch looked; 2 by its counter"
+        );
+    }
+
+    #[test]
+    fn a_held_operation_is_32_bytes() {
+        // `HELD_MAX`'s comment and the design file count 4 MiB a worker.
+        assert_eq!(std::mem::size_of::<Held>(), 32);
+    }
+
+    #[test]
+    fn a_restart_that_meets_a_replicas_compaction_is_paired_with_it() {
+        let s = 1_000_000_000u64;
+        let ms = 1_000_000u64;
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let n = |x: &AtomicU64| x.load(Ordering::Relaxed);
+        let moved = |moved| Count::Read {
+            moved,
+            stale: false,
+        };
+        // The fifth dry run's minute 60: the replica compacting from 13 s
+        // before the kill, its restart over -- reads through the replica
+        // again -- 19 s after its announcement, the compaction 1.5 s
+        // later: paired as the window ends, its length and the restart's.
+        replica_compaction(&sh, Some(Edge::Began(3_587 * s)), Count::Unread);
+        restart_met(&sh, Some((3_600 * s, 3_619 * s)), None);
+        assert_eq!(n(&sh.r_kill_ms), 0);
+        replica_compaction(&sh, Some(Edge::Ended(3_620 * s + 500 * ms)), moved(true));
+        assert_eq!((n(&sh.r_compact_ms), n(&sh.r_kill_ms)), (33_500, 52_500));
+        // A window over before the restart is: paired as the restart ends.
+        sh.r_kill_ms.store(0, Ordering::Relaxed);
+        replica_compaction(&sh, Some(Edge::Began(5_400 * s)), Count::Unread);
+        replica_compaction(&sh, Some(Edge::Ended(5_420 * s)), moved(true));
+        assert_eq!(n(&sh.r_kill_ms), 0);
+        restart_met(&sh, Some((5_410 * s, 5_440 * s)), None);
+        assert_eq!(n(&sh.r_kill_ms), 50_000);
+        // A restart after the latest window, a window after the latest
+        // restart, and a window its counter did not move in: none.
+        sh.r_kill_ms.store(0, Ordering::Relaxed);
+        restart_met(&sh, Some((5_500 * s, 5_520 * s)), None);
+        replica_compaction(&sh, Some(Edge::Began(5_600 * s)), Count::Unread);
+        replica_compaction(&sh, Some(Edge::Ended(5_610 * s)), moved(true));
+        replica_compaction(&sh, Some(Edge::Began(5_700 * s)), Count::Unread);
+        restart_met(&sh, Some((5_705 * s, 5_720 * s)), None);
+        replica_compaction(&sh, Some(Edge::Ended(5_730 * s)), moved(false));
+        assert_eq!(n(&sh.r_kill_ms), 0);
+    }
+
+    /// The fifth dry run of 2026-11-24's lines as they bear on its
+    /// restarts and the replica's own compactions, the rest the synthetic
+    /// run's: its kills of minutes 30, 60 and 90 -- restarts of 3.6, 6.0
+    /// and 3.5 s, the replica back 3.5, 11.9 and 7.8 s after each, the loop
+    /// 0.1, 15.9 and 0.0 s behind at each announcement, the replica
+    /// compacting through the second, all 13 888 of its operations the
+    /// compaction's -- and the replica's compactions ending on its lines 20,
+    /// 41, 61, 80 and 109 (24.7, 43.4, 33.5, 23.9 and 22.5 s), and a window
+    /// its counter did not move in on line 91. Its end line's `p99_restart`
+    /// was 3.57 s over 27 785 operations, the compactions' p99 20.8 s over
+    /// 539 816. `kill_ms` is the figure a run writes now for the window
+    /// the kill of minute 60 landed in (`r_compact_kill_ms`), its length
+    /// and the restart's: its lines have none.
+    fn fifth_dry_run(p99_restart: f64, p99_rc: f64, kill_ms: Option<f64>) -> String {
+        let tweak = move |m: u64, x: &mut HashMap<&'static str, f64>| {
+            if m > 0 && m < u64::MAX {
+                for k in [
+                    "restart_ops",
+                    "restart_replica_ops",
+                    "restart_behind_ops",
+                    "restart_r_compact_ops",
+                ] {
+                    x.insert(k, 0.0);
+                }
+            }
+            let kill = |x: &mut HashMap<&'static str, f64>, f: [f64; 5]| {
+                for (k, v) in [
+                    "restart_ms",
+                    "replica_back_ms",
+                    "kill_behind_s",
+                    "restart_ops",
+                    "restart_r_compact_ops",
+                ]
+                .into_iter()
+                .zip(f)
+                {
+                    x.insert(k, v);
+                }
+            };
+            let window = |x: &mut HashMap<&'static str, f64>, ms: f64| {
+                x.insert("r_compact_ms", ms);
+                x.insert("r_auto_compacts", 1.0);
+                x.insert("r_compacts_watched", 1.0);
+            };
+            match m {
+                20 => window(x, 24_701.0),
+                31 => kill(x, [3_626.0, 3_521.0, 0.1, 13_704.0, 0.0]),
+                41 => window(x, 43_410.0),
+                61 => {
+                    kill(x, [5_971.0, 11_907.0, 15.9, 0.0, 13_888.0]);
+                    window(x, 33_502.0);
+                    if let Some(k) = kill_ms {
+                        x.insert("r_compact_kill_ms", k);
+                    }
+                }
+                80 => window(x, 23_858.0),
+                91 => {
+                    kill(x, [3_504.0, 7_770.0, 0.0, 14_081.0, 0.0]);
+                    x.insert("r_compacts_false", 1.0);
+                }
+                109 => window(x, 22_480.0),
+                u64::MAX => {
+                    x.insert("p99_restart", p99_restart);
+                    x.insert("restart_ops", 27_785.0);
+                    x.insert("restart_behind_ops", 0.0);
+                    x.insert("restart_ms_max", 5_971.0);
+                    x.insert("r_compact_ops", 539_816.0);
+                    x.insert("p99_r_compact", p99_rc);
+                    x.insert("r_held_max", 2_310.0);
+                }
+                _ => {}
+            }
+        };
+        synthetic(120, &tweak)
+    }
+
+    #[test]
+    fn the_fifth_dry_runs_kill_in_the_replicas_compaction() {
+        let said = |text: &str, c: &str| -> (bool, String) {
+            let j = judge(text, None);
+            let v = j[0].verdicts.iter().find(|v| v.0 == c).unwrap();
+            (v.1, v.2.clone())
+        };
+        // The kill of minute 60, met behind the schedule, every operation
+        // due in it the compaction's: said so, with their count, where its
+        // line had "p99 ?"; and its restart of 6.0 s sets no bound, the
+        // others' operations held to their own restarts' -- 3.6 s and two,
+        // the replica's 3.5 and 7.8 s and two -- not to 8.0 and 19.9.
+        let run = fifth_dry_run(3_573_547.0, 20_803_748.0, None);
+        let (ok, why) = said(&run, CRITERIA[13]);
+        assert!(ok, "{why}");
+        assert!(
+            why.contains("p99 of the operations due in one 3.6 s of 5.6 at the primary and none through the replica (its bound 13.3), over the 2 kills the loop met on its schedule; the restart at minute 61 sets no bound, none of the operations due in it among them"),
+            "{why}"
+        );
+        assert!(
+            why.contains("; 1 met behind it, at minutes 61 (16 s at the most), every operation due in it gone to the replica's own compaction, 13888 of them, judged with it, and none to the backlog's figure; "),
+            "{why}"
+        );
+        assert!(
+            !why.contains("p99 ?") && !why.contains("due in one the replica's own"),
+            "{why}"
+        );
+        // A p99 of 6.0 s: past the others' restarts and two, which 8.0
+        // passed.
+        let (ok, why) = said(&fifth_dry_run(6e6, 20_803_748.0, None), CRITERIA[13]);
+        assert!(!ok, "{why}");
+        // The compactions' reads, on its own lines: held to the longest
+        // watched, 43.4 s, and two.
+        let (ok, why) = said(&run, CRITERIA[20]);
+        assert!(ok, "{why}");
+        assert!(
+            why.contains("p99 of the 539816 operations they held 20.8 s of 45.4 (the longest watched, 43.4 s, and two); 13888 of them due in a restart"),
+            "{why}"
+        );
+        // Reads held 50 s: past it; but the window the kill landed in held
+        // them 33.5 s and the restart's 18.9 s more, until reads went
+        // through the replica again -- 52.4 s, and two, where the run says
+        // so.
+        let (ok, _) = said(&fifth_dry_run(3_573_547.0, 50e6, None), CRITERIA[20]);
+        assert!(!ok);
+        let (ok, why) = said(
+            &fifth_dry_run(3_573_547.0, 50e6, Some(52_380.0)),
+            CRITERIA[20],
+        );
+        assert!(ok, "{why}");
+        assert!(
+            why.contains("50.0 s of 54.4 (the longest watched with the restart of a kill that landed in it, 52.4 s, and two; the longest alone 43.4 s)"),
+            "{why}"
+        );
+        // The watch: five by its counter, five seen, one window its
+        // counter did not move in; and the most a worker held, of the most
+        // it may.
+        let (ok, why) = said(&run, CRITERIA[21]);
+        assert!(ok, "{why}");
+        assert_eq!(
+            why,
+            "5 by its counter, 5 seen to end at its compaction thread; 1 window its counter did not move in, no compaction"
+        );
+        let j = judge(&run, None);
+        assert!(
+            j[0].notes.iter().any(|n| n.ends_with(
+                "; a worker held 2310 operations for one before its verdict at the most, of the 131072 it may (1.8%)"
+            )),
+            "{:?}",
+            j[0].notes
         );
     }
 }
