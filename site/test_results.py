@@ -39,6 +39,20 @@ class Results(unittest.TestCase):
                          ["f\ta\tsys\tmeasured again"])
         self.assertEqual(m[("f", "sys:1", "v")], 5)
 
+    def test_a_failed_runs_cell_counts_in_no_median(self):
+        # Run b's cell failed (an old line's `ops_s 0` beside it), run c's
+        # was the environment's: neither joins a, d and e's median; a run
+        # measured again after its failure counts as its last line.
+        m = self.medians([row("a", "x:1", "ops_s", "10"),
+                          row("b", "x:1", "ops_s", "0"), row("b", "x:1", "failed", "1"),
+                          row("c", "x:1", "env_failed", "1"),
+                          row("d", "x:1", "ops_s", "30"), row("d", "x:1", "failed", "0"),
+                          row("e", "x:1", "failed", "1"), row("e", "x:1", "ops_s", "20"),
+                          row("e", "x:1", "failed", "0")])
+        self.assertEqual(m[("f", "x:1", "ops_s")], 20)
+        self.assertNotIn(("f", "x:1", "env_failed"), m)
+        self.assertEqual(m[("f", "x:1", "failed")], 0)
+
     def test_a_cell_measured_again_counts_once_as_its_last_line(self):
         m = self.medians([row("a", "x", "v", "1"), row("a", "x", "v", "9"), row("b", "x", "v", "9")])
         self.assertEqual(m[("f", "x", "v")], 9)

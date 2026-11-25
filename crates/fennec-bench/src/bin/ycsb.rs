@@ -76,9 +76,25 @@
 //! timed path is the one measured without `--verify`; a verifying run
 //! times a read-modify-write's digests too and its figures are not the
 //! published ones.
+//!
+//! `--rate <ops/s>` sends a cell's operations open loop, an operation's
+//! time from when it was due (`Config::rate`). `--memory <limit>` runs a
+//! system under a memory limit -- `server-docker`'s container started with
+//! it, or this process in a container started so -- each cell then
+//! carrying its cgroup's faults and memory, a failed one a line saying so
+//! (`ycsb/run-larger-than-memory.sh`, family `ycsb_larger`). `ycsb heap`
+//! measures the heap a row of each index kind holds, `ycsb fill` writes
+//! the cells a killed process could not, and `ycsb soak` (`src/soak.rs`) is
+//! hours of load against fennec-server in a container (`ycsb/run-soak.sh`).
+//! Built `--no-default-features`, it has fennecdb's systems alone and none
+//! of the rivals' crates.
 
 #[path = "../http.rs"]
 mod http;
+#[path = "../register.rs"]
+mod register;
+#[path = "../soak.rs"]
+mod soak;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -94,9 +110,20 @@ const FIELDS: usize = 10;
 const FIELD_LEN: usize = 100;
 const SEED: u64 = 0x5943_5342; // "YCSB"
 const LOAD_BATCH: usize = 1_000;
+/// The image every container beside a measured one runs in -- the looks, the
+/// verifies, the backups, the sampler, `df` -- by its digest, as the
+/// Dockerfile names the rust image: every `docker run` takes `--pull
+/// never`, and a tag can move. `ycsb/env-check.sh` names the same
+/// (`ENV_ALPINE`, which `--preflight` checks is here; a test holds the two
+/// to one digest).
+const ALPINE: &str =
+    "alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf";
+#[cfg(feature = "rivals")]
 const PG_URL: &str = "host=127.0.0.1 port=55433 user=postgres password=fennec dbname=ycsb";
+#[cfg(feature = "rivals")]
 const MONGO_URL: &str = "mongodb://127.0.0.1:27018/?maxPoolSize=64";
 // Apart from `make geo-bench`'s Redis (56379), so the two never meet.
+#[cfg(feature = "rivals")]
 const REDIS_URL: &str = "redis://127.0.0.1:56380/";
 
 // ------------------------------------------------------------ randomness
@@ -512,6 +539,183 @@ trait System {
     fn memory(&self) -> Option<u64> {
         None
     }
+    /// Its cgroup as last read, under `--memory` alone: the server's
+    /// container through a process beside it, a look a second
+    /// (`Watch`), or the container this process runs in (`Cgroup::own`).
+    fn cgroup(&self) -> Option<Cgroup> {
+        None
+    }
+    /// Whether the kernel killed it for its memory: what a cell that
+    /// failed is told apart by.
+    fn oom_killed(&self) -> bool {
+        false
+    }
+    /// The bytes of its live records, where it says: what a cell under
+    /// `--memory` is held to twice the limit by.
+    fn live(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// A cgroup's memory as one look read it (`memory.stat`,
+/// `memory.current`, `memory.events`, `memory.max`): the major faults its
+/// processes took so far, what it is charged in all, its anonymous memory,
+/// its files' pages -- the mapped database's among them --, the OOM kills
+/// it had, and the limit the kernel holds it to, none where `memory.max`
+/// says `max` or was not read: the limit a line names is the cgroup's own,
+/// never the `--memory` asked for.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Cgroup {
+    pgmajfault: u64,
+    current: u64,
+    anon: u64,
+    file: u64,
+    oom_kill: u64,
+    limit: Option<u64>,
+}
+
+impl Cgroup {
+    /// A look's lines: `memory.stat`'s, `current <n>`, `memory.events`'
+    /// `oom_kill <n>` and `limit <memory.max>`, in any order. The limit's
+    /// key is none of the files' own: `memory.events` has a `max`, the times
+    /// the limit was met.
+    fn parse(text: &str) -> Option<Cgroup> {
+        let get = |key: &str| -> Option<u64> {
+            text.lines()
+                .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+                .and_then(|v| v.trim().parse().ok())
+        };
+        Some(Cgroup {
+            pgmajfault: get("pgmajfault")?,
+            current: get("current")?,
+            anon: get("anon")?,
+            file: get("file")?,
+            oom_kill: get("oom_kill").unwrap_or(0),
+            limit: get("limit"),
+        })
+    }
+
+    /// The container this process runs in, from its own cgroup: cgroup v2
+    /// in a namespace of its own, where `/sys/fs/cgroup` is the
+    /// container's.
+    fn own() -> Option<Cgroup> {
+        let dir = Path::new("/sys/fs/cgroup");
+        let mut text = std::fs::read_to_string(dir.join("memory.stat")).ok()?;
+        let current = std::fs::read_to_string(dir.join("memory.current")).ok()?;
+        writeln!(text, "current {}", current.trim()).unwrap();
+        if let Ok(max) = std::fs::read_to_string(dir.join("memory.max")) {
+            writeln!(text, "limit {}", max.trim()).unwrap();
+        }
+        if let Ok(events) = std::fs::read_to_string(dir.join("memory.events")) {
+            // `oom_kill` alone: its `max` line is no limit.
+            for l in events.lines().filter(|l| l.starts_with("oom_kill ")) {
+                writeln!(text, "{l}").unwrap();
+            }
+        }
+        Cgroup::parse(&text)
+    }
+}
+
+/// What a shell beside a container prints of the container's cgroup, a look
+/// a second, a blank line after each: the lines `Cgroup::parse` reads.
+const CGROUP_LOOK: &str = "cd /proc/1/root/sys/fs/cgroup && while :; do \
+    cat memory.stat; echo current $(cat memory.current); \
+    echo limit $(cat memory.max); grep oom_kill memory.events; echo; sleep 1; done";
+
+/// One look at a container's cgroup, `CGROUP_LOOK`'s lines once, by a
+/// shell in its process namespace (`<container>-look`): what a step reads
+/// before and after it rather than a look a second.
+fn container_cgroup(container: &str) -> Option<Cgroup> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            &format!("--pid=container:{container}"),
+        ])
+        .args(["--name", &format!("{container}-look")])
+        // Reading another user's `/proc/<pid>/root` is a ptrace's right.
+        .args(["--cap-add", "SYS_PTRACE", ALPINE, "sh", "-c"])
+        .arg(
+            "cd /proc/1/root/sys/fs/cgroup && cat memory.stat && \
+             echo current $(cat memory.current) && echo limit $(cat memory.max) && \
+             grep oom_kill memory.events",
+        )
+        .output()
+        .ok()?;
+    Cgroup::parse(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// A container's cgroup looked at each second by a shell in its process
+/// namespace (`CGROUP_LOOK`), the last look kept: one process the run
+/// long, where a `docker run` a look took a quarter of a one-client
+/// server's reads (`size_beside`). It ends with the container's processes.
+struct Watch {
+    child: std::process::Child,
+    name: String,
+    last: Arc<std::sync::Mutex<Option<Cgroup>>>,
+}
+
+impl Watch {
+    fn start(container: &str) -> Option<Watch> {
+        let name = format!("{container}-watch");
+        let mut child = std::process::Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                &format!("--pid=container:{container}"),
+            ])
+            .args(["--name", &name])
+            // Reading another user's `/proc/<pid>/root` is a ptrace's right.
+            .args(["--cap-add", "SYS_PTRACE", ALPINE, "sh", "-c", CGROUP_LOOK])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let out = child.stdout.take()?;
+        let last = Arc::new(std::sync::Mutex::new(None));
+        let keep = Arc::clone(&last);
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut look = String::new();
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if !line.is_empty() {
+                    look.push_str(&line);
+                    look.push('\n');
+                    continue;
+                }
+                if let Some(c) = Cgroup::parse(&look) {
+                    *keep.lock().unwrap() = Some(c);
+                }
+                look.clear();
+            }
+        });
+        Some(Watch { child, name, last })
+    }
+
+    fn last(&self) -> Option<Cgroup> {
+        *self.last.lock().unwrap()
+    }
+}
+
+impl Drop for Watch {
+    /// The container goes with its own: killing `docker run` leaves it.
+    /// The client is killed first; a container the daemon was still making
+    /// for it -- left `Created` once, a watch dropped as it started -- is
+    /// removed again with the server's (`Server::stop`).
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// What a container holds of its own -- its processes' anonymous memory
@@ -522,9 +726,15 @@ trait System {
 /// fennec-server's image is empty but for the binary and has no `cat`.
 fn container_memory(name: &str) -> Option<u64> {
     let out = std::process::Command::new("docker")
-        .args(["run", "--rm", &format!("--pid=container:{name}")])
+        .args([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            &format!("--pid=container:{name}"),
+        ])
         // Reading another user's `/proc/<pid>/root` is a ptrace's right.
-        .args(["--cap-add", "SYS_PTRACE", "alpine"])
+        .args(["--cap-add", "SYS_PTRACE", ALPINE])
         .args(["cat", "/proc/1/root/sys/fs/cgroup/memory.stat"])
         .output()
         .ok()?;
@@ -591,6 +801,9 @@ struct FennecLocal {
     /// beside the queries once half of it is dead.
     auto_compact: bool,
     compactor: Option<fennec_core::engine::Compactor>,
+    /// Run under `--memory`, in a container of its own: its cgroup is
+    /// looked at beside each cell.
+    contained: bool,
 }
 
 fn stmt(src: &str) -> Statement {
@@ -613,7 +826,7 @@ fn insert_text() -> String {
 }
 
 impl FennecLocal {
-    fn new(dir: &Path, auto_compact: bool) -> FennecLocal {
+    fn new(dir: &Path, auto_compact: bool, contained: bool) -> FennecLocal {
         FennecLocal {
             dir: dir.to_path_buf(),
             db: None,
@@ -621,6 +834,7 @@ impl FennecLocal {
             syncer: None,
             auto_compact,
             compactor: None,
+            contained,
         }
     }
     fn stop_syncer(&mut self) {
@@ -645,6 +859,13 @@ impl System for FennecLocal {
         std::fs::metadata(self.dir.join("ycsb.fennec"))
             .ok()
             .map(|m| m.len())
+    }
+    fn cgroup(&self) -> Option<Cgroup> {
+        self.contained.then(Cgroup::own).flatten()
+    }
+    fn live(&self) -> Option<u64> {
+        let db = self.db.as_ref()?.read().unwrap();
+        Some(db.stats().iter().map(|c| c.bytes as u64).sum())
     }
     fn load(&mut self, records: u64) {
         // A load starts afresh: the syncer holds the database it replaces.
@@ -832,11 +1053,13 @@ impl Client for FennecLocalClient {
 
 // ---- SQLite
 
+#[cfg(feature = "rivals")]
 struct Sqlite {
     path: PathBuf,
     durable: bool,
 }
 
+#[cfg(feature = "rivals")]
 fn sqlite_conn(path: &Path, durable: bool) -> rusqlite::Connection {
     let c = rusqlite::Connection::open(path).unwrap();
     c.pragma_update(None, "journal_mode", "WAL").unwrap();
@@ -851,6 +1074,7 @@ fn sqlite_conn(path: &Path, durable: bool) -> rusqlite::Connection {
     c
 }
 
+#[cfg(feature = "rivals")]
 impl System for Sqlite {
     fn name(&self) -> &'static str {
         "sqlite"
@@ -907,6 +1131,7 @@ impl System for Sqlite {
     }
 }
 
+#[cfg(feature = "rivals")]
 fn sqlite_insert() -> String {
     let fields: Vec<String> = (0..FIELDS).map(|i| format!("field{i}")).collect();
     let marks: Vec<String> = (0..=FIELDS).map(|i| format!("?{}", i + 1)).collect();
@@ -917,11 +1142,13 @@ fn sqlite_insert() -> String {
     )
 }
 
+#[cfg(feature = "rivals")]
 struct SqliteClient {
     c: rusqlite::Connection,
     last: Vec<(i64, [String; FIELDS])>,
 }
 
+#[cfg(feature = "rivals")]
 fn sqlite_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, [String; FIELDS])> {
     let mut out: [String; FIELDS] = Default::default();
     for (i, o) in out.iter_mut().enumerate() {
@@ -931,6 +1158,7 @@ fn sqlite_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, [String; FIELDS])> {
 }
 
 /// Rows read into strings, as every client reads them, to their digests.
+#[cfg(feature = "rivals")]
 fn digests_of(rows: &[(i64, [String; FIELDS])]) -> Vec<(u64, [u64; FIELDS])> {
     rows.iter()
         .map(|(k, f)| {
@@ -943,6 +1171,7 @@ fn digests_of(rows: &[(i64, [String; FIELDS])]) -> Vec<(u64, [u64; FIELDS])> {
         .collect()
 }
 
+#[cfg(feature = "rivals")]
 impl Client for SqliteClient {
     fn read(&mut self, key: u64) {
         let mut s = self
@@ -1001,10 +1230,14 @@ struct Server {
     /// `--auto-compact off` when the run says so; the server's default
     /// otherwise.
     auto_compact: bool,
+    /// In Docker, what the container and its volume are named after
+    /// (`<name>-server`, `<name>-data`: `--docker-name`, `fennecycsb`
+    /// unless given), and the memory it may hold (`--memory`), page cache
+    /// and all, its cgroup looked at each second while it runs.
+    name: String,
+    memory: Option<String>,
+    watch: Option<Watch>,
 }
-
-const DOCKER_SERVER: &str = "fennecycsb-server";
-const DOCKER_VOLUME: &str = "fennecycsb-data";
 
 impl Server {
     fn start(&mut self, sync: &str) {
@@ -1018,10 +1251,17 @@ impl Server {
             self.proc = Some(http::start_fennec(&file, self.port, "ycsb", &args));
             return;
         }
-        let st = std::process::Command::new("docker")
-            .args(["run", "-d", "--name", DOCKER_SERVER])
+        let mut run = std::process::Command::new("docker");
+        run.args(["run", "-d", "--pull", "never", "--name", &self.container()])
             .args(["-p", &format!("127.0.0.1:{}:8080", self.port)])
-            .args(["-v", &format!("{DOCKER_VOLUME}:/data")])
+            .args(["-v", &format!("{}:/data", self.volume())]);
+        if let Some(m) = &self.memory {
+            // No swap past it: a page the limit pushes out is read again
+            // from the file, which is what is measured, and the server's
+            // own memory past it is an OOM kill rather than a slow cell.
+            run.args(["--memory", m, "--memory-swap", m]);
+        }
+        let st = run
             .arg(&self.image)
             .args(["--http", "0.0.0.0:8080", "--insecure", "--no-checkpoint"])
             .args(["--file", "/data/ycsb.fennec", "--sync", sync])
@@ -1048,6 +1288,15 @@ impl Server {
             assert!(Instant::now() < until, "the container did not start");
             std::thread::sleep(Duration::from_millis(100));
         }
+        if self.memory.is_some() {
+            self.watch = Watch::start(&self.container());
+        }
+    }
+    fn container(&self) -> String {
+        format!("{}-server", self.name)
+    }
+    fn volume(&self) -> String {
+        format!("{}-data", self.name)
     }
     /// Stopped as a supervisor stops it, so that the writes of the last
     /// `--sync 250` interval are on disk when it starts again.
@@ -1055,14 +1304,22 @@ impl Server {
         if let Some(p) = self.proc.take() {
             p.terminate();
         }
+        self.watch = None;
         if self.docker {
             let _ = std::process::Command::new("docker")
-                .args(["stop", "-t", "60", DOCKER_SERVER])
+                .args(["stop", "-t", "60", &self.container()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
             let _ = std::process::Command::new("docker")
-                .args(["rm", "-f", DOCKER_SERVER])
+                .args(["rm", "-f", &self.container()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // A watch the daemon made after its drop, which can no longer
+            // start now that the server's processes are gone.
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &format!("{}-watch", self.container())])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
@@ -1077,7 +1334,7 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop();
         if self.docker {
-            remove_volume();
+            remove_volume(&self.volume());
         }
     }
 }
@@ -1088,10 +1345,10 @@ impl Drop for Server {
 /// collection made (409) -- or a GB or more stayed in the VM after a run.
 /// The container is started without it now, which makes the removal
 /// synchronous; the wait stays for a daemon that answers late.
-fn remove_volume() {
+fn remove_volume(volume: &str) {
     for _ in 0..40 {
         let gone = std::process::Command::new("docker")
-            .args(["volume", "rm", "-f", DOCKER_VOLUME])
+            .args(["volume", "rm", "-f", volume])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -1101,7 +1358,7 @@ fn remove_volume() {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    panic!("the volume {DOCKER_VOLUME} is still in use");
+    panic!("the volume {volume} is still in use");
 }
 
 impl System for Server {
@@ -1118,8 +1375,15 @@ impl System for Server {
             // by a container mounting the volume beside the server.
             true => {
                 let out = std::process::Command::new("docker")
-                    .args(["run", "--rm", "-v", &format!("{DOCKER_VOLUME}:/data")])
-                    .args(["alpine", "du", "-b", "/data/ycsb.fennec"])
+                    .args([
+                        "run",
+                        "--rm",
+                        "--pull",
+                        "never",
+                        "-v",
+                        &format!("{}:/data", self.volume()),
+                    ])
+                    .args([ALPINE, "du", "-b", "/data/ycsb.fennec"])
                     .output()
                     .ok()?;
                 String::from_utf8_lossy(&out.stdout)
@@ -1140,13 +1404,29 @@ impl System for Server {
     fn memory(&self) -> Option<u64> {
         // The mapped file's pages are the page cache's, not the server's.
         self.docker
-            .then(|| container_memory(DOCKER_SERVER))
+            .then(|| container_memory(&self.container()))
             .flatten()
+    }
+    fn cgroup(&self) -> Option<Cgroup> {
+        self.watch.as_ref()?.last()
+    }
+    fn oom_killed(&self) -> bool {
+        self.docker
+            && std::process::Command::new("docker")
+                .args(["inspect", "-f", "{{.State.OOMKilled}}", &self.container()])
+                .output()
+                .is_ok_and(|o| o.stdout.starts_with(b"true"))
+    }
+    fn live(&self) -> Option<u64> {
+        // A connection of its own, after the cell's clients have stopped.
+        let mut c = http::Http::try_connect(&self.addr(), Duration::from_secs(5)).ok()?;
+        let (status, body) = c.try_request("GET", "/_metrics", "text/plain", b"").ok()?;
+        (status == 200).then(|| metric_sum(body, "fennec_data_bytes"))
     }
     fn load(&mut self, records: u64) {
         if self.docker {
             self.stop();
-            remove_volume();
+            remove_volume(&self.volume());
         } else {
             let _ = std::fs::remove_file(self.dir.join("ycsb-server.fennec"));
         }
@@ -1257,6 +1537,19 @@ impl Client for ServerClient {
     }
 }
 
+/// The sum of a family's samples in a `/_metrics` page, every label's:
+/// `fennec_data_bytes{collection="usertable"} 123`.
+fn metric_sum(page: &[u8], family: &str) -> u64 {
+    String::from_utf8_lossy(page)
+        .lines()
+        .filter(|l| {
+            l.strip_prefix(family)
+                .is_some_and(|r| r.starts_with('{') || r.starts_with(' '))
+        })
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum::<f64>() as u64
+}
+
 /// The rows of an answer to `get`, `[{"id":1,"field0":"..",..},..]`: each
 /// one's `id` and its fields' digests. The values are letters and digits,
 /// so a string ends at the next quote; anything else in the body is no row.
@@ -1308,6 +1601,7 @@ fn json_rows(body: &[u8]) -> Vec<(u64, [u64; FIELDS])> {
 
 // ---- PostgreSQL
 
+#[cfg(feature = "rivals")]
 struct Pg {
     url: String,
     durable: bool,
@@ -1318,6 +1612,7 @@ struct Pg {
 /// a quarter of the memory as shared buffers, the rest left to the page
 /// cache it counts on, and checkpoints spaced so the load is not one. Its
 /// data in a volume, the VM's own file system, not the image's layers.
+#[cfg(feature = "rivals")]
 const PG_RUN: &[&str] = &[
     "-e",
     "POSTGRES_PASSWORD=fennec",
@@ -1340,6 +1635,7 @@ const PG_RUN: &[&str] = &[
 ];
 
 /// MongoDB 8 as it comes: WiredTiger's cache is half the memory less 1 GB.
+#[cfg(feature = "rivals")]
 const MONGO_RUN: &[&str] = &[
     "-p",
     "127.0.0.1:27018:27017",
@@ -1350,8 +1646,10 @@ const MONGO_RUN: &[&str] = &[
 
 /// A container started for a system's turn, removed with its volume after,
 /// so that one system's memory is not in the VM beside another's.
+#[cfg(feature = "rivals")]
 struct Container(String);
 
+#[cfg(feature = "rivals")]
 impl Container {
     fn start(name: &str, args: &[&str]) -> Container {
         let c = Container(format!("fennecycsb-{name}"));
@@ -1378,12 +1676,14 @@ impl Container {
     }
 }
 
+#[cfg(feature = "rivals")]
 impl Drop for Container {
     fn drop(&mut self) {
         self.remove();
     }
 }
 
+#[cfg(feature = "rivals")]
 impl System for Pg {
     fn name(&self) -> &'static str {
         "pg"
@@ -1479,6 +1779,7 @@ impl System for Pg {
     }
 }
 
+#[cfg(feature = "rivals")]
 struct PgClient {
     c: postgres::Client,
     last: Vec<(i64, [String; FIELDS])>,
@@ -1488,6 +1789,7 @@ struct PgClient {
     insert: postgres::Statement,
 }
 
+#[cfg(feature = "rivals")]
 fn pg_fields(r: &postgres::Row) -> (i64, [String; FIELDS]) {
     let mut out: [String; FIELDS] = Default::default();
     for (i, o) in out.iter_mut().enumerate() {
@@ -1496,6 +1798,7 @@ fn pg_fields(r: &postgres::Row) -> (i64, [String; FIELDS]) {
     (r.get(0), out)
 }
 
+#[cfg(feature = "rivals")]
 impl Client for PgClient {
     fn ping(&mut self) -> bool {
         self.c.simple_query("").unwrap();
@@ -1539,15 +1842,19 @@ impl Client for PgClient {
 
 // ---- MongoDB
 
+#[cfg(feature = "rivals")]
 use mongodb::bson::{doc, Document};
+#[cfg(feature = "rivals")]
 use mongodb::options::{Acknowledgment, CollectionOptions, WriteConcern};
 
+#[cfg(feature = "rivals")]
 struct Mongo {
     client: mongodb::sync::Client,
     durable: bool,
     container: Option<Container>,
 }
 
+#[cfg(feature = "rivals")]
 impl Mongo {
     fn coll(&self, durable: bool) -> mongodb::sync::Collection<Document> {
         let wc = WriteConcern::builder()
@@ -1561,6 +1868,7 @@ impl Mongo {
     }
 }
 
+#[cfg(feature = "rivals")]
 fn mongo_doc(key: u64, values: &[String]) -> Document {
     let mut d = doc! { "_id": key as i64 };
     for (i, v) in values.iter().enumerate() {
@@ -1569,6 +1877,7 @@ fn mongo_doc(key: u64, values: &[String]) -> Document {
     d
 }
 
+#[cfg(feature = "rivals")]
 impl System for Mongo {
     fn name(&self) -> &'static str {
         "mongo"
@@ -1625,6 +1934,7 @@ impl System for Mongo {
     }
 }
 
+#[cfg(feature = "rivals")]
 struct MongoClient {
     admin: mongodb::sync::Database,
     coll: mongodb::sync::Collection<Document>,
@@ -1632,6 +1942,7 @@ struct MongoClient {
     last: Vec<Document>,
 }
 
+#[cfg(feature = "rivals")]
 impl Client for MongoClient {
     fn ping(&mut self) -> bool {
         self.admin.run_command(doc! {"ping": 1}).run().unwrap();
@@ -1700,6 +2011,7 @@ impl Client for MongoClient {
 /// It loads with the append-only file fsynced once a second, as
 /// fennec-server loads under `--sync 250`, and `set_mode` sets the mode
 /// over it. Its data in a volume, as PostgreSQL's and MongoDB's are.
+#[cfg(feature = "rivals")]
 const REDIS_RUN: &[&str] = &[
     "-p",
     "127.0.0.1:56380:6379",
@@ -1715,6 +2027,7 @@ const REDIS_RUN: &[&str] = &[
 
 /// The sorted set of every key YCSB's binding keeps for its scans, under
 /// the binding's name for it (`INDEX_KEY`).
+#[cfg(feature = "rivals")]
 const REDIS_INDEX: &str = "_indices";
 
 /// A record as YCSB's own Redis binding keeps it (`redis/src/main/java/
@@ -1735,6 +2048,7 @@ const REDIS_INDEX: &str = "_indices";
 /// every other system's insert is one statement -- and a scan asks for
 /// its records in one pipeline, where the binding asks one at a time, a
 /// round trip each.
+#[cfg(feature = "rivals")]
 struct Redis {
     url: String,
     /// Started afresh for each load and removed with its volume, so a load
@@ -1748,6 +2062,7 @@ struct Redis {
 /// a pipeline written in pieces would wait on the ACK of the first.
 /// Waits for the server: Docker's port takes a connection before Redis
 /// listens, so a `PING` answered is the sign.
+#[cfg(feature = "rivals")]
 fn redis_connect(url: &str) -> redis::Connection {
     use redis::IntoConnectionInfo as _;
     let info = url
@@ -1772,6 +2087,7 @@ fn redis_connect(url: &str) -> redis::Connection {
 }
 
 /// One field of `INFO <section>`.
+#[cfg(feature = "rivals")]
 fn redis_info(c: &mut redis::Connection, section: &str, field: &str) -> String {
     let info: String = redis::cmd("INFO").arg(section).query(c).unwrap();
     info.lines()
@@ -1785,6 +2101,7 @@ fn redis_info(c: &mut redis::Connection, section: &str, field: &str) -> String {
 /// append-only file, to end and for none to be due: the load's end, and
 /// what is measured after a phase, are the server's own and not a fork's
 /// copy of its pages or a file half written.
+#[cfg(feature = "rivals")]
 fn redis_idle(c: &mut redis::Connection) {
     let until = Instant::now() + Duration::from_secs(1200);
     loop {
@@ -1806,6 +2123,7 @@ fn redis_idle(c: &mut redis::Connection) {
 
 /// Runs a background job -- `BGSAVE`, `BGREWRITEAOF` -- to its end, and
 /// holds its status to `ok`.
+#[cfg(feature = "rivals")]
 fn redis_background(c: &mut redis::Connection, cmd: &str, status: &str) {
     redis_idle(c);
     redis::cmd(cmd).query::<String>(c).unwrap();
@@ -1813,12 +2131,14 @@ fn redis_background(c: &mut redis::Connection, cmd: &str, status: &str) {
     assert_eq!(redis_info(c, "persistence", status), "ok", "{cmd}");
 }
 
+#[cfg(feature = "rivals")]
 impl Redis {
     fn connect(&self) -> redis::Connection {
         redis_connect(&self.url)
     }
 }
 
+#[cfg(feature = "rivals")]
 impl System for Redis {
     fn name(&self) -> &'static str {
         "redis"
@@ -1962,6 +2282,7 @@ impl System for Redis {
     }
 }
 
+#[cfg(feature = "rivals")]
 struct RedisClient {
     c: redis::Connection,
     fields: Vec<String>,
@@ -1976,6 +2297,7 @@ struct RedisClient {
 
 /// An `HGETALL` reply's field-value pairs, a flat array under RESP2 and a
 /// map under RESP3.
+#[cfg(feature = "rivals")]
 fn redis_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
     match v {
         redis::Value::Array(a) => a.as_chunks::<2>().0.iter().map(|[k, v]| (k, v)).collect(),
@@ -1986,6 +2308,7 @@ fn redis_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
 
 /// A record's fields' digests from its `HGETALL` reply, 0 for a field it
 /// did not hold.
+#[cfg(feature = "rivals")]
 fn redis_digests(v: &redis::Value) -> [u64; FIELDS] {
     let mut d = [0; FIELDS];
     for (k, v) in redis_pairs(v) {
@@ -2002,6 +2325,7 @@ fn redis_digests(v: &redis::Value) -> [u64; FIELDS] {
     d
 }
 
+#[cfg(feature = "rivals")]
 impl Client for RedisClient {
     fn ping(&mut self) -> bool {
         redis::cmd("PING").query::<String>(&mut self.c).unwrap();
@@ -2098,6 +2422,33 @@ struct Config {
     /// fennecdb's files compacted on their own, in process and in the
     /// server, as each ships; `--no-auto-compact` for the runs before.
     auto_compact: bool,
+    /// The operations a second the cell's threads send together, open
+    /// loop (`--rate`): each thread keeps a schedule and an operation's
+    /// time runs from when it was due, so a stall counts the wait of every
+    /// one queued behind it rather than slowing the client down with the
+    /// server -- coordinated omission. 0, as fast as each is answered.
+    rate: f64,
+    /// The family the lines are of (`--family`): `ycsb`, or a regime of its
+    /// own whose cells must not join the published grid's medians.
+    family: String,
+    /// `server-docker`'s container and volume are named after it
+    /// (`--docker-name`).
+    docker_name: String,
+    /// The memory the system runs under (`--memory`, Docker's form: `2g`):
+    /// the server's container is started with it, and a process run in a
+    /// container started with it says so to look at its own cgroup. Each
+    /// cell then carries its cgroup's faults and memory, its limit and the
+    /// live bytes, and a failed cell is a line saying so.
+    memory: Option<String>,
+    /// The bytes `--verify`'s logs may hold before the cell's measured
+    /// window ends (`--verify-max`, in MB): in a container under a limit
+    /// the logs are the process's own memory, which would otherwise push
+    /// out the very pages measured, or past the limit.
+    verify_max: Option<u64>,
+    /// A directory the script beside the run answers in before each load
+    /// and cell (`--gate`, `ask_gate`): whether the machine is quiet and
+    /// the disks have room, which a process in a container cannot see.
+    gate: Option<PathBuf>,
 }
 
 /// What a cell measured, and with `--verify` what each thread logged.
@@ -2113,6 +2464,36 @@ struct Cell {
     majflt: u64,
     largest: u64,
     sampled: bool,
+    /// How long the measured window ran: `--seconds`, or less where the
+    /// logs reached `--verify-max`.
+    secs: f64,
+    /// The system's cgroup, a look a second through the measured window.
+    looks: Vec<Cgroup>,
+    /// What ended it early: a client's panic -- a refused write, the
+    /// server gone.
+    failed: Option<String>,
+}
+
+/// A panic's message, as a cell that failed names it.
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "a panic".into())
+}
+
+/// Docker's form of a size -- `512m`, `2g`, `1073741824` -- in bytes.
+fn bytes_of(v: &str) -> Option<u64> {
+    let v = v.trim().to_ascii_lowercase();
+    let (n, mul) = match v.char_indices().last()? {
+        (i, 'k') => (&v[..i], 1u64 << 10),
+        (i, 'm') => (&v[..i], 1 << 20),
+        (i, 'g') => (&v[..i], 1 << 30),
+        (i, 'b') => (&v[..i], 1),
+        _ => (&v[..], 1),
+    };
+    let n: f64 = n.parse().ok()?;
+    Some((n * mul as f64) as u64)
 }
 
 /// The process's major faults so far (`getrusage`), `rusage`'s layout on
@@ -2157,6 +2538,8 @@ fn run_cell(
     let measuring = AtomicBool::new(false);
     let stop = AtomicBool::new(false);
     let verify = cfg.verify.is_some();
+    // The bytes the threads' logs hold, told every 256 entries.
+    let logged = AtomicU64::new(0);
     let clients: Vec<Box<dyn Client>> = (0..threads).map(|_| sys.client()).collect();
     let mut cell = Cell {
         ops: 0,
@@ -2165,6 +2548,15 @@ fn run_cell(
         majflt: 0,
         largest: 0,
         sampled: false,
+        secs: 0.0,
+        looks: Vec::new(),
+        failed: None,
+    };
+    // Open loop: each thread an operation every `every`, the threads'
+    // schedules staggered across it.
+    let every = match cfg.rate > 0.0 {
+        true => Some(Duration::from_secs_f64(threads as f64 / cfg.rate)),
+        false => None,
     };
     let t0 = Instant::now();
     std::thread::scope(|s| {
@@ -2172,7 +2564,8 @@ fn run_cell(
             .into_iter()
             .enumerate()
             .map(|(t, mut client)| {
-                let (keys, measuring, stop) = (&keys, &measuring, &stop);
+                let (keys, measuring, stop, logged) = (&keys, &measuring, &stop, &logged);
+                let first = every.map(|e| t0 + e.mul_f64(t as f64 / threads as f64));
                 let mut chooser = Chooser {
                     dist: w.dist,
                     scrambled: base_scrambled.clone(),
@@ -2188,8 +2581,20 @@ fn run_cell(
                     let mut value = String::with_capacity(FIELD_LEN);
                     let mut ops = 0u64;
                     let mut log = Vec::new();
+                    let (mut sent, mut told) = (0u64, 0usize);
                     let at = |i: Instant| (i - t0).as_nanos() as u64;
                     while !stop.load(Ordering::Relaxed) {
+                        // When this operation is due: now, closed loop, or
+                        // its place in the schedule, waited for if early.
+                        let due = match (first, every) {
+                            (Some(first), Some(e)) => {
+                                let due = first + e.mul_f64(sent as f64);
+                                sent += 1;
+                                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                                due
+                            }
+                            _ => Instant::now(),
+                        };
                         let mut u = rng.f64();
                         let mut op = mix[mix.len() - 1].0;
                         for (o, p) in mix {
@@ -2249,12 +2654,20 @@ fn run_cell(
                         }
                         let end = Instant::now();
                         if measuring.load(Ordering::Relaxed) {
-                            let ns = (end - start).as_nanos() as u64;
+                            // From when it was due: the same as its start
+                            // closed loop, its wait in the queue too open.
+                            let ns = (end - due.min(start)).as_nanos() as u64;
                             hist.entry(op).or_insert_with(Hist::new).record(ns);
                             ops += 1;
                         }
                         if !verify {
                             continue;
+                        }
+                        if log.len() >= told + 256 {
+                            let more: u64 =
+                                log[told..].iter().map(|e: &Entry| e.bytes() as u64).sum();
+                            logged.fetch_add(more, Ordering::Relaxed);
+                            told = log.len();
                         }
                         // What the operation was answered, kept after the
                         // timed span; the warm-up's writes are logged too,
@@ -2301,24 +2714,56 @@ fn run_cell(
         std::thread::sleep(cfg.warmup);
         measuring.store(true, Ordering::Relaxed);
         let faults = major_faults();
-        let ends = Instant::now() + cfg.run;
-        while Instant::now() < ends {
-            std::thread::sleep(Duration::from_millis(100).min(ends - Instant::now().min(ends)));
+        let began = Instant::now();
+        let ends = began + cfg.run;
+        let mut look = began;
+        loop {
+            let now = Instant::now();
+            if now >= look {
+                cell.looks.extend(sys.cgroup());
+                look += Duration::from_secs(1);
+            }
+            if now >= ends {
+                break;
+            }
+            if let Some(max) = cfg.verify_max {
+                if logged.load(Ordering::Relaxed) >= max {
+                    eprintln!(
+                        "  the verify logs reached {} MB after {:.1} s: the cell ends there",
+                        max >> 20,
+                        now.duration_since(began).as_secs_f64()
+                    );
+                    break;
+                }
+            }
+            // Every client gone -- the server they ask killed -- ends it.
+            if handles.iter().all(|h| h.is_finished()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100).min(ends - now));
             if let Some(bytes) = sys.size_beside() {
                 cell.largest = cell.largest.max(bytes);
                 cell.sampled = true;
             }
         }
+        cell.secs = began.elapsed().as_secs_f64();
         cell.majflt = major_faults() - faults;
         measuring.store(false, Ordering::Relaxed);
         stop.store(true, Ordering::Relaxed);
         for h in handles {
-            let (ops, hist, log) = h.join().unwrap();
-            cell.ops += ops;
-            for (op, h) in hist {
-                cell.hist.entry(op).or_insert_with(Hist::new).merge(&h);
+            match h.join() {
+                Ok((ops, hist, log)) => {
+                    cell.ops += ops;
+                    for (op, h) in hist {
+                        cell.hist.entry(op).or_insert_with(Hist::new).merge(&h);
+                    }
+                    cell.logs.push(log);
+                }
+                Err(p) => {
+                    let why = panic_text(p.as_ref());
+                    cell.failed.get_or_insert(why);
+                }
             }
-            cell.logs.push(log);
         }
         if !cell.sampled {
             cell.largest = sys.size().unwrap_or(0);
@@ -2364,6 +2809,15 @@ enum Entry {
 }
 
 impl Entry {
+    /// What it holds, a scan's rows too: what `--verify-max` counts.
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Entry>()
+            + match self {
+                Entry::Scan { rows, .. } => rows.capacity() * std::mem::size_of::<(u64, u64)>(),
+                _ => 0,
+            }
+    }
+
     fn read(key: u64, s: u64, e: u64, rows: Vec<(u64, [u64; FIELDS])>) -> Entry {
         Entry::Read {
             key,
@@ -2375,45 +2829,17 @@ impl Entry {
     }
 }
 
-/// A write to one field as the checker holds it.
-#[derive(Clone, Copy)]
-struct W {
-    s: u64,
-    e: u64,
-    d: u64,
-}
-
-/// The writes a cell made to one field of one record, by when they ended,
-/// and the latest start among the first `i + 1` of them.
-struct Reg {
-    ws: Vec<W>,
-    smax: Vec<u64>,
-}
-
-impl Reg {
-    /// The latest start of a write that ended before `t`, if one did.
-    fn latest_start_before(&self, t: u64) -> Option<u64> {
-        let n = self.ws.partition_point(|w| w.e < t);
-        n.checked_sub(1).map(|i| self.smax[i])
-    }
-}
-
 /// What each field holds as a cell begins, where a cell before it in the
-/// phase wrote it: the values it can hold, more than one only where the
-/// writes that could have been the last overlapped.
+/// phase wrote it -- the values it can hold, more than one only where the
+/// writes that could have been the last overlapped -- in the registers
+/// every answer is held to (`register.rs`), and the records' loaded values.
 #[derive(Default)]
 struct Model {
-    fields: std::collections::HashMap<(u64, u8), Vec<u64>>,
+    regs: register::Registers,
     base: std::collections::HashMap<u64, [u64; FIELDS]>,
 }
 
 impl Model {
-    fn initial(&mut self, key: u64, field: u8) -> Vec<u64> {
-        if let Some(v) = self.fields.get(&(key, field)) {
-            return v.clone();
-        }
-        vec![self.base(key)[field as usize]]
-    }
     fn base(&mut self, key: u64) -> [u64; FIELDS] {
         *self.base.entry(key).or_insert_with(|| base_digests(key))
     }
@@ -2453,7 +2879,6 @@ impl Verdict {
 fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
     let mut v = Verdict::default();
     // Every write, into its field's register.
-    let mut regs: std::collections::HashMap<(u64, u8), Reg> = std::collections::HashMap::new();
     for e in logs.iter().flatten() {
         if let Entry::Write {
             key,
@@ -2468,62 +2893,35 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
             if affected != 1 {
                 v.wrong(format!("write of {key} answered {affected} records"));
             }
-            let mut put = |f: u8, d: u64| {
-                regs.entry((key, f))
-                    .or_insert_with(|| Reg {
-                        ws: Vec::new(),
-                        smax: Vec::new(),
-                    })
-                    .ws
-                    .push(W { s, e, d })
-            };
             if field as usize == FIELDS {
                 for (f, d) in model.base(key).into_iter().enumerate() {
-                    put(f as u8, d);
+                    model
+                        .regs
+                        .write(key, f as u8, register::W::answered(s, e, d));
                 }
             } else {
-                put(field, value);
+                model
+                    .regs
+                    .write(key, field, register::W::answered(s, e, value));
             }
         }
     }
-    let mut by_value: std::collections::HashMap<u64, ((u64, u8), usize)> =
-        std::collections::HashMap::new();
-    for (r, reg) in regs.iter_mut() {
-        reg.ws.sort_by_key(|w| (w.e, w.s));
-        let mut m = 0;
-        reg.smax = reg
-            .ws
-            .iter()
-            .map(|w| {
-                m = m.max(w.s);
-                m
-            })
-            .collect();
-        for (i, w) in reg.ws.iter().enumerate() {
-            by_value.insert(w.d, (*r, i));
-        }
-    }
-    // Whether `d` is a value the field `r` could hold to a read over [s, e].
-    let may_hold = |model: &mut Model, r: (u64, u8), s: u64, e: u64, d: u64| -> bool {
-        let reg = regs.get(&r);
-        let none_ended = reg.is_none_or(|g| g.latest_start_before(s).is_none());
-        if none_ended && model.initial(r.0, r.1).contains(&d) {
-            return true;
-        }
-        let (Some(reg), Some(&(at, i))) = (reg, by_value.get(&d)) else {
-            return false;
-        };
-        if at != r {
-            return false;
-        }
-        let w = reg.ws[i];
-        let overlaps = w.s <= e && w.e >= s;
-        // Ended before the read, and no write began after it ended and
-        // ended before the read too.
-        let last = w.e < s && reg.latest_start_before(s).is_some_and(|m| m <= w.e);
-        overlaps || last
-    };
-    for e in logs.iter().flatten() {
+    // The reads in the order they ended: a register is atomic, so a read
+    // is held to every read that ended before it began (`register.rs`).
+    let mut reads: Vec<&Entry> = logs
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e, Entry::Read { .. }))
+        .collect();
+    reads.sort_by_key(|x| match x {
+        Entry::Read { e, .. } => *e,
+        _ => 0,
+    });
+    let scans = logs
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e, Entry::Scan { .. }));
+    for e in reads.into_iter().chain(scans) {
         match e {
             Entry::Read {
                 key,
@@ -2540,8 +2938,9 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                     ));
                     continue;
                 }
-                for (f, &held) in got.1.iter().enumerate() {
-                    if !may_hold(model, (*key, f as u8), *s, *e, held) {
+                let base = model.base(*key);
+                for (f, (&d, &b)) in got.1.iter().zip(&base).enumerate() {
+                    if !model.regs.read(*key, f as u8, *s, *e, d, b) {
                         v.wrong(format!(
                             "read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
                         ));
@@ -2580,14 +2979,9 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                     // The record as written: each field's starting value or
                     // any written to it in the cell, every combination
                     // tried up to a bound.
-                    let cands: Vec<Vec<u64>> = (0..FIELDS as u8)
-                        .map(|f| {
-                            let mut c = model.initial(*k, f);
-                            if let Some(g) = regs.get(&(*k, f)) {
-                                c.extend(g.ws.iter().map(|w| w.d));
-                            }
-                            c
-                        })
+                    let base = model.base(*k);
+                    let cands: Vec<Vec<u64>> = (0..FIELDS)
+                        .map(|f| model.regs.candidates(*k, f as u8, base[f]))
                         .collect();
                     if cands.iter().map(Vec::len).product::<usize>() > 4096 {
                         v.undecided += 1;
@@ -2625,13 +3019,11 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
         }
     }
     // What each field written holds now: the writes no other began after.
-    for (r, reg) in regs {
-        let last = *reg.smax.last().unwrap();
-        model.fields.insert(
-            r,
-            reg.ws.iter().filter(|w| w.e >= last).map(|w| w.d).collect(),
-        );
-    }
+    let Model { regs, base } = model;
+    regs.settle(u64::MAX, |key, f| {
+        base.get(&key)
+            .map_or_else(|| base_digests(key)[f as usize], |b| b[f as usize])
+    });
     v
 }
 
@@ -2670,12 +3062,42 @@ fn cool(base: f64, least: Duration) -> f64 {
 
 const HEADER: &str = "run\tsystem\tmode\tworkload\tthreads\trecords\tseconds\tops\tops_s\tprobe";
 
+/// The columns after the operations', each empty -- and so no line -- in a
+/// run that did not ask for it: the open loop's rate (`--rate`); under
+/// `--memory` the cgroup's major faults a second over the window and in
+/// its worst second, the most it was charged and the most of that
+/// anonymous, its files' pages on average, the limit its own `memory.max`
+/// says, the live records' bytes, and whether the cell failed and the
+/// kernel killed the system for its memory; with `--verify` its verdict;
+/// and `env_failed`, a cell the environment failed -- the disk short or
+/// the machine busy before it, or the disk short during it (`ycsb fill
+/// --env-failed`) -- which is no measurement and no failure of the
+/// system's.
+const TAIL: [&str; 13] = [
+    "rate",
+    "majflt_s",
+    "majflt_s_max",
+    "cg_peak",
+    "anon_peak",
+    "file_mean",
+    "limit",
+    "live",
+    "failed",
+    "oom",
+    "mismatches",
+    "undecided",
+    "env_failed",
+];
+
 fn header() -> String {
     let mut h = HEADER.to_string();
     for op in OPS {
         for q in ["n", "p50", "p95", "p99", "max"] {
             write!(h, "\t{}_{q}", op.name()).unwrap();
         }
+    }
+    for t in TAIL {
+        write!(h, "\t{t}").unwrap();
     }
     h
 }
@@ -2686,8 +3108,10 @@ fn header() -> String {
 const RESULT_COLUMNS: &str = "run\tcommit\tmachine\tdate\tfamily\tcell\tmetric\tvalue";
 
 /// What a line names beside its values: the commit the bench was built from
-/// (`-dirty` with uncommitted changes), the machine (`FENNEC_BENCH_MACHINE`,
-/// else the host's name) and the day. Asked once a process.
+/// (`-dirty` with uncommitted changes; `FENNEC_BENCH_COMMIT` for a build run
+/// where there is no checkout, a container's), the machine
+/// (`FENNEC_BENCH_MACHINE`, else the host's name) and the day. Asked once a
+/// process.
 fn provenance() -> &'static (String, String, String) {
     static P: std::sync::OnceLock<(String, String, String)> = std::sync::OnceLock::new();
     P.get_or_init(|| {
@@ -2700,10 +3124,16 @@ fn provenance() -> &'static (String, String, String) {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default()
         };
-        let mut commit = run("git", &["rev-parse", "--short=8", "HEAD"]);
-        if !run("git", &["status", "--porcelain", "--untracked-files=no"]).is_empty() {
-            commit.push_str("-dirty");
-        }
+        let commit = match std::env::var("FENNEC_BENCH_COMMIT") {
+            Ok(c) if !c.trim().is_empty() => c.trim().to_string(),
+            _ => {
+                let mut commit = run("git", &["rev-parse", "--short=8", "HEAD"]);
+                if !run("git", &["status", "--porcelain", "--untracked-files=no"]).is_empty() {
+                    commit.push_str("-dirty");
+                }
+                commit
+            }
+        };
         let machine = std::env::var("FENNEC_BENCH_MACHINE")
             .ok()
             .filter(|m| !m.trim().is_empty())
@@ -2742,7 +3172,24 @@ fn utc_date() -> String {
 /// Appends a wide line (`header()`'s columns) to a results file as one line
 /// a value: the cell is `<system>:<mode>:<workload>:<threads>`, each column
 /// after the thread count a metric, an empty one left out.
-fn append(path: &Path, line: &str) {
+fn append(path: &Path, family: &str, line: &str) {
+    let head = header();
+    let head: Vec<&str> = head.split('\t').collect();
+    let v: Vec<&str> = line.split('\t').collect();
+    let values: Vec<(&str, String)> = head
+        .iter()
+        .zip(&v)
+        .skip(5)
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(name, value)| (*name, value.to_string()))
+        .collect();
+    append_values(path, family, v[0], &v[1..5].join(":"), &values);
+}
+
+/// Appends a cell's values to a results file, a line each, the header first
+/// into a file that is new: the one write a line takes, so a run cut short
+/// keeps every line it finished.
+fn append_values(path: &Path, family: &str, run: &str, cell: &str, values: &[(&str, String)]) {
     let new = !path.exists();
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -2752,32 +3199,25 @@ fn append(path: &Path, line: &str) {
     if new {
         writeln!(f, "{RESULT_COLUMNS}").unwrap();
     }
-    let head = header();
-    let head: Vec<&str> = head.split('\t').collect();
-    let v: Vec<&str> = line.split('\t').collect();
     let (commit, machine, date) = provenance();
-    let cell = v[1..5].join(":");
     let mut text = String::new();
-    for (name, value) in head.iter().zip(&v).skip(5) {
-        if !value.is_empty() {
-            writeln!(
-                text,
-                "{}\t{commit}\t{machine}\t{date}\tycsb\t{cell}\t{name}\t{value}",
-                v[0]
-            )
-            .unwrap();
-        }
+    for (name, value) in values {
+        writeln!(
+            text,
+            "{run}\t{commit}\t{machine}\t{date}\t{family}\t{cell}\t{name}\t{value}"
+        )
+        .unwrap();
     }
     f.write_all(text.as_bytes()).unwrap();
 }
 
 fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
     match name {
-        "fennec" => Box::new(FennecLocal::new(dir, cfg.auto_compact)),
-        "sqlite" => Box::new(Sqlite {
-            path: dir.join("ycsb.sqlite"),
-            durable: false,
-        }),
+        "fennec" => Box::new(FennecLocal::new(
+            dir,
+            cfg.auto_compact,
+            cfg.memory.is_some(),
+        )),
         "server" | "server-docker" => Box::new(Server {
             dir: dir.to_path_buf(),
             docker: name == "server-docker",
@@ -2785,6 +3225,26 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
             proc: None,
             image: cfg.image.clone(),
             auto_compact: cfg.auto_compact,
+            name: cfg.docker_name.clone(),
+            memory: cfg.memory.clone(),
+            watch: None,
+        }),
+        #[cfg(feature = "rivals")]
+        other => rival(other, dir),
+        #[cfg(not(feature = "rivals"))]
+        other => panic!(
+            "no system `{other}` in a build without the rivals: fennec, server, server-docker"
+        ),
+    }
+}
+
+/// SQLite, PostgreSQL, MongoDB or Redis, each started for its turn.
+#[cfg(feature = "rivals")]
+fn rival(name: &str, dir: &Path) -> Box<dyn System> {
+    match name {
+        "sqlite" => Box::new(Sqlite {
+            path: dir.join("ycsb.sqlite"),
+            durable: false,
         }),
         "pg" => {
             // A server of the reader's own when named, else a container
@@ -2901,39 +3361,121 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
             if order.is_empty() {
                 continue;
             }
+            if let Err(why) = ask_gate(cfg, name, "load") {
+                eprintln!("{name}: the environment's failure before a load: {why}");
+                drop(sys);
+                let _ = std::fs::remove_dir_all(&dir);
+                std::process::exit(EXIT_ENV);
+            }
             let ratio = cool(base, cfg.gap);
             eprintln!("{name}: loading {} records", cfg.records);
             let t = Instant::now();
-            sys.load(cfg.records);
+            // A system that fails -- a server killed for its memory -- is a
+            // failed line for each cell it would have run, never a line
+            // missing (`--memory`'s runs are judged by every cell).
+            let mut broken = attempt(|| sys.load(cfg.records));
             let secs = t.elapsed().as_secs_f64();
             let rate = cfg.records as f64 / secs;
-            eprintln!("{name}: loaded at {rate:.0} records/s");
-            append(
-                &cfg.out,
-                &format!(
-                    "{}\t{name}\t{}\tload\t1\t{}\t{secs:.2}\t{}\t{rate:.0}\t{ratio:.3}",
-                    cfg.run_id,
-                    mode.name(),
-                    cfg.records,
-                    cfg.records
-                ),
-            );
-            if !pinged {
-                pinged = true;
-                ping(sys.as_ref(), name, cfg, ratio);
+            if broken.is_none() {
+                eprintln!("{name}: loaded at {rate:.0} records/s");
+                append(
+                    &cfg.out,
+                    &cfg.family,
+                    &format!(
+                        "{}\t{name}\t{}\tload\t1\t{}\t{secs:.2}\t{}\t{rate:.0}\t{ratio:.3}",
+                        cfg.run_id,
+                        mode.name(),
+                        cfg.records,
+                        cfg.records
+                    ),
+                );
             }
-            sys.set_mode(mode);
+            // Under `--memory` the live records must be twice the limit
+            // before a cell runs: a run whose data fits is not the regime
+            // measured, and three hours of cells would only find it out.
+            if broken.is_none() && cfg.memory.is_some() {
+                if let Err(why) = twice_the_limit(sys.as_ref()) {
+                    eprintln!("{name}: refused before any cell: {why}");
+                    // Said where the script reads it: an exit status can be
+                    // a wrapper's (`caffeinate`) rather than ours.
+                    if let Some(gate) = &cfg.gate {
+                        let _ = std::fs::write(gate.join("refused"), format!("{name}: {why}\n"));
+                    }
+                    drop(sys);
+                    let _ = std::fs::remove_dir_all(&dir);
+                    std::process::exit(EXIT_SMALL);
+                }
+            }
+            if !pinged && broken.is_none() {
+                pinged = true;
+                broken = attempt(|| ping(sys.as_ref(), name, cfg, ratio));
+            }
+            if broken.is_none() {
+                broken = attempt(|| sys.set_mode(mode));
+            }
+            let mut oom = broken.is_some() && sys.oom_killed();
             let mut records = cfg.records;
             // What the load wrote, which each cell's writes move on.
             let mut model = Model::default();
             for w in order {
                 for &threads in &cfg.threads {
+                    if let Some(why) = &broken {
+                        let cell = Cell::failed(format!("not run: {why}"));
+                        let after = After {
+                            live: None,
+                            oom,
+                            verdict: None,
+                        };
+                        write_cell(
+                            name, mode, w, threads, records, &cell, 0.0, cfg, run, &after,
+                        );
+                        continue;
+                    }
+                    if let Err(why) = ask_gate(cfg, name, "cell") {
+                        eprintln!(
+                            "{name} {} {} x{threads}: the environment's failure before it: {why}",
+                            mode.name(),
+                            w.name
+                        );
+                        drop(sys);
+                        let _ = std::fs::remove_dir_all(&dir);
+                        std::process::exit(EXIT_ENV);
+                    }
                     let ratio = cool(base, cfg.gap);
-                    let (cell, now) = run_cell(sys.as_ref(), w, threads, records, cfg);
+                    let (cell, now) =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_cell(sys.as_ref(), w, threads, records, cfg)
+                        })) {
+                            Ok(out) => out,
+                            Err(p) => (Cell::failed(panic_text(p.as_ref())), records),
+                        };
                     records = now;
-                    write_cell(name, mode, w, threads, records, &cell, ratio, cfg, run);
-                    if let Some(path) = &cfg.verify {
-                        let v = check(&cell.logs, &mut model);
+                    oom = cell.failed.is_some() && sys.oom_killed();
+                    let verdict = match (&cfg.verify, &cell.failed) {
+                        (Some(_), None) => Some(check(&cell.logs, &mut model)),
+                        _ => None,
+                    };
+                    let after = After {
+                        live: match (&cfg.memory, &cell.failed) {
+                            (Some(_), None) => sys.live(),
+                            _ => None,
+                        },
+                        oom,
+                        verdict: verdict.as_ref(),
+                    };
+                    write_cell(
+                        name, mode, w, threads, records, &cell, ratio, cfg, run, &after,
+                    );
+                    if let Some(why) = &cell.failed {
+                        eprintln!(
+                            "{name} {} {} x{threads} failed{}: {why}",
+                            mode.name(),
+                            w.name,
+                            if oom { ", killed for its memory" } else { "" }
+                        );
+                        broken = Some(why.clone());
+                    }
+                    if let (Some(path), Some(v)) = (&cfg.verify, &verdict) {
                         eprintln!(
                             "verify {name} {} {} x{threads}: {} reads, {} scans ({} rows), {} writes: {} mismatches, {} undecided",
                             mode.name(),
@@ -2978,6 +3520,7 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
                 eprintln!("{name}: {} MB on disk after {phase}", bytes >> 20);
                 append(
                     &cfg.out,
+                    &cfg.family,
                     &format!(
                         "{}\t{name}\t{}\tsize-{phase}\t1\t{records}\t0\t{bytes}\t0\t0",
                         cfg.run_id,
@@ -2989,6 +3532,7 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
                 eprintln!("{name}: {} MB in memory after {phase}", bytes >> 20);
                 append(
                     &cfg.out,
+                    &cfg.family,
                     &format!(
                         "{}\t{name}\t{}\tmemory-{phase}\t1\t{records}\t0\t{bytes}\t0\t0",
                         cfg.run_id,
@@ -3000,6 +3544,143 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
     }
     drop(sys);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ycsb`'s exit when the live records after a load are under twice the
+/// cgroup's limit (`twice_the_limit`): the run is refused, no cell written.
+const EXIT_SMALL: i32 = 3;
+/// `ycsb`'s exit when the gate (`--gate`) said the environment cannot take
+/// the next step: the script writes the cells left as the environment's
+/// (`ycsb fill --env-failed`).
+const EXIT_ENV: i32 = 4;
+
+/// Whether the live records `sys` holds are at least twice the limit its
+/// cgroup's own `memory.max` says, both read -- the reason, naming both,
+/// where not. A server's cgroup is looked at a second apart: a few seconds
+/// for the first look.
+fn twice_the_limit(sys: &dyn System) -> std::result::Result<(), String> {
+    let mut limit = None;
+    for _ in 0..20 {
+        limit = sys.cgroup().and_then(|c| c.limit);
+        if limit.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let live = sys.live();
+    match (live, limit) {
+        (Some(live), Some(limit)) if live >= 2 * limit => {
+            eprintln!(
+                "{}: {} MB live, {:.2} times the cgroup's limit of {} MB",
+                sys.name(),
+                live >> 20,
+                live as f64 / limit as f64,
+                limit >> 20
+            );
+            Ok(())
+        }
+        (Some(live), Some(limit)) => Err(format!(
+            "{live} bytes live ({} MB) are under twice the cgroup's limit of {limit} bytes ({} MB): raise --records",
+            live >> 20,
+            limit >> 20
+        )),
+        (live, limit) => Err(format!(
+            "the live bytes ({live:?}) or the cgroup's limit ({limit:?}, memory.max) could not be read"
+        )),
+    }
+}
+
+/// Asks the script beside the run whether the environment can take the
+/// next step (`--gate <dir>`, a directory both see: a container's run
+/// mounts it): writes `ask.<id>` holding `what` (`load` or `cell`) and
+/// waits for `ok.<id>` or `stop.<id>`, the latter holding why. The script
+/// answers once the host's load is down to its quiet line and the host's
+/// and Docker's VM's free disk cover the step (`ycsb/env-check.sh`), which
+/// a process in a container cannot see. No gate, no question.
+fn ask_gate(cfg: &Config, system: &str, what: &str) -> std::result::Result<(), String> {
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    let Some(dir) = &cfg.gate else {
+        return Ok(());
+    };
+    let n = ASKED.fetch_add(1, Ordering::Relaxed) + 1;
+    // Unique across the run's processes, which share the directory.
+    let id = format!("{}-{system}-{}-{n}", cfg.run_id, std::process::id());
+    std::fs::write(dir.join(format!("ask.{id}")), what)
+        .map_err(|e| format!("the gate {dir:?}: {e}"))?;
+    // The script waits out the machine's load for a bounded time; past an
+    // hour more no answer is one.
+    let until = Instant::now() + Duration::from_secs(3600);
+    loop {
+        if dir.join(format!("ok.{id}")).exists() {
+            return Ok(());
+        }
+        if let Ok(why) = std::fs::read_to_string(dir.join(format!("stop.{id}"))) {
+            return Err(why.trim().to_string());
+        }
+        if Instant::now() > until {
+            return Err("the gate gave no answer in an hour".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// `f` run, its panic -- a refused request, the server gone -- the reason
+/// it failed.
+fn attempt(f: impl FnOnce()) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .err()
+        .map(|p| panic_text(p.as_ref()))
+}
+
+/// What a cell's line says beside what it measured: its system's live
+/// bytes after it, whether the system was killed for its memory, and the
+/// verdict `--verify` gave it.
+struct After<'a> {
+    live: Option<u64>,
+    oom: bool,
+    verdict: Option<&'a Verdict>,
+}
+
+impl Cell {
+    /// A cell that measured nothing, and why.
+    fn failed(why: String) -> Cell {
+        Cell {
+            ops: 0,
+            hist: BTreeMap::new(),
+            logs: Vec::new(),
+            majflt: 0,
+            largest: 0,
+            sampled: false,
+            secs: 0.0,
+            looks: Vec::new(),
+            failed: Some(why),
+        }
+    }
+
+    /// The columns of `TAIL` its cgroup's looks give: the major faults a
+    /// second over the window and in the worst second between two looks,
+    /// the most charged, the most of it anonymous, the files' pages on
+    /// average.
+    fn cgroup_columns(&self) -> [String; 5] {
+        let l = &self.looks;
+        if l.len() < 2 {
+            return Default::default();
+        }
+        let faults = l[l.len() - 1].pgmajfault.saturating_sub(l[0].pgmajfault);
+        let worst = l
+            .windows(2)
+            .map(|w| w[1].pgmajfault.saturating_sub(w[0].pgmajfault))
+            .max()
+            .unwrap_or(0);
+        let file = l.iter().map(|c| c.file).sum::<u64>() / l.len() as u64;
+        [
+            format!("{:.1}", faults as f64 / (l.len() - 1) as f64),
+            worst.to_string(),
+            l.iter().map(|c| c.current).max().unwrap_or(0).to_string(),
+            l.iter().map(|c| c.anon).max().unwrap_or(0).to_string(),
+            file.to_string(),
+        ]
+    }
 }
 
 /// The round trip of the least request, 2 000 of them after 200.
@@ -3038,7 +3719,7 @@ fn ping(sys: &dyn System, name: &str, cfg: &Config, ratio: f64) {
     for _ in 1..OPS.len() {
         line.push_str("\t0\t\t\t\t");
     }
-    append(&cfg.out, &line);
+    append(&cfg.out, &cfg.family, &line);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3052,15 +3733,26 @@ fn write_cell(
     ratio: f64,
     cfg: &Config,
     run: usize,
+    after: &After,
 ) {
-    let secs = cfg.run.as_secs_f64();
+    if cell.failed.is_some() {
+        // No measured value: a failed cell's `ops_s 0` would join a
+        // median once a figure names the cell. What failed it is the log's.
+        let cell = format!("{name}:{}:{}:{threads}", mode.name(), w.name);
+        write_failed(cfg, &cell, after.oom, false);
+        return;
+    }
+    let secs = cell.secs;
+    let rate = match secs > 0.0 {
+        true => cell.ops as f64 / secs,
+        false => 0.0,
+    };
     let mut line = format!(
-        "{}\t{name}\t{}\t{}\t{threads}\t{records}\t{secs:.0}\t{}\t{:.0}\t{ratio:.3}",
+        "{}\t{name}\t{}\t{}\t{threads}\t{records}\t{secs:.0}\t{}\t{rate:.0}\t{ratio:.3}",
         cfg.run_id,
         mode.name(),
         w.name,
         cell.ops,
-        cell.ops as f64 / secs
     );
     let mut summary = String::new();
     for op in OPS {
@@ -3081,22 +3773,120 @@ fn write_cell(
             _ => line.push_str("\t0\t\t\t\t"),
         }
     }
-    append(&cfg.out, &line);
+    // `TAIL`, in its order.
+    let bounded = cfg.memory.is_some();
+    let flag = |b: bool| match bounded {
+        true => (b as u8).to_string(),
+        false => String::new(),
+    };
+    let [majflt_s, majflt_max, cg_peak, anon_peak, file_mean] = cell.cgroup_columns();
+    let tail = [
+        match cfg.rate > 0.0 {
+            true => format!("{:.0}", cfg.rate),
+            false => String::new(),
+        },
+        majflt_s,
+        majflt_max,
+        cg_peak,
+        anon_peak,
+        file_mean,
+        // What the kernel held the cgroup to, from its own `memory.max`.
+        cell.looks
+            .iter()
+            .rev()
+            .find_map(|c| c.limit)
+            .map(|b| b.to_string())
+            .unwrap_or_default(),
+        after.live.map(|b| b.to_string()).unwrap_or_default(),
+        flag(cell.failed.is_some()),
+        flag(after.oom),
+        after
+            .verdict
+            .map(|v| v.mismatches.to_string())
+            .unwrap_or_default(),
+        after
+            .verdict
+            .map(|v| v.undecided.to_string())
+            .unwrap_or_default(),
+        String::new(),
+    ];
+    for t in &tail {
+        write!(line, "\t{t}").unwrap();
+    }
+    append(&cfg.out, &cfg.family, &line);
+    let faults = match cell.looks.len() >= 2 {
+        true => format!("{} major faults a second", tail[1]),
+        false => format!("{} major faults", cell.majflt),
+    };
     eprintln!(
-        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2}), {} major faults, the file {} MB {}",
+        "run {run} {name} {} {} x{threads}: {rate:.0} ops/s{summary} (probe {ratio:.2}), {faults}, the file {} MB {}",
         mode.name(),
         w.name,
-        cell.ops as f64 / secs,
-        cell.majflt,
         cell.largest >> 20,
         if cell.sampled { "at the most" } else { "after it" }
     );
 }
 
+/// What a run of a cell stands for in `ycsb report`'s medians.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Standing {
+    /// A measurement: in the medians.
+    Counts,
+    /// The system failed it: counted, and its figures are none.
+    Failed,
+    /// Under `--memory`, its live bytes were not twice its cgroup's limit,
+    /// or it did not say either: another regime than the one measured.
+    Small,
+    /// The environment failed it (`env_failed`): no run of the system's.
+    Env,
+}
+
+impl Standing {
+    /// A run's standing from its metrics (`get`) in a file holding the
+    /// columns `--memory` writes (`bounded`).
+    fn of(get: impl Fn(&str) -> Option<f64>, bounded: bool) -> Standing {
+        if get("env_failed") == Some(1.0) {
+            return Standing::Env;
+        }
+        if get("failed") == Some(1.0) {
+            return Standing::Failed;
+        }
+        let small = bounded
+            && get("failed") == Some(0.0)
+            && match (get("live"), get("limit")) {
+                (Some(live), Some(limit)) => live < 2.0 * limit,
+                _ => true,
+            };
+        match small {
+            true => Standing::Small,
+            false => Standing::Counts,
+        }
+    }
+}
+
+/// A cell that measured nothing, as a line: `failed 1` and whether the
+/// kernel killed the system for its memory, or `env_failed 1` where the
+/// environment failed it -- never a figure, which a median would take.
+fn write_failed(cfg: &Config, cell: &str, oom: bool, env: bool) {
+    let values: Vec<(&str, String)> = match env {
+        true => vec![("env_failed", "1".into())],
+        false => vec![("failed", "1".into()), ("oom", (oom as u8).to_string())],
+    };
+    append_values(&cfg.out, &cfg.family, &cfg.run_id, cell, &values);
+}
+
 // ----------------------------------------------------------------- report
 
 /// The median of each cell's runs: ops/s and every op's p99, as the
-/// lines `ycsb` wrote them.
+/// lines `ycsb` wrote them, of the family the file's first line is of. A
+/// file holding the columns `--memory` writes (`ycsb_larger`'s) gets them
+/// too: each cell's faults a second, the most its cgroup was charged and
+/// held anonymous, its limit and live bytes, and how many of its runs
+/// failed, were killed for their memory, held live bytes under twice the
+/// limit (`under_2x`: or did not say either), were failed by the
+/// environment (`env`) or found a mismatch -- a run failed, under twice
+/// the limit or the environment's counting in no median, and a line at
+/// the end naming every cell short of a run that counts.
 fn report(path: &Path) {
     let text = std::fs::read_to_string(path).unwrap();
     let mut lines = text.lines();
@@ -3105,6 +3895,12 @@ fn report(path: &Path) {
         RESULT_COLUMNS,
         "a results file is one value a line: {RESULT_COLUMNS}"
     );
+    let family = text
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split('\t').nth(4))
+        .unwrap_or("ycsb")
+        .to_string();
     // The wide lines the median reads: each run's cell as the columns
     // `header()` names, a metric written again by a later line winning (a
     // run cut short and completed under its own id), the file's order kept.
@@ -3112,9 +3908,24 @@ fn report(path: &Path) {
     let col = |name: &str| head.iter().position(|h| h == name).unwrap();
     let mut order: Vec<(String, String)> = Vec::new();
     let mut wide: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    // `ycsb heap`'s lines, apart: kind -> metric -> each run's value.
+    let mut heaps: BTreeMap<String, BTreeMap<String, Vec<(String, f64)>>> = BTreeMap::new();
     for l in lines {
         let f: Vec<&str> = l.split('\t').collect();
-        if f[4] != "ycsb" {
+        if f.len() < 8 || f[4] != family {
+            continue;
+        }
+        if let Some(kind) = f[5].strip_prefix("server-docker:heap:") {
+            if let Ok(x) = f[7].parse::<f64>() {
+                let runs = heaps
+                    .entry(kind.to_string())
+                    .or_default()
+                    .entry(f[6].to_string())
+                    .or_default();
+                // A run's value measured again counts as its last.
+                runs.retain(|(run, _)| run != f[0]);
+                runs.push((f[0].to_string(), x));
+            }
             continue;
         }
         let key = (f[0].to_string(), f[5].to_string());
@@ -3141,7 +3952,7 @@ fn report(path: &Path) {
             .skip(1)
             .filter_map(|l| {
                 let mut f = l.split('\t');
-                (f.next()? == "ycsb").then_some(())?;
+                (f.next()? == family).then_some(())?;
                 Some((f.next()?.to_string(), f.next()?.to_string()))
             })
             .collect();
@@ -3158,14 +3969,18 @@ fn report(path: &Path) {
     // once, as its last line: the file is only ever appended to.
     let mut latest: BTreeMap<(String, String, String, String, usize), Vec<String>> =
         BTreeMap::new();
-    for l in lines {
-        let f = l;
+    for f in lines {
+        // A line no cell of the grid is -- another tool's in the family --
+        // is no figure here.
+        let Ok(threads) = f[col("threads")].parse() else {
+            continue;
+        };
         let key = (
             f[col("system")].clone(),
             f[col("mode")].clone(),
             f[col("workload")].clone(),
             f[col("run")].clone(),
-            f[col("threads")].parse().unwrap(),
+            threads,
         );
         latest.insert(key, f);
     }
@@ -3180,19 +3995,53 @@ fn report(path: &Path) {
         v.sort_by(|a, b| a.total_cmp(b));
         Some(v[v.len() / 2])
     };
-    println!("system\tmode\tworkload\tthreads\truns\tops_s\tREAD_p99\tUPDATE_p99\tINSERT_p99\tSCAN_p99\tRMW_p99\tREAD_p50\tUPDATE_p50\tINSERT_p50\tSCAN_p50\tRMW_p50\tprobe_max");
-    for ((sys, mode, wl, threads), runs) in cells {
-        // A size line stops at the probe's column: what it has not got is
-        // no figure.
-        let num = |f: &Vec<String>, c: &str| f.get(col(c))?.parse::<f64>().ok();
+    // A size line stops at the probe's column: what it has not got is no
+    // figure.
+    let num = |f: &Vec<String>, c: &str| f.get(col(c))?.parse::<f64>().ok();
+    let bounded = cells
+        .values()
+        .flatten()
+        .any(|f| num(f, "failed").is_some() || num(f, "env_failed").is_some());
+    let mut title = String::from("system\tmode\tworkload\tthreads\truns\tops_s\tREAD_p99\tUPDATE_p99\tINSERT_p99\tSCAN_p99\tRMW_p99\tREAD_p50\tUPDATE_p50\tINSERT_p50\tSCAN_p50\tRMW_p50\tprobe_max");
+    if bounded {
+        title.push_str(
+            "\tmajflt_s\tcg_peak_mb\tanon_peak_mb\tlimit_mb\tlive_mb\tfailed\toom\tunder_2x\tenv\tmismatches",
+        );
+    }
+    println!("{title}");
+    let mut short: Vec<String> = Vec::new();
+    for ((sys, mode, wl, threads), all) in cells {
+        let standing: Vec<Standing> = all
+            .iter()
+            .map(|f| Standing::of(|c| num(f, c), bounded))
+            .collect();
+        let n = |s: Standing| standing.iter().filter(|x| **x == s).count();
+        let (envs, failed, under) = (n(Standing::Env), n(Standing::Failed), n(Standing::Small));
+        let oom = all
+            .iter()
+            .zip(&standing)
+            .filter(|(f, s)| **s == Standing::Failed && num(f, "oom") == Some(1.0))
+            .count();
+        let runs: Vec<&Vec<String>> = all
+            .iter()
+            .zip(&standing)
+            .filter(|(_, s)| **s == Standing::Counts)
+            .map(|(f, _)| f)
+            .collect();
+        if bounded && (failed > 0 || under > 0 || envs > 0) {
+            short.push(format!(
+                "{sys}:{mode}:{wl}:{threads} ({} counted; {failed} failed, {under} under twice the limit, {envs} the environment's)",
+                runs.len()
+            ));
+        }
         let mut ops: Vec<f64> = runs.iter().filter_map(|f| num(f, "ops_s")).collect();
         let mut probe: Vec<f64> = runs.iter().filter_map(|f| num(f, "probe")).collect();
         probe.sort_by(|a, b| a.total_cmp(b));
-        let mut out = format!(
-            "{sys}\t{mode}\t{wl}\t{threads}\t{}\t{:.0}",
-            runs.len(),
-            median(&mut ops).unwrap()
-        );
+        let mut out = format!("{sys}\t{mode}\t{wl}\t{threads}\t{}", runs.len());
+        match median(&mut ops) {
+            Some(x) => write!(out, "\t{x:.0}").unwrap(),
+            None => out.push_str("\t-"),
+        }
         for q in ["p99", "p50"] {
             for op in OPS {
                 let c = format!("{}_{q}", op.name());
@@ -3204,7 +4053,74 @@ fn report(path: &Path) {
             }
         }
         write!(out, "\t{:.2}", probe.last().copied().unwrap_or(0.0)).unwrap();
+        if bounded {
+            for (c, scale) in [
+                ("majflt_s", 1.0),
+                ("cg_peak", 1048576.0),
+                ("anon_peak", 1048576.0),
+                ("limit", 1048576.0),
+                ("live", 1048576.0),
+            ] {
+                let mut v: Vec<f64> = runs.iter().filter_map(|f| num(f, c)).collect();
+                match median(&mut v) {
+                    Some(x) => write!(out, "\t{:.0}", x / scale).unwrap(),
+                    None => out.push_str("\t-"),
+                }
+            }
+            let mismatches: f64 = all
+                .iter()
+                .filter_map(|f| num(f, "mismatches"))
+                .fold(0.0, |a, b| a + b);
+            write!(out, "\t{failed}\t{oom}\t{under}\t{envs}\t{mismatches:.0}").unwrap();
+        }
         println!("{out}");
+    }
+    if !short.is_empty() {
+        println!(
+            "\n{} cells hold a run that does not count: {}",
+            short.len(),
+            short.join("; ")
+        );
+    }
+    if heaps.is_empty() {
+        return;
+    }
+    println!("\nindex\truns\trows\tbytes_row\tcg_anon_bytes_row\theap_mb\tbuild_s\tlimit_mb\tfailed\toom\tenv");
+    for (kind, m) in heaps {
+        // A run the environment failed counts as its alone.
+        let envs: Vec<&str> = m.get("env_failed").map_or(Vec::new(), |v| {
+            v.iter()
+                .filter(|x| x.1 == 1.0)
+                .map(|x| x.0.as_str())
+                .collect()
+        });
+        let count = |metric: &str| {
+            m.get(metric).map_or(0, |v| {
+                v.iter()
+                    .filter(|x| x.1 == 1.0 && !envs.contains(&x.0.as_str()))
+                    .count()
+            })
+        };
+        let (failed, oom, env) = (count("failed"), count("oom"), envs.len());
+        let mid = |metric: &str, scale: f64, digits: usize| -> String {
+            let mut v: Vec<f64> = m
+                .get(metric)
+                .map_or(Vec::new(), |v| v.iter().map(|x| x.1).collect());
+            match median(&mut v) {
+                Some(x) => format!("{:.*}", digits, x / scale),
+                None => "-".into(),
+            }
+        };
+        println!(
+            "{kind}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{failed}\t{oom}\t{env}",
+            m.get("rows").map_or(0, Vec::len),
+            mid("rows", 1.0, 0),
+            mid("bytes_row", 1.0, 1),
+            mid("cg_anon_bytes_row", 1.0, 1),
+            mid("bytes", 1048576.0, 0),
+            mid("build_s", 1.0, 1),
+            mid("limit", 1048576.0, 0),
+        );
     }
 }
 
@@ -3214,12 +4130,315 @@ fn list<T>(s: &str, f: impl Fn(&str) -> T) -> Vec<T> {
     s.split(',').filter(|x| !x.is_empty()).map(f).collect()
 }
 
+/// For each cell of `cfg` the file lacks a line of under `cfg.run_id` --
+/// a run whose process the kernel killed (`oom`) or that ended otherwise
+/// -- a failed line, so that no cell asked for is missing:
+/// `ycsb fill` with the arguments the run was given. With `env`
+/// (`--env-failed 1`: the script's gate stopped the run, or the disk ran
+/// short during it) each such cell is the environment's instead, and so is
+/// one whose line says it failed: a server meeting a full disk fails its
+/// cell, and that is no failure of the server's. A cell that measured
+/// stays as it is.
+fn fill(cfg: &Config, oom: bool, env: bool) {
+    let text = std::fs::read_to_string(&cfg.out).unwrap_or_default();
+    let (have, failed) = written(&text, cfg);
+    let modes: Vec<Mode> = cfg
+        .modes
+        .iter()
+        .copied()
+        .filter(|m| *m != Mode::Snapshot)
+        .collect();
+    let c_mode = match modes.contains(&Mode::Buffered) {
+        true => Some(Mode::Buffered),
+        false => modes.first().copied(),
+    };
+    let mut filled = 0;
+    for name in &cfg.systems {
+        for &mode in &modes {
+            for w in WORKLOADS.iter().filter(|w| cfg.workloads.contains(&w.name)) {
+                if w.name == 'C' && c_mode != Some(mode) {
+                    continue;
+                }
+                for &threads in &cfg.threads {
+                    let cell = format!("{name}:{}:{}:{threads}", mode.name(), w.name);
+                    if have.contains(&cell) && !(env && failed.contains(&cell)) {
+                        continue;
+                    }
+                    write_failed(cfg, &cell, oom, env);
+                    filled += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{filled} cells of run {} written as {}",
+        cfg.run_id,
+        match (env, oom) {
+            (true, _) => "the environment's failures",
+            (false, true) => "failed, the process killed for its memory",
+            (false, false) => "failed, the process ended before them",
+        }
+    );
+}
+
+/// The cells of `cfg.run_id` in its family a results file holds a line
+/// of -- one that measured (`ops_s`) or one that says it failed -- and,
+/// of those, the ones whose last `failed` is 1.
+fn written(
+    text: &str,
+    cfg: &Config,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut have = std::collections::HashSet::new();
+    let mut failed = std::collections::HashSet::new();
+    for l in text.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() != 8 || f[0] != cfg.run_id || f[4] != cfg.family {
+            continue;
+        }
+        match f[6] {
+            "ops_s" | "env_failed" => {
+                have.insert(f[5].to_string());
+            }
+            "failed" => {
+                have.insert(f[5].to_string());
+                match f[7] == "1" {
+                    true => failed.insert(f[5].to_string()),
+                    false => failed.remove(f[5]),
+                };
+            }
+            _ => {}
+        }
+    }
+    (have, failed)
+}
+
+/// The `/_metrics` page of the server at `addr`, read on a connection of
+/// its own.
+fn metrics_page(addr: &str) -> Option<String> {
+    let mut c = http::Http::try_connect(addr, Duration::from_secs(30)).ok()?;
+    let (status, body) = c.try_request("GET", "/_metrics", "text/plain", b"").ok()?;
+    (status == 200).then(|| String::from_utf8_lossy(body).into_owned())
+}
+
+/// The heap a row of each index kind holds, from the server's own
+/// `memory_bytes` (`fennec_memory_bytes`): `server-docker` under
+/// `--memory` over `--records` rows of a collection made for it -- a token
+/// of 16 letters for `@hash`, an integer for `@sorted`, eight words of a
+/// 10 000-word vocabulary drawn zipfian for `@text`, a `vector<dim>` for
+/// `@hnsw(cosine)` -- each index made, measured once the server says no
+/// vector waits to be linked, and dropped before the next: `ycsb heap`.
+/// A line a kind, `server-docker:heap:<kind>`, failed where the server
+/// was killed, and started again for the next.
+///
+/// Beside the engine's own accounting (`bytes_row`, which counts what each
+/// index's tables hold: `@sorted` came out at exactly 20.0 bytes a row),
+/// what the kernel charged: the container's anonymous memory
+/// (`memory.stat`'s `anon`, one look before the index and one after it is
+/// linked) changed by `cg_anon_bytes`, `cg_anon_bytes_row` a row -- the
+/// allocator's own and every buffer the build kept with it. The server is
+/// started again over its file before each kind, so that the kind before
+/// it, dropped with its field, leaves no freed memory for this one's build
+/// to reuse: its anonymous memory starts from what an open holds. Run with
+/// no `--memory` (`run-larger-than-memory.sh`): `@hnsw` over millions of
+/// vectors is heap that has to fit, and under the cells' limit it was
+/// killed, which says nothing of how much it takes.
+fn heap(cfg: &Config, dim: usize, vectors: u64) {
+    let dir = std::env::temp_dir().join(format!("fennec-ycsb-heap-{}", std::process::id()));
+    let mut srv = Server {
+        dir: dir.clone(),
+        docker: true,
+        port: http::free_port(),
+        proc: None,
+        image: cfg.image.clone(),
+        auto_compact: cfg.auto_compact,
+        name: cfg.docker_name.clone(),
+        memory: cfg.memory.clone(),
+        watch: None,
+    };
+    srv.stop();
+    remove_volume(&srv.volume());
+    srv.start("250");
+    let addr = srv.addr();
+    let mut c = http::Http::connect(&addr);
+    c.query(
+        &format!("create collection kinds (k text, at int, body text, v vector<{dim}>)"),
+        "",
+    );
+    let mut rng = Rng::new(SEED ^ 0x4845_4150);
+    let mut words = Zipfian::new(10_000);
+    let rows = cfg.records.max(vectors);
+    let t = Instant::now();
+    let mut body = String::new();
+    let mut key = 0;
+    while key < rows {
+        let end = (key + LOAD_BATCH as u64).min(rows);
+        body.clear();
+        body.push('[');
+        for k in key..end {
+            if k > key {
+                body.push(',');
+            }
+            let token: String = (0..16)
+                .map(|_| (b'a' + rng.below(26) as u8) as char)
+                .collect();
+            let text: Vec<String> = (0..8)
+                .map(|_| format!("w{}", words.next(&mut rng, 10_000)))
+                .collect();
+            write!(
+                body,
+                "{{\"k\":\"{token}\",\"at\":{},\"body\":\"{}\"",
+                rng.below(1 << 40),
+                text.join(" ")
+            )
+            .unwrap();
+            if k < vectors {
+                let v: Vec<f32> = (0..dim).map(|_| rng.f64() as f32 * 2.0 - 1.0).collect();
+                write!(body, ",\"v\":{}", http::vector_json(&v)).unwrap();
+            }
+            body.push('}');
+        }
+        body.push(']');
+        c.post("/kinds", "application/json", body.as_bytes());
+        key = end;
+    }
+    drop(c);
+    eprintln!(
+        "heap: {rows} rows, {vectors} with a vector<{dim}>, loaded in {:.0} s",
+        t.elapsed().as_secs_f64()
+    );
+    for (kind, field, index, count) in [
+        ("hash", "k", "@hash", rows),
+        ("sorted", "at", "@sorted", rows),
+        ("text", "body", "@text", rows),
+        ("hnsw", "v", "@hnsw(cosine)", vectors),
+    ] {
+        srv.start("250");
+        let look = container_cgroup(&srv.container());
+        let page = metrics_page(&addr).unwrap_or_default();
+        let before = metric_sum(page.as_bytes(), "fennec_memory_bytes");
+        let live = metric_sum(page.as_bytes(), "fennec_data_bytes");
+        let t = Instant::now();
+        let mut failed = attempt(|| {
+            let mut c = http::Http::connect(&addr);
+            c.query(&format!("create index on kinds ({field}) {index}"), "");
+        });
+        let mut after = before;
+        while failed.is_none() {
+            match metrics_page(&addr) {
+                Some(p) if metric_sum(p.as_bytes(), "fennec_vectors_unlinked") == 0 => {
+                    after = metric_sum(p.as_bytes(), "fennec_memory_bytes");
+                    break;
+                }
+                Some(_) => std::thread::sleep(Duration::from_secs(1)),
+                None => failed = Some("the server stopped answering".into()),
+            }
+        }
+        let built = t.elapsed().as_secs_f64();
+        let oom = failed.is_some() && srv.oom_killed();
+        let held = after.saturating_sub(before);
+        let anon = match (&failed, look, container_cgroup(&srv.container())) {
+            (None, Some(a), Some(b)) => Some(b.anon as i64 - a.anon as i64),
+            _ => None,
+        };
+        let mut values = vec![
+            ("rows", count.to_string()),
+            ("live", live.to_string()),
+            // What the server held before: the kinds measured before this
+            // one let go of with their fields.
+            ("held_before", before.to_string()),
+            ("failed", (failed.is_some() as u8).to_string()),
+            ("oom", (oom as u8).to_string()),
+        ];
+        // The cgroup's own limit, where it has one.
+        if let Some(l) = look.and_then(|c| c.limit) {
+            values.push(("limit", l.to_string()));
+        }
+        match &failed {
+            None => {
+                values.push(("bytes", held.to_string()));
+                values.push(("bytes_row", format!("{:.1}", held as f64 / count as f64)));
+                values.push(("build_s", format!("{built:.1}")));
+                if let Some(a) = anon {
+                    values.push(("cg_anon_bytes", a.to_string()));
+                    values.push((
+                        "cg_anon_bytes_row",
+                        format!("{:.1}", a as f64 / count as f64),
+                    ));
+                }
+                eprintln!(
+                    "heap: {kind} on {field}: {} MB, {:.1} bytes a row, built in {built:.1} s; the cgroup's anonymous memory {}",
+                    held >> 20,
+                    held as f64 / count as f64,
+                    match anon {
+                        Some(a) => format!("{:+} MB, {:.1} bytes a row", a >> 20, a as f64 / count as f64),
+                        None => "not read".into(),
+                    }
+                );
+            }
+            Some(why) => {
+                eprintln!(
+                    "heap: {kind} on {field} failed{}: {why}",
+                    if oom { ", killed for its memory" } else { "" }
+                );
+            }
+        }
+        append_values(
+            &cfg.out,
+            &cfg.family,
+            &cfg.run_id,
+            &format!("server-docker:heap:{kind}"),
+            &values,
+        );
+        if failed.is_none() {
+            let mut c = http::Http::connect(&addr);
+            // A field's own index goes with the field (`drop index` is an
+            // index over several fields'): its values stay in the
+            // documents. The next kind starts the server again over the
+            // file -- as the kill left it, where this one failed.
+            c.query(&format!("alter collection kinds drop field {field}"), "");
+        }
+    }
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("report") {
-        report(Path::new(args.get(1).expect("ycsb report <file.tsv>")));
-        return;
+    match args.first().map(String::as_str) {
+        Some("report") => {
+            report(Path::new(args.get(1).expect("ycsb report <file.tsv>")));
+            return;
+        }
+        Some("soak") => {
+            soak::main(&args[1..]);
+            return;
+        }
+        // `ycsb mark <file> <family> <run> <cell> <metric> <value>`: one
+        // line, with the run's provenance -- what a script writes of its
+        // own, an environment's failure among them.
+        Some("mark") => {
+            let [file, family, run, cell, metric, value] = &args[1..] else {
+                panic!("ycsb mark <file> <family> <run> <cell> <metric> <value>");
+            };
+            append_values(
+                Path::new(file),
+                family,
+                run,
+                cell,
+                &[(metric.as_str(), value.clone())],
+            );
+            return;
+        }
+        _ => {}
     }
+    let (sub, args) = match args.first().map(String::as_str) {
+        Some(s @ ("fill" | "heap")) => (Some(s.to_string()), args[1..].to_vec()),
+        _ => (None, args),
+    };
+    let (mut oom, mut env, mut dim, mut vectors) = (false, false, 32usize, None);
     let mut cfg = Config {
         records: 1_000_000,
         warmup: Duration::from_secs(5),
@@ -3238,6 +4457,12 @@ fn main() {
         run_id: String::new(),
         verify: None,
         auto_compact: true,
+        rate: 0.0,
+        family: "ycsb".into(),
+        docker_name: "fennecycsb".into(),
+        memory: None,
+        verify_max: None,
+        gate: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -3270,9 +4495,30 @@ fn main() {
             "--image" => cfg.image = v,
             "--run-id" => cfg.run_id = v,
             "--verify" => cfg.verify = Some(PathBuf::from(&v)),
+            "--rate" => cfg.rate = v.parse().unwrap(),
+            "--family" => cfg.family = v,
+            "--docker-name" => cfg.docker_name = v,
+            "--memory" => {
+                assert!(bytes_of(&v).is_some(), "--memory {v}: a size, 512m or 2g");
+                cfg.memory = Some(v)
+            }
+            "--verify-max" => cfg.verify_max = Some(v.parse::<u64>().unwrap() << 20),
+            // `fill`: the run's process was killed for its memory, or the
+            // environment failed it.
+            "--oom" => oom = v == "1",
+            "--env-failed" => env = v == "1",
+            "--gate" => cfg.gate = Some(PathBuf::from(&v)),
+            // `heap`: the vectors' dimension, and how many rows hold one.
+            "--dim" => dim = v.parse().unwrap(),
+            "--vectors" => vectors = Some(v.parse().unwrap()),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
+    }
+    match sub.as_deref() {
+        Some("fill") => return fill(&cfg, oom, env),
+        Some("heap") => return heap(&cfg, dim, vectors.unwrap_or(cfg.records)),
+        _ => {}
     }
     let base = cfg.probe_base.unwrap_or_else(|| {
         // The idle speed: the best of a few probes a few seconds apart.
@@ -3308,6 +4554,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The image beside the measured containers is one, by one digest:
+    /// ycsb's, the scripts' (`ENV_ALPINE`, which `--preflight` checks is
+    /// here), and no container of theirs by a tag.
+    #[test]
+    fn ycsb_and_the_scripts_run_one_alpine_by_its_digest() {
+        let digest = ALPINE.strip_prefix("alpine@sha256:").unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        let env = include_str!("../../ycsb/env-check.sh");
+        assert!(env.contains(&format!("\nENV_ALPINE={ALPINE}\n")));
+        for (name, text) in [
+            ("env-check.sh", env),
+            ("run-soak.sh", include_str!("../../ycsb/run-soak.sh")),
+            (
+                "run-larger-than-memory.sh",
+                include_str!("../../ycsb/run-larger-than-memory.sh"),
+            ),
+        ] {
+            for l in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                assert!(!l.contains(" alpine "), "{name}: {l}");
+            }
+        }
+    }
 
     fn read(key: u64, s: u64, e: u64, fields: [u64; FIELDS]) -> Entry {
         Entry::read(key, s, e, vec![(key, fields)])
@@ -3415,6 +4684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rivals")]
     fn redis_hashes_are_read_as_written_in_either_protocol() {
         use redis::Value::{Array, BulkString, Map};
         let v = record_values(3);
@@ -3446,5 +4716,334 @@ mod tests {
         let stat = "anon 8740864\nfile 458752\nkernel 1\nshmem 4096\nfile_mapped 0\n";
         assert_eq!(memory_stat(stat), Some(8740864 + 4096));
         assert_eq!(memory_stat("file 1\n"), None);
+    }
+
+    #[test]
+    fn a_cgroups_look_is_read_whole_or_not_at_all() {
+        let look = "anon 100\nfile 200\npgmajfault 7\nshmem 0\ncurrent 400\noom_kill 1\n";
+        let c = Cgroup::parse(look).unwrap();
+        assert_eq!(
+            c,
+            Cgroup {
+                pgmajfault: 7,
+                current: 400,
+                anon: 100,
+                file: 200,
+                oom_kill: 1,
+                limit: None,
+            }
+        );
+        // The limit is the cgroup's own `memory.max`, none where it has
+        // none, and never `memory.events`' `max`, the times it was met.
+        let held = format!("{look}limit 2147483648\nmax 12\n");
+        assert_eq!(Cgroup::parse(&held).unwrap().limit, Some(2 << 30));
+        let free = format!("{look}limit max\n");
+        assert_eq!(Cgroup::parse(&free).unwrap().limit, None);
+        // `file_mapped` is not `file`, and a look cut short is none.
+        assert_eq!(Cgroup::parse("file_mapped 3\nanon 1\ncurrent 2\n"), None);
+        assert_eq!(bytes_of("512m"), Some(512 << 20));
+        assert_eq!(bytes_of("2g"), Some(2 << 30));
+        assert_eq!(bytes_of("1048576"), Some(1 << 20));
+        assert_eq!(bytes_of("lots"), None);
+        let page = b"# TYPE fennec_data_bytes gauge\nfennec_data_bytes{collection=\"a\"} 10\nfennec_data_bytes{collection=\"b\"} 32\nfennec_data_bytes_x 5\n";
+        assert_eq!(metric_sum(page, "fennec_data_bytes"), 42);
+    }
+
+    /// A client whose `stall`th read takes 200 ms, the rest nothing.
+    struct Stalling(u64, u64);
+
+    impl Client for Stalling {
+        fn read(&mut self, _: u64) {
+            self.0 += 1;
+            if self.0 == self.1 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        fn update(&mut self, _: u64, _: usize, _: &str) {}
+        fn insert(&mut self, _: u64, _: &[String]) {}
+        fn scan(&mut self, _: u64, _: u64) {}
+        fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+            Vec::new()
+        }
+    }
+
+    struct Fake;
+
+    impl System for Fake {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn load(&mut self, _: u64) {}
+        fn set_mode(&mut self, _: Mode) {}
+        fn client(&self) -> Box<dyn Client> {
+            Box::new(Stalling(0, 100))
+        }
+    }
+
+    fn config(rate: f64) -> Config {
+        Config {
+            records: 1_000,
+            warmup: Duration::ZERO,
+            run: Duration::from_secs(1),
+            threads: vec![1],
+            workloads: vec!['C'],
+            modes: vec![Mode::Buffered],
+            systems: Vec::new(),
+            out: PathBuf::new(),
+            runs: 1,
+            probe_base: None,
+            gap: Duration::ZERO,
+            turn_gap: Duration::ZERO,
+            image: String::new(),
+            run_id: String::new(),
+            verify: None,
+            auto_compact: true,
+            rate,
+            family: "ycsb".into(),
+            docker_name: String::new(),
+            memory: None,
+            verify_max: None,
+            gate: None,
+        }
+    }
+
+    #[test]
+    fn open_loop_counts_the_wait_behind_a_stall() {
+        let c = &WORKLOADS[2];
+        // At 1 000 a second, the 200 operations due while one stalls each
+        // wait for it: a fifth of the second's operations, so its p99 is
+        // the stall's.
+        let (open, _) = run_cell(&Fake, c, 1, 1_000, &config(1_000.0));
+        let p99 = open.hist[&Op::Read].pct(0.99);
+        assert!(p99 >= 100_000.0, "open loop p99 {p99} us");
+        assert!(
+            open.ops <= 1_100,
+            "{} operations at 1 000 a second",
+            open.ops
+        );
+        // Closed loop the stall is one operation's time among many.
+        let (closed, _) = run_cell(&Fake, c, 1, 1_000, &config(0.0));
+        let p99 = closed.hist[&Op::Read].pct(0.99);
+        assert!(
+            closed.ops > open.ops && p99 < 150_000.0,
+            "closed loop p99 {p99} us"
+        );
+    }
+
+    /// A results file of its own, removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(what: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("ycsb-{what}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        /// `(cell, metric, value)` of each line of `run`.
+        fn lines(&self, run: &str) -> Vec<(String, String, String)> {
+            std::fs::read_to_string(self.0.join("r.tsv"))
+                .unwrap_or_default()
+                .lines()
+                .skip(1)
+                .map(|l| l.split('\t').map(str::to_string).collect::<Vec<_>>())
+                .filter(|f| f[0] == run)
+                .map(|f| (f[5].clone(), f[6].clone(), f[7].clone()))
+                .collect()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn bounded(s: &Scratch) -> Config {
+        let mut cfg = config(0.0);
+        cfg.out = s.0.join("r.tsv");
+        cfg.family = "ycsb_larger".into();
+        cfg.run_id = "lm1".into();
+        cfg.memory = Some("2g".into());
+        cfg.systems = vec!["server-docker".into()];
+        cfg.workloads = vec!['B', 'C'];
+        cfg.modes = vec![Mode::Durable, Mode::Buffered];
+        cfg.threads = vec![16];
+        cfg
+    }
+
+    #[test]
+    fn a_failed_cell_writes_no_measured_value() {
+        let s = Scratch::new("failed");
+        let cfg = bounded(&s);
+        let after = After {
+            live: Some(5 << 30),
+            oom: true,
+            verdict: None,
+        };
+        let cell = Cell::failed("the server stopped answering".into());
+        write_cell(
+            "server-docker",
+            Mode::Buffered,
+            &WORKLOADS[1],
+            16,
+            1_000,
+            &cell,
+            1.0,
+            &cfg,
+            1,
+            &after,
+        );
+        let mut got: Vec<(String, String)> =
+            s.lines("lm1").into_iter().map(|(_, m, v)| (m, v)).collect();
+        got.sort();
+        // Neither `ops_s 0` nor the live bytes: a median would take them.
+        assert_eq!(
+            got,
+            [("failed".into(), "1".into()), ("oom".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn fill_hands_the_environments_cells_to_it() {
+        let s = Scratch::new("fill");
+        let cfg = bounded(&s);
+        // B measured; C failed as a full disk fails a server; neither of
+        // the durable mode's cells (B) written.
+        fn values<'a>(v: &[(&'a str, &str)]) -> Vec<(&'a str, String)> {
+            v.iter().map(|(k, x)| (*k, x.to_string())).collect()
+        }
+        let b = "server-docker:buffered:B:16";
+        let c = "server-docker:buffered:C:16";
+        append_values(
+            &cfg.out,
+            &cfg.family,
+            "lm1",
+            b,
+            &values(&[("ops_s", "900"), ("failed", "0")]),
+        );
+        append_values(&cfg.out, &cfg.family, "lm1", c, &values(&[("failed", "1")]));
+        fill(&cfg, false, true);
+        let env: Vec<String> = s
+            .lines("lm1")
+            .into_iter()
+            .filter(|(_, m, v)| m == "env_failed" && v == "1")
+            .map(|(cell, _, _)| cell)
+            .collect();
+        assert!(!env.contains(&b.to_string()), "{env:?}");
+        assert!(env.contains(&c.to_string()), "{env:?}");
+        assert!(env.contains(&"server-docker:durable:B:16".to_string()));
+        // A process that ended is the system's: a cell written once stays.
+        let s = Scratch::new("fill-ended");
+        let cfg = bounded(&s);
+        append_values(&cfg.out, &cfg.family, "lm1", c, &values(&[("failed", "1")]));
+        fill(&cfg, true, false);
+        let lines = s.lines("lm1");
+        assert_eq!(lines.iter().filter(|l| l.0 == c).count(), 1);
+        assert!(lines.contains(&(
+            "server-docker:durable:B:16".into(),
+            "oom".into(),
+            "1".into()
+        )));
+    }
+
+    #[test]
+    fn a_run_counts_only_as_a_measurement_of_the_regime() {
+        let run = |v: &[(&str, f64)]| {
+            let v: Vec<(String, f64)> = v.iter().map(|(k, x)| (k.to_string(), *x)).collect();
+            Standing::of(|c| v.iter().find(|(k, _)| k == c).map(|(_, x)| *x), true)
+        };
+        let gb = (1u64 << 30) as f64;
+        let ok = [("failed", 0.0), ("live", 4.5 * gb), ("limit", 2.0 * gb)];
+        assert_eq!(run(&ok), Standing::Counts);
+        // 1.92 times the limit, as 4 000 000 records of 1 026 bytes are.
+        let small = [("failed", 0.0), ("live", 3.84 * gb), ("limit", 2.0 * gb)];
+        assert_eq!(run(&small), Standing::Small);
+        // Neither said: not shown to be the regime.
+        assert_eq!(run(&[("failed", 0.0)]), Standing::Small);
+        assert_eq!(run(&[("failed", 1.0), ("oom", 1.0)]), Standing::Failed);
+        // A full disk's server error is the environment's.
+        assert_eq!(run(&[("failed", 1.0), ("env_failed", 1.0)]), Standing::Env);
+        // Outside `--memory`'s files no limit is asked for.
+        assert_eq!(
+            Standing::of(|c| (c == "ops_s").then_some(1.0), false),
+            Standing::Counts
+        );
+    }
+
+    /// A system whose live bytes and cgroup's limit are what a test says.
+    struct Held(Option<u64>, Option<u64>);
+
+    impl System for Held {
+        fn name(&self) -> &'static str {
+            "held"
+        }
+        fn load(&mut self, _: u64) {}
+        fn set_mode(&mut self, _: Mode) {}
+        fn client(&self) -> Box<dyn Client> {
+            Box::new(Stalling(0, 100))
+        }
+        fn cgroup(&self) -> Option<Cgroup> {
+            Some(Cgroup {
+                limit: self.1,
+                ..Cgroup::default()
+            })
+        }
+        fn live(&self) -> Option<u64> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_run_is_refused_under_twice_the_cgroups_limit() {
+        let limit = 2u64 << 30;
+        assert!(twice_the_limit(&Held(Some(4_822_200_000), Some(limit))).is_ok());
+        let why = twice_the_limit(&Held(Some(4_104_000_000), Some(limit))).unwrap_err();
+        // Both numbers named.
+        assert!(
+            why.contains("4104000000") && why.contains("2147483648"),
+            "{why}"
+        );
+        assert!(twice_the_limit(&Held(Some(1 << 40), None)).is_err());
+        assert!(twice_the_limit(&Held(None, Some(limit))).is_err());
+    }
+
+    #[test]
+    fn the_gate_answers_each_step() {
+        let s = Scratch::new("gate");
+        let mut cfg = bounded(&s);
+        cfg.gate = Some(s.0.clone());
+        let dir = s.0.clone();
+        // The script's part: an ok to the first question, a stop to the
+        // second.
+        let keeper = std::thread::spawn(move || {
+            let mut answered = 0;
+            while answered < 2 {
+                for e in std::fs::read_dir(&dir).unwrap() {
+                    let name = e.unwrap().file_name().into_string().unwrap();
+                    let Some(id) = name.strip_prefix("ask.") else {
+                        continue;
+                    };
+                    let (ok, stop) = (dir.join(format!("ok.{id}")), dir.join(format!("stop.{id}")));
+                    if ok.exists() || stop.exists() {
+                        continue;
+                    }
+                    match answered {
+                        0 => std::fs::write(ok, "").unwrap(),
+                        _ => std::fs::write(stop, "the host has 10 KB free\n").unwrap(),
+                    }
+                    answered += 1;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        assert_eq!(ask_gate(&cfg, "server-docker", "load"), Ok(()));
+        assert_eq!(
+            ask_gate(&cfg, "server-docker", "cell"),
+            Err("the host has 10 KB free".to_string())
+        );
+        keeper.join().unwrap();
+        // No gate, no question.
+        cfg.gate = None;
+        assert_eq!(ask_gate(&cfg, "server-docker", "cell"), Ok(()));
     }
 }

@@ -16,7 +16,8 @@ many threads and one opening the audit log (`tests/audit.rs`,
 servers asking with no refusal wait (`audit::set_delay(0)`). Measurement
 programs (`examples/`, `fennec-bench`) are wired to `make`, not CI, but the
 perf gate's workloads (`fennec-http/examples/gate.rs`); an example that is a
-check -- fennec-ql's `corpus` -- runs in CI's test job.
+check -- fennec-ql's `corpus` -- runs in CI's test job, and `ycsb`'s unit
+tests, which judge its long runs, in the clippy job.
 
 **[Every parser of untrusted bytes is fuzzed](../docs/design/conventions.md#fuzzing)**
 by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
