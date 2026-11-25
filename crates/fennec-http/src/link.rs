@@ -14,7 +14,7 @@
 //! beside the queries, since nothing else ever gives them back.
 
 use fennec_core::engine::{
-    compact_when_due_in, CompactPolicy, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
+    compact_when_due_in, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
 };
 use fennec_core::prelude::Database;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -281,6 +281,27 @@ pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> 
     })
 }
 
+/// The line a compact or a `create index` run beside the database writes,
+/// one shape whoever ran it: `<what>: <done> in <took>, the lock held
+/// <longest> at most (<each hold>)` -- `--auto-compact`'s naming the file or
+/// the tenant, a statement's naming itself (`compact`, `create index`) and
+/// its request id after. The longest hold first, then each: every one held
+/// every writer, and every reader behind a waiting writer. Where the line
+/// said the swap's alone, a graph's rebuild under the read lock held a
+/// soak's server 5-6 s and its log said 4 ms. The holds are the ones its
+/// own maintenance handed back ([`fennec_core::prelude::Database::maintain_held`]).
+/// Then each graph a compact kept as it stood, rather than its rebuilt one
+/// -- ``; graph `docs.v` kept, 412 behind`` -- since a sustained ingest of
+/// vectors may keep it every time, its tombstones growing until a quieter
+/// compact, and nothing else says so.
+pub(crate) fn said_beside(what: &str, done: std::fmt::Arguments, took: Duration, holds: &Holds) {
+    let kept: String = holds.kept.iter().map(|k| format!("; {k}")).collect();
+    crate::log!(
+        "{what}: {done} in {took:.1?}, the lock held {:.1?} at most ({holds}){kept}",
+        holds.longest()
+    );
+}
+
 /// Compacts `db` beside the queries if its dead records are past the
 /// policy: one database at a time, on a thread of its own rather than the
 /// graph keeper's, since a compact of a gigabyte takes seconds and the
@@ -292,20 +313,24 @@ pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> 
 fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Memory) {
     let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
     let t = Instant::now();
-    let Some(r) = compact_when_due_in(db, policy, memory) else {
+    let Some((r, holds)) = compact_when_due_in(db, policy, memory) else {
         return;
     };
     let took = t.elapsed();
-    let g = db.read().unwrap_or_else(|e| e.into_inner());
     match r {
         Ok(_) => {
             AUTO_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
             refusal_is_news(what, None);
-            crate::log!(
-                "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, {:.1?} under the write lock",
-                before.file as f64 / 1e6,
-                g.garbage().file as f64 / 1e6,
-                g.last_compact_held()
+            let after = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
+            said_beside(
+                what,
+                format_args!(
+                    "compacted, {:.1} MB -> {:.1} MB",
+                    before.file as f64 / 1e6,
+                    after.file as f64 / 1e6
+                ),
+                took,
+                &holds,
             );
         }
         // Put back as it was: the next look tries again. A compact is

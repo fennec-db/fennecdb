@@ -4262,11 +4262,39 @@ fn run_query(
     } else if let Some(built) = {
         let running = trace::span("execute");
         running.attr("fennec.beside", true);
-        let built = Database::maintain(db, &stmt);
+        // A compact says the file's size before and after, as
+        // `--auto-compact`'s line does (`link::said_beside`).
+        let compact = matches!(&*stmt, Statement::Compact(_));
+        let before = compact.then(|| db.read().unwrap_or_else(|e| e.into_inner()).garbage());
+        let began = std::time::Instant::now();
+        let built = Database::maintain_held(db, &stmt);
         if built.is_none() {
             running.forget();
         }
-        built
+        match (&built, before) {
+            (Some((Ok(_), holds)), Some(before)) => {
+                let after = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
+                link::said_beside(
+                    "compact",
+                    format_args!(
+                        "compacted, {:.1} MB -> {:.1} MB",
+                        before.file as f64 / 1e6,
+                        after.file as f64 / 1e6
+                    ),
+                    began.elapsed(),
+                    holds,
+                );
+            }
+            // `index built on `c.f``, or that it was there already.
+            (Some((Ok(Response2::Ok(done)), holds)), None) => link::said_beside(
+                "create index",
+                format_args!("{done}"),
+                began.elapsed(),
+                holds,
+            ),
+            _ => {}
+        }
+        built.map(|(r, _)| r)
     } {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
