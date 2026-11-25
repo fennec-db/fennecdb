@@ -2628,6 +2628,20 @@ pub(crate) fn nodes_beside() -> usize {
     0
 }
 
+/// How many lists [`VectorIndex::enter_live`] reads from a tombstone entry
+/// for a live node, down its levels, before it walks every node: over the
+/// review's stress every walk met one within 37 lists at m = 4 and 85 at
+/// m = 16, none walking every node.
+#[cfg(target_pointer_width = "64")]
+const ENTER_STEPS: usize = 256;
+
+#[cfg(test)]
+thread_local! {
+    /// The walks over every node [`VectorIndex::enter_live`] made on this
+    /// thread, for a test holding a rollback to the bound it keeps.
+    pub(crate) static ENTRY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether a graph of `nodes` takes one more node with `waiting` placed
 /// before it -- a statement's vectors not placed yet, each of which may
 /// take one ([`MAX_NODES`]).
@@ -4790,10 +4804,93 @@ impl VectorIndex {
             own.extend_from_slice(self.neighbors(node, l));
             for &nb in &own {
                 if nb != node && !self.neighbors(nb, l).contains(&node) {
-                    self.link_into(nb, l, node, max_deg);
+                    self.link_back_into(nb, l, node, max_deg);
                 }
             }
         }
+    }
+
+    /// `node` into `nb`'s list at level `l` as a link takes it
+    /// ([`Self::link_into`]) -- a tombstone's too, which still routes a
+    /// walk -- but where the list, full, chosen again, would let go of a
+    /// node no other list holds ([`Self::held_elsewhere`]), that node kept
+    /// in the place of the last chosen that another list holds, and nothing
+    /// changed where none is; nor where the list chosen again leaves `node`
+    /// out. A link back made as a link is let go of what a pruning drops:
+    /// over the review's stress, 300 rows at m = 4 under 120 blocks a seed,
+    /// two thirds rolled back, 255 live nodes no walk from the entry
+    /// reached summed over the rollbacks of 4 seeds (main: 98), 559 over 16
+    /// (main: 883), only 2 and 4 of them new after a rollback: a list a
+    /// pruning took a node's other ways in from left it the one a write
+    /// later let go of. Kept, 70 and 285, the rows their own vector missed
+    /// at ef 16 3 610 and 14 474 against 3 749 and 14 876 (main: 17 313
+    /// and 62 841); at m = 16 none unreached in either, missed 2 014 and
+    /// 5 440 against 2 023 and 5 395. No link back made into a tombstone,
+    /// 145 and 491 unreached, 8 948 and 28 914 missed; no link back made
+    /// where it would let go of such a node, 17 and 315, 3 979 and 17 556.
+    #[cfg(target_pointer_width = "64")]
+    fn link_back_into(&mut self, nb: u32, l: usize, node: u32, max_deg: usize) {
+        if l > 0 && l > self.node_levels(nb) {
+            return;
+        }
+        if self.push_neighbor(nb, l, node, max_deg) {
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.prune_buf);
+        let mut chosen = (self.view()).pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
+        self.prune_buf = buf;
+        if !chosen.contains(&node) {
+            return;
+        }
+        let list = self.neighbors(nb, l);
+        // `x`, let go of and held nowhere else, kept: in a place the list
+        // has, or in that of the last chosen another list holds.
+        let keep = |chosen: &mut Vec<u32>, x: u32| -> bool {
+            if chosen.len() < max_deg {
+                chosen.push(x);
+                return true;
+            }
+            match (chosen.iter()).rposition(|&y| y != node && self.held_elsewhere(y, nb)) {
+                Some(at) => {
+                    chosen[at] = x;
+                    true
+                }
+                None => false,
+            }
+        };
+        // `chosen` is `list` and `node` but those let go of. Where that is
+        // one, as where a full list held no tombstone, the sums tell which,
+        // each list read once: with each node of the list looked for in
+        // `chosen`, a rollback of one row's `set` over 2 000 rows read 1 884
+        // instructions more than with no node kept (0.29%), and 679 so.
+        if list.len() == chosen.len() {
+            let sum = |s: &[u32]| s.iter().map(|&x| x as u64).sum::<u64>();
+            let x = (sum(list) + node as u64 - sum(&chosen)) as u32;
+            if !self.held_elsewhere(x, nb) && !keep(&mut chosen, x) {
+                return;
+            }
+        } else {
+            for &x in list {
+                if chosen.contains(&x) || self.held_elsewhere(x, nb) {
+                    continue;
+                }
+                if !keep(&mut chosen, x) {
+                    return;
+                }
+            }
+        }
+        self.set_neighbors(nb, l, &chosen);
+    }
+
+    /// Whether a list other than `owner`'s holds `x`: one of the nodes
+    /// `x`'s own lists reach, at that level, as a link's links back leave
+    /// them -- the lists a walk most likely reaches it through, read
+    /// without a walk.
+    #[cfg(target_pointer_width = "64")]
+    fn held_elsewhere(&self, x: u32, owner: u32) -> bool {
+        (0..=self.node_levels(x)).any(|l| {
+            (self.neighbors(x, l).iter()).any(|&y| y != owner && self.neighbors(y, l).contains(&x))
+        })
     }
 
     /// A document's node met again with `raw`: `true` when it already holds
@@ -4931,34 +5028,41 @@ impl VectorIndex {
     /// rollbacks [`Self::link_back`] measures, 4 to 7 rows a `set`'s missed
     /// at ef 8, and 62 to 71 a `put`'s, 6 to 10 at ef 40, recall 0.963 to
     /// 0.994. Then each list of theirs holding a node the put-back made a
-    /// tombstone is chosen again ([`Self::mend`]), and an entry the
-    /// put-back left a tombstone moved to a live node ([`Self::enter_live`]).
+    /// tombstone is chosen again ([`Self::mend`]), and an entry left a
+    /// tombstone moved to a live node ([`Self::enter_live`]). Nothing, its
+    /// entry neither, where the put-back made no node live or tombstone.
     #[cfg(target_pointer_width = "64")]
     pub fn link_revived(&mut self) {
         let revived = std::mem::take(&mut self.revived);
-        for &node in &revived {
-            if !self.is_deleted(node) {
-                self.link_back(node);
-            }
-        }
         // Out and back, its room kept as `retired`'s is: let go of at each
         // rollback, a rollback of one row's `put` over 2 000 rows took 885
         // instructions more than with no list (74 092); kept, 356, inside
         // the builds' spread.
         let mut taken = std::mem::take(&mut self.taken);
+        // A block that wrote no vector here put nothing back: the graph,
+        // its entry too, is the block's start's.
+        if revived.is_empty() && taken.is_empty() {
+            self.taken = taken;
+            return;
+        }
+        for &node in &revived {
+            if !self.is_deleted(node) {
+                self.link_back(node);
+            }
+        }
+        taken.sort_unstable();
         if !taken.is_empty() {
-            taken.sort_unstable();
             for &node in &revived {
                 if !self.is_deleted(node) && self.mend(node, &taken) {
                     self.link_back(node);
                 }
             }
-            taken.clear();
         }
+        if let Some(e) = self.entry.filter(|&e| self.is_deleted(e)) {
+            self.enter_live(taken.binary_search(&e).is_ok());
+        }
+        taken.clear();
         self.taken = taken;
-        if self.entry.is_some_and(|e| self.is_deleted(e)) {
-            self.enter_live();
-        }
     }
 
     /// Each list of `node`, a node a put-back made live again, that holds
@@ -5024,15 +5128,16 @@ impl VectorIndex {
         mended
     }
 
-    /// The entry moved off a tombstone once a put-back ends, to the node a
-    /// graph of the live nodes linked in node order enters by: the first
-    /// live node at the highest level a live node holds, the graph's top
-    /// level falling to it where the levels above hold only tombstones.
-    /// A block that placed a node above the top level made it the entry,
-    /// and put back, left it a tombstone whose links reach the block's
-    /// nodes alone where the block was linked as a batch -- a list chosen
-    /// again takes no tombstone, and the rows' nodes were tombstones then
-    /// -- so a search entering there walked the block's tombstones and
+    /// The entry moved off a tombstone once a put-back that made a node
+    /// live or a tombstone ends, to the node a graph of the live nodes
+    /// linked in node order enters by, or the nearest it finds: the live,
+    /// linked node of the highest level a walk from the entry down its
+    /// levels meets ([`Self::live_near`]), the graph's top level falling to
+    /// it. A block that placed a node above the top level made it the
+    /// entry, and put back, left it a tombstone whose links reach the
+    /// block's nodes alone where the block was linked as a batch -- a list
+    /// chosen again takes no tombstone, and the rows' nodes were tombstones
+    /// then -- so a search entering there walked the block's tombstones and
     /// rarely reached a row: over 2 000 x 16, after a `put` of every row
     /// rolled back, its lists chosen again ([`Self::mend`]), 342 to 427
     /// rows were missed by their own vector at ef 8 and 39 to 70 at ef 40
@@ -5041,36 +5146,104 @@ impl VectorIndex {
     /// that entry, so it reached them. In a graph linked in node order the
     /// entry is the first node at its top level, so a block put back whole
     /// has the entry and top level of its start. Never a node waiting to
-    /// be linked, which holds no links to walk; and nothing moved where no
-    /// live node is linked. A walk over every node's levels, made only
-    /// where a put-back ends on a tombstone entry, which a block placing a
-    /// node above the top level leaves, or a delete of the entry's row
-    /// before it: a delete leaves the entry where it is, its links still
-    /// walked.
+    /// be linked, which holds no links to walk. Where the walk meets none
+    /// and the entry is a node the put-back took (`own`, the block's), every
+    /// node is walked ([`Self::live_anywhere`]); a delete of the entry's
+    /// row leaves the entry where it is, its links still walked, and so
+    /// does a put-back that meets no live node near it. Made as it first
+    /// was, by a walk over every node with the nodes waiting copied and
+    /// sorted, wherever a rollback of the collection ended on a tombstone
+    /// entry -- a block writing no vector, after its row was deleted, among
+    /// them, and each rollback while every live node waited to be linked,
+    /// as a server's open leaves them -- a block setting one row's other
+    /// field over a file of 2 000 such rows and 2 000 deleted took 282 558
+    /// instructions to put back, main 32 258; made so, 32 296. Moved only
+    /// where the put-back took the entry, the review's stress missed rows
+    /// by their own vector at ef 16 4 233 times against 3 610.
     #[cfg(target_pointer_width = "64")]
     #[cold]
     #[inline(never)]
-    fn enter_live(&mut self) {
-        if self.deleted_count >= self.doc_ids.len() {
+    fn enter_live(&mut self, own: bool) {
+        let Some(from) = self.entry else {
             return;
+        };
+        let found = match self.live_near(from) {
+            Some(node) => Some(node),
+            None if own => self.live_anywhere(),
+            None => None,
+        };
+        if let Some(node) = found {
+            (self.entry, self.max_level) = (Some(node), self.node_levels(node));
+            self.changes += 1;
         }
-        let mut waiting = self.pending.clone();
-        waiting.sort_unstable();
+    }
+
+    /// Whether `node` may enter a walk: live, and linked -- a node waiting
+    /// to be linked holds no list ([`Self::defer_batch`]), and nothing links
+    /// to it before it is linked.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn enters(&self, node: u32) -> bool {
+        !self.deleted[node as usize] && self.l0_len[node as usize] > 0
+    }
+
+    /// The live, linked node of the highest level a walk from `from` down
+    /// its levels meets, the lowest id among equals: each level's lists
+    /// read from the nodes met above it and at it, [`ENTER_STEPS`] lists
+    /// in all, and `None` where those meet no such node.
+    #[cfg(target_pointer_width = "64")]
+    fn live_near(&self, from: u32) -> Option<u32> {
+        let mut met = vec![from];
+        let mut seen = std::collections::HashSet::from([from]);
+        let mut best: Option<(usize, u32)> = None;
+        let mut steps = 0;
+        for l in (0..=self.node_levels(from)).rev() {
+            let mut i = 0;
+            while i < met.len() {
+                if steps == ENTER_STEPS {
+                    return best.map(|(_, node)| node);
+                }
+                steps += 1;
+                let x = met[i];
+                i += 1;
+                for &y in self.neighbors(x, l) {
+                    if !seen.insert(y) {
+                        continue;
+                    }
+                    met.push(y);
+                    if self.enters(y) {
+                        let level = self.node_levels(y);
+                        if best.is_none_or(|(top, at)| level > top || (level == top && y < at)) {
+                            best = Some((level, y));
+                        }
+                    }
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        best.map(|(_, node)| node)
+    }
+
+    /// The first live, linked node at the highest level a live node holds,
+    /// by a walk over every node: where [`Self::live_near`] met none.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    fn live_anywhere(&self) -> Option<u32> {
+        #[cfg(test)]
+        ENTRY_WALKS.with(|w| w.set(w.get() + 1));
         let mut best: Option<(usize, u32)> = None;
         for node in 0..self.doc_ids.len() as u32 {
-            if self.deleted[node as usize] {
+            if !self.enters(node) {
                 continue;
             }
             let level = self.node_levels(node);
-            if best.is_some_and(|(top, _)| level <= top) || waiting.binary_search(&node).is_ok() {
-                continue;
+            if best.is_none_or(|(top, _)| level > top) {
+                best = Some((level, node));
             }
-            best = Some((level, node));
         }
-        if let Some((level, node)) = best {
-            (self.entry, self.max_level) = (Some(node), level);
-            self.changes += 1;
-        }
+        best.map(|(_, node)| node)
     }
 
     /// `doc` out of the graph as a put-back takes it out ([`Self::remove`])
@@ -5199,6 +5372,32 @@ impl VectorIndex {
     pub(crate) fn entered(&self) -> (Option<u32>, bool, usize) {
         let dead = self.entry.is_some_and(|e| self.is_deleted(e));
         (self.entry, dead, self.max_level)
+    }
+
+    /// The documents of the live, linked nodes no walk from the entry
+    /// reaches, through tombstones and every level: for a test holding a
+    /// put-back to the graph it leaves.
+    #[cfg(test)]
+    pub(crate) fn unreached(&self) -> Vec<DocId> {
+        let n = self.doc_ids.len();
+        let mut seen = vec![false; n];
+        let mut stack: Vec<u32> = self.entry.into_iter().collect();
+        for &e in &stack {
+            seen[e as usize] = true;
+        }
+        while let Some(x) = stack.pop() {
+            for l in 0..=self.node_levels(x) {
+                for &y in self.neighbors(x, l) {
+                    if !std::mem::replace(&mut seen[y as usize], true) {
+                        stack.push(y);
+                    }
+                }
+            }
+        }
+        (0..n as u32)
+            .filter(|&x| !seen[x as usize] && !self.is_deleted(x) && !self.pending.contains(&x))
+            .map(|x| self.doc_ids[x as usize])
+            .collect()
     }
 
     /// Changes to the graph since it was made or restored: nodes added,

@@ -146,17 +146,26 @@ the links into it that lists chosen again while it was a tombstone let go
 of are made again from its own once the put-back ends (`link_revived`):
 each node it links to takes it back, pruned as a link is, no search made
 -- made with none, a rollback of a `put` rewriting 4 000 rows left 3 899 or
-more of them unfound by their own vector. Each of its lists holding a
+more of them unfound by their own vector -- unless the pruning would let
+go of a node no other list holds, kept then in the place of the last it
+chose that another list holds (`link_back_into`): pruned as a link is,
+at m = 4 the links back took nodes' other ways in, and later writes'
+pruning left more live nodes no walk reached than main's rollback did
+([crates.md, limits](crates.md#limits)). Each of its lists holding a
 node the put-back made a tombstone, the block's (`taken`), is then chosen
 again from its live nodes and those its tombstones' lists hold, pruned
 the same way (`mend`): a `put` linked as a
 batch while the rows' nodes were tombstones linked its first nodes
 through them, and their full lists, chosen again taking no tombstone,
-kept the block's nodes alone. An entry the put-back left a tombstone --
-the block's node placed above the top level -- moves to the first live
-node at the highest level a live node holds, the top level falling with
-it (`enter_live`): the block's start's entry, in a graph linked in node
-order. A delete leaves the entry where it is, its links still walked, and
+kept the block's nodes alone. An entry left a tombstone by a put-back
+that made a node live or a tombstone there -- the block's node placed
+above the top level -- moves to the live node, none waiting to be
+linked, of the highest level a walk from it down its levels meets in 256
+lists (`enter_live`, `live_near`), the top level falling with it: the
+block's start's entry, in a graph linked in node order. Every node is
+walked only where that meets none and the entry is the block's
+(`live_anywhere`); a block that wrote no vector there puts nothing back.
+A delete leaves the entry where it is, its links still walked, and
 a rollback placing every vector again reached the rows by a search from
 it; over 2 000 x 16 after a `put` of every row, the revived graph missed
 372 to 444 rows by their own vector at ef 8, 118 to 159 with the entry

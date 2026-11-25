@@ -2067,7 +2067,7 @@ mod torn {
     /// each row's own vector finds it at ef 16, as the graph a rollback
     /// placing every vector again leaves. Its nodes made live again with
     /// the links of their own and none into them -- a list chosen again
-    /// while a node was a tombstone left it out -- 7 to 10 of 1 000 rows
+    /// while a node was a tombstone left it out -- 13 of the 1 000 rows
     /// were found at ef 16 by no walk: the links into each are made again
     /// from its own as the put-back ends (`VectorIndex::link_revived`).
     #[test]
@@ -2239,6 +2239,253 @@ mod torn {
             "{} rows not found: {missed:?}",
             missed.len()
         );
+    }
+
+    /// A block that wrote no vector, rolled back in a collection whose
+    /// entry is a tombstone -- its row deleted, which leaves the entry where
+    /// it is -- leaves the entry there and reads no list: the entry was
+    /// moved on any rollback of the collection, by a walk over every node
+    /// and a copy of the nodes waiting to be linked, sorted, under the write
+    /// lock, and again on each while no live node was linked, as after a
+    /// server's open. A block that wrote a vector moves it, by a walk from
+    /// it, and over every node never: the entry is not the block's.
+    #[test]
+    fn a_rollback_writing_no_vector_leaves_the_entry_where_it_is() {
+        let (n, dim) = (300i64, 8);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut vector = || {
+            let v: Vec<f32> = (0..dim)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect();
+            Value::Vector(v)
+        };
+        let mut db = Database::new();
+        let spec = VectorIndexSpec::default().resolved();
+        let v = Field::new("v", DataType::Vector(dim, VecPrec::F32));
+        let fields = vec![
+            v.indexed(IndexKind::Vector(spec)),
+            Field::new("n", DataType::Int),
+        ];
+        db.execute(&Statement::CreateCollection {
+            schema: Schema::new("t", fields).expect("t"),
+            if_not_exists: false,
+        })
+        .expect("create");
+        let docs = (1..=n)
+            .map(|id| {
+                vec![
+                    ("id".to_string(), Expr::Lit(Value::Int(id))),
+                    ("n".to_string(), Expr::Lit(Value::Int(id))),
+                    ("v".to_string(), Expr::Lit(vector())),
+                ]
+            })
+            .collect();
+        db.execute(&Statement::Put {
+            collection: "t".into(),
+            docs,
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        })
+        .expect("the rows");
+        let entered = |db: &Database| db.collections["t"].vectors.get("v").expect("v").entered();
+        let (entry, _, top) = entered(&db);
+        let row = (1..=n as u64)
+            .find(|&id| node_of_row(&db, id) == entry)
+            .expect("the entry's row");
+        db.execute(&Statement::Delete {
+            collection: "t".into(),
+            filter: Some(eq("id", Value::Int(row as i64))),
+            require: None,
+            pick: None,
+        })
+        .expect("the entry's row deleted");
+        let tomb = entered(&db);
+        assert_eq!(tomb, (entry, true, top), "a delete leaves the entry");
+        let other: i64 = if row == 1 { 2 } else { 1 };
+        let set = |field: &str, to: Value| Statement::Update {
+            collection: "t".into(),
+            set: vec![(field.into(), Expr::Lit(to))],
+            filter: Some(eq("id", Value::Int(other))),
+            require: None,
+            pick: None,
+        };
+        crate::vector::ENTRY_WALKS.with(|w| w.set(0));
+        for _ in 0..3 {
+            db.begin().expect("begin");
+            db.execute(&set("n", Value::Int(-1))).expect("no vector");
+            db.rollback();
+            assert_eq!(
+                entered(&db),
+                tomb,
+                "a block writing no vector moved the entry"
+            );
+        }
+        db.begin().expect("begin");
+        db.execute(&set("v", vector())).expect("a vector");
+        db.rollback();
+        let (moved, dead, _) = entered(&db);
+        assert!(!dead && moved != entry, "the entry left a tombstone");
+        let walks = crate::vector::ENTRY_WALKS.with(|w| w.get());
+        assert_eq!(walks, 0, "walks over every node");
+        let ix = db.collections["t"].vectors.get("v").expect("v");
+        assert_eq!(ix.unreached(), Vec::<u64>::new(), "rows no walk reaches");
+    }
+
+    /// Blocks of every write over 300 rows at m = 4 -- a row's vector
+    /// written again, made null, given back and shared with another row,
+    /// rows deleted and added, a `put` of hundreds linked as a batch --
+    /// two in three rolled back: each rollback leaves reachable from the
+    /// entry every live node a walk from it reached as its block began.
+    /// Its links back made through the pruning a link makes, a list chosen
+    /// again let go of the last list holding a node, and on this seed the
+    /// rollback of step 42 left one no walk reached
+    /// (`VectorIndex::link_back_into`).
+    #[test]
+    fn a_rollback_takes_no_node_its_last_way_in() {
+        let mut r = 9u64.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = move || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r
+        };
+        let dim = 8usize;
+        let vector = |next: &mut dyn FnMut() -> u64| -> Vec<f32> {
+            let unit = |x: u64| (x >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+            (0..dim).map(|_| unit(next())).collect()
+        };
+        let put = |rows: &[(i64, Vec<f32>)]| Statement::Put {
+            collection: "t".into(),
+            docs: (rows.iter())
+                .map(|(id, v)| {
+                    vec![
+                        ("id".to_string(), Expr::Lit(Value::Int(*id))),
+                        ("v".to_string(), Expr::Lit(Value::Vector(v.clone()))),
+                    ]
+                })
+                .collect(),
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        let mut db = Database::new();
+        let mut spec = VectorIndexSpec::default();
+        (spec.m, spec.ef_construction) = (4, 40);
+        let field = Field::new("v", DataType::Vector(dim as _, VecPrec::F32));
+        db.execute(&Statement::CreateCollection {
+            schema: Schema::new("t", vec![field.indexed(IndexKind::Vector(spec.resolved()))])
+                .expect("t"),
+            if_not_exists: false,
+        })
+        .expect("create");
+        let rows: Vec<(i64, Vec<f32>)> = (1..=300).map(|id| (id, vector(&mut next))).collect();
+        db.execute(&put(&rows)).expect("the rows");
+        let mut model: std::collections::BTreeMap<i64, Option<Vec<f32>>> =
+            rows.into_iter().map(|(id, v)| (id, Some(v))).collect();
+        let unreached =
+            |db: &Database| db.collections["t"].vectors.get("v").expect("v").unreached();
+        let mut next_id = 301i64;
+        for step in 0..=42 {
+            let start = model.clone();
+            let reached_out = unreached(&db);
+            let mut m = model.clone();
+            db.begin().expect("begin");
+            let writes = if next() % 10 == 0 {
+                1
+            } else {
+                1 + (next() % 12) as usize
+            };
+            for _ in 0..writes {
+                let ids: Vec<i64> = m.keys().copied().collect();
+                let hot = ids[(next() % 8) as usize % ids.len()];
+                let any = ids[(next() as usize) % ids.len()];
+                let id = if next() % 2 == 0 { hot } else { any };
+                let set = |v: Value| Statement::Update {
+                    collection: "t".into(),
+                    set: vec![("v".into(), Expr::Lit(v))],
+                    filter: Some(eq("id", Value::Int(id))),
+                    require: None,
+                    pick: None,
+                };
+                let wrote = match next() % 9 {
+                    0..=2 => Some(Some(vector(&mut next))),
+                    3 => Some(None),
+                    4 => start.get(&id).cloned().filter(Option::is_some),
+                    5 => {
+                        let del = Statement::Delete {
+                            collection: "t".into(),
+                            filter: Some(eq("id", Value::Int(id))),
+                            require: None,
+                            pick: None,
+                        };
+                        db.execute(&del).expect("a delete");
+                        m.remove(&id);
+                        None
+                    }
+                    6 => {
+                        let v = vector(&mut next);
+                        db.execute(&put(&[(next_id, v.clone())])).expect("a row");
+                        m.insert(next_id, Some(v));
+                        next_id += 1;
+                        None
+                    }
+                    7 if step % 7 == 0 => {
+                        let mut batch = Vec::new();
+                        for &id in &ids {
+                            if next() % 2 == 0 {
+                                batch.push((id, vector(&mut next)));
+                            }
+                        }
+                        for _ in 0..(400 + next() % 300) {
+                            batch.push((next_id, vector(&mut next)));
+                            next_id += 1;
+                        }
+                        db.execute(&put(&batch)).expect("a batch");
+                        m.extend(batch.into_iter().map(|(id, v)| (id, Some(v))));
+                        None
+                    }
+                    7 => None,
+                    _ => match m.get(&any) {
+                        Some(Some(v))
+                            if m.values().filter(|x| x.as_ref() == Some(v)).count() < 2 =>
+                        {
+                            Some(Some(v.clone()))
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(v) = wrote {
+                    let to = v.clone().map_or(Value::Null, Value::Vector);
+                    db.execute(&set(to)).expect("a row's vector");
+                    m.insert(id, v);
+                }
+            }
+            if next() % 3 == 0 {
+                db.commit().expect("commit");
+                model = m;
+                continue;
+            }
+            db.rollback();
+            let lost: Vec<u64> = (unreached(&db).into_iter())
+                .filter(|d| !reached_out.contains(d))
+                .collect();
+            assert!(
+                lost.is_empty(),
+                "step {step}: rows {lost:?} no walk reaches now"
+            );
+        }
     }
 
     /// A row written twice in one block is given back the node it held as

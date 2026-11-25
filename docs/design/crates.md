@@ -321,8 +321,29 @@ a node made live, which a list chosen again while it was a tombstone
 dropped (`select_heuristic` takes none), are made again from its own once
 the put-back ends (`link_revived`, `link_back`): each node its lists reach
 takes it back into its list at that level, as a node linked takes its
-neighbours' links back, through the same pruning, no search made.
-Measured over 4 000 x 32, m = 16, after a block writing every row's vector
+neighbours' links back, through the same pruning, no search made -- but
+a node the pruning would let go of that no other list holds is kept, in
+the place of the last chosen that another list holds, and the list left
+as it was where none is (`link_back_into`, `held_elsewhere`: the lists
+of the nodes the dropped one's own lists reach, read without a walk).
+Made through the pruning alone, the links back left, over the review's
+stress -- 300 rows at m = 4, 120 blocks a seed of every write, a vector
+set, made null, given back and shared, rows deleted and added, a `put`
+of hundreds as a batch, two in three rolled back -- 255 live nodes no
+walk from the entry reached, summed over the rollbacks of 4 seeds, where
+main left 98, and 559 over 16 seeds against main's 883; yet only 2 and 4
+of them were new after a rollback: the links back took nodes' other ways
+in, leaving each the one a later write's pruning took. Kept, 70 and 285
+(at m = 16 none in either, as on main), the rows their own vector
+missed at ef 16 3 610 and 14 474 against 3 749 and 14 876 (main: 17 313 and 62 841; at m = 16
+2 014 and 5 440 against 2 023 and 5 395, main 32 933 and 133 533), and
+over 2 000 x 16 and 4 000 x 32 the same misses and recall as without it.
+The review would have the links back made into live nodes alone, a
+tombstone's pruning wasted: made so, 145 and 491 unreached and 8 948 and
+28 914 missed, a tombstone still routing the walks that reach the node
+made live; with no link back made where the pruning would let go of such
+a node, 17 and 315 unreached but 3 979 and 17 556 missed. Measured over
+4 000 x 32, m = 16, after a block writing every row's vector
 again was rolled back (3 seeds; misses are rows their own vector does not
 find, recall@10 at ef 100 over 500 other queries): left with no links in,
 227 to 273 rows missed at ef 8 and 2 to 6 at ef 40 after a `set` of each,
@@ -367,10 +388,34 @@ again wherever a list held any tombstone, the earlier writes' too, a
 rollback of one row's `set` over 2 000 rows cost 34% more, its row's lists
 holding the nodes of the blocks before it; held to the block's own, a
 rollback of one row's `set` or `put` moved by under a thousand
-instructions of 648 000 and 74 000. The walk over every node's levels for
-the entry is made only where a put-back ends on a tombstone entry. The
-4 000 rows' rollback takes 26 to 29 ms, 10 to 16 with the links back alone
-and 360 to 470 placing the vectors again. A block put back whole, then,
+instructions of 648 000 and 74 000; the nodes the links back keep cost
+the `set`'s 679 more (0.10%, SE 135) and the `put`'s none past the
+builds' spread (+53, SE 90). The entry is looked for where a
+put-back that made a node live or a tombstone in the graph ends on a
+tombstone entry -- a block that wrote no vector there puts nothing back,
+its entry neither -- by a walk from it down its levels, reading 256
+lists at most (`ENTER_STEPS`, `live_near`): the live, linked node of the
+highest level it meets, the lowest id among equals, a node waiting to be
+linked holding no list. Only where that meets none and the entry is a
+node the put-back took, the block's, is every node walked
+(`live_anywhere`); an entry a delete left, where the walk meets no live
+node, stays where the delete left it. Walked over every node
+with the nodes waiting copied and sorted wherever a rollback of the
+collection ended on a tombstone entry, as the move was first made, the
+rollback of a block writing no vector, after the entry's row was deleted,
+walked every node, and every rollback did while each live node waited to
+be linked, as a server's open leaves them: over a file of 2 000 such rows
+and 2 000 deleted, opened as a server opens it, a block setting one row's
+other field took 282 558 instructions to put back, where main took
+32 258 and this takes 32 296. In the stress every walk from the entry
+met a live node, within 37 lists at m = 4 and 85 at m = 16, and none
+walked every node. Moved only where the put-back took the entry, the
+stress missed 4 233 rows against 3 610 (16 seeds: 16 545 against 14 474;
+at m = 16, 3 076 and 7 180 against 2 014 and 5 440). The 4 000 rows'
+rollback takes 28.5 to 29.8 ms, 26.2 to 28.2 with each link back pruned
+as a link is (2 000 x 16: 12.7 to 13.2 against 11.7 to 12.4), 10 to 16
+with the links back alone and 360 to 470 placing the vectors again. A
+block put back whole, then,
 has its rows' nodes back, each with its links both ways, its lists that
 held the block's nodes chosen again from the live nodes those led to, and
 the entry and top level of its start; the nodes it placed stay in the
@@ -445,9 +490,18 @@ they were (`a_put_back_at_a_graphs_bound_revives_the_node_its_write_took`);
 off it, a block writing 1 000 rows' vectors again rolled back, each row
 its node, the block's nodes tombstones, and each found by its own vector
 at ef 16 (`a_rollback_gives_each_row_its_node_and_the_links_into_it`, 13
-rows not found where no links in were made), a row written A, null, A and
-one written A, B, A by a write a panic stopped, each given the node it
-began the block with
+rows not found where no links in were made), a block whose `put` of every
+row and 3 000 more placed a node above the top level, rolled back, the
+start's entry and top level given back and each row found at ef 8
+(`a_rollback_gives_back_the_entry_and_the_lists_a_batch_took`), a block
+writing no vector rolled back over a tombstone entry leaving it where it
+is, every node unwalked, and one writing a vector moving it by the walk
+from it (`a_rollback_writing_no_vector_leaves_the_entry_where_it_is`),
+the stress's blocks at m = 4 on the seed where a rollback's pruning took
+a node's last way in, each rollback leaving reachable every node its
+block's start reached (`a_rollback_takes_no_node_its_last_way_in`), a
+row written A, null, A and one written A, B, A by a write a panic
+stopped, each given the node it began the block with
 (`a_row_written_twice_in_a_block_gets_the_node_it_began_with`), and every
 write a panic stops leaving each row the node it had
 (`a_panic_anywhere_in_a_write_puts_its_block_back_whole`);
