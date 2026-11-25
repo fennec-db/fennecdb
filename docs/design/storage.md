@@ -189,29 +189,71 @@ rewrite, so its faults were the docs' records pushed out by the million
 records' reads and writes, not by the compact's own read.
 
 Now the read lock takes only what is read from: each collection's store
-cloned as a pin clones it (`IndexCopy::from`: the records in the file and
-the segments shared, the id index copied, 12 bytes a row -- 240 KB for
-the soak's docs), and the tail's token. The values are read from the
-clone with no lock held (`IndexCopy::read`). A record there never moves:
-the file is only appended to, a compact's swap renames a new file over it
-while the clone keeps its mapping (on Windows its views), and a write to
-a segment the clone shares copies it first (`Arc::make_mut`) -- read into
-memory alike. The graph is built, then caught up with the writes made
-meanwhile in rounds (`catch_up_graphs`), as the rewrite's are copied: a
-round's ids drained from the tails at once, their documents looked up
-4 096 at a time under the read lock (`Store::snapshot`) and read after it
-(`store::field_at`), each linked with no lock held -- taken out and put
-back for a compact, as `finish_graphs` took them, and for `create index`
-a node holding the vector already kept, as `finish_index` keeps it. A
-round of fewer than 64 ids (`GRAPH_DONE`) ends them, 16 at most, and the
-write lock takes the few written during the last: a link at 768
-dimensions costs about what each vector of a 100 000 x 768 build does in
-its 50 s, half a millisecond, so the rewrite's bound of 1 000, made for
-records copied, would hold the lock half a second. A document a round cannot read
-leaves a compact's graph as it stood, as one the copy cannot read does,
-and refuses `create index` (`BuiltIndex::broken`). An index over several
-fields reads its keys from the clone too; the other indexes' builds take
-milliseconds and catch up under the write lock as before.
+as a pinned read takes it (`Store::pinned`, `maintenance::Taken`) -- the
+records in the file and the segments shared, the id index copied, 12
+bytes a row, 240 KB for the soak's docs, and the stretches of the file an
+image writes from left out, which a read by id never asks for and a
+mapped tail of single writes holds 16 bytes of a write (`Store::clone`,
+which the first cut took, copied them) -- and the tail's token. Its id
+index is charged to the pins' budget while it is held, as a pin's is
+(`PIN_BUDGET`): a long read that would take the budget past it runs under
+the lock meanwhile, and the maintenance itself never declines, since
+reading under the lock is what held the soak's server. The values are
+read from that store with no lock held (`IndexCopy::read`). A record
+there never moves: the file is only appended to, a compact's swap renames
+a new file over it while the store keeps its mapping (on Windows its
+views), and a write to a segment it shares copies it first
+(`Arc::make_mut`) -- read into memory alike. The graph is built, then
+caught up with the writes made meanwhile in rounds (`catch_up_graphs`),
+as the rewrite's are copied: a round's ids drained from every tail at
+once, their documents looked up 4 096 at a time under the read lock
+(`Store::snapshot`) and read after it (`store::field_at`), each linked
+with no lock held -- taken out and put back for a compact, as
+`finish_graphs` took them, and for `create index` a node holding the
+vector already kept, as `finish_index` keeps it. A round of fewer than 64
+ids (`GRAPH_DONE`) ends them, 16 at most.
+
+**The write lock links 128 at most** (`GRAPH_HELD`), the graphs' together:
+what was written during the last round. A single link took 0.82-0.88 ms
+at the median into a graph of 20 000 vectors of 768 dimensions, 1.14 ms
+into one of 100 000, and 0.08 ms at 16 dimensions (`VectorIndex::insert`
+timed alone, one core of an M-series Mac; the half millisecond a vector a
+100 000 x 768 build takes is its eight cores' wall time, not a link's),
+so 128 hold every writer 110-150 ms at 768 dimensions and 10 ms at 16 --
+under the 0.19-0.31 s the rewrite's copy holds the soak's file. Where the
+links keep up with the vectors written, each round takes fewer than the
+one before and the last leaves fewer than 64; twice that is room for a
+burst, and past it the writes outran the rounds. With no bound the write
+lock linked whatever the 16th round left, without end where they did.
+Past it a compact keeps the graph as it stands, tombstones and all, for
+the next compact, and `create index` is refused, its words saying why
+(`fell_behind`). A graph's rounds need the bound where the rewrite's do
+not: each write a rewrite's round copies was appended by its writer under
+the write lock, parsed, encoded and indexed there, and the round copies
+its bytes with no lock and none of that, so its rounds shrink by the
+writes' cost over the copy's, and the write lock copies what was written
+during a round of fewer than 1 000 (`CATCH_UP_DONE`) -- only a copy
+slower than the writes it copies runs its 16 rounds out. A link costs as
+much as the one the write that made it paid, and a block's puts link on
+every core (`link_batch`), so a graph's rounds may not shrink at all. A
+document a round cannot look up or read leaves a compact's graph as it
+stood, as one the copy cannot read does, and refuses `create index`
+(`BuiltIndex::broken`); one the rewrite cannot look up fails the compact,
+whose new file would be without it. An index over several fields reads
+its keys from a pinned store too; the other indexes' builds take
+milliseconds and catch up under the write lock as before, each write a
+read of a record just written.
+
+**A compact of several collections asks every one before it places any
+graph.** Asked as each was placed, a compact whose second collection was
+dropped, altered or given an index by a second `create index` meanwhile
+put the first's rebuilt graph in place and then refused -- and a round
+had already drained the first's tail before it met the second's change,
+so the graph lacked a write: a probe's held document 200's old vector,
+which the graph keeper would then have saved. Every tail is drained
+(`drain` hands back each, `None` for a changed one), a round meeting a
+change ends the rounds, and `finish_graphs` refuses before it places
+anything.
 
 The graph kept is the one the read lock built, link for link, where the
 writes made meanwhile land in one round; one written in two rounds leaves
@@ -222,16 +264,31 @@ lock -- the read moved back under the lock fails it), a hundred documents
 written over, one deleted and one made reach the graph, byte for byte the
 graph the old way builds on the same seed (the copy as it stood linked as
 a batch, the writes in id order after it), every live document's vector
-and no other, as a rebuild at the end holds them; with no write, a
-compact beside the database rebuilds the graph a compact under the lock
-does, byte for byte; a document a round cannot read keeps the graph.
+and no other, as a rebuild at the end holds them -- in memory and over a
+mapped file, its documents in the file and its writes since in memory;
+with no write, a compact beside the database rebuilds the graph a compact
+under the lock does, byte for byte. A document written in two rounds
+holds its last vector; one written again unchanged keeps one node, and
+one written with another's vector joins that node, as the read lock
+built them; a block put back meanwhile reaches no graph; a second `create
+index` beside the first refuses it, placing nothing; a compact of two
+collections, the second dropped, altered or indexed meanwhile, places no
+graph and leaves the first's as the writes left it (asked one at a time,
+it fails); a document a round cannot read keeps the graph; and at 128
+left a compact places its graph and `create index` its index, at 129 the
+compact keeps the graph as the writes left it and `create index` is
+refused.
 
-Every hold is timed (`Holds`, one `Instant` a hold, kept by
-`Database::last_holds` and handed back by `Database::maintain_held`): the
-build's copy, its rounds' longest and its put in place, and a compact's
-file's copy, rounds' longest and swap. `--auto-compact`'s line names the
-longest and each, as does the line a `compact` or `create index` sent as a
-statement writes.
+Every hold is timed (`Holds`, one `Instant` a hold) and handed back by the
+maintenance that held them (`Database::maintain_held`,
+`compact_when_due_in`): read off the database after it, as the first cut's
+`last_holds` was, a `create index` finishing between gave its holds for
+the compact's. The build's copy, its rounds' longest and its put in
+place, and a compact's file's copy, rounds' longest and swap.
+`--auto-compact`'s line and the one a `compact` or `create index` sent as
+a statement writes are one shape (`link::said_beside`): `<what>: <done>
+in <took>, the lock held <longest> at most (<each hold>)`, `--auto-compact`
+naming the file or tenant, a statement itself and its request id after.
 
 *Measured* (`graphhold`, a scratch program over `Database::maintain`:
 the soak's shape -- a million 1 KB records each written over once at a
@@ -275,13 +332,27 @@ what it no longer stops: the writes and reads go on beside its reads, and
 it reads beside their faults. The file's copy -- `begin_beside` cloning
 the million records' id index, 12 MB, under the read lock in a container
 short of memory -- is now the longest hold, 0.19-0.31 s, on main as here;
-it is the next to take off the lock. Nothing on a write's path moved:
-copies of the gate's `core-put` and `file-open` and a compact beside the
-database of 5 000 vectors of 8, counted over 16, 16 and 8 identities a
-build (`make instr-compare`'s means), read +44 (standard error 23), -0.56%
-and -0.07%, each inside two standard errors, and a traced `put` ran 12
-instructions more of its own code, in `HashIndex::add`, which this change
-does not touch.
+it is the next to take off the lock.
+
+Taken as a pinned read takes it rather than cloned whole, the build's
+store holds the read lock 0.8-2.6 ms where the clone held it 13.0-18.2:
+the same runs, four a side against the clone, in ABBA and then BAAB
+order, each begun under a 1-minute load of 2.5 to 4 -- the clone copied
+the docs' stretches of the file as well as their id index. The rest moved
+with the runs alone: the rounds' longest 1.2-1.8 ms against 0.7-1.2, the
+put in place 6.0-10.5 against 6.3-8.4, the file's copy 186-244 ms against
+191-229, the swap 3.7-6.0 against 3.0-3.6, the compact 12.1-20.0 s
+against 13.1-16.4, a writer's longest wait 0.18-1.25 s against 0.59-1.71
+and a reader's 0.24-0.91 against 0.25-0.79 -- the workload's own faults
+and the file's copy -- and peak anonymous memory 133-139 MB against
+128-143. Nothing on a write's path moved:
+copies of the gate's `core-put` and `file-open`, counted over 16
+identities a build against main (`make instr-compare`'s means), read -40
+instructions an op (standard error 32) and +0.26% (standard error 0.74%),
+each inside two standard errors; the first cut read +44 (23) and -0.56%,
+a compact beside the database of 5 000 vectors of 8 -0.07%, and a traced
+`put` ran 12 instructions more of its own code, in `HashIndex::add`, which
+this change does not touch.
 
 **A file compacts itself once half of it is dead** (`engine/garbage.rs`).
 An update appends the whole record and leaves the version it replaced dead

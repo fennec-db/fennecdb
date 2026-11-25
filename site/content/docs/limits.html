@@ -321,7 +321,14 @@ time at the next open, never data.</p>
     write lock throughout. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
-    fits, and so does a second compact while one writes its file. It cannot
+    fits, and so does a second compact while one writes its file; a compact
+    of every collection places no graph when one of them changed. The
+    vectors written while a graph is built are linked into it in rounds
+    beside the queries, and the write lock links at most 128 of them,
+    those of the last round — at 768 dimensions about 0.15 s. Where more
+    were written than that, faster than the rounds could link them, a
+    <code>create index</code> of the graph is refused, saying so, and a
+    compact keeps the graph as it stands until the next. It cannot
     be cancelled once begun.</li>
   <li><b>A file compacts itself once half of it is dead.</b> The server
     (<code>--auto-compact</code>, <a href="/docs/server#compaction">Compaction</a>)
