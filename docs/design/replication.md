@@ -747,6 +747,20 @@ its seal (2 MiB). On the receivers before this each failed at the first
 size: the replica held 19.5 MB, the backup 26.5, the archive's end 32.5,
 the move 24.5.
 
+A count is of the blocks made while it runs: each block carries the number
+of the count it was made in, and one made before it is neither added nor
+taken away as it is let go of. Until 2026-11-25 every block let go of was
+taken away, and what an earlier test's server let go of in a later count
+lowered its peak by as much -- a stream whose follower had gone holds its
+1 MiB writer until its second keep-alive's write fails, 4 s on. On macOS
+CI one did as the replica took 8 000 rows, read as 3.4 MB where it holds
+4.4, and the replica's growth read as 64.12 bytes a row, past its bound of
+64; here a backup's or a replica's did as an archive's end of 8 000 rows
+was taken, read as 0.35 MB where it holds 1.4. The growth is 20 bytes a
+row, the primary's pin (the id index it copies, 12, and the frames' index
+it encodes) as the image streams; the copy's open, its id index of 12 a
+row, comes once the check's buffers are let go of.
+
 A follow of 250 000 rows of a kilobyte, a 253 MB file, timed from the
 replica's start to its first image, three rounds each (Linux, aarch64,
 musl, release, in a container of 3 CPUs; macOS's loopback, 49.7 days up,
