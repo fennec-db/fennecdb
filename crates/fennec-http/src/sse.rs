@@ -254,7 +254,8 @@ impl Drop for StreamSlot<'_> {
 /// by its drop. Held by value, it goes back once whichever way this ends,
 /// a refusal's return or a panic's unwinding too, and always before the
 /// socket closes, which the caller holds. `None` keeps the place where it
-/// is: a tenant's stream is one of the node's `--max-connections`.
+/// is: a tenant's stream is one of the node's `--max-connections`, and so
+/// is a stream no ceiling of its own bounds (`--http-max-streams 0`).
 pub fn serve(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,

@@ -115,7 +115,8 @@ usage: fennec-server [options]
                             default: 100. Every connection is a thread. A
                             subscription gives its place back once it
                             streams, counted under --http-max-streams
-                            instead -- but on a --dir node, where it keeps it
+                            instead -- but on a --dir node or at
+                            --http-max-streams 0, where it keeps it
       --idle-timeout <s>    close a keep-alive connection silent for this
                             long (0 = never)  default: 60
       --header-timeout <s>  a request's time from its first byte, and a
@@ -286,8 +287,9 @@ usage: fennec-server [options]
                             are long lived and each holds a thread, counted
                             apart from --max-connections: a file's server
                             holds that many connections and this many
-                            streams at most. On a --dir node each is one of
-                            --max-connections too, which every tenant
+                            streams at most. At 0 a subscription stays one
+                            of --max-connections. On a --dir node each is
+                            one of --max-connections too, which every tenant
                             shares: --tenant-max-streams and
                             --tenant-max-held bound each tenant's share
       --http-keepalive <s>  keep-alive interval while a subscription is silent

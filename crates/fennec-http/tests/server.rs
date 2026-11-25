@@ -1656,6 +1656,28 @@ fn subscriptions_are_counted_apart_from_connections() {
     refused_a_connection(h.port);
 }
 
+/// At `--http-max-streams 0` no ceiling of its own bounds a stream, so it
+/// keeps its connection's place: `--max-connections` stays what bounds
+/// its thread. Given back there, subscriptions would take threads without
+/// end, where the connection ceiling bounded them before.
+#[test]
+fn an_unbounded_stream_stays_under_the_connection_ceiling() {
+    let h = start(
+        Config {
+            max_connections: 2,
+            max_streams: 0,
+            ..Config::default()
+        },
+        streamed(),
+    );
+    let streams: Vec<_> = (0..2).map(|_| subscribe(h.port, "/t/changes")).collect();
+    for s in &streams {
+        assert_eq!(s.status, 200, "{}", s.said);
+    }
+    assert_eq!(h.server.live_streams(), 2);
+    refused_a_connection(h.port);
+}
+
 /// The stream ceiling refuses past `--http-max-streams`, 503 to come back
 /// in a second, and the refused stream's connection gives its place back
 /// once, before it ends.
@@ -1703,8 +1725,16 @@ fn a_subscriptions_end_gives_its_stream_slot_back() {
     );
     let first = subscribe(h.port, "/t/changes");
     assert_eq!(first.status, 200, "{}", first.said);
+    // Refused by the stream ceiling, not the connection's: the first
+    // stream gave its connection's place back, so this one is taken and
+    // its stream is what is full.
     let refused = subscribe(h.port, "/t/changes");
     assert_eq!(refused.status, 503, "{}", refused.said);
+    assert!(
+        refused.said.contains("too many subscriptions"),
+        "{}",
+        refused.said
+    );
     drop(first);
     // The stream's thread finding its client gone is the event, 30 s at
     // most.

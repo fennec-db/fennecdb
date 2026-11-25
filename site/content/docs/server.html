@@ -748,7 +748,7 @@ file before and after and how long it held the lock.</p>
 <table>
 <thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it. Once a subscription streams it is counted under <code>--http-max-streams</code> instead, except on a tenant node.</td></tr>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it. Once a subscription streams it is counted under <code>--http-max-streams</code> instead, except on a tenant node or at <code>--http-max-streams 0</code>.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
 <tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request must come within it of its first byte, and a second more for each KiB that came, head and body alike: a client sending 1 KiB a second or more is never cut. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
@@ -783,7 +783,9 @@ subscription holds a thread for as long as it lasts, so subscriptions are
 counted apart, under <code>--http-max-streams</code>, a database's own: once
 a subscription streams it gives its place under <code>--max-connections</code>
 back, and a server holds that many connections and that many streams at
-most -- 64 subscribers leave all 100 connections to ordinary requests. A
+most -- 64 subscribers leave all 100 connections to ordinary requests. At
+<code>--http-max-streams 0</code> (no ceiling) a subscription keeps its place
+under <code>--max-connections</code>, the one ceiling left on its thread. A
 refused subscription (503 <code>too many subscriptions</code>) held only its
 connection. On a tenant node <code>--http-max-streams</code> is each tenant's,
 so a stream keeps its place too: <code>--max-connections</code> is what all of

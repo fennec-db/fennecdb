@@ -38,10 +38,11 @@ line after the connection's work, which a panic skips; so is every count
 taken around a connection or a held request (`waits::Answering`, a
 `waits::Ticket` leaving its group). [A file's server's subscription is
 counted apart](../../../../docs/design/http.md#connections-without-a-thread):
-`serve_connection` moves its `Slot` into `sse::serve`, which drops it once
-`--http-max-streams` gave the stream its own place, never keeping both; a
-tenant node's stream keeps it, `--max-connections` the one bound on every
-tenant's threads.
+`serve_connection` moves its `Slot` into `sse::serve`, which drops it only
+once `--http-max-streams` gave the stream its own place: both held for an
+instant, never neither, a connection always under one ceiling. At
+`--http-max-streams 0`, which bounds nothing, and on a tenant node a
+stream keeps its `Slot`, `--max-connections` the one bound on its thread.
 
 **[A request is read in time, and an answer written in
 time.](../../../../docs/design/http.md#slow-clients)** A served connection's

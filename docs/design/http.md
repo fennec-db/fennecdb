@@ -2061,7 +2061,13 @@ stream ends -- a refusal's return, a panic's unwinding -- never twice, and
 before the socket closes, which `serve_connection` holds still. A
 subscription refused at `--http-max-streams` held its connection alone,
 given back as it ends. A server's threads are `--max-connections` and
-`--http-max-streams` at most. A tenant node's stream keeps its slot, as the
+`--http-max-streams` at most -- where `--http-max-streams` bounds them: at
+0 (unlimited, through the flag or `Config { max_streams: 0 }`) `Hub::reserve`
+refuses none, so a stream keeps its slot (`serve_connection`'s
+`cfg.max_streams > 0` guard), or its threads would be under no ceiling at
+all, where `--max-connections` bounded them before
+(`an_unbounded_stream_stays_under_the_connection_ceiling`). A tenant node's
+stream keeps its slot, as the
 docs said of a node: `--http-max-streams` is each tenant's hub's, so
 handed back the node's threads were the connections and 64 for every
 tenant, which no flag bounds, where `--max-connections` is the bound every

@@ -140,8 +140,8 @@ pub struct Config {
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
     /// a thread. A single database's subscriptions are not among them once
-    /// they stream: `max_streams` counts those apart. A tenant node's are,
-    /// since its `max_streams` is each tenant's.
+    /// they stream: `max_streams` counts those apart, unless it is 0. A
+    /// tenant node's are, since its `max_streams` is each tenant's.
     pub max_connections: usize,
     /// Request body ceiling. Bulk `put` bodies can be large, but leaving it
     /// uncapped hands memory to the client.
@@ -173,10 +173,11 @@ pub struct Config {
     /// So a single database's subscription gives back its connection's
     /// place under `max_connections` as it takes its own here
     /// ([`sse::serve`]): its threads are `max_connections` and this at most.
-    /// A tenant's keeps both -- a node's tenants are many, and
-    /// `max_connections` is the one bound on all of their threads -- each
-    /// tenant's share of them held by its quota of streams
-    /// ([`quota::shared`]).
+    /// At 0 a subscription keeps its place under `max_connections`, the one
+    /// ceiling left to bound its thread. A tenant's keeps both -- a node's
+    /// tenants are many, and `max_connections` is the one bound on all of
+    /// their threads -- each tenant's share of them held by its quota of
+    /// streams ([`quota::shared`]).
     pub max_streams: usize,
     /// Interval of the keep-alive line when nothing happens on a subscription.
     /// Proxies and NAT tables drop silent connections.
@@ -1660,13 +1661,16 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             let _ = out.set_read_timeout(None);
             // A file's server counts its subscriptions apart, under
             // `--http-max-streams` alone: the stream gives the connection's
-            // place back as it takes its own. A tenant's stream keeps it:
+            // place back as it takes its own. Only where that ceiling bounds
+            // it: at 0 (unlimited) the stream keeps its place, or its thread
+            // would be under no ceiling at all, where `--max-connections`
+            // bounded it before. A tenant's stream keeps it too:
             // `--http-max-streams` is each tenant's, so the node's
             // `--max-connections`, which every tenant shares, is the one
             // bound on all of their threads.
             let apart = match backend {
-                Backend::Single { .. } => slot.take(),
-                Backend::Tenants(_) | Backend::Metrics { .. } => None,
+                Backend::Single { .. } if cfg.max_streams > 0 => slot.take(),
+                Backend::Single { .. } | Backend::Tenants(_) | Backend::Metrics { .. } => None,
             };
             sse::serve(&mut out, db, cfg, hub, &req, &who, apart);
             return;

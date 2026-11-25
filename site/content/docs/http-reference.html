@@ -861,7 +861,7 @@ last part (<a href="sync.html#seeds-in-parts">a seed in parts</a>).</p>
   <li><b>Limited separately</b> from ordinary requests:
     <code>--http-max-streams</code>, 64 by default, a database's, a stream
     giving back its place under <code>--max-connections</code> as it begins
-    -- on a tenant node each tenant's own, and each one of
+    unless that ceiling is 0 -- on a tenant node each tenant's own, and each one of
     <code>--max-connections</code> too, which a node's tenants share
     (<a href="sharding-reference.html#quota-bounds">a tenant's share</a>).</li>
   <li><b>In gzip</b> where the client asks for it and is across the
@@ -924,7 +924,9 @@ separately from ordinary requests (<code>--http-max-streams</code>, default
 64, a database's: on a tenant node each tenant's). Sharing one ceiling would
 let 100 subscribers shut the server to plain requests, so a stream gives
 back its place under <code>--max-connections</code> once it has its own: a
-server holds that many connections and that many streams at most. On a
+server holds that many connections and that many streams at most. At
+<code>--http-max-streams 0</code> (no ceiling) a stream keeps its place, so
+that <code>--max-connections</code> still bounds its thread. On a
 tenant node a stream keeps its place as well: the node's
 <code>--max-connections</code> is the bound every tenant shares, the only
 one on all of their threads, of which each tenant's streams take a quarter
