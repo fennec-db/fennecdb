@@ -101,6 +101,11 @@ enum Built {
     Sparse(SparseIndex),
     #[cfg_attr(not(all(feature = "sorted", feature = "geo")), allow(dead_code))]
     Geo(GeoIndex),
+    /// A graph whose vectors pass the bound as the graph places them
+    /// (`VectorIndex::insert_held`), refused once the build is done: the
+    /// copy holds every vector, and only placing them counts their nodes.
+    #[cfg_attr(not(target_pointer_width = "64"), allow(dead_code))]
+    Refused(Error),
 }
 
 /// The index built from the copy, and the copy: taking a write back out of
@@ -390,20 +395,6 @@ impl Database {
         for id in c.store.iter_ids() {
             values.push((id, c.store.read_field(id, pos)?));
         }
-        // More vectors than a graph has nodes for, refused as the build
-        // under the lock refuses them (`build_graph`), and counted so.
-        #[cfg(target_pointer_width = "64")]
-        if matches!(kind, IndexKind::Vector(_)) {
-            let beside = crate::vector::nodes_beside();
-            if values.len() + beside > crate::vector::MAX_NODES {
-                let held = values
-                    .iter()
-                    .filter(|(_, v)| matches!(v, Some(Value::Vector(_))));
-                if held.count() + beside > crate::vector::MAX_NODES {
-                    return Err(crate::vector::graph_full(field));
-                }
-            }
-        }
         Ok(Ok(IndexCopy {
             token: self.watch(c.id),
             cid: c.id,
@@ -461,6 +452,7 @@ impl Database {
         // The writes made during the build, applied as the write path would
         // have: out with the value the build saw, in with the one there now.
         match index {
+            Built::Refused(e) => return Err(e),
             Built::Vector(mut ix) => {
                 // Each write may place a node: past the bound, refused here,
                 // where nothing has changed yet -- placed, the last would
@@ -724,13 +716,27 @@ impl Database {
                     b.copy.collection
                 )));
             }
-            let Built::Vector(mut ix) = b.index else {
-                unreachable!("only graphs are rebuilt beside a mapped compact")
+            let mut ix = match b.index {
+                Built::Vector(ix) => ix,
+                // Its live vectors past the bound, which the graph they are
+                // in held: the graph stays, as one a document it cannot
+                // read leaves.
+                Built::Refused(_) => continue,
+                _ => unreachable!("only graphs are rebuilt beside a mapped compact"),
             };
             let c = self.collections.get_mut(&b.copy.collection).unwrap();
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
+            // Each write made meanwhile places a node at most, one its own
+            // write may not have -- a row whose other field it wrote is
+            // taken out and put in again: past the bound, the graph stays
+            // as it stood, as where a document does not read, rather than
+            // meet `alloc_links`' assert under the write lock.
+            #[cfg(target_pointer_width = "64")]
+            if ix.nodes() + ids.len() > crate::vector::MAX_NODES {
+                continue;
+            }
             let caught: Result<()> = ids.into_iter().try_for_each(|id| {
                 ix.remove(id);
                 if let Some(Value::Vector(v)) = c.store.read_field(id, b.copy.pos)? {
@@ -1156,8 +1162,10 @@ impl IndexCopy {
                     })
                     .collect();
                 ix.reserve(items.len());
-                ix.insert_batch(&items);
-                Built::Vector(ix)
+                match ix.insert_held(&items, false, &self.field) {
+                    Ok(()) => Built::Vector(ix),
+                    Err(e) => Built::Refused(e),
+                }
             }
             IndexKind::Hash { .. } => {
                 let mut ix = HashIndex::folding(self.order.fold);
@@ -1421,12 +1429,15 @@ mod tests {
 
     /// limits.html's "vector index node count" where `create index` makes
     /// a graph: under the write lock (`build_graph`), beside the database as
-    /// its copy is taken (`begin_index`), and as it catches up with the
+    /// it is built (`IndexCopy::build`), and as it catches up with the
     /// writes made during the build (`finish_index`), where a placed node
     /// past the bound met `alloc_links`' assert under the write lock. Each
     /// refuses a graph past `MAX_NODES` naming the field, the collection
-    /// left unindexed, and takes one at it. Counted past the graph's own
-    /// nodes ([`crate::vector::NODES_BESIDE`]): no test makes 2^32 vectors.
+    /// left unindexed, and takes one at it -- its nodes counted as the
+    /// graph places them, so four rows sharing three vectors are taken
+    /// where three nodes fit, which counted by rows were refused. Counted
+    /// past the graph's own nodes ([`crate::vector::NODES_BESIDE`]): no
+    /// test makes 2^32 vectors.
     #[test]
     fn create_index_refuses_a_graph_past_its_nodes() {
         use crate::vector::{MAX_NODES, NODES_BESIDE};
@@ -1479,19 +1490,31 @@ mod tests {
             assert!(g.vectors.is_empty(), "{tag}: a graph");
             assert!(matches!(g.schema.fields[1].index, IndexKind::None), "{tag}");
         };
-        // Three vectors: one node past the bound, then at it.
-        for online in [false, true] {
-            let tag = if online { "beside" } else { "under the lock" };
+        // Three vectors: one node past the bound, then at it -- and so with
+        // a fourth row holding the first's vector, which places no node.
+        for (online, shared) in [(false, false), (true, false), (false, true), (true, true)] {
+            let tag = format!(
+                "{}{}",
+                if online { "beside" } else { "under the lock" },
+                if shared { ", shared" } else { "" }
+            );
             let run = |db: &RwLock<Database>| match online {
                 true => Database::maintain(db, &index).expect("maintained"),
                 false => db.write().unwrap().execute(&index),
+            };
+            let made = || {
+                let db = made();
+                if shared {
+                    put(&mut db.write().unwrap(), 4, [1.0, 1.0]);
+                }
+                db
             };
             let db = made();
             let r = {
                 let _b = Beside::counted(MAX_NODES - 2);
                 run(&db)
             };
-            refused(r, &db, tag);
+            refused(r, &db, &tag);
             let _b = Beside::counted(MAX_NODES - 3);
             run(&db).expect("at the bound");
             let nodes = db.read().unwrap().collections["g"]
@@ -1518,6 +1541,52 @@ mod tests {
             .get("v")
             .map(|ix| ix.len());
         assert_eq!(held, Some(4));
+    }
+
+    /// A compact beside the database at a graph's bound: the graph built
+    /// again without its tombstones catches up with the writes made during
+    /// the build, each taken out and put in again -- a node each, though a
+    /// write of another field placed none in the graph it wrote. Past the
+    /// bound the graph stays as it stood, tombstone and all, as where a
+    /// document does not read, where the last met `alloc_links`' assert
+    /// under the write lock.
+    #[test]
+    fn a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph() {
+        use crate::vector::{MAX_NODES, NODES_BESIDE};
+        let mut db = Database::new();
+        let schema = Schema::new(
+            "g",
+            vec![
+                Field::new("meta", DataType::Json),
+                Field::new("v", DataType::Vector(2, VecPrec::F32))
+                    .indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
+            ],
+        )
+        .expect("schema");
+        db.execute(&Statement::CreateCollection {
+            schema,
+            if_not_exists: false,
+        })
+        .expect("create");
+        put(&mut db, 1, [1.0, 0.0]);
+        put(&mut db, 2, [0.0, 1.0]);
+        put(&mut db, 1, [1.0, 0.2]);
+        let graph = |db: &Database| {
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            (ix.len(), ix.dead(), ix.nodes())
+        };
+        assert_eq!(graph(&db), (2, 1, 3));
+        let lock = RwLock::new(db);
+        NODES_BESIDE.with(|b| b.set(MAX_NODES - 3));
+        let r = Database::maintain_with(&lock, &Statement::Compact(None), &mut || {
+            // Each row's own vector again: no node in the graph written.
+            put(&mut lock.write().unwrap(), 1, [1.0, 0.2]);
+            put(&mut lock.write().unwrap(), 2, [0.0, 1.0]);
+        });
+        let stood = graph(&lock.read().unwrap());
+        NODES_BESIDE.with(|b| b.set(0));
+        r.expect("a maintenance").expect("compact");
+        assert_eq!(stood, (2, 1, MAX_NODES), "the graph as it stood");
     }
 
     /// A compact builds a graph holding tombstones again from every

@@ -4290,11 +4290,12 @@ impl Collection {
     /// tell (#501 left a chunk holding no word, which a removal reading
     /// them panicked on again -- and a second panic aborts the process).
     /// A write that ended pays nothing for this: the panic's put-back
-    /// alone runs it, once, for the last write of its block.
+    /// alone runs it, once, for the last write of its block. `false` where
+    /// a vector found no node ([`Self::put_back_doc`]).
     #[cfg(panic = "unwind")]
     #[cold]
     #[inline(never)]
-    fn put_back_torn(&mut self, now: Option<&Document>, before: Option<&Document>) {
+    fn put_back_torn(&mut self, now: Option<&Document>, before: Option<&Document>) -> bool {
         for ix in self.texts.values_mut() {
             if let Some(ix) = ix.get_mut() {
                 ix.forget_words();
@@ -4303,39 +4304,85 @@ impl Collection {
         if let Some(now) = now {
             self.unindex_doc(now, None);
         }
-        if let Some(before) = before {
-            self.unindex_doc(before, None);
-            #[cfg(target_pointer_width = "64")]
-            if self.crowded(0) {
-                self.make_room();
-            }
-            self.index_doc(before, None);
-        }
+        let Some(before) = before else {
+            return true;
+        };
+        self.unindex_doc(before, None);
+        self.put_back_doc(before, None)
     }
 
-    /// Each graph with no node left made again from the rows, without its
-    /// tombstones ([`build_graph`]): what a put-back asks before it puts a
-    /// row's vector back. That vector's node is a tombstone the write it
-    /// puts back left, which no vector placed finds again, so it places a
-    /// node, past the bound where the write took the last. The rows are
-    /// those of a state the writes put back passed through, whose live
-    /// vectors had their nodes, and the graph made holds the row's own:
-    /// put back, it places none there. A row that does not read leaves the
-    /// graph as it stands, as a compact leaves one. At the bound alone.
+    /// `doc`, the row a write put back holds again, into the indexes, `old`
+    /// the version it replaces, as [`Self::index_doc`] puts it -- its
+    /// vectors each given the node its write took from it, a tombstone
+    /// the graph holds ([`VectorIndex::put_back`]): placed again, a vector
+    /// took a node more than the write did, past the bound where the write
+    /// took the last. `false` where a vector found no node, which only a
+    /// graph made again in the middle of the writes put back may leave (a
+    /// replica's room): [`Self::room_for`].
+    #[cfg(target_pointer_width = "64")]
+    #[inline(always)]
+    fn put_back_doc(&mut self, doc: &Document, old: Option<&Document>) -> bool {
+        let mut short: Option<Vec<String>> = None;
+        for (name, ix) in self.vectors.iter_mut() {
+            if let Some(Value::Vector(v)) = doc.get(name) {
+                #[cfg(test)]
+                panic_in('+', name);
+                if !ix.put_back(doc.id, v) {
+                    short.get_or_insert_with(Vec::new).push(name.clone());
+                }
+            }
+        }
+        self.index_scalar(doc, old);
+        short.is_none_or(|fields| self.room_for(doc, &fields))
+    }
+
+    /// `doc`'s vector in each of `fields` put back where its graph has no
+    /// node left and holds no tombstone of it -- a graph made again from
+    /// the rows in the middle of the writes put back, without the
+    /// tombstones they took (a replica's room, `Database::room_applied`):
+    /// the graph made again from the rows as the put-back has them, a
+    /// state the writes passed through, whose live vectors had their nodes,
+    /// which holds `doc`'s vector, so that it places none. `false` where a
+    /// row does not read or the bound refuses the rows' vectors, the graph
+    /// left short of the vector for the database to be failed: never a node
+    /// past the bound. A graph's build at the bound, out of line.
     #[cfg(target_pointer_width = "64")]
     #[cold]
     #[inline(never)]
-    fn make_room(&mut self) {
-        for pos in 0..self.schema.fields.len() {
-            let IndexKind::Vector(spec) = self.schema.fields[pos].index else {
-                continue;
+    fn room_for(&mut self, doc: &Document, fields: &[String]) -> bool {
+        let mut whole = true;
+        for field in fields {
+            let made = match self.schema.field_pos(field) {
+                Some(pos) => match self.schema.fields[pos].index {
+                    IndexKind::Vector(spec) => build_graph(self, pos, spec).is_ok(),
+                    _ => false,
+                },
+                None => false,
             };
-            let field = &self.schema.fields[pos].name;
-            let full = (self.vectors.get(field))
-                .is_some_and(|ix| !crate::vector::takes_node(ix.nodes(), 0));
-            if full {
-                let _ = build_graph(self, pos, spec);
-            }
+            whole &= made
+                && match (self.vectors.get_mut(field), doc.get(field)) {
+                    (Some(ix), Some(Value::Vector(v))) => ix.put_back(doc.id, v),
+                    _ => false,
+                };
+        }
+        whole
+    }
+
+    /// [`Self::index_doc`] where no graph meets the bound: a 32-bit build's
+    /// memory stops far short of it. A torn write's put-back alone asks it.
+    #[cfg(all(panic = "unwind", not(target_pointer_width = "64")))]
+    #[inline(always)]
+    fn put_back_doc(&mut self, doc: &Document, old: Option<&Document>) -> bool {
+        self.index_doc(doc, old);
+        true
+    }
+
+    /// Lets go of the tombstones a put-back looks among in each graph
+    /// ([`VectorIndex::forget_retired`]): a block put back whole.
+    #[cfg(target_pointer_width = "64")]
+    fn forget_retired(&mut self) {
+        for ix in self.vectors.values_mut() {
+            ix.forget_retired();
         }
     }
 
@@ -8254,6 +8301,20 @@ impl Database {
                         gone.push(id);
                     }
                 }
+                // Each document written after the record places a node at
+                // most, and may place one its writes did not -- they found a
+                // copy the tail's order took away. Where that may pass the
+                // bound the graph is made from the rows instead, counted as
+                // the graph places them.
+                #[cfg(target_pointer_width = "64")]
+                if (c.vectors.get(field))
+                    .is_some_and(|ix| ix.nodes() + items.len() > crate::vector::MAX_NODES)
+                {
+                    if let IndexKind::Vector(spec) = c.schema.fields[pos].index {
+                        build_graph(c, pos, spec).map_err(as_damage)?;
+                        continue;
+                    }
+                }
                 let ix = c
                     .vectors
                     .get_mut(field)
@@ -8408,21 +8469,28 @@ impl Database {
                 ));
             }
             for (p, ix, rows) in vector_ix.iter_mut() {
-                // More vectors in a field than a graph has nodes for, which
-                // a release before the bound wrapped: the file is refused,
-                // naming the field, where placing them would pass the bound
-                // `alloc_links` asserts. Counted as `build_graph` counts.
+                // More vectors in a field than a graph has nodes for, counted
+                // as the graph places them, which a release before the bound
+                // wrapped: the file is refused as damage, naming the field,
+                // where placing them would pass the bound `alloc_links`
+                // asserts. Rows sharing a vector share a node, so a file this
+                // build wrote, its vectors in a graph it held to the bound,
+                // opens: counted by rows, one of more rows than the bound
+                // sharing vectors was refused.
                 #[cfg(target_pointer_width = "64")]
-                if rows.len() + crate::vector::nodes_beside() > crate::vector::MAX_NODES {
-                    return Err(crate::vector::graph_full(&schema.fields[*p].name));
-                }
+                ix.insert_held(rows, later, &schema.fields[*p].name)
+                    .map_err(as_damage)?;
+                // The browser module's: no field's name looked up for a
+                // refusal it never makes, 44 bytes of it.
                 #[cfg(not(target_pointer_width = "64"))]
-                let _ = p;
-                match later {
-                    true => {
-                        ix.defer_batch(rows);
+                {
+                    let _ = p;
+                    match later {
+                        true => {
+                            ix.defer_batch(rows);
+                        }
+                        false => ix.insert_batch(rows),
                     }
-                    false => ix.insert_batch(rows),
                 }
             }
         }
@@ -9329,7 +9397,9 @@ impl Database {
                 continue;
             }
             if c.vectors.get(&field).is_some_and(|ix| ix.dead() > 0) {
-                build_graph(c, pos, spec)?;
+                // Its live vectors past the bound, which a primary's graph
+                // held: damage, as below.
+                build_graph(c, pos, spec).map_err(as_damage)?;
                 if room(c) {
                     continue;
                 }
@@ -9835,6 +9905,9 @@ impl Database {
         // runs of one collection.
         let mut of: Option<(u32, String)> = None;
         let mut rebound = false;
+        // Whether every vector put back found its node.
+        #[cfg(target_pointer_width = "64")]
+        let mut whole = true;
         while let Some(u) = undo.pop() {
             // Only the last write can have been stopped: every write before
             // it in the block ended.
@@ -9850,7 +9923,9 @@ impl Database {
                 // found: searching the ids so far for each, those writes took
                 // 402 ms under the write lock, and sorted, the sort was 4.6 KB
                 // of the browser module. An id written again in the block is
-                // put back again, its vector re-linked each time.
+                // put back again, natively given the node each write took
+                // from it (`put_back_doc`), in the browser its vector placed
+                // and linked again each time.
                 Undo::Doc(cid, id, loc) => {
                     if of.as_ref().is_none_or(|(c, _)| *c != cid) {
                         of = self.named(cid).map(|n| (cid, n));
@@ -9862,7 +9937,12 @@ impl Database {
                     let now = c.store.read(&c.schema, id).ok().flatten();
                     c.store.point(id, loc);
                     let before = c.store.read(&c.schema, id).ok().flatten();
-                    #[cfg(panic = "unwind")]
+                    #[cfg(all(panic = "unwind", target_pointer_width = "64"))]
+                    if last {
+                        whole &= c.put_back_torn(now.as_ref(), before.as_ref());
+                        continue;
+                    }
+                    #[cfg(all(panic = "unwind", not(target_pointer_width = "64")))]
                     if last {
                         c.put_back_torn(now.as_ref(), before.as_ref());
                         continue;
@@ -9871,12 +9951,11 @@ impl Database {
                         c.unindex_doc(now, before.as_ref());
                     }
                     if let Some(before) = &before {
-                        // Its vector put back may place a node: at the
-                        // bound, room is made first.
                         #[cfg(target_pointer_width = "64")]
-                        if c.crowded(0) {
-                            c.make_room();
+                        {
+                            whole &= c.put_back_doc(before, now.as_ref());
                         }
+                        #[cfg(not(target_pointer_width = "64"))]
                         c.index_doc(before, now.as_ref());
                     }
                 }
@@ -10031,8 +10110,25 @@ impl Database {
         }
         for &(cid, mark) in marks {
             if let Some(name) = self.named(cid) {
-                self.collections.get_mut(&name).unwrap().store.rewind(mark);
+                let c = self.collections.get_mut(&name).unwrap();
+                c.store.rewind(mark);
+                #[cfg(target_pointer_width = "64")]
+                c.forget_retired();
             }
+        }
+        // A vector no node was found for, left out of its graph: a graph
+        // made again in the middle of the writes put back (a replica's
+        // room, `room_applied`) that could not be made again from the rows
+        // (`Collection::room_for`). Stopped as a storage error stops writes,
+        // so that what the graph holds is the rows' again once the file is
+        // opened; the rest is put back, never left half way.
+        #[cfg(target_pointer_width = "64")]
+        if !whole {
+            self.fail(&Error::Io(
+                "a write put back found no node left for a vector its graph held: \
+                 open the file again"
+                    .into(),
+            ));
         }
     }
 
@@ -15916,6 +16012,17 @@ struct VectorBatch {
     docs: Vec<Document>,
 }
 
+/// A limit's refusal met in what a file or a primary holds, which no write
+/// of this build makes: damage, `Error::Corrupt`, in the limit's words.
+#[cfg(target_pointer_width = "64")]
+#[cold]
+fn as_damage(e: Error) -> Error {
+    match e {
+        Error::Query(m) => Error::Corrupt(m),
+        e => e,
+    }
+}
+
 fn missing(cid: u32) -> Error {
     Error::Corrupt(format!("a write to collection {cid}, which is not here"))
 }
@@ -15939,14 +16046,12 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
             items.push((*id, v));
         }
     }
-    // A collection holding more vectors than a graph has nodes for: what
-    // `create index` refuses. Counted as a graph's nodes are, past its own
-    // in a test ([`crate::vector::NODES_BESIDE`]).
-    #[cfg(target_pointer_width = "64")]
-    if items.len() + crate::vector::nodes_beside() > crate::vector::MAX_NODES {
-        return Err(crate::vector::graph_full(field));
-    }
-    ix.insert_batch(&items);
+    // A collection holding more vectors than a graph has nodes for, counted
+    // as the graph places them -- rows sharing a vector share a node: what
+    // `create index` refuses, the graph it had kept. Counted by rows, a
+    // collection of more rows than the bound sharing vectors was refused
+    // where its nodes fit.
+    ix.insert_held(&items, false, field)?;
     c.vectors.insert(field.clone(), ix);
     Ok(())
 }

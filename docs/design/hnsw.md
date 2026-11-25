@@ -137,7 +137,11 @@ before its record is written, so that a block put back after all is put
 back as any other. A search in the block measures the waiting ones
 exactly, as it does a server's backlog, and a rollback drops those its
 undo made tombstones (`forget_waiting`) -- the newest of the waiting, since
-nothing else leaves one while a block is open. A lone statement links as
+nothing else leaves one while a block is open. Natively a rollback gives
+each row back the node its write took from it, a tombstone the graph still
+holds (`VectorIndex::put_back`), rather than place its vector again: a
+graph at its bound has no node left for one more ([crates.md,
+limits](crates.md#limits)). A lone statement links as
 it did, and so does the browser module's `run` of several: its one thread
 links a vector as it is written (`DEFERS`), the waiting being 843 bytes
 brotli of it for nothing. Linked a row at a time, as a `/batch` of single puts would have

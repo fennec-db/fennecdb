@@ -1890,23 +1890,16 @@ mod torn {
                 .expect("the last node, beside two placing none");
             assert_eq!(nodes(&db), crate::vector::MAX_NODES);
         }
-        // Put back at the bound: a `set` of two rows' vectors, refused at
-        // the second once the first took the last node, puts the first
-        // row's vector back, whose node it left a tombstone -- placed again,
-        // a node past the bound. Room is made first, the graph made again
-        // from the rows; so for a block rolled back.
-        let red = |e: Expr| Statement::Update {
-            collection: "t".into(),
-            set: vec![("v".into(), e)],
-            filter: Some(eq("tag", text("red"))),
-            require: None,
-            pick: None,
-        };
-        let nine = Expr::Lit(Value::Vector(vec![9.0, 9.0, 9.0, 9.0]));
+        // Put back at the bound: a `set` of two rows' vectors, each its
+        // own, refused at the second once the first took the last node,
+        // puts the first row's vector back, whose node it left a tombstone
+        // -- placed again, a node past the bound. The node is made live
+        // again (`a_put_back_at_a_graphs_bound_revives_the_node_its_write_took`);
+        // so for a block rolled back.
         let before = state(&db);
         let e = {
             let _bound = Bound::nodes(crate::vector::MAX_NODES - 1 - nodes(&db));
-            db.execute(&red(nine.clone())).expect_err("the second row")
+            db.execute(&red_own()).expect_err("the second row")
         };
         assert!(refused(&e), "{e:?}");
         assert!(db.failure().is_none());
@@ -1935,6 +1928,287 @@ mod torn {
         db.execute(&put(n7, true)).expect("no vector");
         db.execute(&write(Write::Del)).expect("a delete");
         drop(bound);
+    }
+
+    /// `set v = ...` over the red rows, 2 and 4, each given a vector of its
+    /// own: the second refused at the bound for a node of its own, and not
+    /// for a copy of the first's the statement's count does not look for.
+    fn red_own() -> Statement {
+        let v = |x: f32| Expr::Lit(Value::Vector(vec![x, 9.0, 9.0, 9.0]));
+        Statement::Update {
+            collection: "t".into(),
+            set: vec![(
+                "v".into(),
+                Expr::Call("case".into(), vec![eq("id", Value::Int(2)), v(9.0), v(8.0)]),
+            )],
+            filter: Some(eq("tag", text("red"))),
+            require: None,
+            pick: None,
+        }
+    }
+
+    /// The nodes of `t`'s graph and its tombstones, its nodes counted past
+    /// its own where this thread counts them so.
+    fn graph_of(db: &Database) -> (usize, usize) {
+        let ix = db.collections["t"].vectors.get("v").expect("v");
+        (ix.nodes(), ix.dead())
+    }
+
+    /// `t`'s rows 201 and 202, each holding row 1's vector: two rows and no
+    /// node, so `t` holds more rows with a vector than its graph nodes.
+    fn put_shared(db: &mut Database) {
+        for id in [201, 202] {
+            let mut doc = with_id(id, row(id));
+            for (f, e) in doc.iter_mut() {
+                if f == "v" {
+                    *e = Expr::Lit(Value::Vector(vec![1.0, 1.0, 0.5, 0.0]));
+                }
+            }
+            db.execute(&put(doc, false)).expect("row 1's vector again");
+        }
+    }
+
+    /// A row of `t` that does not read, put in its store as an open would
+    /// hold it: its first field nested past what a value may. Every index
+    /// is built from the rows first, so that only a build after it meets
+    /// the row.
+    fn put_unreadable(db: &mut Database, id: DocId) {
+        let _ = state(db);
+        let mut deep = Vec::new();
+        for _ in 0..100 {
+            deep.extend_from_slice(&[crate::codec::TAG_LIST, 1]);
+        }
+        deep.push(crate::codec::TAG_NULL);
+        let c = db.collections.get_mut("t").expect("t");
+        c.store.append(OP_PUT, id, &deep);
+        let v = c.schema.field_pos("v").expect("v");
+        assert!(c.store.read_field(id, v).is_err(), "a row that reads");
+    }
+
+    /// A block put back at a graph's bound gives each row back the node its
+    /// write took from it, a tombstone the graph still holds, and places
+    /// none: a block rolled back after taking the last node, a `set` of two
+    /// rows refused at its second, and a write a panic stopped once it took
+    /// the last node (`put_back_torn`) -- each its state as it was, its
+    /// graph holding the one node the write placed, a tombstone now, and
+    /// the database not failed. Over rows sharing a vector, more rows than
+    /// nodes, and beside a row that does not read: a graph made again from
+    /// the rows -- the room the round before made -- counted the rows past
+    /// the bound or failed on the row, and the put-back met `alloc_links`'
+    /// assert with the block half put back, or a second panic aborted.
+    #[test]
+    fn a_put_back_at_a_graphs_bound_revives_the_node_its_write_took() {
+        let scratch = Scratch::new("fennecdb-revive");
+        let most = crate::vector::MAX_NODES;
+        let says = "field `v`: a vector index holds at most 4294967295 nodes";
+        for (case, shared) in [
+            ("block", true),
+            ("set", true),
+            ("torn", true),
+            ("unread", false),
+        ] {
+            let mut db = made(&scratch.0.join(format!("{case}.fennec")));
+            match shared {
+                true => put_shared(&mut db),
+                false => put_unreadable(&mut db, 203),
+            }
+            let before = state(&db);
+            let (nodes, dead) = graph_of(&db);
+            assert_eq!(nodes, 4, "{case}: rows 1 to 4's nodes");
+            {
+                let _bound = Bound::nodes(most - 1 - nodes);
+                match case {
+                    "block" | "unread" => {
+                        db.begin().expect("begin");
+                        db.execute(&write(Write::Over)).expect("the last node");
+                        assert_eq!(graph_of(&db).0, most, "{case}");
+                        db.rollback();
+                    }
+                    "set" => {
+                        let e = db.execute(&red_own()).expect_err("the second row");
+                        assert!(
+                            matches!(&e, Error::Query(m) if m.starts_with(says)),
+                            "{e:?}"
+                        );
+                    }
+                    _ => {
+                        let r = catch_unwind(AssertUnwindSafe(|| {
+                            PANIC_AT.with(|p| p.set(Some("graph-link")));
+                            db.execute(&write(Write::Over)).map(drop)
+                        }));
+                        assert!(r.is_err(), "the panic");
+                        assert!(PANIC_AT.with(|p| p.take()).is_none(), "the test's");
+                    }
+                }
+            }
+            assert!(!db.in_block(), "{case}: a block left open");
+            assert_eq!(db.failure(), None, "{case}");
+            assert_eq!(state(&db), before, "{case}: put back");
+            unfed(&db, before.seq, case);
+            assert_eq!(
+                graph_of(&db),
+                (nodes + 1, dead + 1),
+                "{case}: one node placed"
+            );
+        }
+    }
+
+    /// Where the tombstone a write took is gone -- a replica's graph made
+    /// again from the rows in the middle of a record, to land a vector its
+    /// primary took, before the record was refused -- and the graph has no
+    /// node left, the put-back makes the graph again from the rows as it
+    /// has them (`Collection::room_for`), which hold the row's vector:
+    /// the record put back whole. Where that cannot be made either -- a
+    /// row that does not read -- the vector is left out, the rest put
+    /// back, and the database failed, as a storage error fails it: never a
+    /// node past the bound.
+    #[test]
+    fn a_put_back_finding_no_node_makes_room_from_the_rows_or_fails() {
+        let scratch = Scratch::new("fennecdb-no-node");
+        let most = crate::vector::MAX_NODES;
+        // The primary's block: row 2 written over, a row of a new vector,
+        // and a row of `u`, whose frame puts the second into the graph.
+        let (records, after) = landed(|p| {
+            p.begin()?;
+            p.execute(&write(Write::Over))?;
+            p.execute(&write(Write::Insert))?;
+            p.execute(&put_u(3))?;
+            p.commit()
+        });
+        assert_eq!(each_record(&records).len(), 1, "one block");
+        let block = record_at(&records, &mut 0).expect("a record");
+        assert_eq!(block.kind, REC_BLOCK);
+        let (u4, _) = landed(|p| p.execute(&put_u(4)).map(drop));
+        let u4 = record_at(&u4, &mut 0).expect("a record");
+        // After them, a write to a collection the replica does not hold.
+        let mut inner = block.body.to_vec();
+        frame_into(&mut inner, REC_DATA, 99, u4.body);
+        let refused = framed(REC_BLOCK, 0, &inner);
+        let mut db = replica(&scratch.0.join("replica.fennec"));
+        let before = state(&db);
+        let (nodes, dead) = graph_of(&db);
+        assert_eq!((nodes, dead), (4, 0));
+        let r = {
+            // One node left: the write over takes it, and the new row's
+            // vector finds the graph made again without the tombstone.
+            let _bound = Bound::nodes(most - 1 - nodes);
+            db.apply(&refused)
+        };
+        assert!(matches!(r, Err(Error::Corrupt(_))), "{r:?}");
+        assert_eq!(db.failure(), None);
+        assert_eq!(state(&db), before, "the replica: put back");
+        unfed(&db, before.seq, "the replica");
+        assert_eq!(graph_of(&db), (nodes, 0), "made again from the rows");
+        db.apply(&records).expect("the block alone");
+        assert_eq!(state(&db), after, "the replica, then taken");
+        // A primary's block, its tombstone let go of as a graph made again
+        // in the middle of it leaves it: made again from the rows, and
+        // where a row does not read, the database failed.
+        for unread in [false, true] {
+            let path = scratch.0.join(format!("unread{unread}.fennec"));
+            let mut db = made(&path);
+            if unread {
+                put_unreadable(&mut db, 203);
+            }
+            let before = state(&db);
+            let (nodes, _) = graph_of(&db);
+            {
+                let _bound = Bound::nodes(most - 1 - nodes);
+                db.begin().expect("begin");
+                db.execute(&write(Write::Over)).expect("the last node");
+                let c = db.collections.get_mut("t").expect("t");
+                c.vectors.get_mut("v").expect("v").forget_retired();
+                db.rollback();
+            }
+            assert!(!db.in_block());
+            if !unread {
+                assert_eq!(db.failure(), None);
+                assert_eq!(state(&db), before, "made again from the rows");
+                continue;
+            }
+            let failed = db.failure().expect("failed").to_string();
+            assert!(failed.contains("found no node left"), "{failed}");
+            assert_eq!(
+                rows_of(&db.collections["t"]),
+                before.rows,
+                "the rows put back"
+            );
+            let r = db.execute(&write(Write::Insert));
+            assert!(matches!(r, Err(Error::Io(_))), "{r:?}");
+            drop(db);
+            let db = crate::fs::open(&path).expect("open again");
+            assert_eq!(db.failure(), None);
+            let ix = db.collections["t"].vectors.get("v").expect("v");
+            assert_eq!(ix.len(), 4, "the rows' vectors, from the file");
+        }
+    }
+
+    /// limits.html's "vector index node count" where an open makes a graph
+    /// from the rows: counted as the graph places them, rows sharing a
+    /// vector one node, so a file of more rows than the bound whose vectors
+    /// fit opens -- an open refusing a file it wrote is the worst a bound
+    /// can do -- and one whose vectors pass it is refused as damage, naming
+    /// the field, where placing them met `alloc_links`' assert. And a graph
+    /// restored from its record that the writes after it would take past
+    /// the bound, which they may where their order has a row take a node
+    /// another row's vector held in the record: made from the rows
+    /// instead, and opened.
+    #[test]
+    fn an_open_counts_a_graphs_nodes_as_the_graph_places_them() {
+        let scratch = Scratch::new("fennecdb-open-nodes");
+        let most = crate::vector::MAX_NODES;
+        let path = scratch.0.join("shared.fennec");
+        let mut db = made(&path);
+        put_shared(&mut db);
+        let kept = state(&db);
+        drop(db);
+        {
+            // Six rows, four nodes.
+            let _bound = Bound::nodes(most - 4);
+            let db = crate::fs::open(&path).expect("at the bound");
+            assert_eq!(graph_of(&db), (most, 0));
+        }
+        let refused = {
+            let _bound = Bound::nodes(most - 3);
+            crate::fs::open(&path)
+                .map(drop)
+                .expect_err("past the bound")
+        };
+        let says = "field `v`: a vector index holds at most 4294967295 nodes";
+        assert!(
+            matches!(&refused, Error::Corrupt(m) if m.contains(says)),
+            "{refused:?}"
+        );
+        assert_eq!(state(&crate::fs::open(&path).expect("open")), kept);
+        // A graph record, then row 203 written with row 1's vector -- the
+        // node's copy -- and row 1 deleted, which leaves the node to 203:
+        // no node placed. Taken after the record in id order, row 1's
+        // delete makes the node a tombstone and 203 places one.
+        let path = scratch.0.join("restored.fennec");
+        let mut db = made(&path);
+        db.checkpoint().expect("a graph record");
+        let mut doc = with_id(203, row(203));
+        for (f, e) in doc.iter_mut() {
+            if f == "v" {
+                *e = Expr::Lit(Value::Vector(vec![1.0, 1.0, 0.5, 0.0]));
+            }
+        }
+        db.execute(&put(doc, false)).expect("row 1's vector again");
+        db.execute(&Statement::Delete {
+            collection: "t".into(),
+            filter: Some(eq("id", Value::Int(1))),
+            require: None,
+            pick: None,
+        })
+        .expect("row 1 deleted");
+        assert_eq!(graph_of(&db), (4, 0), "no node placed");
+        let kept = state(&db);
+        drop(db);
+        let _bound = Bound::nodes(most - 4);
+        let db = crate::fs::open(&path).expect("at the bound");
+        assert_eq!(graph_of(&db), (most, 0), "made from the rows");
+        drop(_bound);
+        assert_eq!(state(&db), kept);
     }
 
     /// A replica lands every write its primary took, whatever its own graph

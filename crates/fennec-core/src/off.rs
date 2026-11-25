@@ -117,6 +117,22 @@ impl VectorIndex {
     pub fn remove(&mut self, doc: DocId) {
         match self.never {}
     }
+    #[cfg(target_pointer_width = "64")]
+    pub fn put_back(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        match self.never {}
+    }
+    #[cfg(target_pointer_width = "64")]
+    pub fn forget_retired(&mut self) {
+        match self.never {}
+    }
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+    ) -> crate::error::Result<()> {
+        match self.never {}
+    }
     #[cfg(test)]
     pub(crate) fn dump(&self, ids: impl Iterator<Item = DocId>) -> String {
         match self.never {}

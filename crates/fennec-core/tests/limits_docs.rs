@@ -403,6 +403,14 @@ fn rows(problems: &mut Vec<String>) -> Vec<Row> {
                     UNWINDING,
                     "a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back",
                 ),
+                (
+                    UNWINDING,
+                    "a_put_back_at_a_graphs_bound_revives_the_node_its_write_took",
+                ),
+                (
+                    UNWINDING,
+                    "an_open_counts_a_graphs_nodes_as_the_graph_places_them",
+                ),
             ]),
         )
         .note(format!("a vector index holds at most {} nodes", vector::MAX_NODES)),

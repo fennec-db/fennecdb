@@ -3170,6 +3170,16 @@ pub struct VectorIndex {
     /// The vector being placed, as the arena would store it: kept from one
     /// insert to the next.
     stored_buf: Vec<u8>,
+    /// The nodes made tombstones, in turn, since the graph was made or a
+    /// block was last put back ([`Self::forget_retired`]): where a
+    /// put-back finds the node its write took from the row
+    /// ([`Self::put_back`]), which no vector placed finds. A node is made a
+    /// tombstone once until a put-back makes it live, so it holds no more
+    /// than [`Self::dead`] nodes, 4 bytes a tombstone beside its 150 or
+    /// more. Natively alone: the browser module's graph never meets the
+    /// bound a put-back keeps to, and places a node as a write does.
+    #[cfg(target_pointer_width = "64")]
+    retired: Vec<u32>,
 }
 
 /// The nodes by their vector as the arena stores it, for a vector written
@@ -3586,6 +3596,8 @@ impl VectorIndex {
             aliases: Vec::new(),
             same: Same::default(),
             stored_buf: Vec::new(),
+            #[cfg(target_pointer_width = "64")]
+            retired: Vec::new(),
         }
     }
 
@@ -3730,6 +3742,18 @@ impl VectorIndex {
             + self.pending.capacity() * 4
             + self.aliases.capacity() * size_of::<(u32, DocId)>()
             + self.same.bytes()
+            + self.retired_bytes()
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    fn retired_bytes(&self) -> usize {
+        self.retired.capacity() * 4
+    }
+
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    fn retired_bytes(&self) -> usize {
+        0
     }
 
     /// Nodes that no link reaches yet ([`Self::defer_batch`]), tombstones
@@ -3968,11 +3992,13 @@ impl VectorIndex {
         self.changes += 1;
         let node = self.doc_ids.len();
         // Never reached: the engine refuses a write whose vector would place
-        // a node past `MAX_NODES` before it changes anything, makes room
-        // before a put-back places one at the bound (`Collection::make_room`),
-        // and holds a graph made from documents to it where it is made
-        // (`build_graph`, an open's rebuild, `create index` beside the
-        // database). Cut to 32 bits, as it was, the 2^32nd node took the id
+        // a node past `MAX_NODES` before it changes anything, a put-back
+        // gives a row the node its write took and places one only where the
+        // graph takes it (`put_back`), and a graph made from documents is
+        // held to it where it is made (`insert_held`: `build_graph`, an
+        // open's rebuild, `create index` beside the database), as are the
+        // writes a build beside the database catches up with. Cut to 32
+        // bits, as it was, the 2^32nd node took the id
         // `by_doc` reads as none, and the next node 0's. A 32-bit build's
         // `Vec` of ids stops at 2^28. Asked of `nodes`, which a test's thread
         // may count past the graph's own ([`NODES_BESIDE`]), so a path
@@ -4310,6 +4336,8 @@ impl VectorIndex {
             self.deleted[node as usize] = true;
             self.deleted_count += 1;
             self.changes += 1;
+            #[cfg(target_pointer_width = "64")]
+            self.retired.push(node);
         }
     }
 
@@ -4729,6 +4757,169 @@ impl VectorIndex {
         if let Some(node) = self.node_of(doc) {
             self.detach(doc, node);
         }
+    }
+
+    /// `doc`'s vector `raw` put back as a write put back leaves it -- a
+    /// block rolled back, a statement refused part way, a replica's record
+    /// refused -- placing no node where the graph holds one for it: the
+    /// node its row holds, a live node holding it (an alias, as
+    /// [`Self::place`] makes one), or the node a write of the row took from
+    /// it, a tombstone the graph still holds, made live again
+    /// ([`Self::revive`]). Only where none holds it is a node placed and
+    /// linked, as [`Self::insert`] places one, and only where the graph
+    /// takes one: `false`, and nothing placed, where it does not, which no
+    /// put-back meets but one after the graph was made again in the middle
+    /// of the writes it puts back (a replica's room, `room_applied`). Placed
+    /// again, the vector took a node more than the write did, past the
+    /// bound where the write took the last: `alloc_links`' assert under the
+    /// write lock, with the block half put back.
+    #[cfg(target_pointer_width = "64")]
+    #[inline(never)]
+    pub fn put_back(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        if raw.len() != self.dim {
+            return true;
+        }
+        let held = self.as_held(raw);
+        if let Some(old) = self.node_of(doc) {
+            // The node it leaves holds the vector the write wrote, which
+            // nothing put back after it asks for: out of the list, so that
+            // the list stays the writes' own.
+            let top = self.retired.len();
+            let kept = self.retire(doc, old, &held);
+            self.retired.truncate(top);
+            if kept {
+                return true;
+            }
+        }
+        let (hash, copy) = self.find_copy(&held);
+        if let Some(node) = copy {
+            self.alias(node, doc);
+            return true;
+        }
+        if self.revive(doc, raw, &held, hash) {
+            return true;
+        }
+        if !takes_node(self.nodes(), 0) {
+            return false;
+        }
+        // `place` asks again what was asked above, and places it.
+        self.insert(doc, raw);
+        true
+    }
+
+    /// Makes live again the node a write took from `doc` that holds `held`
+    /// (`raw` as the arena holds it, `hash` its hash): the newest such
+    /// tombstone of [`Self::retired`], taken off it. Its vector, level and
+    /// links are those it had -- a node its write took is the row's node
+    /// before the write, so a block put back whole has its rows' nodes back
+    /// -- and lists that dropped it as a tombstone while it was one stay as
+    /// they are, as a search finding it through its own links finds it. A
+    /// node no link reaches -- it waited to be linked when the write took
+    /// it, and a block's linking passed it over as a tombstone -- is linked
+    /// now, unless it waits still. Out of line, at a put-back alone.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn revive(&mut self, doc: DocId, raw: &[f32], held: &[f32], hash: u64) -> bool {
+        let stored = self.stored(held);
+        let found = self.retired.iter().rposition(|&n| {
+            self.deleted[n as usize]
+                && self.doc_ids[n as usize] == doc
+                && self.stored_of(n) == stored
+        });
+        let Some(at) = found else {
+            return false;
+        };
+        let node = self.retired.remove(at);
+        self.deleted[node as usize] = false;
+        self.deleted_count -= 1;
+        self.by_doc.insert(doc, node + 1);
+        self.changes += 1;
+        // Its slot in the copies table stays until its table grows.
+        if self.same.built && self.find_copy(held).1 != Some(node) {
+            self.same_put(node, hash);
+        }
+        let linked = self.entry == Some(node) || self.l0_len[node as usize] > 0;
+        if !linked && !self.pending.contains(&node) {
+            let query = self.build_query(raw);
+            self.link_node(node, self.node_levels(node), None, query.as_deref());
+        }
+        true
+    }
+
+    /// Lets go of the tombstones [`Self::put_back`] looks among: what a
+    /// block put back leaves, since only its own writes' are asked for.
+    #[cfg(target_pointer_width = "64")]
+    pub fn forget_retired(&mut self) {
+        self.retired.clear();
+    }
+
+    /// `items` into the graph as [`Self::insert_batch`] puts them -- or as
+    /// [`Self::defer_batch`] leaves them waiting, `later` -- held to
+    /// [`MAX_NODES`] as the graph counts its nodes: a vector its row's node
+    /// or a live node holds already places none ([`Self::place`]), so a
+    /// field of more rows than the bound is taken where its vectors are
+    /// not. A list the room left holds is put in whole, one compare; past
+    /// it a piece the room holds at a time, and with no room left, a vector
+    /// at a time, each asked first whether it places a node -- refused
+    /// naming `field` where it does, what went in before it left in, for the
+    /// caller to let go of the graph. A graph made from documents: `create
+    /// index`, an open, a compact, a replica's room.
+    #[cfg(target_pointer_width = "64")]
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+    ) -> crate::error::Result<()> {
+        let mut rest = items;
+        while !rest.is_empty() {
+            let take = match MAX_NODES.saturating_sub(self.nodes()) {
+                0 if self.places(rest[0].0, &rest[0].1) => return Err(graph_full(field)),
+                0 => 1,
+                room => room.min(rest.len()),
+            };
+            let (now, next) = rest.split_at(take);
+            match later {
+                true => {
+                    self.defer_batch(now);
+                }
+                false => self.insert_batch(now),
+            }
+            rest = next;
+        }
+        Ok(())
+    }
+
+    /// [`Self::insert_held`] where no node can pass the bound: a 32-bit
+    /// build's memory stops far short of it.
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        _field: &str,
+    ) -> crate::error::Result<()> {
+        match later {
+            true => {
+                self.defer_batch(items);
+            }
+            false => self.insert_batch(items),
+        }
+        Ok(())
+    }
+
+    /// Whether [`Self::place`] would place a node for `doc`'s `raw`: its
+    /// row's node does not hold it, nor does a live node.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    fn places(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        if raw.len() != self.dim || self.holds(doc, raw) {
+            return false;
+        }
+        let held = self.as_held(raw);
+        self.find_copy(&held).1.is_none()
     }
 
     /// Which of `ids` it holds, each with the vector its node holds and
