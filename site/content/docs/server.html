@@ -623,8 +623,18 @@ of it is dead and the dead part is at least 64 MB -- or sooner, once a
 third of what the compact writes is dead, where the file has reached three
 quarters of the memory the system has for its pages or the server is
 waiting for the disk, so that its reads stay in memory. The compact runs
-beside the queries, and takes the write lock only to put the new file in
-place. A compact is refused for nothing a document holds: one it cannot
+beside the queries: it reads the documents, rebuilds a vector index that
+holds deleted entries and writes the new file with no lock held, and takes
+the write lock only for the writes of its last moments and to put the new
+file in place. Each compact the server runs on its own is logged with its
+time and the longest it held the lock, and each hold by name -- the
+build's copy, its rounds of catching up and putting it in place, then the
+file's -- as in <code>/data/db.fennec: compacted, 2088.0 MB -&gt; 1067.4 MB in
+16.4s, the lock held 182.1ms at most (the build's copy 12.9ms, rounds
+670.0µs, put in place 6.1ms; the file's copy 182.1ms, rounds 84.4ms, swap
+6.7ms)</code>;
+a <code>compact</code> or <code>create index</code> sent as a statement is
+logged so too. A compact is refused for nothing a document holds: one it cannot
 read is copied as it is, and a dropped field's values become
 <code>null</code>s, its place kept. A refusal that stands -- a damaged
 file, a disk that will not take the new one -- is tried again at every
