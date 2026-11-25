@@ -7,19 +7,23 @@
 //! - driven: the bound is taken, one past it refused with the error the
 //!   page names, and nothing cut -- a ranking, a list, a facet past it
 //!   answers no rows at all;
-//! - at the type's level, where the row cannot be driven at its size (a
-//!   4 GiB payload, 2^32 nodes, an 8 MiB stack), with why;
+//! - at the type's level, where the row cannot be driven at its size, with
+//!   why: an 8 MiB stack, whose overflow is an abort. A bound no test
+//!   machine reaches otherwise -- a 4 GiB payload, a graph of 2^32 - 1
+//!   nodes -- is driven: where it is decided, and through the writes at a
+//!   bound a test's thread holds them to;
 //! - a path either side of a number that is no refusal (a batch, a
 //!   threshold, a ring), with what it is.
 //!
 //! A row with no entry fails naming the row, an entry with no row naming
 //! the entry (the list follows the page), a number the code does not hold
 //! naming both, and a test that is gone naming its file. A test elsewhere
-//! -- fennec-ql's, fennec-http's -- is named by its file and function and
-//! found there as `fn <name>(`, as `tools/security_md_check.py` finds its
-//! tests. The mapping runs in every build (`features.rs` takes this file
-//! in too); a row's own test here needing a feature the build lacks is
-//! `cfg`'d with it, the row still mapped.
+//! -- fennec-ql's, fennec-http's -- is named by its file and function, and
+//! found there as a test CI runs (`held_by`): `#[test]` right before its
+//! `fn`, outside comments and strings, neither ignored nor `cfg`'d out of
+//! every build CI's `make test` makes. The mapping runs in every build
+//! (`features.rs` takes this file in too); a row's own test here needing a
+//! feature the build lacks is `cfg`'d with it, the row still mapped.
 
 use fennec_core::prelude::*;
 
@@ -90,12 +94,14 @@ const QUOTA: &str = "crates/fennec-http/src/quota.rs";
 const MCP: &str = "crates/fennec-http/tests/mcp.rs";
 const CALLS: &str = "crates/fennec-core/tests/calls.rs";
 const VECTOR: &str = "crates/fennec-core/src/vector.rs";
+const STORE: &str = "crates/fennec-core/src/store.rs";
+const UNWINDING: &str = "crates/fennec-core/src/engine/unwinding.rs";
 const HTTP: &str = "crates/fennec-http/src/lib.rs";
 const MCP_SRC: &str = "crates/fennec-http/src/mcp/mod.rs";
 
 /// Every row's entry, in the page's order.
 fn rows(problems: &mut Vec<String>) -> Vec<Row> {
-    use fennec_core::{codec, engine, named, query, schema, store, value};
+    use fennec_core::{codec, engine, named, query, schema, store, value, vector};
     let n = |v: usize| v as f64;
     let mut src =
         |file: &str, anchor: &str, needle: &str| source_number(file, anchor, needle, problems);
@@ -376,26 +382,31 @@ fn rows(problems: &mut Vec<String>) -> Vec<Row> {
         ),
         row(
             "document payload, segment offset",
-            vec![u32::MAX as f64 + 1.0],
-            "store::Loc's u32 fields",
-            Held::Typed(
-                "a 4 GiB document is more than a test's machine holds twice over: held at the \
-                 location's fields, three u32s. A payload past them is not yet refused -- \
-                 `Store::land_frame` casts its length -- which is owed",
-                &[(ME, "a_location_is_three_u32s")],
-            ),
-        ),
+            vec![n(store::MAX_PAYLOAD)],
+            "store::MAX_PAYLOAD",
+            Held::Driven(&[
+                (STORE, "a_payload_of_u32_max_bytes_is_taken_and_one_more_refused"),
+                (
+                    UNWINDING,
+                    "a_document_past_a_frames_length_is_refused_and_its_block_put_back",
+                ),
+            ]),
+        )
+        .note(format!("{} bytes", spaced(store::MAX_PAYLOAD as u64)))
+        .note(format!("a document is at most {} bytes encoded", store::MAX_PAYLOAD)),
         row(
             "vector index node count",
-            vec![2f64.powi(32)],
-            "the graph's u32 node ids",
-            Held::Typed(
-                "2^32 nodes take past 100 GB of links at the least: held at the node id's type. \
-                 A node past them is not yet refused -- `alloc_links` casts the count -- which \
-                 is owed",
-                &[("crates/fennec-core/src/vector.rs", "a_node_is_a_u32")],
-            ),
-        ),
+            vec![n(vector::MAX_NODES)],
+            "vector::MAX_NODES",
+            Held::Driven(&[
+                (VECTOR, "a_graph_takes_its_last_node_and_refuses_one_more"),
+                (
+                    UNWINDING,
+                    "a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back",
+                ),
+            ]),
+        )
+        .note(format!("a vector index holds at most {} nodes", vector::MAX_NODES)),
         row(
             "@hnsw's m",
             vec![2.0, n(schema::MAX_M)],
@@ -810,13 +821,368 @@ fn problems(page: &str) -> Vec<String> {
         }
         for (file, name) in tests {
             match std::fs::read_to_string(format!("{ROOT}{file}")) {
-                Ok(text) if text.contains(&format!("fn {name}(")) => {}
-                Ok(_) => problems.push(format!("row `{key}`: {file} holds no `fn {name}`")),
+                Ok(text) => {
+                    if let Err(why) = held_by(&text, name) {
+                        problems.push(format!("row `{key}`: {file}: {why}"));
+                    }
+                }
                 Err(e) => problems.push(format!("row `{key}`: {file}: {e}")),
             }
         }
     }
     problems
+}
+
+/// The builds of CI's `make test`, `(os, arch)`, each crate with its
+/// default features: a named test must run in one of them at least.
+const BUILDS: [(&str, &str); 3] = [
+    ("linux", "x86_64"),
+    ("linux", "aarch64"),
+    ("macos", "aarch64"),
+];
+
+/// fennec-core's default features: every one but `statements`, which a
+/// crate depending on it asks for. Any other is taken as off.
+const FEATURES: &[&str] = &[
+    "std-fs",
+    "full",
+    "indexes",
+    "vector",
+    "text",
+    "sparse",
+    "sorted",
+    "composite",
+    "language",
+    "geo",
+    "nocase",
+    "facets",
+    "highlight",
+    "analytics",
+    "collate",
+];
+
+/// Whether `cfg` predicate `p` holds in build `(os, arch)`: `Err` names
+/// what it cannot tell, a predicate never taken for true unread.
+fn holds(p: &str, (os, arch): (&str, &str)) -> std::result::Result<bool, String> {
+    let p = p.trim();
+    let list = |inner: &str| -> std::result::Result<Vec<bool>, String> {
+        let (mut out, mut depth, mut from) = (Vec::new(), 0, 0);
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(holds(&inner[from..i], (os, arch))?);
+                    from = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if !inner[from..].trim().is_empty() {
+            out.push(holds(&inner[from..], (os, arch))?);
+        }
+        Ok(out)
+    };
+    let call = |f: &str| {
+        p.strip_prefix(f)
+            .and_then(|r| r.trim_start().strip_prefix('(')?.strip_suffix(')'))
+    };
+    if let Some(inner) = call("all") {
+        return Ok(list(inner)?.into_iter().all(|b| b));
+    }
+    if let Some(inner) = call("any") {
+        return Ok(list(inner)?.into_iter().any(|b| b));
+    }
+    if let Some(inner) = call("not") {
+        return holds(inner, (os, arch)).map(|b| !b);
+    }
+    let atom = match p.split_once('=') {
+        Some((k, v)) => (k.trim(), Some(v.trim().trim_matches('"'))),
+        None => (p, None),
+    };
+    Ok(match atom {
+        ("test" | "unix", None) => true,
+        ("windows", None) => false,
+        ("target_os", Some(v)) => v == os,
+        ("target_arch", Some(v)) => v == arch,
+        ("target_family", Some(v)) => v == "unix",
+        ("target_pointer_width", Some(v)) => v == "64",
+        ("feature", Some(f)) => FEATURES.contains(&f),
+        _ => return Err(format!("`{p}` is no predicate this test reads")),
+    })
+}
+
+/// Whether a test is found, or what is wrong.
+type Found = std::result::Result<(), String>;
+
+/// Whether `text`, a Rust file, holds `name` as a test CI runs: `fn
+/// <name>(` outside its comments and literals, `#[test]` among the
+/// attributes right before it and neither `ignore` nor `cfg_attr`, nothing
+/// around it but `mod`s, and every `cfg` on it, on those `mod`s and on the
+/// file met by one of CI's builds ([`BUILDS`]). Found as text alone, a
+/// helper of the name, a test
+/// commented out, `#[ignore]`d or `cfg`'d out of every build passed for
+/// one. What is wrong, otherwise.
+fn held_by(text: &str, name: &str) -> Found {
+    let code = blanked(text);
+    let needle = format!("fn {name}(");
+    let mut first = None;
+    let mut from = 0;
+    while let Some(at) = code[from..].find(&needle).map(|i| from + i) {
+        from = at + needle.len();
+        if code[..at].ends_with(ident) {
+            continue;
+        }
+        match runs(text, &code, at) {
+            Ok(()) => return Ok(()),
+            Err(why) => first = first.or(Some(why)),
+        }
+    }
+    Err(first.unwrap_or_else(|| format!("holds no `fn {name}`, its comments aside")))
+}
+
+fn ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether the `fn` at `at` of `text` (`code` blanked) runs as a test.
+fn runs(text: &str, code: &str, at: usize) -> Found {
+    let mut attrs = attributes(text, code, at);
+    if !attrs.iter().any(|a| a == "test") {
+        return Err("its `fn` has no `#[test]` right before it: a helper, no test".into());
+    }
+    if attrs
+        .iter()
+        .any(|a| a.starts_with("ignore") || a.starts_with("cfg_attr"))
+    {
+        return Err("its test is `#[ignore]`d, or may be".into());
+    }
+    let mut open = Vec::new();
+    for (i, c) in code[..at].char_indices() {
+        match c {
+            '{' => open.push(i),
+            '}' => drop(open.pop()),
+            _ => {}
+        }
+    }
+    for brace in open {
+        let Some(item) = module_at(&code[..brace]) else {
+            return Err("its test is inside something not a `mod`".into());
+        };
+        attrs.extend(attributes(text, code, item));
+    }
+    // The file's own: `#![cfg(...)]` at its head.
+    let mut p = code.len() - code.trim_start().len();
+    while code[p..].starts_with("#![") {
+        let Some(end) = closing(&code[p + 3..]) else {
+            return Err("an attribute not closed".into());
+        };
+        attrs.push(fold(&text[p + 3..p + 3 + end]));
+        p += 3 + end + 1;
+        p += code[p..].len() - code[p..].trim_start().len();
+    }
+    let cfgs: Vec<&str> = (attrs.iter())
+        .filter_map(|a| a.strip_prefix("cfg(")?.strip_suffix(')'))
+        .collect();
+    for build in BUILDS {
+        let mut met = true;
+        for p in &cfgs {
+            met &= holds(p, build)?;
+        }
+        if met {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "`cfg`'d out of every build CI's `make test` makes: {cfgs:?}"
+    ))
+}
+
+/// Where the `mod` whose block opens right after `head` starts, its
+/// visibility included; `None` where the block is no module's.
+fn module_at(head: &str) -> Option<usize> {
+    let head = head.trim_end();
+    let named = head.trim_end_matches(ident);
+    let before = named.trim_end().strip_suffix("mod")?;
+    if named.len() == head.len() || before.ends_with(ident) {
+        return None;
+    }
+    let before = before.trim_end();
+    // `pub`, `pub(crate)`, `pub(super)`, `pub(in path)`.
+    let vis = match before.strip_suffix(')') {
+        Some(b) => b.rfind('(').map(|o| b[..o].trim_end()),
+        None => Some(before),
+    };
+    Some(match vis.and_then(|v| v.strip_suffix("pub")) {
+        Some(v) if !v.ends_with(ident) => v.len(),
+        _ => before.len(),
+    })
+}
+
+/// The outer attributes right before the item at `at` -- found in `code`,
+/// read in `text` -- each as written inside its `#[...]`, spaces folded.
+fn attributes(text: &str, code: &str, at: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut end = code[..at].trim_end().len();
+    while code[..end].ends_with(']') {
+        let mut depth = 0;
+        let mut open = None;
+        for (i, c) in code[..end - 1].char_indices().rev() {
+            match c {
+                ']' => depth += 1,
+                '[' if depth == 0 => {
+                    open = Some(i);
+                    break;
+                }
+                '[' => depth -= 1,
+                _ => {}
+            }
+        }
+        let Some(open) = open.filter(|&o| code[..o].ends_with('#') && !code[..o].ends_with("#!"))
+        else {
+            break;
+        };
+        out.push(fold(&text[open + 1..end - 1]));
+        end = code[..open - 1].trim_end().len();
+    }
+    out
+}
+
+/// Where the bracket opened before `after` closes in it.
+fn closing(after: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in after.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth == 0 => return Some(i),
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `s`'s whitespace folded to one space, and none inside a bracket's edges.
+fn fold(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("( ", "(")
+        .replace(" )", ")")
+}
+
+/// `text` with its comments, its strings' and its characters' contents
+/// made spaces, every byte where it was: what is left is code, whose
+/// braces and brackets are the code's.
+fn blanked(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for c in &mut out[from..to] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    };
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                let end = b[i..]
+                    .iter()
+                    .position(|&c| c == b'\n')
+                    .map_or(b.len(), |e| i + e);
+                blank(&mut out, i, end);
+                i = end;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let (mut depth, mut j) = (1, i + 2);
+                while j < b.len() && depth > 0 {
+                    if b[j..].starts_with(b"/*") {
+                        depth += 1;
+                        j += 2;
+                    } else if b[j..].starts_with(b"*/") {
+                        depth -= 1;
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                }
+                blank(&mut out, i, j);
+                i = j;
+            }
+            b'r' | b'b' if i == 0 || !word(b[i - 1]) => {
+                // `r"..."`, `r#"..."#`, `b"..."`, `br#"..."#`: raw ones end
+                // at a quote and as many hashes as they began with.
+                let mut j = i + 1;
+                if b[i] == b'b' && b.get(j) == Some(&b'r') {
+                    j += 1;
+                }
+                let raw = b[i] == b'r' || j == i + 2;
+                let hashes = b[j..].iter().take_while(|&&c| c == b'#').count();
+                if b.get(j + hashes) != Some(&b'"') || (!raw && hashes > 0) {
+                    i += 1;
+                    continue;
+                }
+                let from = j + hashes + 1;
+                let end = match raw {
+                    true => {
+                        let close = [b"\"".as_slice(), &vec![b'#'; hashes]].concat();
+                        b[from..]
+                            .windows(close.len())
+                            .position(|w| w == close)
+                            .map_or(b.len(), |e| from + e)
+                    }
+                    false => string_end(b, from),
+                };
+                blank(&mut out, from, end);
+                i = end + 1;
+            }
+            b'"' => {
+                let end = string_end(b, i + 1);
+                blank(&mut out, i + 1, end);
+                i = end + 1;
+            }
+            // A character, as opposed to a lifetime or a label: `'x'`,
+            // `'\n'`, `'\u{..}'`.
+            b'\'' => {
+                let end = match b.get(i + 1) {
+                    Some(b'\\') => (b.get(i + 3..))
+                        .and_then(|r| r.iter().position(|&c| c == b'\''))
+                        .map(|e| i + 3 + e),
+                    Some(_) => {
+                        let len = text[i + 1..].chars().next().map_or(1, char::len_utf8);
+                        (b.get(i + 1 + len) == Some(&b'\'')).then_some(i + 1 + len)
+                    }
+                    None => None,
+                };
+                match end {
+                    Some(end) => {
+                        blank(&mut out, i + 1, end);
+                        i = end + 1;
+                    }
+                    None => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Where the string whose text begins at `from` ends: its closing quote,
+/// an escaped one passed over.
+fn string_end(b: &[u8], from: usize) -> usize {
+    let mut j = from;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j,
+            _ => j += 1,
+        }
+    }
+    b.len()
 }
 
 /// The fixed limits' rows: each one's first cell as its key, its second
@@ -1077,6 +1443,57 @@ fn a_row_added_removed_or_changed_is_told() {
             && said[0].contains("the code holds [8388608.0]"),
         "{said:#?}"
     );
+}
+
+/// A test an entry names is found only as one CI runs: a helper of its
+/// name, a test commented out or in a string, `#[ignore]`d, `cfg`'d out
+/// of every build CI makes -- on itself, a `mod` around it or its file --
+/// or inside something not a `mod` is told, each saying why; a test among
+/// braces in characters, raw strings and lifetimes, in a `mod` CI builds,
+/// is found.
+#[test]
+fn a_helper_or_a_test_ci_does_not_run_is_no_test() {
+    let wrong = [
+        ("fn held() {}", "a helper, no test"),
+        ("// #[test]\n// fn held() {}\nfn other() {}", "holds no `fn held`"),
+        ("/* #[test]\nfn held() {} /* nested */ */", "holds no `fn held`"),
+        ("const S: &str = \"#[test]\\\"fn held() {}\";", "holds no `fn held`"),
+        ("#[test]\nfn hold() {}\n#[test]\nfn unheld() {}", "holds no `fn held`"),
+        ("#[test]\n#[ignore]\nfn held() {}", "`#[ignore]`d"),
+        ("#[test]\n#[cfg_attr(unix, ignore = \"slow\")]\nfn held() {}", "`#[ignore]`d"),
+        ("#[cfg(windows)]\n#[test]\nfn held() {}", "out of every build"),
+        ("#[cfg(feature = \"statements\")]\n#[test]\nfn held() {}", "out of every build"),
+        (
+            "#[cfg(all(target_os = \"linux\", target_arch = \"aarch64\", not(unix)))]\n#[test]\nfn held() {}",
+            "out of every build",
+        ),
+        (
+            "#[cfg(target_arch = \"wasm32\")]\nmod m {\n    #[test]\n    fn held() {}\n}",
+            "out of every build",
+        ),
+        ("#![cfg(any())]\n#[test]\nfn held() {}", "out of every build"),
+        ("fn outer() {\n    #[test]\n    fn held() {}\n}", "not a `mod`"),
+        ("impl S {\n    #[test]\n    fn held() {}\n}", "not a `mod`"),
+        ("#[cfg(miri)]\n#[test]\nfn held() {}", "`miri` is no predicate"),
+    ];
+    for (text, says) in wrong {
+        match held_by(text, "held") {
+            Err(why) => assert!(why.contains(says), "{text:?}: {why}"),
+            Ok(()) => panic!("{text:?}: found"),
+        }
+    }
+    let right = [
+        "#[test]\nfn held() {}",
+        "/// Its doc.\n#[test] // why\n#[should_panic]\nfn held() {}",
+        "fn f<'a>(x: &'a str) -> char {\n    let _ = (x, b'{', r#\"{\"#, \"}\\\"{\");\n    '{'\n}\n\
+         #[test]\nfn held() {}",
+        "#![cfg(unix)]\n//! A file.\n#[cfg(test)]\npub(crate) mod tests {\n    use super::*;\n\n    \
+         #[cfg(all(feature = \"vector\", not(target_os = \"linux\")))]\n    #[test]\n    fn held() {}\n}",
+        "mod a {\n    fn held() {}\n}\nmod b {\n    #[test]\n    fn held() {}\n}",
+    ];
+    for text in right {
+        assert_eq!(held_by(text, "held"), Ok(()), "{text:?}");
+    }
 }
 
 #[test]
@@ -1428,20 +1845,6 @@ fn a_segment_is_sealed_once_it_holds_8_mib() {
     assert_eq!(st.segment_count(), 2);
 }
 
-/// A payload's location is three `u32`s -- segment, offset, length -- so a
-/// payload and an offset are held to 4 GiB by the type.
-#[test]
-fn a_location_is_three_u32s() {
-    use fennec_core::store::Loc;
-    let most = Loc {
-        seg: u32::MAX,
-        off: u32::MAX,
-        len: u32::MAX,
-    };
-    assert_eq!(std::mem::size_of::<Loc>(), 12);
-    assert_eq!(most.len as u64 + 1, 4 << 30);
-}
-
 /// A time is read to the millisecond, the rest of a fraction dropped --
 /// never rounded up into the next one.
 #[test]
@@ -1511,10 +1914,15 @@ fn a_point_takes_180_and_90_and_refuses_past_them() {
         "[0, -90.000001]",
         "[540, 0]",
     ] {
-        assert!(
-            run(&mut db, &format!("put p {{loc: {past}}}")).is_err(),
-            "{past}"
+        let says = format!(
+            "a point is [lon, lat], a longitude from -180 to 180 and a latitude from -90 to 90; \
+             found {}",
+            past.replace(' ', "")
         );
+        match run(&mut db, &format!("put p {{loc: {past}}}")) {
+            Err(Error::Type(m)) => assert!(m.ends_with(&says), "{past}: {m}"),
+            other => panic!("{past}: {other:?}"),
+        }
     }
     let r = ask(&mut db, "get p select loc", &[]).unwrap();
     let json = fennec_core::json::response_to_string(&r);

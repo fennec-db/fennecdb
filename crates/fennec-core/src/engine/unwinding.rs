@@ -1661,4 +1661,241 @@ mod torn {
         let db = crate::fs::open(&path).expect("reopen");
         assert_eq!(db.change_seq(), before.seq + 1);
     }
+
+    /// A bound this thread's writes are held to for a case -- a payload's
+    /// bytes, or the nodes every graph counts beside its own -- lifted as
+    /// the case ends, however it ends.
+    struct Bound;
+
+    impl Bound {
+        fn payload(most: usize) -> Bound {
+            crate::store::PAYLOAD_MOST.with(|m| m.set(most));
+            Bound
+        }
+
+        fn nodes(beside: usize) -> Bound {
+            crate::vector::NODES_BESIDE.with(|n| n.set(beside));
+            Bound
+        }
+    }
+
+    impl Drop for Bound {
+        fn drop(&mut self) {
+            crate::store::PAYLOAD_MOST.with(|m| m.set(crate::store::MAX_PAYLOAD));
+            crate::vector::NODES_BESIDE.with(|n| n.set(0));
+        }
+    }
+
+    /// Write `w`, alone or after `first`, a write that goes well, in a
+    /// block: its refusal, the block put back by the caller as a client's
+    /// is.
+    fn refused_write(db: &mut Database, w: Write, first: Option<&Statement>) -> Error {
+        let r = match first {
+            None => db.execute(&write(w)).map(drop),
+            Some(first) => {
+                db.begin().expect("begin");
+                db.execute(first).expect("a write that goes well");
+                let r = db.execute(&write(w)).map(drop);
+                db.rollback();
+                r
+            }
+        };
+        r.expect_err("refused")
+    }
+
+    /// The bytes of row `id`'s payload in collection `c`.
+    fn payload_len(db: &Database, c: &str, id: DocId) -> usize {
+        db.collections[c].store.loc(id).expect("a row").len as usize
+    }
+
+    /// limits.html's "document payload": a write whose document encodes
+    /// past what a frame's length holds is refused before it changes
+    /// anything, a query error naming the bound -- a `put`, a `put` over a
+    /// row, a `set`, an upsert, alone and after a write that went well in a
+    /// block, and a block of `put`s prepared beside the readers -- and taken
+    /// once the bound is lifted; a replica's apply and an open refuse such a
+    /// frame as damage. Driven at a bound this thread holds payloads to,
+    /// past `u`'s rows and short of `t`'s, for a 4 GiB document is more than
+    /// a test's machine holds; `store::tests` holds the bound at `u32::MAX`.
+    #[test]
+    fn a_document_past_a_frames_length_is_refused_and_its_block_put_back() {
+        let scratch = Scratch::new("fennecdb-payload");
+        let path = scratch.0.join("written.fennec");
+        let mut db = made(&path);
+        let most = (1..=2).map(|id| payload_len(&db, "u", id)).max().unwrap();
+        let least = (1..=4).map(|id| payload_len(&db, "t", id)).min().unwrap();
+        assert!(most < least, "u's rows {most}, t's {least}");
+        let says = format!("a document is at most {most} bytes encoded, a u32's length, not ");
+        let ws = [Write::Insert, Write::Over, Write::Set, Write::Upsert];
+        let first = put_u(3);
+        for (w, alone) in ws.into_iter().flat_map(|w| [(w, true), (w, false)]) {
+            let tag = format!("{w:?}{}", if alone { ", alone" } else { "" });
+            let before = state(&db);
+            let e = {
+                let _bound = Bound::payload(most);
+                refused_write(&mut db, w, (!alone).then_some(&first))
+            };
+            assert!(
+                matches!(&e, Error::Query(m) if m.starts_with(&says)),
+                "{tag}: {e:?}"
+            );
+            assert!(!db.in_block() && db.failure().is_none(), "{tag}");
+            assert_eq!(state(&db), before, "{tag}: put back");
+            unfed(&db, before.seq, &tag);
+        }
+        // A block's `put`s built beside the readers: one past the bound is
+        // left to the `put`, which refuses it.
+        let many = Statement::Put {
+            collection: "t".into(),
+            docs: (300..300 + PREPARE_AT as i64).map(row).collect(),
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        let stmts = [(&many, &[][..])];
+        let before = state(&db);
+        {
+            let _bound = Bound::payload(most);
+            let mut ready = db.prepare(&stmts);
+            assert_eq!(ready.built(), 0, "prepared past the bound");
+            let r = db.execute_prepared(&stmts, &mut ready);
+            assert!(
+                matches!(&r, Err((0, Error::Query(m))) if m.starts_with(&says)),
+                "{r:?}"
+            );
+        }
+        assert_eq!(state(&db), before, "prepared: put back");
+        let mut ready = db.prepare(&stmts);
+        assert_eq!(ready.built(), 1);
+        db.execute_prepared(&stmts, &mut ready)
+            .expect("prepared, taken");
+        for w in ws {
+            db.execute(&write(w)).expect("taken");
+        }
+        let kept = state(&db);
+        drop(db);
+        // An open meets the frames past the bound, as damage, and leaves the
+        // file as it was.
+        let refused = {
+            let _bound = Bound::payload(most);
+            crate::fs::open(&path)
+                .map(drop)
+                .expect_err("opened past the bound")
+        };
+        let frame = format!("past the {most} a write takes");
+        assert!(
+            matches!(&refused, Error::Corrupt(m) if m.ends_with(&frame)),
+            "{refused:?}"
+        );
+        assert_eq!(state(&crate::fs::open(&path).expect("open")), kept);
+        // And so does a replica's apply, its state as it was.
+        let (records, after) = landed(|p| p.execute(&write(Write::Insert)).map(drop));
+        let mut db = replica(&scratch.0.join("replica.fennec"));
+        let before = state(&db);
+        let r = {
+            let _bound = Bound::payload(most);
+            db.apply(&records)
+        };
+        assert!(
+            matches!(&r, Err(Error::Corrupt(m)) if m.ends_with(&frame)),
+            "{r:?}"
+        );
+        assert_eq!(state(&db), before, "applied: put back");
+        unfed(&db, before.seq, "applied");
+        db.apply(&records).expect("applied, taken");
+        assert_eq!(state(&db), after);
+    }
+
+    /// limits.html's "vector index node count": a write whose vector would
+    /// place a node past a graph's `MAX_NODES` is refused before it changes
+    /// anything, a query error naming the field -- a `put`, a `put` over a
+    /// row, a `set`, an upsert, alone and after a write that went well in a
+    /// block, a second document of a `put` the first took the last node
+    /// for, and a replica's apply -- while a write placing no node is
+    /// taken: one keeping a row's vector, one with none. Driven over graphs
+    /// this thread counts at the bound, which no test machine could build
+    /// (`vector::tests` holds the bound itself).
+    #[test]
+    fn a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back() {
+        let scratch = Scratch::new("fennecdb-nodes");
+        let mut db = made(&scratch.0.join("nodes.fennec"));
+        let nodes = |db: &Database| db.collections["t"].vectors.get("v").expect("v").nodes();
+        let says = "field `v`: a vector index holds at most 4294967295 nodes";
+        let refused = |e: &Error| matches!(e, Error::Query(m) if m.starts_with(says));
+        // A block's write that goes well places no node: a rolled back
+        // vector leaves its node a tombstone, which counts.
+        let first = put(vec![("n".into(), Expr::Lit(Value::Int(9)))], true);
+        let ws = [Write::Insert, Write::Over, Write::Set, Write::Upsert];
+        for (w, alone) in ws.into_iter().flat_map(|w| [(w, true), (w, false)]) {
+            let tag = format!("{w:?}{}", if alone { ", alone" } else { "" });
+            let before = state(&db);
+            let e = {
+                let _bound = Bound::nodes(crate::vector::MAX_NODES - nodes(&db));
+                refused_write(&mut db, w, (!alone).then_some(&first))
+            };
+            assert!(refused(&e), "{tag}: {e:?}");
+            assert!(!db.in_block() && db.failure().is_none(), "{tag}");
+            assert_eq!(state(&db), before, "{tag}: put back");
+            unfed(&db, before.seq, &tag);
+        }
+        // Room for one node: a `put` of two vectors is refused at its
+        // second, put back whole; of one, taken.
+        let two = Statement::Put {
+            collection: "t".into(),
+            docs: vec![row(300), row(301)],
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        let before = state(&db);
+        let room = crate::vector::MAX_NODES - 1 - nodes(&db);
+        let e = {
+            let _bound = Bound::nodes(room);
+            db.execute(&two).expect_err("two past the bound")
+        };
+        assert!(refused(&e), "{e:?}");
+        assert_eq!(state(&db), before, "two: put back");
+        {
+            let _bound = Bound::nodes(room);
+            db.execute(&put(row(300), true)).expect("the last node");
+        }
+        // A write placing no node is taken at the bound: a row written again
+        // with the vector it holds, a `set` of another field, a row of none.
+        let bound = Bound::nodes(crate::vector::MAX_NODES - nodes(&db));
+        db.execute(&put(with_id(1, row(1)), false))
+            .expect("its own vector");
+        let n7 = vec![("n".to_string(), Expr::Lit(Value::Int(7)))];
+        db.execute(&Statement::Update {
+            collection: "t".into(),
+            set: n7.clone(),
+            filter: Some(eq("id", Value::Int(2))),
+            require: None,
+            pick: None,
+        })
+        .expect("another field");
+        db.execute(&put(n7, true)).expect("no vector");
+        db.execute(&write(Write::Del)).expect("a delete");
+        drop(bound);
+        // A replica's graph, counted at the bound: its primary's write is
+        // refused, its state as it was.
+        let (records, after) = landed(|p| p.execute(&write(Write::Insert)).map(drop));
+        let mut db = replica(&scratch.0.join("replica.fennec"));
+        let before = state(&db);
+        let r = {
+            let _bound = Bound::nodes(crate::vector::MAX_NODES - nodes(&db));
+            db.apply(&records)
+        };
+        assert!(r.as_ref().is_err_and(refused), "{r:?}");
+        assert!(db.failure().is_none());
+        assert_eq!(state(&db), before, "applied: put back");
+        unfed(&db, before.seq, "applied");
+        db.apply(&records).expect("applied, taken");
+        assert_eq!(state(&db), after);
+    }
 }

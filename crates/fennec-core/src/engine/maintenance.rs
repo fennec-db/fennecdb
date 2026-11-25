@@ -390,6 +390,17 @@ impl Database {
         for id in c.store.iter_ids() {
             values.push((id, c.store.read_field(id, pos)?));
         }
+        // More vectors than a graph has nodes for, refused as the build
+        // under the lock refuses them (`build_graph`).
+        #[cfg(target_pointer_width = "64")]
+        if matches!(kind, IndexKind::Vector(_)) && values.len() > crate::vector::MAX_NODES {
+            let held = values
+                .iter()
+                .filter(|(_, v)| matches!(v, Some(Value::Vector(_))));
+            if held.count() > crate::vector::MAX_NODES {
+                return Err(crate::vector::graph_full(field));
+            }
+        }
         Ok(Ok(IndexCopy {
             token: self.watch(c.id),
             cid: c.id,

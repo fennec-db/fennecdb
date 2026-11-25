@@ -4038,6 +4038,22 @@ impl Collection {
             .map(Some)
     }
 
+    /// Whether a graph of the collection may have no node left for a
+    /// vector written now, `waiting` written before it not placed yet
+    /// ([`crate::vector::MAX_NODES`]): asked where a write encodes the row,
+    /// before it changes anything, as its payload's length is. A graph's
+    /// count is all it reads, a compare a graph, and a collection with none
+    /// reads its count of graphs: walked as a list alone, an empty one was
+    /// 4 instructions more a frame of a replica's apply (traced), its end
+    /// worked out first. Where it says so, [`nodes_past`] reads the
+    /// document. A 32-bit build's memory stops far short of the bound.
+    #[cfg(target_pointer_width = "64")]
+    #[inline(always)]
+    fn crowded(&self, waiting: usize) -> bool {
+        !self.vectors.is_empty()
+            && (self.vectors.values()).any(|ix| !crate::vector::takes_node(ix.nodes(), waiting))
+    }
+
     /// Puts `doc` into the indexes, `old` the version it replaces. Inlined
     /// for the reason [`Self::reset_index_structures`] is: a compact beside
     /// the database calls it too.
@@ -5193,6 +5209,36 @@ fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
         (Some(a), Some(b)) => hash_key(a) == hash_key(b),
         _ => false,
     }
+}
+
+/// `doc`, written over `old` in a collection a graph of which has no node
+/// left with `waiting` placed before it ([`Collection::crowded`]): its
+/// vector in each such graph refused naming the field, unless `old` held it
+/// to the bit -- the node it holds keeps it (`VectorIndex::retire`).
+/// Compared by the bits, not by [`same`]: a vector `same` took for another,
+/// `-0.0` for `0.0`, would place a node past the bound.
+#[cfg(target_pointer_width = "64")]
+#[cold]
+#[inline(never)]
+fn nodes_past(
+    c: &Collection,
+    doc: &Document,
+    old: Option<&Document>,
+    waiting: usize,
+) -> Result<()> {
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for (field, ix) in c.vectors.iter() {
+        if crate::vector::takes_node(ix.nodes(), waiting) {
+            continue;
+        }
+        match (doc.get(field), old.and_then(|o| o.get(field))) {
+            (Some(Value::Vector(v)), Some(Value::Vector(was)))
+                if bits(&v[..]) == bits(&was[..]) => {}
+            (Some(Value::Vector(_)), _) => return Err(crate::vector::graph_full(field)),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The collation data the text of `doc`'s collated fields needs and the
@@ -9111,6 +9157,11 @@ impl Database {
     ) -> Result<()> {
         let cut = || Error::Corrupt("a write record cut short".into());
         let name = self.named(cid).ok_or_else(|| missing(cid))?;
+        // Each frame's length held to a location's, a record at a time.
+        #[cfg(target_pointer_width = "64")]
+        if body.len() > crate::store::payload_most() {
+            crate::store::frames_fit(body)?;
+        }
         let mut p = 0;
         while p < body.len() {
             let at = p;
@@ -9158,6 +9209,14 @@ impl Database {
                     )))
                 }
             };
+            // Its vectors held to this copy's graphs, the batch's waiting
+            // among them: a graph here may hold tombstones its primary's
+            // compact dropped. Refused as the primary refuses the write, a
+            // limit, not damage.
+            #[cfg(target_pointer_width = "64")]
+            if let (Some(doc), true) = (&new, c.crowded(batch.docs.len())) {
+                nodes_past(c, doc, old.as_ref(), batch.docs.len())?;
+            }
             // Remembered before the frame changes anything, as a write is
             // ([`Block::remember`]): a panic in its upkeep of the indexes
             // puts it back whole, and the record with it.
@@ -11765,6 +11824,29 @@ impl Database {
                     }
                 }
                 if held.is_none() {
+                    // The payload encoded here where no preparation holds
+                    // it, and held to a frame's length and the row's
+                    // vectors to their graphs' nodes before the row written
+                    // over leaves its indexes: a refusal changes nothing,
+                    // and the statement's block is put back. A prepared
+                    // payload was held where it was encoded
+                    // ([`Self::prepare`]).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let at = ready.filter(|_| encoded).map(|(at, _)| at + i);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let made = match at {
+                        Some(_) => Vec::new(),
+                        None => Store::encode_doc(&schema, &doc),
+                    };
+                    #[cfg(target_pointer_width = "64")]
+                    if made.len() > crate::store::payload_most() || c.crowded(written.len()) {
+                        let refused = crate::store::payload_fits(made.len())
+                            .and_then(|()| nodes_past(c, &doc, old.as_ref(), written.len()));
+                        if let Err(e) = refused {
+                            c.store.rewind(mark);
+                            return Err(e);
+                        }
+                    }
                     // Drop the old index entries when overwriting.
                     if let Some(old) = &old {
                         // A row this statement wrote has its vector waiting
@@ -11787,15 +11869,12 @@ impl Database {
                         c.unindex_doc(old, Some(&doc));
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    let made;
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let payload = match ready
-                        .filter(|_| encoded)
-                        .and_then(|(at, _)| self.preparation.payload(at + i))
-                    {
+                    let payload = match at.and_then(|at| self.preparation.payload(at)) {
                         Some(p) => p,
                         None => {
-                            made = Store::encode_doc(&schema, &doc);
+                            // Every document a preparation built has its
+                            // payload ([`Prepared::payload`]).
+                            debug_assert!(at.is_none(), "a prepared document without its payload");
                             &made[..]
                         }
                     };
@@ -15439,6 +15518,17 @@ impl Database {
         for h in hooks {
             h.before_overwrite(schema, &old, &doc)?;
         }
+        // Encoded, and held to a frame's length and its vectors to their
+        // graphs' nodes, before anything changes: the rows past their time a
+        // clash lets go of below, the row leaving its indexes. An upsert's
+        // `put` linked the vectors it wrote before it came here, so none
+        // waits.
+        let payload = Store::encode_doc(schema, &doc);
+        #[cfg(target_pointer_width = "64")]
+        if payload.len() > crate::store::payload_most() || c.crowded(0) {
+            crate::store::payload_fits(payload.len())
+                .and_then(|()| nodes_past(c, &doc, Some(&old), 0))?;
+        }
         // An update makes a duplicate as a put does: `set email = "a"`
         // over two documents is refused at the second. A value rows past
         // their time hold is let go of with them, as a `put`'s is
@@ -15465,7 +15555,6 @@ impl Database {
             b.remember(cid, id, c.store.loc(id), c.store.mark());
         }
         c.unindex_doc(&old, Some(&doc));
-        let payload = Store::encode_doc(schema, &doc);
         let frame = c.store.append(OP_PUT, id, &payload);
         c.index_doc(&doc, Some(&old));
         self.wal(REC_DATA, cid, &frame)?;
@@ -15736,6 +15825,13 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
         if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
             items.push((*id, v));
         }
+    }
+    // A collection holding more vectors than a graph has nodes for: what
+    // `create index` refuses, and an open of a file whose graph a release
+    // before the bound wrapped.
+    #[cfg(target_pointer_width = "64")]
+    if items.len() > crate::vector::MAX_NODES {
+        return Err(crate::vector::graph_full(field));
     }
     ix.insert_batch(&items);
     c.vectors.insert(field.clone(), ix);

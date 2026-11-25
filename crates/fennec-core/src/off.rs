@@ -55,6 +55,9 @@ impl VectorIndex {
     pub fn is_empty(&self) -> bool {
         match self.never {}
     }
+    pub fn nodes(&self) -> usize {
+        match self.never {}
+    }
     pub fn dead(&self) -> usize {
         match self.never {}
     }

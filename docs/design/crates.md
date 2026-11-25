@@ -177,20 +177,121 @@ the constant the code holds it by (`codec::MAX_DEPTH`,
 where it is defined) -- and the tests that hold it, found by file and
 function: one driving it (the bound taken, one past it refused in the
 page's words, a ranking or a list past it answering no row), one at the
-type's level where the row cannot be driven at its size (a 4 GiB payload,
-2^32 nodes, a stack), with why, or one showing the path either side of a
-number that is no refusal (a batch, a threshold, the change ring). A row
-added to the page owes its entry and its test: a row with no entry, an
-entry whose row is gone, a number the code does not hold and a test that
-is gone each fail naming it, in every build (`tests/features.rs` takes the
+type's level where the row cannot be driven at all (a stack, whose
+overflow aborts), with why, or one showing the path either side of a
+number that is no refusal (a batch, a threshold, the change ring). A bound
+no test machine reaches -- a 4 GiB payload, a graph of 2^32 - 1 nodes -- is
+driven all the same: where it is decided, at the bound and one past it,
+and through every write at a bound the test's thread holds it to (*A
+payload and a graph past a `u32`*, below). A named test is found as one CI
+runs (`held_by`): `#[test]` right before its `fn`, outside the file's
+comments and literals, neither `#[ignore]`d nor under a `cfg_attr`,
+nothing around it but `mod`s, and every `cfg` on it, on those `mod`s and on
+the file met by one of the builds CI's `make test` makes (Linux on x86-64
+and aarch64, macOS on aarch64, default features), a predicate it cannot
+read refused. Found as `fn <name>(` alone, as `tools/security_md_check.py`
+finds its tests, a helper of the name passed, as would a test commented
+out, ignored or `cfg`'d out of every build
+(`a_helper_or_a_test_ci_does_not_run_is_no_test`). A row added to the page
+owes its entry and its test: a row with no entry, an entry whose row is
+gone, a number the code does not hold and a test that is gone or does not
+run each fail naming it, in every build (`tests/features.rs` takes the
 file in, a row's own test `cfg`'d with the feature it needs). Written, it
 found `facet ... ranges` refusing 10 001 bounds -- the 10 000 ranges the
 page and the refusal's own words give -- held to the values' bound rather
-than one past it; and two casts past a type's width where a refusal is
-owed: a payload's length past `u32` (`Store::land_frame`) and a graph's
-2^32nd node (`alloc_links`), neither in a wasm32 build's reach and both
-past a test machine's memory: each wants a `Result` through every write
-path that lands one.
+than one past it; and two casts past a type's width where a refusal was
+owed, a payload's length and a graph's node id. Every path that lands
+either already returned a `Result`: only the check was missing.
+
+*A payload and a graph past a `u32`.* A document's payload is found by a
+location of three `u32`s (`store::Loc`, 12 bytes), its length one. Every
+release from v0.1.0 through v0.2.0 kept a longer payload's length cut to
+its low 32 bits (`Store::append`'s `payload.len() as u32`, later
+`land_frame`'s `payload_len as u32`), and an open cut it again reading the
+frame (`replay_mapped`'s `plen as u32`, the replay in memory's `len as
+u32`): the row read back short, or as no document. A wasm32 build cannot
+make one, its `Vec` stopping at 2 GiB; natively it is in reach -- two
+`vector<1000000000>` fields, a `[vector<1000000000>]` of two, an import of
+SQLite rows holding several values near 1 GB, and by the review's reading
+a `set` over HTTP copying a 60 MiB field into 70 others. A write is now
+refused past `store::MAX_PAYLOAD` (`u32::MAX` bytes), a query error naming
+the bound as every limit's is ("a document is at most 4294967295 bytes
+encoded, a u32's length, not 4294967296"), where it encodes the row and
+before anything of it changes (`store::payload_fits`): a `put`, its
+payload encoded above the row written over leaving its indexes, never
+twice, its id handed back (`rewind`); a `put`'s documents prepared beside
+the readers, one past the bound leaving the statement unprepared for the
+`put` to encode and refuse, as one that fails to build is -- each asked
+only where the statement's payloads together pass the bound; a `set` and an
+upsert's `else set`, before the rows past their time a clash lets go of.
+The statement's block is put back whole. An import, `put t $n`, a named
+statement's write and a block's spill all land through these. A frame
+read past the bound -- an open's replay, mapped or in memory, and a
+replica's apply -- is damage (`store::frames_fit`, `Error::Corrupt`),
+refused before any frame of its record lands. It is asked once a record,
+of one longer than a payload may be: a frame is held to what is left of
+its record, so a shorter one's frames all fit, and a compare a frame would
+be 100 000 instructions more an open of 100 000 rows. An image's index held
+a length to a `u32` already (`index_entry`), and walks the frames
+otherwise.
+
+A graph's node id is a `u32` too, held one up where a document finds its
+node (`by_doc`) and in the copies table, 0 for none: a graph holds
+`vector::MAX_NODES` (2^32 - 1) nodes, its tombstones and the nodes waiting
+to be linked among them -- a rolled back block leaves its vectors'
+nodes tombstones, until a compact rebuilds the graph without them. Every
+release from v0.1.0 through v0.2.0 cut the count to 32 bits
+(`alloc_links`'s `doc_ids.len() as u32`): the 2^32 + 1st node took node
+0's id and wrote its links over node 0's, and in v0.2.0, which holds an id
+one up, the 2^32nd already took the one read as none. The refusal cannot
+be where a vector's components are tested (`value::held`, `held_copy`),
+which knows the field and not its graph. It is where a write encodes the
+row, beside the payload's test (`Collection::crowded`): each graph's
+count, with the statement's vectors not yet placed added -- a `put`'s
+`written`, a replica's batch -- held to the bound (`vector::takes_node`), a
+compare a graph, a collection with none reading its count of graphs. Only at
+the bound is the document read (`nodes_past`, out of line): a vector the
+row held to the bit places no node (`VectorIndex::retire`) and is taken,
+by its bits, since `same` takes `-0.0` for `0.0`; any other is refused
+naming its field, a query error,
+"field `v`: a vector index holds at most 4294967295 nodes, its tombstones
+among them, which a compact drops". A replica refuses its primary's write
+so, not as damage: its graph may hold tombstones its primary's compact
+dropped. A graph made from documents -- `create index` under the lock and
+beside the database, an open rebuilding one -- refuses more vectors than
+the bound, a graph record counting more is rebuilt, and `alloc_links`
+asserts the bound it never meets. Both bounds are driven: at the bound and
+one past it where they are decided (`store::tests`, `vector::tests`), and
+through every write at a bound the test's thread holds payloads to, between
+two collections' rows, or graphs counted at the bound (`PAYLOAD_MOST`,
+`NODES_BESIDE`, test builds alone) -- each write refused with nothing
+changed, alone and in a block, the block put back whole, a write placing no
+node taken (`engine::unwinding`'s
+`a_document_past_a_frames_length_is_refused_and_its_block_put_back` and
+`a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`).
+
+*What the two cost.* A write tests both bounds in one branch: its
+payload's length against the bound and, in a collection with a graph, each
+graph's count (`crowded`), what a refusal needs out of line (`nodes_past`,
+`frames_fit`, the error's words). Against main before them (9351148f), in
+instructions an op on macOS (`tools/instr/compare.py`: 8 binary identities
+a build, 7 runs each, the load under 3), each inside two standard errors: a
+replica's apply of one `put` 4 819 to 4 844 and of a record of 100 frames
+298 296 to 298 170; a `put` over `/query` 21 193 to 21 160, and of 100
+documents prepared beside the readers 1 006 663 to 1 009 145; a `set` by id
+over REST 28 577 to 28 575 -- measured before a collection's count of
+graphs was read first, which takes instructions off. Traced in the build
+that has it, one call runs this many instructions of its own more: an
+apply 15 (`apply_frames`), a `put` 18, its encoded payload held past the
+unindex, a `set` 3 fewer, its encode inlined, and a block's preparation of
+a `put` of 100 documents 14. Two first shapes cost more and were changed:
+the node test inline, reading the row written over, put an apply 1% and a
+record of 100 2.6% over, outside two standard errors; and the payload's
+test asked of each prepared document was 5 instructions a document, 501 a
+preparation of 100 and 0.7% of the block. The browser
+module builds neither test -- a wasm32 `Vec` stops at 2 GiB, and its memory
+long before 2^32 nodes -- and grew 17 bytes, 863 579 to 863 596 (12
+gzipped).
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every

@@ -2593,6 +2593,58 @@ fn batch_len(nodes: usize) -> usize {
     (nodes / 16).clamp(MIN_BATCH, MAX_BATCH)
 }
 
+/// The nodes a graph holds at most, its tombstones and the nodes waiting
+/// to be linked among them (limits.html's "vector index node count"): a
+/// node's id is a `u32`, and the documents' nodes (`by_doc`) and the copies
+/// table ([`Same`]) hold it one up, 0 for none, so the last id a node may
+/// take is `u32::MAX - 1`. A write whose vector would place one more is
+/// refused before it changes anything ([`takes_node`], asked by the engine
+/// where it writes a row), and a graph made from a collection's documents
+/// is held to it where it is made. Every release from 0.1.0 through 0.2.0
+/// cut the count to 32 bits (`alloc_links`): the 2^32 + 1st node took node
+/// 0's id, its links written over node 0's, and in 0.2.0, which holds an id
+/// one up, the 2^32nd took the one read as none.
+pub const MAX_NODES: usize = u32::MAX as usize;
+
+#[cfg(test)]
+thread_local! {
+    /// Nodes a test's thread counts in every graph beside its own
+    /// ([`VectorIndex::nodes`]): a graph at [`MAX_NODES`] for the engine's
+    /// refusal to meet, which no test machine could build.
+    pub(crate) static NODES_BESIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn nodes_beside() -> usize {
+    NODES_BESIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn nodes_beside() -> usize {
+    0
+}
+
+/// Whether a graph of `nodes` takes one more node with `waiting` placed
+/// before it -- a statement's vectors not placed yet, each of which may
+/// take one ([`MAX_NODES`]).
+#[inline(always)]
+pub fn takes_node(nodes: usize, waiting: usize) -> bool {
+    nodes + waiting < MAX_NODES
+}
+
+/// The refusal of a vector that would take field `field`'s graph past
+/// [`MAX_NODES`]: a query error naming the field, as a limit is. A
+/// `compact` rebuilds a graph without its tombstones.
+#[cold]
+#[inline(never)]
+pub fn graph_full(field: &str) -> crate::error::Error {
+    crate::error::Error::Query(format!(
+        "field `{field}`: a vector index holds at most {MAX_NODES} nodes, its tombstones \
+         among them, which a compact drops"
+    ))
+}
+
 // -------------------------------------------------------------- HNSW
 
 /// Buffers reused during a search.
@@ -3555,6 +3607,14 @@ impl VectorIndex {
         self.len() == 0
     }
 
+    /// Nodes in the graph, its tombstones and the nodes waiting to be linked
+    /// among them: what [`MAX_NODES`] holds. A test's thread may count more
+    /// ([`NODES_BESIDE`]), a graph at the bound no test can make.
+    #[inline]
+    pub fn nodes(&self) -> usize {
+        self.doc_ids.len() + nodes_beside()
+    }
+
     /// Tombstones: nodes of documents deleted or rewritten, which stay in the
     /// graph -- still routing a search through them -- until it is rebuilt.
     pub fn dead(&self) -> usize {
@@ -3892,7 +3952,16 @@ impl VectorIndex {
 
     fn alloc_links(&mut self, doc: DocId, level: usize) -> u32 {
         self.changes += 1;
-        let node = self.doc_ids.len() as u32;
+        let node = self.doc_ids.len();
+        // Never reached: the engine refuses a write whose vector would place
+        // a node past `MAX_NODES` before it changes anything, and a graph
+        // made from documents is held to it where it is made (`build_graph`,
+        // `create index` beside the database). Cut to 32 bits, as it was,
+        // the 2^32nd node took the id `by_doc` reads as none, and the next
+        // node 0's. A 32-bit build's `Vec` of ids stops at 2^28.
+        #[cfg(target_pointer_width = "64")]
+        assert!(node < MAX_NODES, "a graph holds {MAX_NODES} nodes at most");
+        let node = node as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
         let end = self.doc_ids.len() * self.m0;
@@ -5217,6 +5286,12 @@ impl VectorIndex {
         if count > body.len() / 4 {
             return None;
         }
+        // Past what a graph holds: built again from the documents, which
+        // are held to it there (`build_graph`).
+        #[cfg(target_pointer_width = "64")]
+        if count > MAX_NODES {
+            return None;
+        }
         let read = match flat {
             true => Read::flat(body, count, ix.m0, stored, waits, aliased)?,
             false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
@@ -5736,18 +5811,34 @@ mod tests {
         }
     }
 
-    /// limits.html's "vector index node count": a node is a `u32` (2^32
-    /// of them), which no test can make -- at a dimension of 1 and the
-    /// least `m`, past 100 GB of links. Held at the type: the id a node is
-    /// given, and a graph record's count of them, are `u32`s. What past it
-    /// is refused is owed: `alloc_links` casts the count.
+    /// limits.html's "vector index node count": a graph takes its
+    /// `MAX_NODES`th node, the id `u32::MAX - 1`, and refuses the next --
+    /// counting the nodes a statement has yet to place -- where the engine
+    /// asks (`takes_node`); the ids are `u32`s, held one up where a node is
+    /// looked up, so the last one still has room there. A graph that size is
+    /// past 100 GB of links at a dimension of 1: the engine's refusal of a
+    /// write is driven over a graph counted at the bound
+    /// (`engine::tests::a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`).
     #[test]
-    fn a_node_is_a_u32() {
+    fn a_graph_takes_its_last_node_and_refuses_one_more() {
+        assert_eq!(MAX_NODES, u32::MAX as usize);
+        let last = (MAX_NODES - 1) as u32;
+        assert_eq!(last.checked_add(1), Some(u32::MAX), "held one up");
+        assert!(takes_node(MAX_NODES - 1, 0));
+        assert!(takes_node(MAX_NODES - 3, 2));
+        assert!(!takes_node(MAX_NODES, 0));
+        assert!(!takes_node(MAX_NODES - 1, 1));
+        assert!(!takes_node(MAX_NODES - 3, 3));
         let given: fn(&mut VectorIndex, DocId, usize) -> u32 = VectorIndex::alloc_links;
         let mut ix = VectorIndex::new(2, spec());
         ix.insert(7, &[1.0, 0.0]);
-        assert_eq!(given(&mut ix, 8, 0), 1);
-        assert_eq!(u32::MAX as u64 + 1, 1 << 32);
+        assert_eq!((given(&mut ix, 8, 0), ix.nodes()), (1, 2));
+        let refused = graph_full("v").to_string();
+        assert_eq!(
+            refused,
+            "query error: field `v`: a vector index holds at most 4294967295 nodes, its \
+             tombstones among them, which a compact drops"
+        );
     }
 
     /// A beam as wide as a graph's ids reach -- `near ... ef 4294967295`,
