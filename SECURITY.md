@@ -77,9 +77,13 @@ Vectors are no proof: a bug they miss is as welcome a report as any. What a
 browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.
 
 No outside audit has been made of this code, and 1.0 does not wait for
-one: before it, a review independent of the code's author goes over the
-hand-written cryptography, authentication and parsers, each finding fixed
-with a test. What an outside audit would take -- the files, their sizes,
+one. In its place a review independent of the code's author went over the
+hand-written cryptography and sealed files, the tokens at the HTTP edge
+and the router, the PostgreSQL and SQLite readers, and replication and
+both C ABIs; each finding fixed was fixed with a test that fails without
+the fix, and those still open are named, with their place in the code, in
+the rows of the [threat model](docs/design/security.md#the-boundaries)
+they belong to. What an outside audit would take -- the files, their sizes,
 the vectors and fuzzing that hold them, and the questions to start from --
 is kept current in the
 [threat model](docs/design/security.md#an-outside-audit), so that one can

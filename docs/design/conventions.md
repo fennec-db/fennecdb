@@ -1264,7 +1264,16 @@ by SECURITY.md's own functions. When the table was written it counted 825
 things (41 boundaries, 141 enforcing items, 107 cited tests, 175 of the
 threat model's paths and anchors, 18 of its flags, 4 promises), and named
 the 9 rows saying "no test" on a line of their own, as it does on every
-run: what no test proves is listed, never passed over.
+run: what no test proves is listed, never passed over. After the internal
+review's fixes (#677, #678, #679) were written into the rows it counts 937
+(41 boundaries, 175 enforcing items, 160 cited tests, 182 of the threat
+model's paths and anchors, 20 of its flags, 4 promises) and names 10: a
+release's provenance left the list, its jobs' permissions now held by
+`tools/workflow_check.py` and its files' attestations by
+`tools/release-verify.sh`, each with its tests, and two rows joined it
+for what the review found no test of (a forged `Commit`'s end on a
+PostgreSQL stream not proven; the system's randomness answering
+nothing).
 
 The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
 lands on `main` and the pull request says which releases had the bug; from

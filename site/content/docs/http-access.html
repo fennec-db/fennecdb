@@ -842,12 +842,13 @@ fennec-server --file data.fennec --http 0.0.0.0:8080 --jwt-keys jwks.json --poli
 <details class="deep"><summary>How keys, algorithms and token checks work, timed</summary>
 <p><code>--jwt-keys</code> takes a JWKS file, <code>{"keys": [...]}</code>, in
 place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
-least 32 bytes. An <code>RSA</code> key of at least 2048 bits verifies RS256
+least 32 bytes. An <code>RSA</code> key whose modulus is 256 to 1 024 bytes
+(2041 to 8192 bits) and whose exponent is odd, from 3, verifies RS256
 tokens, which is what Auth0, Clerk, Firebase and most identity providers
 sign with. An <code>EC</code> key on the P-256 curve verifies ES256 tokens
 (ECDSA with SHA-256), as Supabase Auth's EC signing keys sign them; its
 <code>x</code> and <code>y</code> must be a point of the curve, or the
-whole file is refused, as it is for an RSA key under 2048 bits. A file
+whole file is refused, as it is for an RSA key outside those sizes. A file
 whose malformed P-256 key an earlier version skipped therefore no longer
 loads: at the start the server refuses it, and on a reload it keeps the
 keys it read last. A token one of these providers issues is taken with
