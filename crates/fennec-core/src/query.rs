@@ -2812,10 +2812,12 @@ impl Select {
             }
             if let Some(bounds) = &f.ranges {
                 // One message for every way to get them wrong: each was a
-                // string of the browser module's.
+                // string of the browser module's. `MAX_FACET_VALUES` ranges
+                // take one bound more: held to the values, 10 001 bounds
+                // were refused in words that took them (`limits_docs`).
                 if f.top.is_some()
                     || bounds.len() < 2
-                    || bounds.len() > MAX_FACET_VALUES
+                    || bounds.len() > MAX_FACET_VALUES + 1
                     || bounds
                         .iter()
                         .any(|b| !matches!(b, Value::Int(_) | Value::Float(_)))

@@ -2450,6 +2450,34 @@ mod tests {
         assert_eq!(st.len(), 0);
     }
 
+    /// limits.html's "gap in an externally given id": an id at most 4 096
+    /// past the dense array's end grows it, one further goes into the
+    /// sparse map -- a path, not a refusal: either way the id is found.
+    #[test]
+    fn a_gap_of_4096_grows_the_dense_array_and_one_more_does_not() {
+        let at = Loc {
+            seg: 0,
+            off: 0,
+            len: 1,
+        };
+        let mut ix = IdIndex::default();
+        ix.insert(1, at);
+        ix.insert(1 + MAX_DENSE_GAP, at);
+        assert_eq!(
+            (ix.dense.len() as u64, ix.sparse.len()),
+            (1 + MAX_DENSE_GAP, 0)
+        );
+        let far = 2 + 2 * MAX_DENSE_GAP;
+        ix.insert(far, at);
+        assert_eq!(
+            (ix.dense.len() as u64, ix.sparse.len()),
+            (1 + MAX_DENSE_GAP, 1)
+        );
+        for id in [1, 1 + MAX_DENSE_GAP, far] {
+            assert_eq!(ix.get(id), Some(at), "{id}");
+        }
+    }
+
     #[test]
     fn id_index_handles_sparse_ids() {
         let sc = schema();

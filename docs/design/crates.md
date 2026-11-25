@@ -169,6 +169,29 @@ and `1e-400` as 0 (`num::read_f64`,
 [vector-search.md](vector-search.md#numbers-in), *Past the range,
 refused*). Full table in `site/content/docs/limits.html`.
 
+*The page is held to the code.* `crates/fennec-core/tests/limits_docs.rs`
+reads the page's table of fixed limits and holds every row to one entry of
+its list: the row's words, the numbers its value cell says -- read from
+the constant the code holds it by (`codec::MAX_DEPTH`,
+`engine::MAX_NEAR_ROWS`; a server's default or a private constant read
+where it is defined) -- and the tests that hold it, found by file and
+function: one driving it (the bound taken, one past it refused in the
+page's words, a ranking or a list past it answering no row), one at the
+type's level where the row cannot be driven at its size (a 4 GiB payload,
+2^32 nodes, a stack), with why, or one showing the path either side of a
+number that is no refusal (a batch, a threshold, the change ring). A row
+added to the page owes its entry and its test: a row with no entry, an
+entry whose row is gone, a number the code does not hold and a test that
+is gone each fail naming it, in every build (`tests/features.rs` takes the
+file in, a row's own test `cfg`'d with the feature it needs). Written, it
+found `facet ... ranges` refusing 10 001 bounds -- the 10 000 ranges the
+page and the refusal's own words give -- held to the values' bound rather
+than one past it; and two casts past a type's width where a refusal is
+owed: a payload's length past `u32` (`Store::land_frame`) and a graph's
+2^32nd node (`alloc_links`), neither in a wasm32 build's reach and both
+past a test machine's memory: each wants a `Result` through every write
+path that lands one.
+
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
 dimension, beam and count of candidates or words, `hi` a `u32` so the

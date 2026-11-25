@@ -2576,6 +2576,23 @@ pub(crate) const UNLINKED: bool = cfg!(not(target_arch = "wasm32"));
 /// the ceiling of the "1/16 of the graph size" rule.
 const MAX_BATCH: usize = 512;
 
+/// Lower bound on a batch: 1/16 of a graph of [`PARALLEL_FROM`] nodes, the
+/// smallest one linked in parallel, so the floor is met where batches begin.
+const MIN_BATCH: usize = 64;
+
+/// The nodes a graph holds before a batch of them is linked in parallel.
+/// Below it each node goes in on its own, seeing every node before it, so a
+/// small collection loses no recall to nodes that cannot see each other;
+/// and its sixteenth, a batch, is too few to share among threads.
+const PARALLEL_FROM: usize = 1024;
+
+/// The nodes linked as one batch into a graph of `nodes`: 1/16 of it, held
+/// to [`MIN_BATCH`]..=[`MAX_BATCH`] (limits.html's "bulk insert batch").
+#[inline]
+fn batch_len(nodes: usize) -> usize {
+    (nodes / 16).clamp(MIN_BATCH, MAX_BATCH)
+}
+
 // -------------------------------------------------------------- HNSW
 
 /// Buffers reused during a search.
@@ -4377,10 +4394,10 @@ impl VectorIndex {
             // inserting 100k into an empty index in one go would drop the
             // whole batch onto the serial path -- exactly when it should
             // parallelise as the graph grows.
-            if threads < 2 || self.doc_ids.len() < 1024 {
+            if threads < 2 || self.doc_ids.len() < PARALLEL_FROM {
                 let take = rest
                     .len()
-                    .min(1024_usize.saturating_sub(self.doc_ids.len()).max(1));
+                    .min(PARALLEL_FROM.saturating_sub(self.doc_ids.len()).max(1));
                 for (doc, v) in &rest[..take] {
                     self.insert(*doc, v);
                 }
@@ -4388,9 +4405,7 @@ impl VectorIndex {
                 continue;
             }
 
-            let chunk_len = (self.doc_ids.len() / 16)
-                .clamp(64, MAX_BATCH)
-                .min(rest.len());
+            let chunk_len = batch_len(self.doc_ids.len()).min(rest.len());
             let (chunk, tail) = rest.split_at(chunk_len);
             rest = tail;
 
@@ -4508,8 +4523,8 @@ impl VectorIndex {
         let mut linked = self.doc_ids.len() - self.pending.len() - todo.len();
         let mut rest = &todo[..];
         while !rest.is_empty() {
-            if threads < 2 || linked < 1024 || self.entry.is_none() {
-                let take = rest.len().min(1024_usize.saturating_sub(linked).max(1));
+            if threads < 2 || linked < PARALLEL_FROM || self.entry.is_none() {
+                let take = rest.len().min(PARALLEL_FROM.saturating_sub(linked).max(1));
                 for (node, level, query) in &rest[..take] {
                     self.link_node(*node, *level, None, query.as_deref());
                 }
@@ -4517,7 +4532,7 @@ impl VectorIndex {
                 linked += take;
                 continue;
             }
-            let (chunk, tail) = rest.split_at((linked / 16).clamp(64, MAX_BATCH).min(rest.len()));
+            let (chunk, tail) = rest.split_at(batch_len(linked).min(rest.len()));
             rest = tail;
             linked += chunk.len();
             if scratch.is_empty() {
@@ -5666,6 +5681,73 @@ mod tests {
         let r = ix.search(&[10.2, 0.0], 3, None, |_| true);
         assert_eq!(r[0].0, 10);
         assert_eq!(ix.len(), 200);
+    }
+
+    /// limits.html's "bulk insert batch": a sixteenth of the graph, held
+    /// to 64..=512 -- a clamp the page calls one, not a refusal: a batch
+    /// is how many nodes are linked at once, and either side of its ends
+    /// links the same vectors. The floor is met where batches begin.
+    #[test]
+    fn a_batch_is_a_sixteenth_of_the_graph_held_to_its_range() {
+        assert_eq!(batch_len(PARALLEL_FROM), MIN_BATCH);
+        assert_eq!(batch_len(PARALLEL_FROM - 16), MIN_BATCH, "under the floor");
+        assert_eq!(batch_len(PARALLEL_FROM + 16), MIN_BATCH + 1);
+        assert_eq!(batch_len(2048), 128);
+        assert_eq!(batch_len(16 * MAX_BATCH - 16), MAX_BATCH - 1);
+        assert_eq!(batch_len(16 * MAX_BATCH), MAX_BATCH);
+        assert_eq!(
+            batch_len(16 * MAX_BATCH + 16),
+            MAX_BATCH,
+            "past the ceiling"
+        );
+        assert_eq!(batch_len(usize::MAX), MAX_BATCH);
+    }
+
+    thread_local! {
+        /// The batches [`counted`] linked on this thread, by their nodes.
+        static LINKED: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// [`VectorIndex::link_batch`], each batch's nodes noted.
+    fn counted(ix: &mut VectorIndex, computed: Candidates, threads: usize) {
+        LINKED.with(|l| l.borrow_mut().push(computed.len()));
+        VectorIndex::link_batch(ix, computed, threads);
+    }
+
+    /// limits.html's "parallel build threshold": below 1 024 nodes each
+    /// goes in on its own, from 1 024 in batches -- a path, not a
+    /// refusal. Every vector is linked either way.
+    #[test]
+    fn a_graph_links_in_batches_from_1024_nodes() {
+        let items: Vec<(DocId, Vec<f32>)> = (0..PARALLEL_FROM as u64 + 200)
+            .map(|i| (i, vec![(i % 97) as f32, (i / 97) as f32]))
+            .collect();
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert_batch_by(&items[..PARALLEL_FROM], counted);
+        assert_eq!(ix.len(), PARALLEL_FROM);
+        assert!(LINKED.with(|l| l.borrow().is_empty()), "in turn below it");
+        ix.insert_batch_by(&items[PARALLEL_FROM..], counted);
+        assert_eq!(ix.len(), items.len());
+        let batches = LINKED.with(|l| l.take());
+        match VectorIndex::threads() {
+            // One thread links every node in turn, whatever the graph.
+            1 => assert!(batches.is_empty(), "{batches:?}"),
+            _ => assert_eq!(batches, [64, 68, 68], "from it, a sixteenth at a time"),
+        }
+    }
+
+    /// limits.html's "vector index node count": a node is a `u32` (2^32
+    /// of them), which no test can make -- at a dimension of 1 and the
+    /// least `m`, past 100 GB of links. Held at the type: the id a node is
+    /// given, and a graph record's count of them, are `u32`s. What past it
+    /// is refused is owed: `alloc_links` casts the count.
+    #[test]
+    fn a_node_is_a_u32() {
+        let given: fn(&mut VectorIndex, DocId, usize) -> u32 = VectorIndex::alloc_links;
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert(7, &[1.0, 0.0]);
+        assert_eq!(given(&mut ix, 8, 0), 1);
+        assert_eq!(u32::MAX as u64 + 1, 1 << 32);
     }
 
     /// A beam as wide as a graph's ids reach -- `near ... ef 4294967295`,

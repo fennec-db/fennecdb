@@ -96,6 +96,36 @@ fn a_number_past_its_range_is_refused_naming_it() {
             "get v near e [1, 0, 0] ef 4294967297".into(),
             "`ef` is 1 to 4294967295, not 4294967297",
         ),
+        // One past each end limits.html gives (`limits_docs`): the bound
+        // and the number after it, each read as written.
+        (
+            "get v near e [1, 0, 0] ef 4294967296".into(),
+            "`ef` is 1 to 4294967295, not 4294967296",
+        ),
+        (
+            format!("{v} @hnsw(ef_search=4294967296))"),
+            "`ef_search` is 1 to 4294967295, not 4294967296",
+        ),
+        (
+            r#"get d select snippet(body, 4294967296) match body "x""#.into(),
+            "a snippet's length in words is 1 to 4294967295, not 4294967296",
+        ),
+        (
+            r#"get d select snippet(body, 0) match body "x""#.into(),
+            "a snippet's length in words is 1 to 4294967295, not 0",
+        ),
+        (
+            r#"get d match body "x" rerank e [1, 0] candidates 10001"#.into(),
+            "`candidates` is 1 to 10000, not 10001",
+        ),
+        (
+            r#"get d match body "x" near e [1, 0] fuse candidates 10001"#.into(),
+            "`candidates` is 1 to 10000, not 10001",
+        ),
+        (
+            r#"get d match body "x" near e [1, 0] fuse k 1000001"#.into(),
+            "`k` is 0 to 1000000, not 1000001",
+        ),
         // A place past `usize` names no item of the list.
         (
             "select a, b from d order by 4294967297".into(),
