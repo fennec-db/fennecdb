@@ -4843,7 +4843,9 @@ impl VectorIndex {
     /// node no other list holds ([`Self::held_elsewhere`]), that node kept
     /// in the place of the last chosen that another list holds, and nothing
     /// changed where none is; nor where the list chosen again leaves `node`
-    /// out. A link back made as a link is let go of what a pruning drops:
+    /// out. The keep runs only where `m` is [`KEEP_M`] or under; past it a
+    /// link back is the link it was. A link back made as a link is let go
+    /// of what a pruning drops:
     /// over the review's stress, 300 rows at m = 4 under 120 blocks a seed,
     /// two thirds rolled back, 255 live nodes no walk from the entry
     /// reached summed over the rollbacks of 4 seeds (main: 98), 559 over 16

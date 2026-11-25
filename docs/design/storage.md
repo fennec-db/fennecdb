@@ -665,7 +665,7 @@ nothing a document holds, and fails only as storage fails:
   is, and is refused where it is read, in the same words, after the compact
   as before.
 - A graph holding tombstones is built again from every document's vector
-  (`build_graph` under the lock, `begin_graphs` and `finish_graphs` beside
+  (`build_graph` under the lock, `begin_graph` and `finish_graphs` beside
   the database). A document it cannot read leaves the graph as it stands,
   tombstones and all, answering as it did; a graph built without the
   document would not. No file brings such a document to it today: an open
