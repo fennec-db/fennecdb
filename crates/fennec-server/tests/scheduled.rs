@@ -16,9 +16,10 @@ fn now_ms() -> i64 {
     fennec_core::time::now_ms().unwrap()
 }
 
-/// The start of this hour, the clock read once: reading it twice -- `now_ms()
-/// - now_ms().rem_euclid(HOUR)` -- took a millisecond between the two on a
-/// loaded macOS runner and put the hour a millisecond before the slot it ran.
+/// The start of this hour, the clock read once. Reading it twice, as
+/// `now_ms() - now_ms().rem_euclid(HOUR)` did, took a millisecond between the
+/// two on a loaded macOS runner and put the hour a millisecond before the
+/// slot it ran.
 fn this_hour() -> i64 {
     let now = now_ms();
     now - now.rem_euclid(HOUR)
