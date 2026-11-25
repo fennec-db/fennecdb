@@ -151,7 +151,13 @@ go of a node no other list holds, kept then in the place of the last it
 chose that another list holds (`link_back_into`): pruned as a link is,
 at m = 4 the links back took nodes' other ways in, and later writes'
 pruning left more live nodes no walk reached than main's rollback did
-([crates.md, limits](crates.md#limits)). Each of its lists holding a
+([crates.md, limits](crates.md#limits)). Asking whether another list
+holds a node reads about `m0` squared list entries, and a link back asks
+it of each node its list chose: about `m0` cubed a link back, 556 at
+m = 4 and 23 995 at m = 16 at the most over the review's stress, 157 494
+at m = 32, so it is asked up to an `m` of 16 alone (`KEEP_M`), past which
+a link back is a link -- at m = 32 the stress left no node unreached
+either way, and the misses 0.3 to 0.8% more without it. Each of its lists holding a
 node the put-back made a tombstone, the block's (`taken`), is then chosen
 again from its live nodes and those its tombstones' lists hold, pruned
 the same way (`mend`): a `put` linked as a
@@ -162,7 +168,11 @@ that made a node live or a tombstone there -- the block's node placed
 above the top level -- moves to the live node, none waiting to be
 linked, of the highest level a walk from it down its levels meets in 256
 lists (`enter_live`, `live_near`), the top level falling with it: the
-block's start's entry, in a graph linked in node order. Every node is
+block's start's entry, in a graph linked in node order, where the walk
+meets it -- the highest live node the walk meets, not always the highest
+the graph holds (at m = 2, 1 of 86 moves over the stress's 16 seeds left a
+live node a level above the top, reached through its lower lists as any
+node is; [crates.md, limits](crates.md#limits)). Every node is
 walked only where that meets none and the entry is the block's
 (`live_anywhere`); a block that wrote no vector there puts nothing back.
 A delete leaves the entry where it is, its links still walked, and

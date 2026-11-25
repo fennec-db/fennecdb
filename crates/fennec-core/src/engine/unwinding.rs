@@ -2488,6 +2488,71 @@ mod torn {
         }
     }
 
+    /// A link back looks for a node its pruning would let go of that no
+    /// other list holds, to keep it, up to an `m` of 16 alone
+    /// (`vector::KEEP_M`): asked of each node a list chose, it reads about
+    /// `m0` cubed list entries a link back, under the write lock. A block
+    /// writing 200 rows' vectors over 600, rolled back: at `m` 16 and 17
+    /// both prune links back, and only the first asks another list.
+    #[test]
+    fn a_link_back_keeps_a_node_up_to_m_16_alone() {
+        use crate::vector::LINKS_BACK;
+        let dim = 8usize;
+        for (m, asks) in [(16, true), (17, false)] {
+            let mut r = 5u64.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut next = move || {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                (0..dim)
+                    .map(|k| ((r >> (k * 7)) & 0x7f) as f32 / 128.0 - 0.5)
+                    .collect::<Vec<f32>>()
+            };
+            let mut db = Database::new();
+            let mut spec = VectorIndexSpec::default();
+            (spec.m, spec.ef_construction) = (m, 40);
+            let field = Field::new("v", DataType::Vector(dim as _, VecPrec::F32));
+            db.execute(&Statement::CreateCollection {
+                schema: Schema::new("t", vec![field.indexed(IndexKind::Vector(spec.resolved()))])
+                    .expect("t"),
+                if_not_exists: false,
+            })
+            .expect("create");
+            for id in 1..=600 {
+                db.execute(&Statement::Put {
+                    collection: "t".into(),
+                    docs: vec![vec![
+                        ("id".to_string(), Expr::Lit(Value::Int(id))),
+                        ("v".to_string(), Expr::Lit(Value::Vector(next()))),
+                    ]],
+                    docs_param: None,
+                    insert: false,
+                    if_absent: false,
+                    else_set: None,
+                    require: None,
+                    pick: None,
+                })
+                .expect("a row");
+            }
+            LINKS_BACK.with(|c| c.set((0, 0)));
+            db.begin().expect("begin");
+            for id in (1..=600).step_by(3) {
+                db.execute(&Statement::Update {
+                    collection: "t".into(),
+                    set: vec![("v".into(), Expr::Lit(Value::Vector(next())))],
+                    filter: Some(eq("id", Value::Int(id))),
+                    require: None,
+                    pick: None,
+                })
+                .expect("a row's vector");
+            }
+            db.rollback();
+            let (pruned, asked) = LINKS_BACK.with(|c| c.get());
+            assert!(pruned > 0, "m {m}: no link back pruned");
+            assert_eq!(asked > 0, asks, "m {m}: {asked} nodes asked");
+        }
+    }
+
     /// A row written twice in one block is given back the node it held as
     /// the block began: A, null and A again, rolled back; and A, then B,
     /// then A again by a write a panic stopped once it placed A's node

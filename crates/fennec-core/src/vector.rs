@@ -2635,11 +2635,38 @@ pub(crate) fn nodes_beside() -> usize {
 #[cfg(target_pointer_width = "64")]
 const ENTER_STEPS: usize = 256;
 
+/// The widest `m` whose link back keeps a node its pruning would let go of
+/// that no other list holds ([`VectorIndex::link_back_into`]). Looking for
+/// one costs about `m0` squared list entries a node asked
+/// ([`VectorIndex::held_elsewhere`]) and `m0` cubed a link back -- `m0`
+/// to the fourth a node made live -- where the pruning beside it measures
+/// about `m0` squared distances of the dimensions each: over the review's
+/// stress the most one link back read was 556 entries at m = 4, 23 995 at
+/// m = 16 and 157 494 at m = 32, and at `MAX_M`'s 32 767 it would be some
+/// 10^14, under the write lock. Past it a link back is a link, as before
+/// the keep. The keep matters where lists are short: at m = 4 it took the
+/// live nodes no walk reached from 255 to 70 over 4 seeds and 559 to 285
+/// over 16, where at m = 16 there were none either way. At m = 32, past
+/// it, there were none either, and the rows their own vector missed at
+/// ef 16 were 3 370 and 26 049 against the keep's 3 342 and 25 976 (0.8%
+/// and 0.3% more).
+#[cfg(target_pointer_width = "64")]
+const KEEP_M: usize = 16;
+
 #[cfg(test)]
 thread_local! {
     /// The walks over every node [`VectorIndex::enter_live`] made on this
     /// thread, for a test holding a rollback to the bound it keeps.
     pub(crate) static ENTRY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The links back [`VectorIndex::link_back_into`] made through a
+    /// pruning on this thread, and the nodes [`VectorIndex::held_elsewhere`]
+    /// was asked of, for a test holding the keep to [`KEEP_M`].
+    pub(crate) static LINKS_BACK: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Whether a graph of `nodes` takes one more node with `waiting` placed
@@ -4842,6 +4869,13 @@ impl VectorIndex {
         if !chosen.contains(&node) {
             return;
         }
+        #[cfg(test)]
+        LINKS_BACK.with(|c| c.set((c.get().0 + 1, c.get().1)));
+        // Past `KEEP_M` a link back is the link it was ([`KEEP_M`]).
+        if self.spec.m > KEEP_M {
+            self.set_neighbors(nb, l, &chosen);
+            return;
+        }
         let list = self.neighbors(nb, l);
         // `x`, let go of and held nowhere else, kept: in a place the list
         // has, or in that of the last chosen another list holds.
@@ -4885,9 +4919,13 @@ impl VectorIndex {
     /// Whether a list other than `owner`'s holds `x`: one of the nodes
     /// `x`'s own lists reach, at that level, as a link's links back leave
     /// them -- the lists a walk most likely reaches it through, read
-    /// without a walk.
+    /// without a walk. It reads each list `x`'s lists reach, about `m0`
+    /// squared entries a call, and a link back asks it of each node its
+    /// list chose, about `m0` cubed: held to `m` of [`KEEP_M`] at most.
     #[cfg(target_pointer_width = "64")]
     fn held_elsewhere(&self, x: u32, owner: u32) -> bool {
+        #[cfg(test)]
+        LINKS_BACK.with(|c| c.set((c.get().0, c.get().1 + 1)));
         (0..=self.node_levels(x)).any(|l| {
             (self.neighbors(x, l).iter()).any(|&y| y != owner && self.neighbors(y, l).contains(&x))
         })
@@ -5145,8 +5183,19 @@ impl VectorIndex {
     /// the browser module's still does, links each one by a search from
     /// that entry, so it reached them. In a graph linked in node order the
     /// entry is the first node at its top level, so a block put back whole
-    /// has the entry and top level of its start. Never a node waiting to
-    /// be linked, which holds no links to walk. Where the walk meets none
+    /// has the entry and top level of its start where the walk meets that
+    /// node: the highest live node the walk meets, not the highest the graph
+    /// holds. At m = 2 over the review's stress, 1 of 86 moves over 16 seeds
+    /// took the top level to 8 while a live node of level 9 stood four lists
+    /// away, reached only through a level-7 list or the level-9 lists of two
+    /// tombstones the walk never met; walking one level past the first that
+    /// meets a live node found it, and changed nothing at m = 4, 16 or 32,
+    /// but took the most lists a walk read from 59 to 109 at m = 2 and from
+    /// 85 to the bound of 256 at m = 16, and reading the upper lists of the
+    /// nodes met below their top did not find it. A node above the top
+    /// level is a node like any other to a search, reached through its
+    /// lower lists. Never a node waiting to be linked, which holds no links
+    /// to walk. Where the walk meets none
     /// and the entry is a node the put-back took (`own`, the block's), every
     /// node is walked ([`Self::live_anywhere`]); a delete of the entry's
     /// row leaves the entry where it is, its links still walked, and so

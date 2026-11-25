@@ -342,7 +342,17 @@ The review would have the links back made into live nodes alone, a
 tombstone's pruning wasted: made so, 145 and 491 unreached and 8 948 and
 28 914 missed, a tombstone still routing the walks that reach the node
 made live; with no link back made where the pruning would let go of such
-a node, 17 and 315 unreached but 3 979 and 17 556 missed. Measured over
+a node, 17 and 315 unreached but 3 979 and 17 556 missed. Whether another
+list holds a node reads the lists of the nodes its own lists reach, about
+`m0` squared entries, asked of each node a list chose: about `m0` cubed a
+link back, the most read by one 556 at m = 4, 23 995 at m = 16 and
+157 494 at m = 32, and some 10^14 at `m`'s bound of 32 767, under the
+write lock, where the pruning beside it measures about `m0` squared
+distances. So a node is kept only up to an `m` of 16 (`KEEP_M`); past it
+a link back is a link. At m = 32 the stress left no live node unreached
+either way, the rows their own vector missed at ef 16 3 370 and 26 049
+without the keep against 3 342 and 25 976 with it (4 and 16 seeds).
+Measured over
 4 000 x 32, m = 16, after a block writing every row's vector
 again was rolled back (3 seeds; misses are rows their own vector does not
 find, recall@10 at ef 100 over 500 other queries): left with no links in,
@@ -376,9 +386,10 @@ tombstone -- the block's, kept in turn as it takes them out (`taken`) --
 is chosen again from its live nodes and the live nodes its tombstones'
 lists hold at that level, through the same pruning, no search made, and
 its links back made (`mend`); and an entry the put-back left a tombstone
-moves to the first live node, none waiting to be linked, at the highest
-level a live node holds, the top level falling to it (`enter_live`): in a
-graph linked in node order, the block's start's entry and top level. The
+moves to a live node, none waiting to be linked, of the highest level a
+walk from it meets, the top level falling to it (`enter_live`): in a
+graph linked in node order, the block's start's entry and top level where
+the walk meets it. The
 entry moved alone left 118 to 159 and 12 to 20; the lists chosen again
 alone, 342 to 427 and 39 to 70; both, none and none in every shape and
 seed, recall@10 1.0 over 2 000 x 16 after the `put` and the `set`, and
@@ -411,14 +422,26 @@ other field took 282 558 instructions to put back, where main took
 met a live node, within 37 lists at m = 4 and 85 at m = 16, and none
 walked every node. Moved only where the put-back took the entry, the
 stress missed 4 233 rows against 3 610 (16 seeds: 16 545 against 14 474;
-at m = 16, 3 076 and 7 180 against 2 014 and 5 440). The 4 000 rows'
+at m = 16, 3 076 and 7 180 against 2 014 and 5 440). The walk finds the
+highest live node it meets, not the highest the graph holds: at m = 2
+over 16 seeds, 1 of 86 moves left the top level at 8 while a live node of
+level 9 stood four lists from the entry, its ways in a level-7 list and
+the level-9 lists of two tombstones the walk never met. Walking one level
+past the first that meets a live node found it, and moved nothing at
+m = 4, 16 or 32, but took the most lists a walk read from 59 to 109 at
+m = 2 and from 85 to the bound of 256 at m = 16; reading the upper lists
+of the nodes met below their top did not find it. Neither was taken: a
+node above the top level is one like any other to a search, reached
+through its lower lists, and at m = 4, 16 and 32 none was left so. The 4 000 rows'
 rollback takes 28.5 to 29.8 ms, 26.2 to 28.2 with each link back pruned
 as a link is (2 000 x 16: 12.7 to 13.2 against 11.7 to 12.4), 10 to 16
 with the links back alone and 360 to 470 placing the vectors again. A
 block put back whole, then,
 has its rows' nodes back, each with its links both ways, its lists that
 held the block's nodes chosen again from the live nodes those led to, and
-the entry and top level of its start; the nodes it placed stay in the
+the entry and top level of its start where the walk meets its node, the
+highest live node the walk meets where it does not; the nodes it placed
+stay in the
 graph, tombstones, until it is made again (a compact, an open rebuilding
 it); a put-back places a node only where none is
 held, and only where the graph takes one. A node a tombstone once until a
@@ -504,7 +527,9 @@ is, every node unwalked, and one writing a vector moving it by the walk
 from it (`a_rollback_writing_no_vector_leaves_the_entry_where_it_is`),
 the stress's blocks at m = 4 on the seed where a rollback's pruning took
 a node's last way in, each rollback leaving reachable every node its
-block's start reached (`a_rollback_takes_no_node_its_last_way_in`), a
+block's start reached (`a_rollback_takes_no_node_its_last_way_in`), its
+links back asking another list at m = 16 and none at 17
+(`a_link_back_keeps_a_node_up_to_m_16_alone`), a
 row written A, null, A and one written A, B, A by a write a panic
 stopped, each given the node it began the block with
 (`a_row_written_twice_in_a_block_gets_the_node_it_began_with`), and every
