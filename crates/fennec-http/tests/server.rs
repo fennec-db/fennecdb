@@ -23,6 +23,7 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(60);
 struct Harness {
     port: u16,
     db: Arc<RwLock<Database>>,
+    server: Arc<Server>,
 }
 
 fn start(cfg: Config, db: Database) -> Harness {
@@ -40,12 +41,14 @@ fn start_with(mut cfg: Config, db: Database, cdc: bool) -> Harness {
         let feed = Some(Feed::new(1 << 20));
         server = server.with_replication(Replication::new(None, feed, None));
     }
+    let server = Arc::new(server);
     let listener = server.bind().expect("bind");
     let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&server);
     std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
-    Harness { port, db }
+    Harness { port, db, server }
 }
 
 /// A keep-alive connection: requests one after another, as a client's pool
@@ -1549,6 +1552,216 @@ fn a_connection_whose_handling_panics_gives_its_slot_back() {
         rows.contains(r#""count":0"#),
         "every write put back: {rows}"
     );
+}
+
+/// A database with the collection `t (n int)` a stream reads.
+fn streamed() -> Database {
+    let mut db = Database::new();
+    db.execute(&fennec_ql::parse_one("create collection t (n int)").unwrap())
+        .unwrap();
+    db
+}
+
+/// A subscription on a connection of its own: its status and what it
+/// said, read to its seed's event where it streams -- past every place it
+/// takes, its connection's given back before its head -- or to the end of
+/// its connection where it was refused, whose place went back before.
+struct Subscribed {
+    status: u16,
+    said: String,
+    r: BufReader<TcpStream>,
+}
+
+fn subscribe(port: u16, target: &str) -> Subscribed {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+    s.write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut r = BufReader::new(s);
+    let mut said = String::new();
+    let line = |r: &mut BufReader<TcpStream>, said: &mut String| {
+        let mut line = String::new();
+        let n = r.read_line(&mut line).expect("the stream's answer");
+        said.push_str(&line);
+        (n, line)
+    };
+    // The head, to its blank line.
+    loop {
+        let (n, l) = line(&mut r, &mut said);
+        if n == 0 || l == "\r\n" {
+            break;
+        }
+    }
+    let status = said
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if status == 200 {
+        loop {
+            let (n, l) = line(&mut r, &mut said);
+            assert!(n > 0, "ended before its seed: {said}");
+            if l.starts_with("event: seed") {
+                break;
+            }
+        }
+    } else {
+        let _ = r.read_to_string(&mut said);
+    }
+    Subscribed { status, said, r }
+}
+
+/// `n` connections kept alive, each answered: as many places under
+/// `--max-connections` held while they live.
+fn kept_alive(port: u16, n: usize) -> Vec<Conn> {
+    (0..n)
+        .map(|_| {
+            let mut c = Conn::open(port);
+            ok(c.query("collections"));
+            c
+        })
+        .collect()
+}
+
+/// A connection past `--max-connections`, refused as it is taken.
+fn refused_a_connection(port: u16) {
+    let (status, body) = Conn::open(port)
+        .ask("GET", "/collections", "")
+        .expect("the refusal is an answer");
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("too many connections"), "{body}");
+}
+
+/// A file's server counts a subscription apart, under `--http-max-streams`
+/// alone: with as many streams open as `--max-connections` allows
+/// connections, every place is left for ordinary requests, and the
+/// ceiling holds them to it, no more. A subscription kept its connection's
+/// place as well: a primary's 64 subscribers, 32 workers and replica held
+/// 97 of a default server's 100, and its status probes were refused 503.
+#[test]
+fn subscriptions_are_counted_apart_from_connections() {
+    let h = start(
+        Config {
+            max_connections: 2,
+            ..Config::default()
+        },
+        streamed(),
+    );
+    let streams: Vec<_> = (0..2).map(|_| subscribe(h.port, "/t/changes")).collect();
+    for s in &streams {
+        assert_eq!(s.status, 200, "{}", s.said);
+    }
+    assert_eq!(h.server.live_streams(), 2);
+    let _kept = kept_alive(h.port, 2);
+    refused_a_connection(h.port);
+}
+
+/// The stream ceiling refuses past `--http-max-streams`, 503 to come back
+/// in a second, and the refused stream's connection gives its place back
+/// once, before it ends.
+#[test]
+fn the_stream_ceiling_refuses_past_it() {
+    let h = start(
+        Config {
+            max_connections: 2,
+            max_streams: 2,
+            ..Config::default()
+        },
+        streamed(),
+    );
+    let streams: Vec<_> = (0..2).map(|_| subscribe(h.port, "/t/changes")).collect();
+    for s in &streams {
+        assert_eq!(s.status, 200, "{}", s.said);
+    }
+    let refused = subscribe(h.port, "/t/changes");
+    assert_eq!(refused.status, 503, "{}", refused.said);
+    assert!(
+        refused.said.contains("too many subscriptions"),
+        "{}",
+        refused.said
+    );
+    assert!(refused.said.contains("Retry-After: 1"), "{}", refused.said);
+    assert_eq!(h.server.live_streams(), 2);
+    let _kept = kept_alive(h.port, 2);
+    refused_a_connection(h.port);
+}
+
+/// A subscription's end gives its stream's place back -- its thread finds
+/// its client gone at its next keep-alive -- and nothing more: the
+/// connection's place, given back as the stream began, is not given back
+/// again, and the ceiling stands where it was.
+#[test]
+fn a_subscriptions_end_gives_its_stream_slot_back() {
+    let h = start(
+        Config {
+            max_connections: 1,
+            max_streams: 1,
+            stream_keepalive: Duration::from_millis(50),
+            ..Config::default()
+        },
+        streamed(),
+    );
+    let first = subscribe(h.port, "/t/changes");
+    assert_eq!(first.status, 200, "{}", first.said);
+    let refused = subscribe(h.port, "/t/changes");
+    assert_eq!(refused.status, 503, "{}", refused.said);
+    drop(first);
+    // The stream's thread finding its client gone is the event, 30 s at
+    // most.
+    let by = Instant::now() + Duration::from_secs(30);
+    while h.server.live_streams() > 0 {
+        assert!(Instant::now() < by, "the stream outlived its client");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = subscribe(h.port, "/t/changes");
+    assert_eq!(second.status, 200, "{}", second.said);
+    let _kept = kept_alive(h.port, 1);
+    refused_a_connection(h.port);
+}
+
+/// A stream whose look panics -- its shape calls a function that panics on
+/// the row a write brings -- gives back what it holds as its thread
+/// unwinds, before its socket closes: its stream's place, and its
+/// connection's once, given back as it began. Counted by drops, the
+/// unwinding skips none.
+#[test]
+fn a_panic_in_a_stream_gives_back_what_it_holds() {
+    let mut db = streamed();
+    let boom = |args: &[Value]| {
+        if args.first() == Some(&Value::Int(13)) {
+            panic!("a stream's look panicking, as the test means it to");
+        }
+        Ok(args.first().cloned().unwrap_or(Value::Null))
+    };
+    db.registry_mut()
+        .register_fn("boom", Arc::new(boom))
+        .unwrap();
+    let h = start(
+        Config {
+            max_connections: 2,
+            max_streams: 1,
+            ..Config::default()
+        },
+        db,
+    );
+    let mut panicking = subscribe(h.port, "/t/changes?where=boom(n)+%3E%3D+0");
+    assert_eq!(panicking.status, 200, "{}", panicking.said);
+    // Kept, so the ceiling is read with it held below.
+    let mut writer = Conn::open(h.port);
+    ok(writer.query("put t {n: 13}"));
+    // The stream's end is the event: its places went back before it.
+    let mut rest = Vec::new();
+    let read = panicking.r.read_to_end(&mut rest);
+    assert!(
+        !matches!(&read, Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)),
+        "the stream never ended: {read:?}"
+    );
+    assert_eq!(h.server.live_streams(), 0);
+    let again = subscribe(h.port, "/t/changes");
+    assert_eq!(again.status, 200, "{}", again.said);
+    let _kept = kept_alive(h.port, 1);
+    refused_a_connection(h.port);
+    drop(writer);
 }
 
 /// A keep-alive connection silent past `--idle-timeout` is closed, and

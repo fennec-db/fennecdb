@@ -139,7 +139,7 @@ right; so does going past the nesting depths and the path length.</p>
 <tr><td><code>vector&lt;N&gt;</code> and <code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's for <code>sparsevec</code>, and a <code>vector&lt;N&gt;</code>'s <code>f32</code>s still fit a document's 4 GiB; refused past it, never cut, a list's too — <code>[vector&lt;N&gt;]</code>, SQL's <code>vector(n)[]</code> — naming the field and the range, as a file's schema is read back; a sparse vector's weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 
 <tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>
-<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>, a database's; each is a connection and a thread; on a tenant node, each tenant's own, and one of the <code>--max-connections</code> every tenant shares</td></tr>
+<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>, a database's; each is a connection and a thread, counted apart from <code>--max-connections</code> once it streams; on a tenant node, each tenant's own, and one of the <code>--max-connections</code> every tenant shares</td></tr>
 <tr><td>a tenant's file (<code>--dir</code>)</td><td class="n">none unless set</td><td><code>--tenant-max-bytes</code>, a tenant's own <code>bytes</code>; a write that would take the file past it is refused (507) before it lands; deletes, drops and <code>compact</code> run</td></tr>
 <tr><td>a tenant's rows</td><td class="n">none unless set</td><td><code>--tenant-max-rows</code>, its <code>rows</code>; its collections together, the server's own (<code>_</code>-named) left out; 507</td></tr>
 <tr><td>a tenant's streams</td><td class="n">a quarter of <code>--max-connections</code> unless set</td><td><code>--tenant-max-streams</code>, its <code>streams</code>: subscriptions, <code>/_changes</code> waits and <code>Fennec-After</code> waits together; 429</td></tr>
@@ -540,7 +540,9 @@ HTTPS itself once it is given a certificate.</p>
     the middle; a client that goes away does not cancel it.</li>
   <li><b>A ceiling, not a pool.</b> Every connection is an OS thread.
     <code>--max-connections</code> rejects the excess with 503 rather than
-    queueing it; put a proxy in front if you want a queue. The refused
+    queueing it -- once a subscription streams it is counted under
+    <code>--http-max-streams</code> instead, except on a tenant node; put a
+    proxy in front if you want a queue. The refused
     client's request is read off after the 503 and its connection ended
     without a reset, so any HTTP library reads the answer and its
     <code>Retry-After</code>. A connection

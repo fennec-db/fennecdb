@@ -112,7 +112,10 @@ usage: fennec-server [options]
                             once; a terminal is refused, and so is a
                             secret, policy or keys file that is stdin
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
-                            default: 100. Every connection is a thread
+                            default: 100. Every connection is a thread. A
+                            subscription gives its place back once it
+                            streams, counted under --http-max-streams
+                            instead -- but on a --dir node, where it keeps it
       --idle-timeout <s>    close a keep-alive connection silent for this
                             long (0 = never)  default: 60
       --header-timeout <s>  a request's time from its first byte, and a
@@ -280,8 +283,11 @@ usage: fennec-server [options]
       --http-max-streams <n>  ceiling on a database's concurrent subscriptions,
                             on a --dir node each tenant's (0 = unlimited)
                             default: 64. Subscriptions (`GET /<name>/changes`)
-                            are long lived and each holds a thread and one of
-                            --max-connections, which every tenant of a node
+                            are long lived and each holds a thread, counted
+                            apart from --max-connections: a file's server
+                            holds that many connections and this many
+                            streams at most. On a --dir node each is one of
+                            --max-connections too, which every tenant
                             shares: --tenant-max-streams and
                             --tenant-max-held bound each tenant's share
       --http-keepalive <s>  keep-alive interval while a subscription is silent

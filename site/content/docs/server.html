@@ -748,12 +748,12 @@ file before and after and how long it held the lock.</p>
 <table>
 <thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it. Once a subscription streams it is counted under <code>--http-max-streams</code> instead, except on a tenant node.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
 <tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request must come within it of its first byte, and a second more for each KiB that came, head and body alike: a client sending 1 KiB a second or more is never cut. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
 <tr><td><code>--write-timeout &lt;s&gt;</code></td><td class="n">30</td><td>The longest a write of an answer waits for its client to take any of it: a client that reads nothing is let go within twice this (0 = never).</td></tr>
-<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart; on a tenant node, each tenant's.</td></tr>
+<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart from <code>--max-connections</code>; on a tenant node, each tenant's, and each one of the node's connections too.</td></tr>
 </tbody>
 </table>
 </div>
@@ -780,11 +780,18 @@ first record's first byte and a record that comes in parts held to the
 same bound. Each such cut is counted
 (<a href="/docs/monitoring#what-is-counted"><code>fennec_client_timeouts_total</code></a>). A
 subscription holds a thread for as long as it lasts, so subscriptions are
-counted apart as well, under <code>--http-max-streams</code>, a database's
-own: on a tenant node each tenant's, where <code>--max-connections</code> is
-what all of them share, and each tenant's streams and held writes take a
-quarter of it at most unless its quota says otherwise
-(<a href="sharding-reference.html#quota-bounds">quotas</a>).</p>
+counted apart, under <code>--http-max-streams</code>, a database's own: once
+a subscription streams it gives its place under <code>--max-connections</code>
+back, and a server holds that many connections and that many streams at
+most -- 64 subscribers leave all 100 connections to ordinary requests. A
+refused subscription (503 <code>too many subscriptions</code>) held only its
+connection. On a tenant node <code>--http-max-streams</code> is each tenant's,
+so a stream keeps its place too: <code>--max-connections</code> is what all of
+them share, the one bound on every tenant's threads, and each tenant's
+streams and held writes take a quarter of it at most unless its quota says
+otherwise (<a href="sharding-reference.html#quota-bounds">quotas</a>). A
+replica's or an archiver's stream, a <code>/_changes</code> wait and a held
+write (<code>Fennec-Wait</code>) are connections everywhere.</p>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
 requests that <b>grow</b> the data are refused with 507, while reads,

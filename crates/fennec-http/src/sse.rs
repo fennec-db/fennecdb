@@ -247,6 +247,14 @@ impl Drop for StreamSlot<'_> {
 /// It is separate from the normal response path because of
 /// `Content-Length`: an ordinary response knows its body and writes it in
 /// one go, while a stream is a body with no end.
+///
+/// `connection` is the connection's place under `--max-connections` where
+/// the stream is counted apart, under `--http-max-streams` alone -- a
+/// file's server's: given back here once the stream's own place is taken,
+/// by its drop. Held by value, it goes back once whichever way this ends,
+/// a refusal's return or a panic's unwinding too, and always before the
+/// socket closes, which the caller holds. `None` keeps the place where it
+/// is: a tenant's stream is one of the node's `--max-connections`.
 pub fn serve(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
@@ -254,6 +262,7 @@ pub fn serve(
     hub: &Arc<Hub>,
     req: &Request,
     who: &Who,
+    connection: Option<crate::accept::Slot>,
 ) {
     // Said as every 503 says it, to come back in a second: the sync reads
     // the wait from the body, where plain text left it at its own backoff.
@@ -262,6 +271,11 @@ pub fn serve(
         let _ = crate::cors(refused, cfg).write(out, false, false);
         return;
     };
+    // Counted apart from here, under `--http-max-streams` alone: held both
+    // ways, a default server's 64 subscribers took 64 of its 100
+    // connections, and a primary's 32 workers and its replica's stream left
+    // three for every other client, each past them refused 503.
+    drop(connection);
 
     // Sent after a write its client made elsewhere (`Fennec-After`), a
     // stream waits for it here as a read does ([`crate::after`]): served
