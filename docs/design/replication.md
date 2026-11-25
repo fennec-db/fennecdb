@@ -759,7 +759,14 @@ CI one did as the replica took 8 000 rows, read as 3.4 MB where it holds
 was taken, read as 0.35 MB where it holds 1.4. The growth is 20 bytes a
 row, the primary's pin (the id index it copies, 12, and the frames' index
 it encodes) as the image streams; the copy's open, its id index of 12 a
-row, comes once the check's buffers are let go of.
+row, comes once the check's buffers are let go of. `tests/move_peak.rs`
+counted the same way and counts so too, a binary's allocator its own: the
+8 000 rows' router and nodes serve on through the 32 000 rows' move, and
+what they let go of then lowered its peak. Its runs here met none: the
+move's peaks read 3 401 098 and 3 881 433 bytes before, 3 401 121 and
+3 881 456 after -- 23 bytes of blocks made before the count, let go of
+or moved in it, no longer taken away -- its growth 20.01 bytes a row either way, under its bound
+of 96.
 
 A follow of 250 000 rows of a kilobyte, a 253 MB file, timed from the
 replica's start to its first image, three rounds each (Linux, aarch64,
