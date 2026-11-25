@@ -2150,6 +2150,97 @@ mod torn {
         );
     }
 
+    /// A block whose `put` -- every row's vector written again, and rows
+    /// of its own besides, linked as a batch -- placed a node above the
+    /// graph's top level, rolled back: the entry is the block's start's
+    /// again, live, at the top level it had, and each row's own vector
+    /// finds its row at ef 8. The block's node was left the entry, a
+    /// tombstone whose links reached the block's tombstones alone, and the
+    /// rows' nodes were given back with lists the batch had chosen again
+    /// while they were tombstones, holding the block's nodes alone: a
+    /// search entering there rarely reached a row, and one entering at a
+    /// row's node passed through the block's tombstones
+    /// (`VectorIndex::enter_live`, `VectorIndex::mend`).
+    #[test]
+    fn a_rollback_gives_back_the_entry_and_the_lists_a_batch_took() {
+        let (n, more, dim) = (1000u64, 3000u64, 16);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut vector = || {
+            let v: Vec<f32> = (0..dim)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect();
+            v
+        };
+        let old: Vec<Vec<f32>> = (0..n).map(|_| vector()).collect();
+        let new: Vec<Vec<f32>> = (0..n + more).map(|_| vector()).collect();
+        let put = |vectors: &[Vec<f32>], insert: bool| Statement::Put {
+            collection: "t".into(),
+            docs: (vectors.iter().enumerate())
+                .map(|(i, v)| {
+                    vec![
+                        ("id".to_string(), Expr::Lit(Value::Int(i as i64 + 1))),
+                        ("v".to_string(), Expr::Lit(Value::Vector(v.clone()))),
+                    ]
+                })
+                .collect(),
+            docs_param: None,
+            insert,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        let mut db = Database::new();
+        let spec = VectorIndexSpec::default().resolved();
+        let field = Field::new("v", DataType::Vector(dim, VecPrec::F32));
+        db.execute(&Statement::CreateCollection {
+            schema: Schema::new("t", vec![field.indexed(IndexKind::Vector(spec))]).expect("t"),
+            if_not_exists: false,
+        })
+        .expect("create");
+        db.execute(&put(&old, true)).expect("the rows");
+        let entered = |db: &Database| db.collections["t"].vectors.get("v").expect("v").entered();
+        let (start, dead, top) = entered(&db);
+        assert!(start.is_some() && !dead, "the start's entry");
+        db.begin().expect("begin");
+        db.execute(&put(&new, false)).expect("the block's put");
+        let (placed, _, above) = entered(&db);
+        assert!(
+            above > top && placed != start,
+            "the block's node, the entry: {placed:?} at {above}, {start:?} at {top}"
+        );
+        db.rollback();
+        let nodes = (2 * n + more) as usize;
+        assert_eq!(
+            graph_of(&db),
+            (nodes, (n + more) as usize),
+            "the block's nodes"
+        );
+        let ix = db.collections["t"].vectors.get("v").expect("v");
+        let missed: Vec<u64> = (1..=n)
+            .filter(|&id| {
+                let found = ix.search(&old[id as usize - 1], 1, Some(8), |_| true);
+                found.first().map(|f| f.0) != Some(id)
+            })
+            .collect();
+        assert_eq!(
+            entered(&db),
+            (start, false, top),
+            "the start's entry ({} rows not found)",
+            missed.len()
+        );
+        assert!(
+            missed.is_empty(),
+            "{} rows not found: {missed:?}",
+            missed.len()
+        );
+    }
+
     /// A row written twice in one block is given back the node it held as
     /// the block began: A, null and A again, rolled back; and A, then B,
     /// then A again by a write a panic stopped once it placed A's node

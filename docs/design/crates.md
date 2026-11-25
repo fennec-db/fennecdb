@@ -337,14 +337,45 @@ neighbours the put-back had not made live yet: 4 to 7 missed at ef 8
 after the `set`, 62 to 71 and 6 to 10 at ef 40 after the `put`. A `put`
 over fewer rows than a link batch (512) leaves them waiting, never
 linked, and its rollback gives the graph back as it was. One shape still
-leaves rows hard to reach by their own vector at a small ef: over 2 000 x
-16, after the `put`, 439 to 444 missed at ef 8 and 61 to 72 at ef 40,
-where placing them again missed 0 and 1 -- the batch's top node, a
-tombstone now, stays the graph's entry, its links all to the block's
-tombstones; recall@10 is 0.9996 against 1.0. So a block put back whole
-has its rows' nodes back, each with its links both ways, and the nodes it
-placed stay in the graph, tombstones, until it is made again (a compact,
-an open rebuilding it); a put-back places a node only where none is
+left rows hard to reach by their own vector at a small ef: over 2 000 x 16
+after the `put`, 372 to 444 missed at ef 8 and 44 to 72 at ef 40, where
+placing them again missed 0 to 1 and none, recall@10 0.9996 to 0.9998
+against 1.0 -- for two reasons, either enough to leave rows unfound. The
+batch's first nodes, finding nothing live, were linked through the nearest
+tombstones, the rows' nodes, whose full lists, chosen again, took no
+tombstone (`select_heuristic`): the rows' nodes came back with lists
+holding the block's nodes alone. And the batch's top node, placed above
+the graph's top level, stayed the entry, a tombstone whose links reach the
+block's tombstones. Neither main nor the branch moves an entry off a
+tombstone -- a delete leaves it there, its links still walked -- and
+main's rollback reached the rows only because it placed each vector again
+by a search from that entry. So once the links into the nodes made live
+are made again, each of their lists holding a node the put-back made a
+tombstone -- the block's, kept in turn as it takes them out (`taken`) --
+is chosen again from its live nodes and the live nodes its tombstones'
+lists hold at that level, through the same pruning, no search made, and
+its links back made (`mend`); and an entry the put-back left a tombstone
+moves to the first live node, none waiting to be linked, at the highest
+level a live node holds, the top level falling to it (`enter_live`): in a
+graph linked in node order, the block's start's entry and top level. The
+entry moved alone left 118 to 159 and 12 to 20; the lists chosen again
+alone, 342 to 427 and 39 to 70; both, none and none in every shape and
+seed, recall@10 1.0 over 2 000 x 16 after the `put` and the `set`, and
+over 4 000 x 32 0.998 to 0.9996 after either, where the links back alone
+gave 0.995 to 0.997 and placing the vectors again 0.960 to 0.988. Chosen
+again wherever a list held any tombstone, the earlier writes' too, a
+rollback of one row's `set` over 2 000 rows cost 34% more, its row's lists
+holding the nodes of the blocks before it; held to the block's own, a
+rollback of one row's `set` or `put` moved by under a thousand
+instructions of 648 000 and 74 000. The walk over every node's levels for
+the entry is made only where a put-back ends on a tombstone entry. The
+4 000 rows' rollback takes 26 to 29 ms, 10 to 16 with the links back alone
+and 360 to 470 placing the vectors again. A block put back whole, then,
+has its rows' nodes back, each with its links both ways, its lists that
+held the block's nodes chosen again from the live nodes those led to, and
+the entry and top level of its start; the nodes it placed stay in the
+graph, tombstones, until it is made again (a compact, an open rebuilding
+it); a put-back places a node only where none is
 held, and only where the graph takes one. A node a tombstone once until a
 put-back makes it live, the list holds no more than the graph's
 tombstones, 4 bytes each beside a node's 150 or more, and a push where a
@@ -467,7 +498,11 @@ row's vector again by a `put` and rolled back, over 2 000 rows of
 `vector<16>`, 42 667 instructions before them and 74 247 to 74 317 now --
 the links back, 31 651 more -- against 491 118 where the rollback placed
 the vector again; by a `set`, which links its new vector as it writes it,
-597 083, 648 324 to 648 650 and 975 447. Two first shapes cost more and were
+597 083, 648 324 to 648 650 and 975 447. The lists the block took chosen
+again and the entry given back moved neither by a thousand: 74 252 to
+74 607 (+356, SE 119, one binary identity a side reading -400 to +950)
+and 648 426 to 647 447 (-980, SE 136); chosen again wherever a list held
+any tombstone, the `set`'s was 871 092, 34% more. Two first shapes cost more and were
 changed: the node test inline, reading the row written over, put an apply
 1% and a record of 100 2.6% over, outside two standard errors; and the
 payload's test asked of each prepared document was 5 instructions a

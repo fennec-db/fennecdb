@@ -4414,9 +4414,10 @@ impl Collection {
     }
 
     /// A block put back whole, in each graph: the links into the nodes
-    /// its put-back made live again made again ([`VectorIndex::link_revived`]),
-    /// and the tombstones a put-back looks among let go of
-    /// ([`VectorIndex::forget_retired`]).
+    /// its put-back made live again made again, their lists holding the
+    /// block's nodes chosen again and an entry left a tombstone moved to a
+    /// live node ([`VectorIndex::link_revived`]), and the tombstones a
+    /// put-back looks among let go of ([`VectorIndex::forget_retired`]).
     #[cfg(target_pointer_width = "64")]
     fn graphs_put_back(&mut self) {
         for ix in self.vectors.values_mut() {

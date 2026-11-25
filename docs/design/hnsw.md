@@ -146,8 +146,22 @@ the links into it that lists chosen again while it was a tombstone let go
 of are made again from its own once the put-back ends (`link_revived`):
 each node it links to takes it back, pruned as a link is, no search made
 -- made with none, a rollback of a `put` rewriting 4 000 rows left 3 899 or
-more of them unfound by their own vector. The nodes the block placed
-stay, tombstones, until the graph is made again; the tombstones a
+more of them unfound by their own vector. Each of its lists holding a
+node the put-back made a tombstone, the block's (`taken`), is then chosen
+again from its live nodes and those its tombstones' lists hold, pruned
+the same way (`mend`): a `put` linked as a
+batch while the rows' nodes were tombstones linked its first nodes
+through them, and their full lists, chosen again taking no tombstone,
+kept the block's nodes alone. An entry the put-back left a tombstone --
+the block's node placed above the top level -- moves to the first live
+node at the highest level a live node holds, the top level falling with
+it (`enter_live`): the block's start's entry, in a graph linked in node
+order. A delete leaves the entry where it is, its links still walked, and
+a rollback placing every vector again reached the rows by a search from
+it; over 2 000 x 16 after a `put` of every row, the revived graph missed
+372 to 444 rows by their own vector at ef 8, 118 to 159 with the entry
+moved alone, and none with both (placing them again: 0 to 1). The nodes
+the block placed stay, tombstones, until the graph is made again; the tombstones a
 put-back makes are never the ones it makes live (`take_back`). A lone statement links as
 it did, and so does the browser module's `run` of several: its one thread
 links a vector as it is written (`DEFERS`), the waiting being 843 bytes
