@@ -33,6 +33,11 @@ use fennec_core::prelude::*;
 #[path = "model.rs"]
 mod model;
 
+/// limits.html's table held to the code in this build too: every row
+/// mapped, each row's own test here asking for what it needs.
+#[path = "limits_docs.rs"]
+mod limits_docs;
+
 /// The statements of `sql`, each parsed once the ones before it ran: a
 /// refusal a statement's own check makes comes at its parse.
 fn run(db: &mut Database, sql: &str) -> Result<Response> {

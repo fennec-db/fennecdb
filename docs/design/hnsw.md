@@ -137,7 +137,51 @@ before its record is written, so that a block put back after all is put
 back as any other. A search in the block measures the waiting ones
 exactly, as it does a server's backlog, and a rollback drops those its
 undo made tombstones (`forget_waiting`) -- the newest of the waiting, since
-nothing else leaves one while a block is open. A lone statement links as
+nothing else leaves one while a block is open. Natively a rollback gives
+each row back the node its write took from it, a tombstone the graph still
+holds (`VectorIndex::put_back`), rather than place its vector again: a
+graph at its bound has no node left for one more ([crates.md,
+limits](crates.md#limits)). The node comes back with its own links, and
+the links into it that lists chosen again while it was a tombstone let go
+of are made again from its own once the put-back ends (`link_revived`):
+each node it links to takes it back, pruned as a link is, no search made
+-- made with none, a rollback of a `put` rewriting 4 000 rows left 3 899 or
+more of them unfound by their own vector -- unless the pruning would let
+go of a node no other list holds, kept then in the place of the last it
+chose that another list holds (`link_back_into`): pruned as a link is,
+at m = 4 the links back took nodes' other ways in, and later writes'
+pruning left more live nodes no walk reached than main's rollback did
+([crates.md, limits](crates.md#limits)). Asking whether another list
+holds a node reads about `m0` squared list entries, and a link back asks
+it of each node its list chose: about `m0` cubed a link back, 556 at
+m = 4 and 23 995 at m = 16 at the most over the review's stress, 157 494
+at m = 32, so it is asked up to an `m` of 16 alone (`KEEP_M`), past which
+a link back is a link -- at m = 32 the stress left no node unreached
+either way, and the misses 0.3 to 0.8% more without it. Each of its lists holding a
+node the put-back made a tombstone, the block's (`taken`), is then chosen
+again from its live nodes and those its tombstones' lists hold, pruned
+the same way (`mend`): a `put` linked as a
+batch while the rows' nodes were tombstones linked its first nodes
+through them, and their full lists, chosen again taking no tombstone,
+kept the block's nodes alone. An entry left a tombstone by a put-back
+that made a node live or a tombstone there -- the block's node placed
+above the top level -- moves to the live node, none waiting to be
+linked, of the highest level a walk from it down its levels meets in 256
+lists (`enter_live`, `live_near`), the top level falling with it: the
+block's start's entry, in a graph linked in node order, where the walk
+meets it -- the highest live node the walk meets, not always the highest
+the graph holds (at m = 2, 1 of 86 moves over the stress's 16 seeds left a
+live node a level above the top, reached through its lower lists as any
+node is; [crates.md, limits](crates.md#limits)). Every node is
+walked only where that meets none and the entry is the block's
+(`live_anywhere`); a block that wrote no vector there puts nothing back.
+A delete leaves the entry where it is, its links still walked, and
+a rollback placing every vector again reached the rows by a search from
+it; over 2 000 x 16 after a `put` of every row, the revived graph missed
+372 to 444 rows by their own vector at ef 8, 118 to 159 with the entry
+moved alone, and none with both (placing them again: 0 to 1). The nodes
+the block placed stay, tombstones, until the graph is made again; the tombstones a
+put-back makes are never the ones it makes live (`take_back`). A lone statement links as
 it did, and so does the browser module's `run` of several: its one thread
 links a vector as it is written (`DEFERS`), the waiting being 843 bytes
 brotli of it for nothing. Linked a row at a time, as a `/batch` of single puts would have

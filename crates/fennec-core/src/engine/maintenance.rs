@@ -61,26 +61,47 @@ pub struct Holds {
 /// place: its writes outran the rounds that link them beside the database
 /// -- one core linking about 1 000 a second at 768 dimensions, a sustained
 /// ingest of vectors may leave every compact so, its tombstones growing
-/// until a quieter one -- or a document of it did not read.
+/// until a quieter one -- a document of it did not read, or its vectors
+/// would pass the nodes a graph holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeptGraph {
     pub collection: String,
     pub field: String,
-    /// The documents written during its last round, more than the write
-    /// lock had left to link once the graphs before it took theirs
-    /// ([`GRAPH_HELD`]); `None` where a document did not read.
-    pub behind: Option<usize>,
+    pub why: KeptFor,
 }
 
-/// ``graph `docs.v` kept, 412 behind``, or ``graph `docs.v` kept, a
-/// document unread``.
+/// Why a compact kept a graph as it stood ([`KeptGraph`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeptFor {
+    /// The documents written during its last round, more than the write
+    /// lock had left to link once the graphs before it took theirs
+    /// ([`GRAPH_HELD`]).
+    Behind(usize),
+    /// A document of it did not read, or could not be looked up.
+    Unread,
+    /// Rebuilt, its live vectors and the writes made meanwhile would pass
+    /// [`crate::vector::MAX_NODES`] -- each write counted as a node, which
+    /// it may be -- refused before any of them is linked: as a round looks
+    /// up a chunk of them, and under the write lock for the last.
+    Full,
+}
+
+/// ``graph `docs.v` kept, 412 behind``, ``graph `docs.v` kept, a document
+/// unread`` or ``graph `docs.v` kept, its writes would pass 4294967295
+/// nodes``.
 impl std::fmt::Display for KeptGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "graph `{}.{}` kept, ", self.collection, self.field)?;
-        match self.behind {
-            Some(n) => write!(f, "{n} behind"),
-            None => f.write_str("a document unread"),
+        match self.why {
+            KeptFor::Behind(n) => write!(f, "{n} behind"),
+            KeptFor::Unread => f.write_str("a document unread"),
+            KeptFor::Full => write!(
+                f,
+                "its writes would pass {} nodes",
+                crate::vector::MAX_NODES
+            ),
         }
     }
 }
@@ -327,6 +348,11 @@ enum Built {
     Sparse(SparseIndex),
     #[cfg_attr(not(all(feature = "sorted", feature = "geo")), allow(dead_code))]
     Geo(GeoIndex),
+    /// A graph whose vectors pass the bound as the graph places them
+    /// (`VectorIndex::insert_held`), refused once the build is done: the
+    /// copy holds every vector, and only placing them counts their nodes.
+    #[cfg_attr(not(target_pointer_width = "64"), allow(dead_code))]
+    Refused(Error),
 }
 
 /// The index built from the copy, and the copy: taking a write back out of
@@ -744,7 +770,15 @@ impl Database {
         // The writes made during the build, applied as the write path would
         // have: out with the value the build saw, in with the one there now.
         match index {
+            Built::Refused(e) => return Err(e),
             Built::Vector(mut ix) => {
+                // Each write may place a node: past the bound, refused here,
+                // where nothing has changed yet -- placed, the last would
+                // meet `alloc_links`' assert under the write lock. Asked
+                // first: run again, it would be refused as surely.
+                if past_nodes(&ix, ids.len()) {
+                    return Err(crate::vector::graph_full(&copy.field));
+                }
                 // Each a link under the write lock: past the bound the
                 // rounds fell behind the vectors written, and the index is
                 // refused rather than every writer held while it catches up.
@@ -1024,17 +1058,17 @@ impl Database {
         let mut room = held_cost();
         let mut kept = Vec::new();
         for (b, t) in built.into_iter().zip(tails) {
-            let keep = |behind| KeptGraph {
+            let keep = |why| KeptGraph {
                 collection: b.copy.collection.clone(),
                 field: b.copy.field.clone(),
-                behind,
+                why,
             };
             // A document it cannot read leaves the graph as it stands,
             // tombstones and all, and answering as it did: one built
             // without it would not, and the compact is never refused for
             // what a document holds.
             if b.broken.is_some() {
-                kept.push(keep(None));
+                kept.push(keep(KeptFor::Unread));
                 continue;
             }
             let Some(Tail { mut ids, .. }) = t else {
@@ -1042,18 +1076,36 @@ impl Database {
             };
             ids.sort_unstable();
             ids.dedup();
+            let mut ix = match b.index {
+                Built::Vector(ix) => ix,
+                // Its live vectors past the bound, or a round's writes with
+                // them (`graph_round`): the graph they are in stays, as one
+                // a document it cannot read leaves.
+                Built::Refused(_) => {
+                    kept.push(keep(KeptFor::Full));
+                    continue;
+                }
+                _ => unreachable!("only graphs are rebuilt beside a mapped compact"),
+            };
+            // Each write made meanwhile places a node at most, one its own
+            // write may not have -- a row whose other field it wrote is
+            // taken out and put in again: past the bound, the graph stays
+            // as it stood, as where a document does not read, rather than
+            // meet `alloc_links`' assert under the write lock. Asked before
+            // the links' cost, which it spends none of.
+            if past_nodes(&ix, ids.len()) {
+                kept.push(keep(KeptFor::Full));
+                continue;
+            }
             // The rounds fell behind the vectors written: the graph stays as
             // it stands, as where a document does not read, for the next
             // compact, rather than every writer held while it catches up.
             let cost = links_cost(ids.len(), b.copy.link_cost());
             if cost > room {
-                kept.push(keep(Some(ids.len())));
+                kept.push(keep(KeptFor::Behind(ids.len())));
                 continue;
             }
             room -= cost;
-            let Built::Vector(mut ix) = b.index else {
-                unreachable!("only graphs are rebuilt beside a mapped compact")
-            };
             let c = self.collections.get_mut(&b.copy.collection).unwrap();
             let caught: Result<()> = ids.into_iter().try_for_each(|id| {
                 ix.remove(id);
@@ -1071,7 +1123,7 @@ impl Database {
                 Err(_) => kept.push(KeptGraph {
                     collection: b.copy.collection,
                     field: b.copy.field,
-                    behind: None,
+                    why: KeptFor::Unread,
                 }),
             }
         }
@@ -1403,8 +1455,11 @@ fn catch_up_graphs(
 /// whole. A chunk that cannot
 /// be looked up or read leaves its graph as it stood (`broken`), as one the
 /// copy cannot read does: a compact keeps it, and `create index` is
-/// refused. A check of a graph before a chunk is linked into it -- a bound
-/// on its nodes -- goes where `linked` is made, and marks it so too.
+/// refused. A chunk that may take its graph past the nodes a graph holds
+/// ([`past_nodes`]) is linked into it by none: the graph is refused
+/// (`Built::Refused`) -- a compact keeps it, and says so, and `create
+/// index` is refused naming the field -- where linked, the last node met
+/// `alloc_links`' assert with no lock held, the maintenance a panic.
 #[cfg(not(target_arch = "wasm32"))]
 fn graph_round(
     db: &RwLock<Database>,
@@ -1427,7 +1482,12 @@ fn graph_round(
         ids.sort_unstable();
         ids.dedup();
         caught = caught.saturating_add(links_cost(ids.len(), b.copy.link_cost()));
+        let mut full = false;
         for chunk in ids.chunks(CATCH_UP_CHUNK) {
+            if past_nodes(ix, chunk.len()) {
+                full = true;
+                break;
+            }
             let linked = match looked_up(
                 db,
                 &b.copy.collection,
@@ -1445,8 +1505,30 @@ fn graph_round(
                 break;
             }
         }
+        if full {
+            b.index = Built::Refused(crate::vector::graph_full(&b.copy.field));
+        }
     }
     Ok(caught)
+}
+
+/// Whether `writes` written to the rows of `ix` may take it past
+/// [`crate::vector::MAX_NODES`], each counted as the node it may place:
+/// one a compact's graph takes out and puts in again, `create index`'s
+/// one its row's node does not hold. Asked before any of them is linked,
+/// by a round of a chunk and by the write lock of the last round's writes.
+#[cfg(target_pointer_width = "64")]
+#[inline]
+fn past_nodes(ix: &VectorIndex, writes: usize) -> bool {
+    ix.nodes() + writes > crate::vector::MAX_NODES
+}
+
+/// [`past_nodes`] where no graph can pass the bound: a 32-bit build's
+/// memory stops far short of it.
+#[cfg(not(target_pointer_width = "64"))]
+#[inline(always)]
+fn past_nodes(_: &VectorIndex, _: usize) -> bool {
+    false
 }
 
 /// Links the documents a round looked up into `ix`, with no lock held: each
@@ -1718,8 +1800,10 @@ impl IndexCopy {
                     })
                     .collect();
                 ix.reserve(items.len());
-                ix.insert_batch(&items);
-                Built::Vector(ix)
+                match ix.insert_held(&items, false, &self.field) {
+                    Ok(()) => Built::Vector(ix),
+                    Err(e) => Built::Refused(e),
+                }
             }
             IndexKind::Hash { .. } => {
                 let mut ix = HashIndex::folding(self.order.fold);
@@ -2194,6 +2278,238 @@ mod tests {
             pick: None,
         })
         .expect("put");
+    }
+
+    /// limits.html's "vector index node count" where `create index` makes
+    /// a graph: under the write lock (`build_graph`), beside the database as
+    /// it is built (`IndexCopy::build`), and as it catches up with the
+    /// writes made during the build -- a round's chunk (`graph_round`) and
+    /// the last round's writes under the write lock (`finish_index`), where
+    /// a placed node past the bound met `alloc_links`' assert. Each
+    /// refuses a graph past `MAX_NODES` naming the field, the collection
+    /// left unindexed, and takes one at it -- its nodes counted as the
+    /// graph places them, so four rows sharing three vectors are taken
+    /// where three nodes fit, which counted by rows were refused. Counted
+    /// past the graph's own nodes ([`crate::vector::NODES_BESIDE`]): no
+    /// test makes 2^32 vectors.
+    #[test]
+    fn create_index_refuses_a_graph_past_its_nodes() {
+        use crate::vector::{MAX_NODES, NODES_BESIDE};
+        struct Beside;
+        impl Beside {
+            fn counted(n: usize) -> Beside {
+                NODES_BESIDE.with(|b| b.set(n));
+                Beside
+            }
+        }
+        impl Drop for Beside {
+            fn drop(&mut self) {
+                NODES_BESIDE.with(|b| b.set(0));
+            }
+        }
+        let made = || {
+            let mut db = Database::new();
+            let schema = Schema::new(
+                "g",
+                vec![
+                    Field::new("meta", DataType::Json),
+                    Field::new("v", DataType::Vector(2, VecPrec::F32)),
+                ],
+            )
+            .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .expect("create");
+            for id in 1..=3 {
+                put(&mut db, id, [id as f32, 1.0]);
+            }
+            RwLock::new(db)
+        };
+        let index = Statement::CreateIndex {
+            collection: "g".into(),
+            field: "v".into(),
+            kind: IndexKind::Vector(VectorIndexSpec::default().resolved()),
+            if_not_exists: false,
+        };
+        let says = "field `v`: a vector index holds at most 4294967295 nodes";
+        let refused = |r: Result<Response>, db: &RwLock<Database>, tag: &str| {
+            assert!(
+                matches!(&r, Err(Error::Query(m)) if m.starts_with(says)),
+                "{tag}: {r:?}"
+            );
+            let db = db.read().unwrap();
+            let g = &db.collections["g"];
+            assert!(g.vectors.is_empty(), "{tag}: a graph");
+            assert!(matches!(g.schema.fields[1].index, IndexKind::None), "{tag}");
+        };
+        // Three vectors: one node past the bound, then at it -- and so with
+        // a fourth row holding the first's vector, which places no node.
+        for (online, shared) in [(false, false), (true, false), (false, true), (true, true)] {
+            let tag = format!(
+                "{}{}",
+                if online { "beside" } else { "under the lock" },
+                if shared { ", shared" } else { "" }
+            );
+            let run = |db: &RwLock<Database>| match online {
+                true => Database::maintain(db, &index).expect("maintained"),
+                false => db.write().unwrap().execute(&index),
+            };
+            let made = || {
+                let db = made();
+                if shared {
+                    put(&mut db.write().unwrap(), 4, [1.0, 1.0]);
+                }
+                db
+            };
+            let db = made();
+            let r = {
+                let _b = Beside::counted(MAX_NODES - 2);
+                run(&db)
+            };
+            refused(r, &db, &tag);
+            let _b = Beside::counted(MAX_NODES - 3);
+            run(&db).expect("at the bound");
+            let nodes = db.read().unwrap().collections["g"]
+                .vectors
+                .get("v")
+                .map(|ix| ix.nodes());
+            assert_eq!(nodes, Some(MAX_NODES), "{tag}");
+        }
+        // A write made during the build would place the node past it: met
+        // by the round that catches up with it, before it links any, or,
+        // written during the last round, by the write lock -- one past the
+        // bound refused, and one at it taken.
+        for (last, short) in [(false, 3), (false, 4), (true, 4), (true, 5)] {
+            let tag = match last {
+                false => "a round",
+                true => "the last round's writes",
+            };
+            let lock = Arc::new(made());
+            let rounds = std::rc::Rc::new(std::cell::Cell::new(0));
+            let met = std::rc::Rc::clone(&rounds);
+            let (r, _) = {
+                let _b = Beside::counted(MAX_NODES - short);
+                beside(&lock, &index, move |point, n, l| match (point, n) {
+                    ("read", 0) => put(&mut writer(l), 4, [4.0, 1.0]),
+                    ("round", 0) => {
+                        met.set(met.get() + 1);
+                        if last {
+                            put(&mut writer(l), 5, [5.0, 1.0]);
+                        }
+                    }
+                    _ => {}
+                })
+            };
+            let past = short == if last { 4 } else { 3 };
+            // A round refusing its chunk links none of it.
+            assert_eq!(rounds.get(), usize::from(last || !past), "{tag}");
+            if past {
+                refused(r, &lock, tag);
+                continue;
+            }
+            r.expect(tag);
+            // Its own nodes, the rows' -- the count beside it let go of.
+            let rows = if last { 5 } else { 4 };
+            let nodes = lock.read().unwrap().collections["g"]
+                .vectors
+                .get("v")
+                .map(|ix| (ix.len(), ix.nodes()));
+            assert_eq!(nodes, Some((rows, rows)), "{tag}");
+        }
+    }
+
+    /// A compact beside the database at a graph's bound: the graph built
+    /// again without its tombstones catches up with the writes made during
+    /// the build, each taken out and put in again -- a node each, though a
+    /// write of another field placed none in the graph it wrote. Past the
+    /// bound the graph stays as it stood, tombstone and all, as where a
+    /// document does not read, and the compact says so (`KeptFor::Full`),
+    /// where the last met `alloc_links`' assert: refused by the round
+    /// catching up with the writes before it links any, or by the write
+    /// lock for those written during the last round. At the bound the
+    /// rebuilt graph is put in place.
+    #[test]
+    fn a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph() {
+        use crate::vector::{MAX_NODES, NODES_BESIDE};
+        let graph = |db: &Database| {
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            (ix.len(), ix.dead(), ix.nodes())
+        };
+        for (last, short) in [(false, 3), (false, 4), (true, 3), (true, 4)] {
+            let tag = match last {
+                false => "a round",
+                true => "the last round's writes",
+            };
+            let mut db = Database::new();
+            let schema = Schema::new(
+                "g",
+                vec![
+                    Field::new("meta", DataType::Json),
+                    Field::new("v", DataType::Vector(2, VecPrec::F32))
+                        .indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
+                ],
+            )
+            .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .expect("create");
+            put(&mut db, 1, [1.0, 0.0]);
+            put(&mut db, 2, [0.0, 1.0]);
+            put(&mut db, 1, [1.0, 0.2]);
+            assert_eq!(graph(&db), (2, 1, 3));
+            let lock = Arc::new(RwLock::new(db));
+            let rounds = std::rc::Rc::new(std::cell::Cell::new(0));
+            let met = std::rc::Rc::clone(&rounds);
+            NODES_BESIDE.with(|b| b.set(MAX_NODES - short));
+            // Each row's own vector again: no node in the graph written. Both
+            // before the first round, or the second during it.
+            let writes = move |point: &str, n: usize, l: &RwLock<Database>| match (point, n) {
+                ("read", 0) => {
+                    put(&mut writer(l), 1, [1.0, 0.2]);
+                    if !last {
+                        put(&mut writer(l), 2, [0.0, 1.0]);
+                    }
+                }
+                ("round", 0) => {
+                    met.set(met.get() + 1);
+                    if last {
+                        put(&mut writer(l), 2, [0.0, 1.0]);
+                    }
+                }
+                _ => {}
+            };
+            let (r, holds) = beside(&lock, &Statement::Compact(None), writes);
+            let stood = graph(&lock.read().unwrap());
+            NODES_BESIDE.with(|b| b.set(0));
+            r.expect(tag);
+            let past = short == 3;
+            // A round refusing its chunk links none of it.
+            assert_eq!(rounds.get(), usize::from(last || !past), "{tag}");
+            match past {
+                true => {
+                    assert_eq!(stood, (2, 1, MAX_NODES), "{tag}: the graph as it stood");
+                    let kept = KeptGraph {
+                        collection: "g".into(),
+                        field: "v".into(),
+                        why: KeptFor::Full,
+                    };
+                    assert_eq!(
+                        kept.to_string(),
+                        "graph `g.v` kept, its writes would pass 4294967295 nodes"
+                    );
+                    assert_eq!(holds.kept, [kept], "{tag}");
+                }
+                // Rebuilt without its tombstone, a tombstone each write.
+                false => {
+                    assert_eq!(stood, (2, 2, MAX_NODES), "{tag}: rebuilt");
+                    assert!(holds.kept.is_empty(), "{tag}");
+                }
+            }
+        }
     }
 
     /// A compact builds a graph holding tombstones again from every
@@ -2957,7 +3273,7 @@ mod tests {
                     let kept = KeptGraph {
                         collection: "g".into(),
                         field: "v".into(),
-                        behind: Some(left),
+                        why: KeptFor::Behind(left),
                     };
                     assert_eq!(kept.to_string(), format!("graph `g.v` kept, {left} behind"));
                     assert_eq!(holds.kept, [kept]);
@@ -3110,7 +3426,7 @@ mod tests {
         let kept = KeptGraph {
             collection: "h".into(),
             field: "v".into(),
-            behind: Some(900),
+            why: KeptFor::Behind(900),
         };
         assert_eq!(holds.kept, [kept]);
     }
@@ -3168,7 +3484,7 @@ mod tests {
         let kept = KeptGraph {
             collection: "g".into(),
             field: "v".into(),
-            behind: None,
+            why: KeptFor::Unread,
         };
         assert_eq!(kept.to_string(), "graph `g.v` kept, a document unread");
         assert_eq!(holds.kept, [kept]);

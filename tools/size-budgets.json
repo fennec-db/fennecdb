@@ -13,13 +13,13 @@
     },
     "fennec-server": {
       "build": "cargo build --release --target x86_64-unknown-linux-musl -p fennec-server",
-      "measured": 8522448,
-      "budget": 8566000
+      "measured": 8575696,
+      "budget": 8619000
     },
     "small": {
       "build": "make small TARGET=x86_64-unknown-linux-musl",
-      "measured": 3029576,
-      "budget": 3045000
+      "measured": 3054152,
+      "budget": 3070000
     }
   }
 }

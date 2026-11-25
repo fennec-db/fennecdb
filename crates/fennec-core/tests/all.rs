@@ -47,6 +47,7 @@ mod json;
 mod kinds;
 mod language_file;
 mod limit;
+mod limits_docs;
 mod lookup;
 mod lookup_aggregate;
 mod maintenance;

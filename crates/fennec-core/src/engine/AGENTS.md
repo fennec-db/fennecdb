@@ -50,8 +50,10 @@ graph's build or a file's rewrite are caught up in rounds, looked up
 under the read lock and read after it (`catch_up_graphs`, `catch_up`),
 the write lock taking the last round's few: a graph's links costing
 `GRAPH_HELD` at most (`link_cost`: by dimensions, `m` and
-`ef_construction`, a saturating `u64`), past which a compact keeps the graph
-and names it (`KeptGraph`) and `create index` is refused; a rewrite's
+`ef_construction`, a saturating `u64`), past which -- or where a round's
+chunk or the last round's writes may take a graph past its nodes, asked
+before any is linked (`past_nodes`) -- a compact keeps the graph and names
+it (`KeptGraph`) and `create index` is refused; a rewrite's
 bounded by the rounds' pace alone. Every collection is asked before any
 graph is placed. Each hold is timed and handed back
 (`Database::maintain_held`), and a server's log names the longest and

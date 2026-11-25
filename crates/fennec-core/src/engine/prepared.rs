@@ -163,9 +163,26 @@ impl Database {
             p.docs.truncate(first);
             return None;
         }
+        let bytes = p.payloads.len();
         for d in &p.docs[first..] {
             Store::encode_doc_into(&c.schema, d, &mut p.payloads);
             p.ends.push(p.payloads.len());
+        }
+        // A payload past a frame's length is left for the `put` to encode
+        // again and refuse, as a document that fails to build is
+        // ([`crate::store::payload_fits`]): the `put` holds the one it
+        // encodes alone. Asked of each only where the statement's together
+        // pass the bound: a compare a document was 5 instructions of each.
+        if p.payloads.len() - bytes > crate::store::payload_most()
+            && (first..p.docs.len()).any(|i| {
+                let from = if i == 0 { 0 } else { p.ends[i - 1] };
+                p.ends[i] - from > crate::store::payload_most()
+            })
+        {
+            p.docs.truncate(first);
+            p.payloads.truncate(bytes);
+            p.ends.truncate(first);
+            return None;
         }
         let schema = match p.schemas.iter().position(|(cid, _)| *cid == c.id) {
             Some(at) => at,

@@ -169,6 +169,470 @@ and `1e-400` as 0 (`num::read_f64`,
 [vector-search.md](vector-search.md#numbers-in), *Past the range,
 refused*). Full table in `site/content/docs/limits.html`.
 
+*The page is held to the code.* `crates/fennec-core/tests/limits_docs.rs`
+reads the page's table of fixed limits and holds every row to one entry of
+its list: the row's words, the numbers its value cell says -- read from
+the constant the code holds it by (`codec::MAX_DEPTH`,
+`engine::MAX_NEAR_ROWS`; a server's default or a private constant read
+where it is defined) -- and the tests that hold it, found by file and
+function: one driving it (the bound taken, one past it refused in the
+page's words, a ranking or a list past it answering no row), one at the
+type's level where the row cannot be driven at all (a stack, whose
+overflow aborts), with why, or one showing the path either side of a
+number that is no refusal (a batch, a threshold, the change ring). A bound
+no test machine reaches -- a 4 GiB payload, a graph of 2^32 - 1 nodes -- is
+driven all the same: where it is decided, at the bound and one past it,
+and through every write at a bound the test's thread holds it to (*A
+payload and a graph past a `u32`*, below). A named test is found as one CI
+runs (`held_by`): `#[test]` right before its `fn`, outside the file's
+comments and literals, neither `#[ignore]`d nor under a `cfg_attr`,
+nothing around it but `mod`s, and every `cfg` on it, on those `mod`s, on
+the file and on the `mod` items declaring the file and its parents up to
+the crate's root (`declared`: `mod x;` in `src/a.rs` or `src/a/mod.rs`,
+`lib.rs`, a test crate's `all.rs`), met by one of the builds CI's `make
+test` makes (Linux on x86-64 and aarch64, macOS on aarch64, default
+features), a predicate it cannot read refused, and a file of `src` no
+`mod` declares refused. Found as `fn <name>(` alone, as `tools/security_md_check.py`
+finds its tests, a helper of the name passed, as would a test commented
+out, ignored or `cfg`'d out of every build
+(`a_helper_or_a_test_ci_does_not_run_is_no_test`). A row added to the page
+owes its entry and its test: a row with no entry, an entry whose row is
+gone, a number the code does not hold and a test that is gone or does not
+run each fail naming it, in every build (`tests/features.rs` takes the
+file in, a row's own test `cfg`'d with the feature it needs). Written, it
+found `facet ... ranges` refusing 10 001 bounds -- the 10 000 ranges the
+page and the refusal's own words give -- held to the values' bound rather
+than one past it; and two casts past a type's width where a refusal was
+owed, a payload's length and a graph's node id. Every path that lands
+either already returned a `Result`: only the check was missing.
+
+*A payload and a graph past a `u32`.* A document's payload is found by a
+location of three `u32`s (`store::Loc`, 12 bytes), its length one. Every
+release from v0.1.0 through v0.2.0 kept a longer payload's length cut to
+its low 32 bits (`Store::append`'s `payload.len() as u32`, later
+`land_frame`'s `payload_len as u32`), and an open cut it again reading the
+frame (`replay_mapped`'s `plen as u32`, the replay in memory's `len as
+u32`): the row read back short, or as no document. A wasm32 build cannot
+make one, its `Vec` stopping at 2 GiB; natively it is in reach -- two
+`vector<1000000000>` fields, a `[vector<1000000000>]` of two, an import of
+SQLite rows holding several values near 1 GB, and by the review's reading
+a `set` over HTTP copying a 60 MiB field into 70 others. A write is now
+refused past `store::MAX_PAYLOAD` (`u32::MAX` bytes), a query error naming
+the bound as every limit's is ("a document is at most 4294967295 bytes
+encoded, a u32's length, not 4294967296"), where it encodes the row and
+before anything of it changes (`store::payload_fits`): a `put`, its
+payload encoded above the row written over leaving its indexes, never
+twice, its id handed back (`rewind`); a `put`'s documents prepared beside
+the readers, one past the bound leaving the statement unprepared for the
+`put` to encode and refuse, as one that fails to build is -- each asked
+only where the statement's payloads together pass the bound; a `set` and an
+upsert's `else set`, before the rows past their time a clash lets go of.
+The statement's block is put back whole. An import, `put t $n`, a named
+statement's write and a block's spill all land through these. A frame
+read past the bound -- an open's replay, mapped or in memory, and a
+replica's apply -- is damage (`store::frames_fit`, `Error::Corrupt`),
+refused before any frame of its record lands. So a file v0.1.0 to v0.2.0
+wrote holding such a document no longer opens at all, where those
+releases opened it with that one row cut short or unread ([What 1.0
+refuses that v0.2.0 took](compatibility.md#what-10-refuses-that-v020-took)).
+It is asked once a record,
+of one longer than a payload may be: a frame is held to what is left of
+its record, so a shorter one's frames all fit, and a compare a frame would
+be 100 000 instructions more an open of 100 000 rows. An image's index held
+a length to a `u32` already (`index_entry`), and walks the frames
+otherwise.
+
+A graph's node id is a `u32` too, held one up where a document finds its
+node (`by_doc`) and in the copies table, 0 for none: a graph holds
+`vector::MAX_NODES` (2^32 - 1) nodes, its tombstones and the nodes waiting
+to be linked among them -- a rolled back block leaves its vectors'
+nodes tombstones, until a compact rebuilds the graph without them. Every
+release from v0.1.0 through v0.2.0 cut the count to 32 bits
+(`alloc_links`'s `doc_ids.len() as u32`): the 2^32 + 1st node took node
+0's id and wrote its links over node 0's, and in v0.2.0, which holds an id
+one up, the 2^32nd already took the one read as none. The refusal cannot
+be where a vector's components are tested (`value::held`, `held_copy`),
+which knows the field and not its graph. It is where a write encodes the
+row, beside the payload's test (`Collection::crowded`): each graph's
+count, with every document of the statement not yet placed added -- a
+`put`'s `written`, a replica's batch -- held to the bound
+(`vector::takes_node`), a compare a graph, a collection with none reading
+its count of graphs. That filter counts a document of no vector as one, so
+only where it says a graph may be full is the count made exactly, out of
+line (`nodes_past`): of the documents waiting, those holding a vector in
+the graph's field their row's node does not hold (`VectorIndex::holds`,
+the test `place` asks), and the document's own vector none where the row
+held it to the bit (`VectorIndex::retire` keeps the node), by its bits,
+since `same` takes `-0.0` for `0.0`, and against the row read, since a row
+the statement wrote has its node still to come. A vector past the bound is
+refused naming its field, a query error, "field `v`: a vector index holds
+at most 4294967295 nodes, its tombstones among them, which a compact
+drops"; at one node left, a `put` of a document with no vector, one whose
+row holds its vector and one new vector is taken. A vector the graph holds
+for another row is counted as a node: at the bound a copy is refused
+rather than looked for.
+
+*A replica lands what its primary took.* The primary alone judges a
+write's nodes. Counted on the copy, a write the primary took could be
+refused: its batch holds every document of the collection, a `put {n:1}`
+before a `put` of a vector counted as one, and its graph counts its own
+tombstones -- a compact the primary made and it did not, a block the
+primary rolled back that it never saw, a put-back of its own -- so a pair
+at the bound broke, the follower connecting again for a full image, and
+again near the bound. A replica asks the same compare a frame, and only
+where it says a graph may be full (`Database::room_applied`, out of line)
+puts its batch into the graph and counts what the graph holds: a vector
+its row's node holds places none; a graph with no node for it that holds
+tombstones is made again from the rows without them (`build_graph`, as a
+compact makes it); and a graph whose live vectors still leave none is
+damage, `Error::Corrupt`, a write no primary takes -- the record put back
+whole, the follower taking an image. Over bit-coded vectors a graph made
+again may code them apart from the primary's, whose centres it learned in
+another order, so its live nodes may differ by the copies a code shared:
+at 2^32 nodes, and named here rather than met.
+
+*A put-back gives the row its node back.* A write over a row's vector,
+or its delete, leaves the node of the vector it replaced a tombstone, which
+no vector placed finds again (`find_copy` passes over tombstones). Put
+back -- a block rolled back, a statement refused at its second row, a
+write a panic stopped, a replica's record refused part way -- the row's
+vector was placed again, a node more than the write took: at the bound,
+past it, where `alloc_links`' assert stopped it under the write lock with
+the block half put back (`set v = ... where tag = 'red'` over two rows with
+one node left), or, in a write a panic stopped, a second panic that aborts.
+So a put-back gives the row the node its write took (`VectorIndex::put_back`,
+in `rewind` and `put_back_torn` natively): a graph keeps, in turn, the
+nodes its writes made tombstones (`retired`, pushed where `detach` makes
+one, let go of as a block is put back), and the row's vector, where
+neither its node nor a live node holds it, makes live again the newest of
+them that holds it for that row, as the write left it -- its vector, level
+and its own links; a node with none (one waiting, which a block's linking
+passed over) linked then. Taken off the end, it is the node the row held
+before the write. The tombstones a put-back makes itself -- the block's
+nodes, as it takes them out -- never go on the list (`take_back`, through
+`Collection::vectors_back` in `rewind` and `put_back_torn`, whose
+removals now leave the graphs to it): taken out as a write takes a row
+out, a row written A, null, A in one block was given the node of its
+second A, the newest holding A, and so was a row written A, B and A again
+by a write a panic stopped; and every put-back after a block's inserts
+were taken out looked past each of their nodes, under the write lock (the
+review's 20 000 inserts taken out, then 5 000 nodes made live: 94 ms). The links into
+a node made live, which a list chosen again while it was a tombstone
+dropped (`select_heuristic` takes none), are made again from its own once
+the put-back ends (`link_revived`, `link_back`): each node its lists reach
+takes it back into its list at that level, as a node linked takes its
+neighbours' links back, through the same pruning, no search made -- but
+a node the pruning would let go of that no other list holds is kept, in
+the place of the last chosen that another list holds, and the list left
+as it was where none is (`link_back_into`, `held_elsewhere`: the lists
+of the nodes the dropped one's own lists reach, read without a walk).
+Made through the pruning alone, the links back left, over the review's
+stress -- 300 rows at m = 4, 120 blocks a seed of every write, a vector
+set, made null, given back and shared, rows deleted and added, a `put`
+of hundreds as a batch, two in three rolled back -- 255 live nodes no
+walk from the entry reached, summed over the rollbacks of 4 seeds, where
+main left 98, and 559 over 16 seeds against main's 883; yet only 2 and 4
+of them were new after a rollback: the links back took nodes' other ways
+in, leaving each the one a later write's pruning took. Kept, 70 and 285
+(at m = 16 none in either, as on main), the rows their own vector
+missed at ef 16 3 610 and 14 474 against 3 749 and 14 876 (main: 17 313 and 62 841; at m = 16
+2 014 and 5 440 against 2 023 and 5 395, main 32 933 and 133 533), and
+over 2 000 x 16 and 4 000 x 32 the same misses and recall as without it.
+The review would have the links back made into live nodes alone, a
+tombstone's pruning wasted: made so, 145 and 491 unreached and 8 948 and
+28 914 missed, a tombstone still routing the walks that reach the node
+made live; with no link back made where the pruning would let go of such
+a node, 17 and 315 unreached but 3 979 and 17 556 missed. Whether another
+list holds a node reads the lists of the nodes its own lists reach, about
+`m0` squared entries, asked of each node a list chose: about `m0` cubed a
+link back, the most read by one 556 at m = 4, 23 995 at m = 16 and
+157 494 at m = 32, and some 10^14 at `m`'s bound of 32 767, under the
+write lock, where the pruning beside it measures about `m0` squared
+distances. So a node is kept only up to an `m` of 16 (`KEEP_M`); past it
+a link back is a link. At m = 32 the stress left no live node unreached
+either way, the rows their own vector missed at ef 16 3 370 and 26 049
+without the keep against 3 342 and 25 976 with it (4 and 16 seeds).
+Measured over
+4 000 x 32, m = 16, after a block writing every row's vector
+again was rolled back (3 seeds; misses are rows their own vector does not
+find, recall@10 at ef 100 over 500 other queries): left with no links in,
+227 to 273 rows missed at ef 8 and 2 to 6 at ef 40 after a `set` of each,
+recall 0.960 to 0.966, and after one `put` of them all, linked as a
+batch, 3 899 to 3 968 of the 4 000, recall 0.017 at best; the graph of
+the rollback placing every vector again, as before the bound, 5 and none
+(after the `put`, 12 to 52 and up to 7), recall 0.960 to 0.964 (0.987 to
+0.988); links made again, 0 to 3 and none, recall 0.995 to 0.997, the
+rollback taking 12 to 21 ms against 360 to 470. Made as each node was
+made live, as the review first put it, a list chosen again let go of
+neighbours the put-back had not made live yet: 4 to 7 missed at ef 8
+after the `set`, 62 to 71 and 6 to 10 at ef 40 after the `put`. A `put`
+over fewer rows than a link batch (512) leaves them waiting, never
+linked, and its rollback gives the graph back as it was. One shape still
+left rows hard to reach by their own vector at a small ef: over 2 000 x 16
+after the `put`, 372 to 444 missed at ef 8 and 44 to 72 at ef 40, where
+placing them again missed 0 to 1 and none, recall@10 0.9996 to 0.9998
+against 1.0 -- for two reasons, either enough to leave rows unfound. The
+batch's first nodes, finding nothing live, were linked through the nearest
+tombstones, the rows' nodes, whose full lists, chosen again, took no
+tombstone (`select_heuristic`): the rows' nodes came back with lists
+holding the block's nodes alone. And the batch's top node, placed above
+the graph's top level, stayed the entry, a tombstone whose links reach the
+block's tombstones. Neither main nor the branch moves an entry off a
+tombstone -- a delete leaves it there, its links still walked -- and
+main's rollback reached the rows only because it placed each vector again
+by a search from that entry. So once the links into the nodes made live
+are made again, each of their lists holding a node the put-back made a
+tombstone -- the block's, kept in turn as it takes them out (`taken`) --
+is chosen again from its live nodes and the live nodes its tombstones'
+lists hold at that level, through the same pruning, no search made, and
+its links back made (`mend`); and an entry the put-back left a tombstone
+moves to a live node, none waiting to be linked, of the highest level a
+walk from it meets, the top level falling to it (`enter_live`): in a
+graph linked in node order, the block's start's entry and top level where
+the walk meets it. The
+entry moved alone left 118 to 159 and 12 to 20; the lists chosen again
+alone, 342 to 427 and 39 to 70; both, none and none in every shape and
+seed, recall@10 1.0 over 2 000 x 16 after the `put` and the `set`, and
+over 4 000 x 32 0.998 to 0.9996 after either, where the links back alone
+gave 0.995 to 0.997 and placing the vectors again 0.960 to 0.988. Chosen
+again wherever a list held any tombstone, the earlier writes' too, a
+rollback of one row's `set` over 2 000 rows cost 34% more, its row's lists
+holding the nodes of the blocks before it; held to the block's own, a
+rollback of one row's `set` or `put` moved by under a thousand
+instructions of 648 000 and 74 000; the nodes the links back keep cost
+the `set`'s 679 more (0.10%, SE 135) and the `put`'s none past the
+builds' spread (+53, SE 90). The entry is looked for where a
+put-back that made a node live or a tombstone in the graph ends on a
+tombstone entry -- a block that wrote no vector there puts nothing back,
+its entry neither -- by a walk from it down its levels, reading 256
+lists at most (`ENTER_STEPS`, `live_near`): the live, linked node of the
+highest level it meets, the lowest id among equals, a node waiting to be
+linked holding no list. Only where that meets none and the entry is a
+node the put-back took, the block's, is every node walked
+(`live_anywhere`); an entry a delete left, where the walk meets no live
+node, stays where the delete left it. Walked over every node
+with the nodes waiting copied and sorted wherever a rollback of the
+collection ended on a tombstone entry, as the move was first made, the
+rollback of a block writing no vector, after the entry's row was deleted,
+walked every node, and every rollback did while each live node waited to
+be linked, as a server's open leaves them: over a file of 2 000 such rows
+and 2 000 deleted, opened as a server opens it, a block setting one row's
+other field took 282 558 instructions to put back, where main took
+32 258 and this takes 32 296. In the stress every walk from the entry
+met a live node, within 37 lists at m = 4 and 85 at m = 16, and none
+walked every node. Moved only where the put-back took the entry, the
+stress missed 4 233 rows against 3 610 (16 seeds: 16 545 against 14 474;
+at m = 16, 3 076 and 7 180 against 2 014 and 5 440). The walk finds the
+highest live node it meets, not the highest the graph holds: at m = 2
+over 16 seeds, 1 of 86 moves left the top level at 8 while a live node of
+level 9 stood four lists from the entry, its ways in a level-7 list and
+the level-9 lists of two tombstones the walk never met. Walking one level
+past the first that meets a live node found it, and moved nothing at
+m = 4, 16 or 32, but took the most lists a walk read from 59 to 109 at
+m = 2 and from 85 to the bound of 256 at m = 16; reading the upper lists
+of the nodes met below their top did not find it. Neither was taken: a
+node above the top level is one like any other to a search, reached
+through its lower lists, and at m = 4, 16 and 32 none was left so. The 4 000 rows'
+rollback takes 28.5 to 29.8 ms, 26.2 to 28.2 with each link back pruned
+as a link is (2 000 x 16: 12.7 to 13.2 against 11.7 to 12.4), 10 to 16
+with the links back alone and 360 to 470 placing the vectors again. A
+block put back whole, then,
+has its rows' nodes back, each with its links both ways, its lists that
+held the block's nodes chosen again from the live nodes those led to, and
+the entry and top level of its start where the walk meets its node, the
+highest live node the walk meets where it does not; the nodes it placed
+stay in the
+graph, tombstones, until it is made again (a compact, an open rebuilding
+it); a put-back places a node only where none is
+held, and only where the graph takes one. A node a tombstone once until a
+put-back makes it live, the list holds no more than the graph's
+tombstones, 4 bytes each beside a node's 150 or more, and a push where a
+write makes one, which a write over a row's vector pays beside the
+linking of its new one. A first cut made room instead, the graph made
+again from the rows before the put-back placed the vector
+(`make_room`): a graph's build under the write lock -- hours at 2^32
+nodes, and the graph's memory twice -- on every put-back while any graph
+of the collection was full, a graph whose answers to `near` were no longer
+the block's start's, and it counted rows, not nodes, and failed on a row
+that does not read, leaving the graph full for the assert. The rebuild
+stays where no tombstone holds the vector: a replica's graph made again
+in the middle of a record (`room_applied`, below), whose tombstones the
+record's first writes took. There, where the graph has no node left, it is
+made again from the rows as the put-back has them (`Collection::room_for`),
+a state the writes passed through whose live vectors had their nodes --
+a graph of new ids, levels and links, a bit index's centres learned again,
+so `near`'s approximate answers may move there, as after a compact; and
+where a row does not read, or the bound refuses the rows' vectors, the
+vector is left out and the database failed as a storage error fails it,
+the rest put back (`a_put_back_finding_no_node_makes_room_from_the_rows_or_fails`).
+The browser module keeps placing the vector again: its graph never meets
+the bound, and carries none of it.
+
+A graph made from documents is held to the bound where it is made,
+counted as the graph places them (`VectorIndex::insert_held`): rows
+sharing a vector share a node ("A vector written again is one node"), so
+a list the room left holds goes in whole, one compare, and past it a piece
+the room holds at a time, then each vector asked first whether it places
+a node. Counted by rows, a collection of more rows than the bound whose
+vectors fit -- which a write takes, holding nodes exactly -- was refused by
+`create index` and by the next open, an open refusing a file it wrote.
+So: `create index` under the lock (`build_graph`), beside the database as
+it is built (`IndexCopy::build`, the refusal carried to `finish_index`) and
+as it catches up with the writes made during the build -- each round's
+chunk before it links any, with no lock held (`graph_round`), and the last
+round's under the write lock (`finish_index`), each write counted as a
+node, where they were placed unchecked, a panic at the bound;
+an open rebuilding one, a file holding more vectors in a field than the
+bound's nodes hold, which a release before the bound wrapped, refused as
+damage naming the field; a graph restored from its record that the writes after it may
+take past the bound -- taken in id order, a delete can leave a node a
+tombstone that a later write kept live, and the row written place one --
+made from the rows instead; a replica's graph made again without its
+tombstones (`room_applied`), its refusal damage, as a primary's graph held
+the vectors; and a compact beside the database, whose graph is kept, as
+where a document does not read, where the writes made during its build,
+each taken out and put in again, would pass the bound -- asked where the
+rounds and the write lock link them, as `create index` asks -- and said in
+its log line (`KeptFor::Full`: ``graph `docs.v` kept, its writes would
+pass 4294967295 nodes``). A graph record
+counting more is rebuilt, and `alloc_links` asserts the bound it never
+meets, counted as the engine counts. A replica's room and a put-back's
+build are a graph's build under the write lock, reached only at the bound
+with tombstones in the graph: hours at 2^32 nodes, and the graph's memory
+twice while the old one is let go of. Both bounds are driven: at the
+bound and one past it where they are decided (`store::tests`,
+`vector::tests`: a record past the bound rebuilt, a node past it never
+placed), and through every write at a bound the test's thread holds
+payloads to, between two collections' rows, or graphs counted
+at the bound (`PAYLOAD_MOST`, `NODES_BESIDE`, test builds alone, which
+every count held to the bound adds) -- each write refused with nothing
+changed, alone and in a block, the block put back whole, a write placing no
+node taken, an open mapped and in memory refusing a frame past it
+(`engine::unwinding`'s
+`a_document_past_a_frames_length_is_refused_and_its_block_put_back` and
+`a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`); a
+put-back at the bound -- a block rolled back, a `set` of two rows refused
+at its second, a write a panic stopped -- over rows sharing a vector and
+beside a row that does not read, each its state and its graph's nodes as
+they were (`a_put_back_at_a_graphs_bound_revives_the_node_its_write_took`);
+off it, a block writing 1 000 rows' vectors again rolled back, each row
+its node, the block's nodes tombstones, and each found by its own vector
+at ef 16 (`a_rollback_gives_each_row_its_node_and_the_links_into_it`, 13
+rows not found where no links in were made), a block whose `put` of every
+row and 3 000 more placed a node above the top level, rolled back, the
+start's entry and top level given back and each row found at ef 8
+(`a_rollback_gives_back_the_entry_and_the_lists_a_batch_took`), a block
+writing no vector rolled back over a tombstone entry leaving it where it
+is, every node unwalked, and one writing a vector moving it by the walk
+from it (`a_rollback_writing_no_vector_leaves_the_entry_where_it_is`),
+the stress's blocks at m = 4 on the seed where a rollback's pruning took
+a node's last way in, each rollback leaving reachable every node its
+block's start reached (`a_rollback_takes_no_node_its_last_way_in`), its
+links back asking another list at m = 16 and none at 17
+(`a_link_back_keeps_a_node_up_to_m_16_alone`), a
+row written A, null, A and one written A, B, A by a write a panic
+stopped, each given the node it began the block with
+(`a_row_written_twice_in_a_block_gets_the_node_it_began_with`), and every
+write a panic stops leaving each row the node it had
+(`a_panic_anywhere_in_a_write_puts_its_block_back_whole`);
+an open at the bound, rows sharing vectors taken and one past refused,
+and a restored graph's catch-up
+(`an_open_counts_a_graphs_nodes_as_the_graph_places_them`); a replica
+landing the review's case, a tombstone its primary's compact dropped, and
+refusing as damage what its live vectors leave no node for
+(`a_replica_lands_every_vector_its_primary_took`); `create index` each
+way, rows sharing vectors among them
+(`maintenance::tests::create_index_refuses_a_graph_past_its_nodes`), and
+a compact's catch-up
+(`a_compact_whose_catch_up_would_pass_the_bound_keeps_its_graph`), each
+written to before a round, which refuses its chunk linking none, and
+during the last, which the write lock refuses, one past the bound and one
+at it.
+
+*What the two cost.* A write tests both bounds in one branch: its
+payload's length against the bound and, in a collection with a graph, each
+graph's count (`crowded`), what a refusal needs out of line (`nodes_past`,
+`room_applied`, `put_back`, `frames_fit`, the error's words). Against main
+before them (9351148f), in instructions an op on macOS
+(`tools/instr/compare.py`: 8 binary identities a build, 7 runs each, the
+load under 3), each inside two standard errors: a replica's apply of one
+`put` 4 819 to 4 852 and of a record of 100 frames 295 573 to 297 991; a
+`put` over `/query` 21 190 to 21 144, and of 100 documents prepared beside
+the readers 1 006 203 to 1 009 542; a `set` by id over REST 28 549 to
+28 631. Single-stepped (`tools/instr/trace.py`, which the allocator's draw
+does not move), one call runs this many instructions of its own more: an
+apply 16 a frame (`apply_frames`, 1 501 a record of 100), a `put` 17, its
+encoded payload held past the unindex, a `set` 3 fewer, its encode
+inlined, and a block's preparation of a `put` of 100 documents 14. A
+replica landing what its primary took, an exact count and a put-back's
+room moved none by more than an instruction: each is reached only where
+the compare says a graph may be full. The put-back giving a row its node
+back, the count of a graph made from documents and the list of
+tombstones moved none of those traces either, measured again against the
+same base (a replica's apply of one `put` 4 818 to 4 843, a record of 100
+frames 298 218 to 297 978, a `put` 21 159 to 21 187, 100 prepared 1 006 712
+to 1 007 368, a `set` 28 473 to 28 588, each inside two standard errors);
+a replica's apply writing a row's vector again, a tombstone and a push
+each, 630 452 to 630 450. The links made again into the nodes a put-back
+makes live, and the put-back's own tombstones kept off the list, moved
+none of them either, measured once more against the same base (an apply's
+`put` 4 856.0 to 4 855.8, a record of 100 299 157 to 298 014, a vector
+written again 630 820 to 631 104, a `put` 21 164 to 21 202, a record of
+100 prepared 1 006 751 to 1 007 773, a `set` 28 537 to 28 606 -- +68.5,
+SE 32.5, just past two standard errors, and again 28 567 to 28 535 -- each
+inside two but that one). A rollback pays for them: a block writing one
+row's vector again by a `put` and rolled back, over 2 000 rows of
+`vector<16>`, 42 667 instructions before them and 74 247 to 74 317 now --
+the links back, 31 651 more -- against 491 118 where the rollback placed
+the vector again; by a `set`, which links its new vector as it writes it,
+597 083, 648 324 to 648 650 and 975 447. The lists the block took chosen
+again and the entry given back moved neither by a thousand: 74 252 to
+74 607 (+356, SE 119, one binary identity a side reading -400 to +950)
+and 648 426 to 647 447 (-980, SE 136); chosen again wherever a list held
+any tombstone, the `set`'s was 871 092, 34% more. Two first shapes cost more and were
+changed: the node test inline, reading the row written over, put an apply
+1% and a record of 100 2.6% over, outside two standard errors; and the
+payload's test asked of each prepared document was 5 instructions a
+document, 501 a preparation of 100 and 0.7% of the block. The browser
+module builds neither test -- a wasm32 `Vec` stops at 2 GiB, and its memory
+long before 2^32 nodes -- and grew 17 bytes, 863 579 to 863 596 (12
+gzipped).
+
+*What the two weigh.* The binaries a release ships grew, as CI's build
+job measures them (x86_64 musl, against main's merge group for #692):
+`fennec-server` 8 547 024 to 8 575 696 bytes (+28 672, +0.34%), `make
+small` 3 033 672 to 3 054 152 (+20 480, +0.68%), `fennec` 5 118 832 to
+5 143 408 (+24 576, +0.48%); the native library (stripped) 3 600 160 to
+3 624 704 on x86_64 Linux (+24 544), 3 134 096 to 3 150 656 on
+aarch64-apple-darwin, and 560 bytes on armv7, a 32-bit target that builds
+no put-back. Built with their symbols on macOS, `fennec-server`'s code
+grew 21.8 KB: the put-back's graph code 14.3 KB -- `link_back` with
+`link_back_into` and `held_elsewhere` 3.9, `live_near` and its set 3.0,
+`mend` 1.6, `rewind` 1.2, `revive` 1.1, `put_back` 0.7, `put_back_torn`
+and `room_for` 0.6 each -- the two bounds' checks 7.5 KB -- `room_applied`
+1.1, `create index` and the compact beside the database 1.2, `nodes_past`
+and the open's count 0.9 each, `holds` 0.6, the apply's 0.4, the
+preparation's, `frames_fit` and the `put`'s 0.3 each -- and `place`'s
+helpers out of line once the put-back called them, 0.6 net; the tables a
+panic unwinds by 2.9 KB more. The shell without its default features:
+13.9 and 3.7 KB. Two pieces were code no path needed: `live_near` kept the
+nodes its walk met in a `HashSet<u32>`, the only one either binary built,
+std's table and SipHash for it beside the walk, and marks them in the
+search's own buffer now (`Scratch::see`); `nodes_past` collected each
+vector's bits into a `Vec` to compare them, and compares them in place.
+They took 1.8 and 0.2 KB of `fennec-server`'s code and 2.2 and 0.2 of the
+shell's, a 4 KB page off each in CI and 2.6 to 3.1 KB off the native
+library on Linux and Android. Neither is on a write's way: every other
+function of the builds disassembles as before but for alignment and
+addresses, and none of the rollbacks measured above calls `enter_live`,
+`live_anywhere` or `nodes_past`: measured again against the build before
+them, the `put`'s rollback read -86 instructions (SE 88), the `set`'s
++147 (SE 119) and the block writing no vector +71 (SE 70), each inside
+two standard errors. The rest is what the two buy -- no node
+id or payload length cut to 32 bits, and a rollback that gives each row
+its node, its links and the entry back, at a sixth of main's
+instructions after a `put` and two thirds after a `set`.
+
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
 dimension, beam and count of candidates or words, `hi` a `u32` so the

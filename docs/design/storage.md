@@ -230,7 +230,14 @@ once, their documents looked up 4 096 at a time under the read lock
 with no lock held -- taken out and put back for a compact, as
 `finish_graphs` took them, and for `create index` a node holding the
 vector already kept, as `finish_index` keeps it. A round whose links cost
-less than 64 at 768 dimensions (`GRAPH_DONE`) ends them, 16 at most.
+less than 64 at 768 dimensions (`GRAPH_DONE`) ends them, 16 at most. A
+chunk that may take the graph past the nodes a graph holds
+(`vector::MAX_NODES`, each write counted as a node: `past_nodes`) links
+none of it, and the graph is refused (`Built::Refused`) -- a compact
+keeps it as it stands, `create index` is refused naming the field -- as
+the write lock refuses the last round's ([crates.md,
+limits](crates.md#limits)); linked, its last node met `alloc_links`'
+assert.
 
 **The write lock links what 128 links at 768 dimensions cost, at most**
 (`GRAPH_HELD`), the graphs' together: what was written during the last
@@ -400,14 +407,16 @@ maintenance that held them (`Database::maintain_held`,
 the compact's. The build's copy -- a compact's longest, one a graph --
 its rounds' longest and its put in place, and a compact's file's copy,
 rounds' longest and swap. With them the graphs a compact kept as they
-stood (`Holds::kept`, each a `KeptGraph`: its collection, field and the
-writes its last round left, or none where a document did not read), since
+stood (`Holds::kept`, each a `KeptGraph`: its collection, field and why,
+`KeptFor` -- the writes its last round left, a document unread, or its
+writes past the nodes a graph holds), since
 nothing else says one was kept: the answer to `compact` carries no holds,
 and a kept graph answers as it did. `--auto-compact`'s line and the one a
 `compact` or `create index` sent as a statement writes are one shape
 (`link::said_beside`): `<what>: <done> in <took>, the lock held <longest>
 at most (<each hold>)`, then ``; graph `<collection>.<field>` kept, <n>
-behind`` (or `a document unread`) for each graph kept, `--auto-compact`
+behind`` (or `a document unread`, or `its writes would pass 4294967295
+nodes`) for each graph kept, `--auto-compact`
 naming the file or tenant, a statement itself and its request id after.
 
 *Measured* (`graphhold`, a scratch program over `Database::maintain`:
@@ -656,7 +665,7 @@ nothing a document holds, and fails only as storage fails:
   is, and is refused where it is read, in the same words, after the compact
   as before.
 - A graph holding tombstones is built again from every document's vector
-  (`build_graph` under the lock, `begin_graphs` and `finish_graphs` beside
+  (`build_graph` under the lock, `begin_graph` and `finish_graphs` beside
   the database). A document it cannot read leaves the graph as it stands,
   tombstones and all, answering as it did; a graph built without the
   document would not. No file brings such a document to it today: an open

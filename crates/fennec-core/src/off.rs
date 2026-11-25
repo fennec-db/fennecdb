@@ -55,6 +55,13 @@ impl VectorIndex {
     pub fn is_empty(&self) -> bool {
         match self.never {}
     }
+    pub fn nodes(&self) -> usize {
+        match self.never {}
+    }
+    #[cfg(target_pointer_width = "64")]
+    pub fn holds(&self, _: DocId, _: &[f32]) -> bool {
+        match self.never {}
+    }
     pub fn dead(&self) -> usize {
         match self.never {}
     }
@@ -108,6 +115,29 @@ impl VectorIndex {
         match self.never {}
     }
     pub fn remove(&mut self, doc: DocId) {
+        match self.never {}
+    }
+    #[cfg(target_pointer_width = "64")]
+    pub fn put_back(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        match self.never {}
+    }
+    #[cfg(target_pointer_width = "64")]
+    pub fn forget_retired(&mut self) {
+        match self.never {}
+    }
+    #[cfg(target_pointer_width = "64")]
+    pub fn link_revived(&mut self) {
+        match self.never {}
+    }
+    pub fn take_back(&mut self, doc: DocId) {
+        match self.never {}
+    }
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+    ) -> crate::error::Result<()> {
         match self.never {}
     }
     #[cfg(test)]

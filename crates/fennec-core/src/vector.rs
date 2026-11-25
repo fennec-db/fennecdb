@@ -2576,6 +2576,119 @@ pub(crate) const UNLINKED: bool = cfg!(not(target_arch = "wasm32"));
 /// the ceiling of the "1/16 of the graph size" rule.
 const MAX_BATCH: usize = 512;
 
+/// Lower bound on a batch: 1/16 of a graph of [`PARALLEL_FROM`] nodes, the
+/// smallest one linked in parallel, so the floor is met where batches begin.
+const MIN_BATCH: usize = 64;
+
+/// The nodes a graph holds before a batch of them is linked in parallel.
+/// Below it each node goes in on its own, seeing every node before it, so a
+/// small collection loses no recall to nodes that cannot see each other;
+/// and its sixteenth, a batch, is too few to share among threads.
+const PARALLEL_FROM: usize = 1024;
+
+/// The nodes linked as one batch into a graph of `nodes`: 1/16 of it, held
+/// to [`MIN_BATCH`]..=[`MAX_BATCH`] (limits.html's "bulk insert batch").
+#[inline]
+fn batch_len(nodes: usize) -> usize {
+    (nodes / 16).clamp(MIN_BATCH, MAX_BATCH)
+}
+
+/// The nodes a graph holds at most, its tombstones and the nodes waiting
+/// to be linked among them (limits.html's "vector index node count"): a
+/// node's id is a `u32`, and the documents' nodes (`by_doc`) and the copies
+/// table ([`Same`]) hold it one up, 0 for none, so the last id a node may
+/// take is `u32::MAX - 1`. A write whose vector would place one more is
+/// refused before it changes anything ([`takes_node`], asked by the engine
+/// where it writes a row), and a graph made from a collection's documents
+/// is held to it where it is made. Every release from 0.1.0 through 0.2.0
+/// cut the count to 32 bits (`alloc_links`): the 2^32 + 1st node took node
+/// 0's id, its links written over node 0's, and in 0.2.0, which holds an id
+/// one up, the 2^32nd took the one read as none.
+pub const MAX_NODES: usize = u32::MAX as usize;
+
+#[cfg(test)]
+thread_local! {
+    /// Nodes a test's thread counts in every graph beside its own
+    /// ([`VectorIndex::nodes`]): a graph at [`MAX_NODES`] for the engine's
+    /// refusal to meet, which no test machine could build.
+    pub(crate) static NODES_BESIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`NODES_BESIDE`]: every count held to [`MAX_NODES`] adds it -- a
+/// graph's nodes, a collection's vectors a graph is built from, a graph
+/// record's count -- so each refusal is driven where the bound is decided.
+#[cfg(test)]
+pub(crate) fn nodes_beside() -> usize {
+    NODES_BESIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn nodes_beside() -> usize {
+    0
+}
+
+/// How many lists [`VectorIndex::enter_live`] reads from a tombstone entry
+/// for a live node, down its levels, before it walks every node: over the
+/// review's stress every walk met one within 37 lists at m = 4 and 85 at
+/// m = 16, none walking every node.
+#[cfg(target_pointer_width = "64")]
+const ENTER_STEPS: usize = 256;
+
+/// The widest `m` whose link back keeps a node its pruning would let go of
+/// that no other list holds ([`VectorIndex::link_back_into`]). Looking for
+/// one costs about `m0` squared list entries a node asked
+/// ([`VectorIndex::held_elsewhere`]) and `m0` cubed a link back -- `m0`
+/// to the fourth a node made live -- where the pruning beside it measures
+/// about `m0` squared distances of the dimensions each: over the review's
+/// stress the most one link back read was 556 entries at m = 4, 23 995 at
+/// m = 16 and 157 494 at m = 32, and at `MAX_M`'s 32 767 it would be some
+/// 10^14, under the write lock. Past it a link back is a link, as before
+/// the keep. The keep matters where lists are short: at m = 4 it took the
+/// live nodes no walk reached from 255 to 70 over 4 seeds and 559 to 285
+/// over 16, where at m = 16 there were none either way. At m = 32, past
+/// it, there were none either, and the rows their own vector missed at
+/// ef 16 were 3 370 and 26 049 against the keep's 3 342 and 25 976 (0.8%
+/// and 0.3% more).
+#[cfg(target_pointer_width = "64")]
+const KEEP_M: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// The walks over every node [`VectorIndex::enter_live`] made on this
+    /// thread, for a test holding a rollback to the bound it keeps.
+    pub(crate) static ENTRY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The links back [`VectorIndex::link_back_into`] made through a
+    /// pruning on this thread, and the nodes [`VectorIndex::held_elsewhere`]
+    /// was asked of, for a test holding the keep to [`KEEP_M`].
+    pub(crate) static LINKS_BACK: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Whether a graph of `nodes` takes one more node with `waiting` placed
+/// before it -- a statement's vectors not placed yet, each of which may
+/// take one ([`MAX_NODES`]).
+#[inline(always)]
+pub fn takes_node(nodes: usize, waiting: usize) -> bool {
+    nodes + waiting < MAX_NODES
+}
+
+/// The refusal of a vector that would take field `field`'s graph past
+/// [`MAX_NODES`]: a query error naming the field, as a limit is. A
+/// `compact` rebuilds a graph without its tombstones.
+#[cold]
+#[inline(never)]
+pub fn graph_full(field: &str) -> crate::error::Error {
+    crate::error::Error::Query(format!(
+        "field `{field}`: a vector index holds at most {MAX_NODES} nodes, its tombstones \
+         among them, which a compact drops"
+    ))
+}
+
 // -------------------------------------------------------------- HNSW
 
 /// Buffers reused during a search.
@@ -3098,6 +3211,33 @@ pub struct VectorIndex {
     /// The vector being placed, as the arena would store it: kept from one
     /// insert to the next.
     stored_buf: Vec<u8>,
+    /// The nodes writes made tombstones, in turn, since the graph was made
+    /// or a block was last put back ([`Self::forget_retired`]): where a
+    /// put-back finds the node its write took from the row
+    /// ([`Self::put_back`]), which no vector placed finds. A put-back's own
+    /// tombstones -- the nodes the block placed, as it takes them out --
+    /// never go on it ([`Self::take_back`]): a row written A, null, A in a
+    /// block had the node of its second A, the newest holding A, made live
+    /// again for the block's start's, and every put-back after a block's
+    /// inserts were taken out looked past each of them. A node is made a
+    /// tombstone once until a put-back makes it live, so it holds no more
+    /// than [`Self::dead`] nodes, 4 bytes a tombstone beside its 150 or
+    /// more. Natively alone: the browser module's graph never meets the
+    /// bound a put-back keeps to, and places a node as a write does.
+    #[cfg(target_pointer_width = "64")]
+    retired: Vec<u32>,
+    /// The nodes a put-back made live again, in turn ([`Self::revive`]),
+    /// whose links in are made again from their own once the put-back
+    /// ends ([`Self::link_revived`]). Natively alone, as `retired` is.
+    #[cfg(target_pointer_width = "64")]
+    revived: Vec<u32>,
+    /// The nodes a put-back made tombstones itself, in turn -- the block's,
+    /// as it takes them out ([`Self::take_back`], [`Self::put_back`]) --
+    /// whose places in the lists of the nodes it made live are filled again
+    /// once it ends ([`Self::mend`]), and let go of then. Natively alone,
+    /// as `retired` is.
+    #[cfg(target_pointer_width = "64")]
+    taken: Vec<u32>,
 }
 
 /// The nodes by their vector as the arena stores it, for a vector written
@@ -3514,6 +3654,12 @@ impl VectorIndex {
             aliases: Vec::new(),
             same: Same::default(),
             stored_buf: Vec::new(),
+            #[cfg(target_pointer_width = "64")]
+            retired: Vec::new(),
+            #[cfg(target_pointer_width = "64")]
+            revived: Vec::new(),
+            #[cfg(target_pointer_width = "64")]
+            taken: Vec::new(),
         }
     }
 
@@ -3536,6 +3682,25 @@ impl VectorIndex {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Nodes in the graph, its tombstones and the nodes waiting to be linked
+    /// among them: what [`MAX_NODES`] holds. A test's thread may count more
+    /// ([`NODES_BESIDE`]), a graph at the bound no test can make.
+    #[inline]
+    pub fn nodes(&self) -> usize {
+        self.doc_ids.len() + nodes_beside()
+    }
+
+    /// Whether `doc`'s node holds `raw` as the arena would store it, to the
+    /// bit: a vector placed for `doc` then takes no node, its node kept
+    /// ([`Self::retire`]'s test, as [`Self::place`] asks it). What counts a
+    /// write's nodes exactly asks it, out of line, at the bound alone.
+    #[cfg(target_pointer_width = "64")]
+    pub fn holds(&self, doc: DocId, raw: &[f32]) -> bool {
+        self.node_of(doc).is_some_and(|node| {
+            !self.is_deleted(node) && self.stored_of(node) == self.stored(&self.as_held(raw))
+        })
     }
 
     /// Tombstones: nodes of documents deleted or rewritten, which stay in the
@@ -3639,6 +3804,18 @@ impl VectorIndex {
             + self.pending.capacity() * 4
             + self.aliases.capacity() * size_of::<(u32, DocId)>()
             + self.same.bytes()
+            + self.retired_bytes()
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    fn retired_bytes(&self) -> usize {
+        (self.retired.capacity() + self.revived.capacity() + self.taken.capacity()) * 4
+    }
+
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    fn retired_bytes(&self) -> usize {
+        0
     }
 
     /// Nodes that no link reaches yet ([`Self::defer_batch`]), tombstones
@@ -3875,7 +4052,25 @@ impl VectorIndex {
 
     fn alloc_links(&mut self, doc: DocId, level: usize) -> u32 {
         self.changes += 1;
-        let node = self.doc_ids.len() as u32;
+        let node = self.doc_ids.len();
+        // Never reached: the engine refuses a write whose vector would place
+        // a node past `MAX_NODES` before it changes anything, a put-back
+        // gives a row the node its write took and places one only where the
+        // graph takes it (`put_back`), and a graph made from documents is
+        // held to it where it is made (`insert_held`: `build_graph`, an
+        // open's rebuild, `create index` beside the database), as are the
+        // writes a build beside the database catches up with. Cut to 32
+        // bits, as it was, the 2^32nd node took the id
+        // `by_doc` reads as none, and the next node 0's. A 32-bit build's
+        // `Vec` of ids stops at 2^28. Asked of `nodes`, which a test's thread
+        // may count past the graph's own ([`NODES_BESIDE`]), so a path
+        // placing a node past the bound fails a test that drives it.
+        #[cfg(target_pointer_width = "64")]
+        assert!(
+            self.nodes() < MAX_NODES,
+            "a graph holds {MAX_NODES} nodes at most"
+        );
+        let node = node as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
         let end = self.doc_ids.len() * self.m0;
@@ -4203,6 +4398,8 @@ impl VectorIndex {
             self.deleted[node as usize] = true;
             self.deleted_count += 1;
             self.changes += 1;
+            #[cfg(target_pointer_width = "64")]
+            self.retired.push(node);
         }
     }
 
@@ -4377,10 +4574,10 @@ impl VectorIndex {
             // inserting 100k into an empty index in one go would drop the
             // whole batch onto the serial path -- exactly when it should
             // parallelise as the graph grows.
-            if threads < 2 || self.doc_ids.len() < 1024 {
+            if threads < 2 || self.doc_ids.len() < PARALLEL_FROM {
                 let take = rest
                     .len()
-                    .min(1024_usize.saturating_sub(self.doc_ids.len()).max(1));
+                    .min(PARALLEL_FROM.saturating_sub(self.doc_ids.len()).max(1));
                 for (doc, v) in &rest[..take] {
                     self.insert(*doc, v);
                 }
@@ -4388,9 +4585,7 @@ impl VectorIndex {
                 continue;
             }
 
-            let chunk_len = (self.doc_ids.len() / 16)
-                .clamp(64, MAX_BATCH)
-                .min(rest.len());
+            let chunk_len = batch_len(self.doc_ids.len()).min(rest.len());
             let (chunk, tail) = rest.split_at(chunk_len);
             rest = tail;
 
@@ -4508,8 +4703,8 @@ impl VectorIndex {
         let mut linked = self.doc_ids.len() - self.pending.len() - todo.len();
         let mut rest = &todo[..];
         while !rest.is_empty() {
-            if threads < 2 || linked < 1024 || self.entry.is_none() {
-                let take = rest.len().min(1024_usize.saturating_sub(linked).max(1));
+            if threads < 2 || linked < PARALLEL_FROM || self.entry.is_none() {
+                let take = rest.len().min(PARALLEL_FROM.saturating_sub(linked).max(1));
                 for (node, level, query) in &rest[..take] {
                     self.link_node(*node, *level, None, query.as_deref());
                 }
@@ -4517,7 +4712,7 @@ impl VectorIndex {
                 linked += take;
                 continue;
             }
-            let (chunk, tail) = rest.split_at((linked / 16).clamp(64, MAX_BATCH).min(rest.len()));
+            let (chunk, tail) = rest.split_at(batch_len(linked).min(rest.len()));
             rest = tail;
             linked += chunk.len();
             if scratch.is_empty() {
@@ -4578,19 +4773,7 @@ impl VectorIndex {
             let max_deg = if l == 0 { self.m0 } else { self.spec.m };
             self.set_neighbors(node, l, &selected);
             for &nb in &selected {
-                if l > 0 && l > self.node_levels(nb) {
-                    continue; // the neighbour does not have this level
-                }
-                if self.push_neighbor(nb, l, node, max_deg) {
-                    continue;
-                }
-                // The list is full: reselect with the diversity heuristic.
-                let mut buf = std::mem::take(&mut self.prune_buf);
-                let pruned = self
-                    .view()
-                    .pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
-                self.set_neighbors(nb, l, &pruned);
-                self.prune_buf = buf;
+                self.link_into(nb, l, node, max_deg);
             }
         }
 
@@ -4598,6 +4781,156 @@ impl VectorIndex {
             self.max_level = level;
             self.entry = Some(node);
         }
+    }
+
+    /// `node` into `nb`'s list at level `l`, which, full, is chosen again
+    /// by the diversity heuristic: the link back a node's own link to `nb`
+    /// makes ([`Self::link_node`], [`Self::link_back`]).
+    #[inline(always)]
+    fn link_into(&mut self, nb: u32, l: usize, node: u32, max_deg: usize) {
+        if l > 0 && l > self.node_levels(nb) {
+            return; // the neighbour does not have this level
+        }
+        if self.push_neighbor(nb, l, node, max_deg) {
+            return;
+        }
+        // The list is full: reselect with the diversity heuristic.
+        let mut buf = std::mem::take(&mut self.prune_buf);
+        let pruned = self
+            .view()
+            .pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
+        self.set_neighbors(nb, l, &pruned);
+        self.prune_buf = buf;
+    }
+
+    /// The links into `node`, a tombstone made live again ([`Self::revive`]),
+    /// made again from its own: each node its lists reach takes it back
+    /// into its list at that level, as a node linked takes its neighbours'
+    /// links back ([`Self::link_into`]), no search made. Its own lists are
+    /// those it had, but a list chosen again while it was a tombstone left
+    /// it out (`select_heuristic` takes no tombstone). Over 4 000 x 32,
+    /// m = 16, a block's `set` of every row's vector rolled back, made
+    /// live again with no links in left 227 to 273 rows their own vector
+    /// did not find at ef 8 and 2 to 6 at ef 40, recall@10 at ef 100
+    /// 0.960 to 0.966; a block's `put` of every row, linked as a batch,
+    /// 3 899 to 3 968 of the 4 000, recall 0.008 to 0.017. The graph of a
+    /// rollback placing every vector again left 5 and none (12 to 52 and up
+    /// to 7 after the `put`), recall 0.960 to 0.964 (0.987 to 0.988); taken
+    /// back from their own lists once the put-back ends
+    /// ([`Self::link_revived`]), 0 to 3 and none, recall 0.995 to 0.997,
+    /// the rollback taking 12 to 21 ms where placing them again took 360
+    /// to 470.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn link_back(&mut self, node: u32) {
+        let mut own = Vec::new();
+        for l in 0..=self.node_levels(node) {
+            let max_deg = if l == 0 { self.m0 } else { self.spec.m };
+            own.clear();
+            own.extend_from_slice(self.neighbors(node, l));
+            for &nb in &own {
+                if nb != node && !self.neighbors(nb, l).contains(&node) {
+                    self.link_back_into(nb, l, node, max_deg);
+                }
+            }
+        }
+    }
+
+    /// `node` into `nb`'s list at level `l` as a link takes it
+    /// ([`Self::link_into`]) -- a tombstone's too, which still routes a
+    /// walk -- but where the list, full, chosen again, would let go of a
+    /// node no other list holds ([`Self::held_elsewhere`]), that node kept
+    /// in the place of the last chosen that another list holds, and nothing
+    /// changed where none is; nor where the list chosen again leaves `node`
+    /// out. The keep runs only where `m` is [`KEEP_M`] or under; past it a
+    /// link back is the link it was. A link back made as a link is let go
+    /// of what a pruning drops:
+    /// over the review's stress, 300 rows at m = 4 under 120 blocks a seed,
+    /// two thirds rolled back, 255 live nodes no walk from the entry
+    /// reached summed over the rollbacks of 4 seeds (main: 98), 559 over 16
+    /// (main: 883), only 2 and 4 of them new after a rollback: a list a
+    /// pruning took a node's other ways in from left it the one a write
+    /// later let go of. Kept, 70 and 285, the rows their own vector missed
+    /// at ef 16 3 610 and 14 474 against 3 749 and 14 876 (main: 17 313
+    /// and 62 841); at m = 16 none unreached in either, missed 2 014 and
+    /// 5 440 against 2 023 and 5 395. No link back made into a tombstone,
+    /// 145 and 491 unreached, 8 948 and 28 914 missed; no link back made
+    /// where it would let go of such a node, 17 and 315, 3 979 and 17 556.
+    #[cfg(target_pointer_width = "64")]
+    fn link_back_into(&mut self, nb: u32, l: usize, node: u32, max_deg: usize) {
+        if l > 0 && l > self.node_levels(nb) {
+            return;
+        }
+        if self.push_neighbor(nb, l, node, max_deg) {
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.prune_buf);
+        let mut chosen = (self.view()).pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
+        self.prune_buf = buf;
+        if !chosen.contains(&node) {
+            return;
+        }
+        #[cfg(test)]
+        LINKS_BACK.with(|c| c.set((c.get().0 + 1, c.get().1)));
+        // Past `KEEP_M` a link back is the link it was ([`KEEP_M`]).
+        if self.spec.m > KEEP_M {
+            self.set_neighbors(nb, l, &chosen);
+            return;
+        }
+        let list = self.neighbors(nb, l);
+        // `x`, let go of and held nowhere else, kept: in a place the list
+        // has, or in that of the last chosen another list holds.
+        let keep = |chosen: &mut Vec<u32>, x: u32| -> bool {
+            if chosen.len() < max_deg {
+                chosen.push(x);
+                return true;
+            }
+            match (chosen.iter()).rposition(|&y| y != node && self.held_elsewhere(y, nb)) {
+                Some(at) => {
+                    chosen[at] = x;
+                    true
+                }
+                None => false,
+            }
+        };
+        // `chosen` is `list` and `node` but those let go of. Where that is
+        // one, as where a full list held no tombstone, the sums tell which,
+        // each list read once: with each node of the list looked for in
+        // `chosen`, a rollback of one row's `set` over 2 000 rows read 1 884
+        // instructions more than with no node kept (0.29%), and 679 so.
+        if list.len() == chosen.len() {
+            let sum = |s: &[u32]| s.iter().map(|&x| x as u64).sum::<u64>();
+            let x = (sum(list) + node as u64 - sum(&chosen)) as u32;
+            if !self.held_elsewhere(x, nb) && !keep(&mut chosen, x) {
+                return;
+            }
+        } else {
+            for &x in list {
+                if chosen.contains(&x) || self.held_elsewhere(x, nb) {
+                    continue;
+                }
+                if !keep(&mut chosen, x) {
+                    return;
+                }
+            }
+        }
+        self.set_neighbors(nb, l, &chosen);
+    }
+
+    /// Whether a list other than `owner`'s holds `x`: one of the nodes
+    /// `x`'s own lists reach, at that level, as a link's links back leave
+    /// them -- the lists a walk most likely reaches it through, read
+    /// without a walk. It reads each list `x`'s lists reach, about `m0`
+    /// squared entries a call, and a link back asks it of each node its
+    /// list chose, about `m0` cubed: held to `m` of [`KEEP_M`] at most.
+    #[cfg(target_pointer_width = "64")]
+    fn held_elsewhere(&self, x: u32, owner: u32) -> bool {
+        #[cfg(test)]
+        LINKS_BACK.with(|c| c.set((c.get().0, c.get().1 + 1)));
+        (0..=self.node_levels(x)).any(|l| {
+            (self.neighbors(x, l).iter()).any(|&y| y != owner && self.neighbors(y, l).contains(&x))
+        })
     }
 
     /// A document's node met again with `raw`: `true` when it already holds
@@ -4626,6 +4959,446 @@ impl VectorIndex {
         }
     }
 
+    /// `doc`'s vector `raw` put back as a write put back leaves it -- a
+    /// block rolled back, a statement refused part way, a replica's record
+    /// refused -- placing no node where the graph holds one for it: the
+    /// node its row holds, a live node holding it (an alias, as
+    /// [`Self::place`] makes one), or the node a write of the row took from
+    /// it, a tombstone the graph still holds, made live again
+    /// ([`Self::revive`]). Only where none holds it is a node placed and
+    /// linked, as [`Self::insert`] places one, and only where the graph
+    /// takes one: `false`, and nothing placed, where it does not, which no
+    /// put-back meets but one after the graph was made again in the middle
+    /// of the writes it puts back (a replica's room, `room_applied`). Placed
+    /// again, the vector took a node more than the write did, past the
+    /// bound where the write took the last: `alloc_links`' assert under the
+    /// write lock, with the block half put back.
+    #[cfg(target_pointer_width = "64")]
+    #[inline(never)]
+    pub fn put_back(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        if raw.len() != self.dim {
+            return true;
+        }
+        let held = self.as_held(raw);
+        if let Some(old) = self.node_of(doc) {
+            // The node it leaves holds the vector the write wrote, which
+            // nothing put back after it asks for: out of the list, so that
+            // the list stays the writes' own.
+            let top = self.retired.len();
+            let kept = self.retire(doc, old, &held);
+            if self.retired.len() > top {
+                self.retired.truncate(top);
+                self.taken.push(old);
+            }
+            if kept {
+                return true;
+            }
+        }
+        let (hash, copy) = self.find_copy(&held);
+        if let Some(node) = copy {
+            self.alias(node, doc);
+            return true;
+        }
+        if self.revive(doc, raw, &held, hash) {
+            return true;
+        }
+        if !takes_node(self.nodes(), 0) {
+            return false;
+        }
+        // `place` asks again what was asked above, and places it.
+        self.insert(doc, raw);
+        true
+    }
+
+    /// Makes live again the node a write took from `doc` that holds `held`
+    /// (`raw` as the arena holds it, `hash` its hash): the newest such
+    /// tombstone of [`Self::retired`], taken off it. Its vector, level and
+    /// own links are those it had -- a node its write took is the row's
+    /// node before the write, so a block put back whole has its rows' nodes
+    /// back -- and the links into it a list chosen again while it was a
+    /// tombstone dropped are made again from its own once the put-back
+    /// ends ([`Self::link_revived`]). A node with no links of its own -- it
+    /// waited to be linked when the write took it, and a block's linking
+    /// passed it over as a tombstone -- is linked now, unless it waits
+    /// still. Out of line, at a put-back alone.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn revive(&mut self, doc: DocId, raw: &[f32], held: &[f32], hash: u64) -> bool {
+        let stored = self.stored(held);
+        let found = self.retired.iter().rposition(|&n| {
+            self.deleted[n as usize]
+                && self.doc_ids[n as usize] == doc
+                && self.stored_of(n) == stored
+        });
+        let Some(at) = found else {
+            return false;
+        };
+        let node = self.retired.remove(at);
+        self.deleted[node as usize] = false;
+        self.deleted_count -= 1;
+        self.by_doc.insert(doc, node + 1);
+        self.changes += 1;
+        // Its slot in the copies table stays until its table grows.
+        if self.same.built && self.find_copy(held).1 != Some(node) {
+            self.same_put(node, hash);
+        }
+        if self.l0_len[node as usize] > 0 {
+            self.revived.push(node);
+        } else if self.entry != Some(node) && !self.pending.contains(&node) {
+            let query = self.build_query(raw);
+            self.link_node(node, self.node_levels(node), None, query.as_deref());
+        }
+        true
+    }
+
+    /// Lets go of the tombstones [`Self::put_back`] looks among: what a
+    /// block put back leaves, since only its own writes' are asked for.
+    #[cfg(target_pointer_width = "64")]
+    pub fn forget_retired(&mut self) {
+        self.retired.clear();
+    }
+
+    /// The links into each node a put-back made live again and left live,
+    /// made again from its own ([`Self::link_back`]), once the put-back has
+    /// ended: every node it gives back is live by then, so a list chosen
+    /// again keeps them and lets go of the block's own. Made as each was
+    /// made live, a list chosen again let go of the nodes still tombstones
+    /// that the put-back would make live after it, their own links: in the
+    /// rollbacks [`Self::link_back`] measures, 4 to 7 rows a `set`'s missed
+    /// at ef 8, and 62 to 71 a `put`'s, 6 to 10 at ef 40, recall 0.963 to
+    /// 0.994. Then each list of theirs holding a node the put-back made a
+    /// tombstone is chosen again ([`Self::mend`]), and an entry left a
+    /// tombstone moved to a live node ([`Self::enter_live`]). Nothing, its
+    /// entry neither, where the put-back made no node live or tombstone.
+    #[cfg(target_pointer_width = "64")]
+    pub fn link_revived(&mut self) {
+        let revived = std::mem::take(&mut self.revived);
+        // Out and back, its room kept as `retired`'s is: let go of at each
+        // rollback, a rollback of one row's `put` over 2 000 rows took 885
+        // instructions more than with no list (74 092); kept, 356, inside
+        // the builds' spread.
+        let mut taken = std::mem::take(&mut self.taken);
+        // A block that wrote no vector here put nothing back: the graph,
+        // its entry too, is the block's start's.
+        if revived.is_empty() && taken.is_empty() {
+            self.taken = taken;
+            return;
+        }
+        for &node in &revived {
+            if !self.is_deleted(node) {
+                self.link_back(node);
+            }
+        }
+        taken.sort_unstable();
+        if !taken.is_empty() {
+            for &node in &revived {
+                if !self.is_deleted(node) && self.mend(node, &taken) {
+                    self.link_back(node);
+                }
+            }
+        }
+        if let Some(e) = self.entry.filter(|&e| self.is_deleted(e)) {
+            self.enter_live(taken.binary_search(&e).is_ok());
+        }
+        taken.clear();
+        self.taken = taken;
+    }
+
+    /// Each list of `node`, a node a put-back made live again, that holds
+    /// one of `taken` (sorted: the nodes the put-back made tombstones, the
+    /// block's) chosen again from its live nodes and the live nodes its
+    /// tombstones' lists hold at that level, through the pruning a link
+    /// makes (`pruned`), no search made: `true` where one was, for its
+    /// links back to be made ([`Self::link_back`]). A list a tombstone
+    /// alone leads from is left, a tombstone still routing a walk. A
+    /// block's `put` linked as a batch while the rows' nodes were
+    /// tombstones: its first nodes found nothing live and were linked
+    /// through the nearest tombstones, whose lists, full, were chosen again
+    /// taking no tombstone -- the rows' nodes' own lists left holding the
+    /// block's nodes alone. Made live with those lists, their neighbours
+    /// were reached through the block's tombstones: over 2 000 x 16, after
+    /// the `put` of every row rolled back and the entry made live again,
+    /// 118 to 159 rows missed by their own vector at ef 8 and 12 to 20 at
+    /// ef 40, where the rollback placing every vector again missed 0 to 1
+    /// and none; chosen again, none and none, recall@10 at ef 100 1.0, and
+    /// over 4 000 x 32 none after the `set` and the `put`, recall 0.998 to
+    /// 0.9996 against 0.995 to 0.997. Chosen again wherever a list held a
+    /// tombstone, the tombstones of earlier writes too, a block writing one
+    /// row's vector by a `set` and rolled back, over 2 000 rows, cost 34%
+    /// more, its row's lists holding the nodes of the blocks before it,
+    /// which a write leaves in a list as main does. Out of line, at a
+    /// put-back's end alone.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn mend(&mut self, node: u32, taken: &[u32]) -> bool {
+        let mut mended = false;
+        let mut buf = std::mem::take(&mut self.prune_buf);
+        let mut found: Vec<u32> = Vec::new();
+        for l in 0..=self.node_levels(node) {
+            let own = self.neighbors(node, l);
+            if !own
+                .iter()
+                .any(|&n| self.is_deleted(n) && taken.binary_search(&n).is_ok())
+            {
+                continue;
+            }
+            found.clear();
+            for &nb in own {
+                if !self.is_deleted(nb) {
+                    found.push(nb);
+                    continue;
+                }
+                let through = self.neighbors(nb, l).iter();
+                found.extend(through.filter(|&&x| x != node && !self.is_deleted(x)));
+            }
+            found.sort_unstable();
+            found.dedup();
+            let Some((&last, rest)) = found.split_last() else {
+                continue;
+            };
+            let max_deg = if l == 0 { self.m0 } else { self.spec.m };
+            let chosen = self.view().pruned(node, rest, last, max_deg, &mut buf);
+            self.set_neighbors(node, l, &chosen);
+            mended = true;
+        }
+        self.prune_buf = buf;
+        self.changes += mended as u64;
+        mended
+    }
+
+    /// The entry moved off a tombstone once a put-back that made a node
+    /// live or a tombstone ends, to the node a graph of the live nodes
+    /// linked in node order enters by, or the nearest it finds: the live,
+    /// linked node of the highest level a walk from the entry down its
+    /// levels meets ([`Self::live_near`]), the graph's top level falling to
+    /// it. A block that placed a node above the top level made it the
+    /// entry, and put back, left it a tombstone whose links reach the
+    /// block's nodes alone where the block was linked as a batch -- a list
+    /// chosen again takes no tombstone, and the rows' nodes were tombstones
+    /// then -- so a search entering there walked the block's tombstones and
+    /// rarely reached a row: over 2 000 x 16, after a `put` of every row
+    /// rolled back, its lists chosen again ([`Self::mend`]), 342 to 427
+    /// rows were missed by their own vector at ef 8 and 39 to 70 at ef 40
+    /// entering there, none here. A rollback placing the vectors again, as
+    /// the browser module's still does, links each one by a search from
+    /// that entry, so it reached them. In a graph linked in node order the
+    /// entry is the first node at its top level, so a block put back whole
+    /// has the entry and top level of its start where the walk meets that
+    /// node: the highest live node the walk meets, not the highest the graph
+    /// holds. At m = 2 over the review's stress, 1 of 86 moves over 16 seeds
+    /// took the top level to 8 while a live node of level 9 stood four lists
+    /// away, reached only through a level-7 list or the level-9 lists of two
+    /// tombstones the walk never met; walking one level past the first that
+    /// meets a live node found it, and changed nothing at m = 4, 16 or 32,
+    /// but took the most lists a walk read from 59 to 109 at m = 2 and from
+    /// 85 to the bound of 256 at m = 16, and reading the upper lists of the
+    /// nodes met below their top did not find it. A node above the top
+    /// level is a node like any other to a search, reached through its
+    /// lower lists. Never a node waiting to be linked, which holds no links
+    /// to walk. Where the walk meets none
+    /// and the entry is a node the put-back took (`own`, the block's), every
+    /// node is walked ([`Self::live_anywhere`]); a delete of the entry's
+    /// row leaves the entry where it is, its links still walked, and so
+    /// does a put-back that meets no live node near it. Made as it first
+    /// was, by a walk over every node with the nodes waiting copied and
+    /// sorted, wherever a rollback of the collection ended on a tombstone
+    /// entry -- a block writing no vector, after its row was deleted, among
+    /// them, and each rollback while every live node waited to be linked,
+    /// as a server's open leaves them -- a block setting one row's other
+    /// field over a file of 2 000 such rows and 2 000 deleted took 282 558
+    /// instructions to put back, main 32 258; made so, 32 296. Moved only
+    /// where the put-back took the entry, the review's stress missed rows
+    /// by their own vector at ef 16 4 233 times against 3 610.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn enter_live(&mut self, own: bool) {
+        let Some(from) = self.entry else {
+            return;
+        };
+        let found = match self.live_near(from) {
+            Some(node) => Some(node),
+            None if own => self.live_anywhere(),
+            None => None,
+        };
+        if let Some(node) = found {
+            (self.entry, self.max_level) = (Some(node), self.node_levels(node));
+            self.changes += 1;
+        }
+    }
+
+    /// Whether `node` may enter a walk: live, and linked -- a node waiting
+    /// to be linked holds no list ([`Self::defer_batch`]), and nothing links
+    /// to it before it is linked.
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn enters(&self, node: u32) -> bool {
+        !self.deleted[node as usize] && self.l0_len[node as usize] > 0
+    }
+
+    /// The live, linked node of the highest level a walk from `from` down
+    /// its levels meets, the lowest id among equals: each level's lists
+    /// read from the nodes met above it and at it, [`ENTER_STEPS`] lists
+    /// in all, and `None` where those meet no such node. The nodes met are
+    /// marked in this thread's search buffer, as a search marks them
+    /// ([`Scratch::see`]): a `HashSet` of them, hashing each node, was
+    /// 1.8 KB of `fennec-server`'s code and 2.2 KB of the shell's built for
+    /// macOS, std's table for `u32`s, which nothing else of either builds.
+    #[cfg(target_pointer_width = "64")]
+    fn live_near(&self, from: u32) -> Option<u32> {
+        SCRATCH.with(|cell| {
+            let mut seen = cell.borrow_mut();
+            seen.begin(self.doc_ids.len());
+            seen.see(from);
+            let mut met = vec![from];
+            let mut best: Option<(usize, u32)> = None;
+            let mut steps = 0;
+            for l in (0..=self.node_levels(from)).rev() {
+                let mut i = 0;
+                while i < met.len() {
+                    if steps == ENTER_STEPS {
+                        return best.map(|(_, node)| node);
+                    }
+                    steps += 1;
+                    let x = met[i];
+                    i += 1;
+                    for &y in self.neighbors(x, l) {
+                        if !seen.see(y) {
+                            continue;
+                        }
+                        met.push(y);
+                        if self.enters(y) {
+                            let level = self.node_levels(y);
+                            if best.is_none_or(|(top, at)| level > top || (level == top && y < at))
+                            {
+                                best = Some((level, y));
+                            }
+                        }
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+            best.map(|(_, node)| node)
+        })
+    }
+
+    /// The first live, linked node at the highest level a live node holds,
+    /// by a walk over every node: where [`Self::live_near`] met none.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    fn live_anywhere(&self) -> Option<u32> {
+        #[cfg(test)]
+        ENTRY_WALKS.with(|w| w.set(w.get() + 1));
+        let mut best: Option<(usize, u32)> = None;
+        for node in 0..self.doc_ids.len() as u32 {
+            if !self.enters(node) {
+                continue;
+            }
+            let level = self.node_levels(node);
+            if best.is_none_or(|(top, _)| level > top) {
+                best = Some((level, node));
+            }
+        }
+        best.map(|(_, node)| node)
+    }
+
+    /// `doc` out of the graph as a put-back takes it out ([`Self::remove`])
+    /// -- a row the block made, or a vector it gave a row that had none --
+    /// its node, where it is made a tombstone, left off [`Self::retired`]
+    /// and put on [`Self::taken`]: a node a put-back makes a tombstone is
+    /// the block's, which no put-back after it asks for.
+    #[cfg(target_pointer_width = "64")]
+    pub fn take_back(&mut self, doc: DocId) {
+        let Some(node) = self.node_of(doc) else {
+            return;
+        };
+        let top = self.retired.len();
+        self.detach(doc, node);
+        if self.retired.len() > top {
+            self.retired.truncate(top);
+            self.taken.push(node);
+        }
+    }
+
+    /// [`Self::take_back`] where no graph keeps [`Self::retired`].
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    pub fn take_back(&mut self, doc: DocId) {
+        self.remove(doc);
+    }
+
+    /// `items` into the graph as [`Self::insert_batch`] puts them -- or as
+    /// [`Self::defer_batch`] leaves them waiting, `later` -- held to
+    /// [`MAX_NODES`] as the graph counts its nodes: a vector its row's node
+    /// or a live node holds already places none ([`Self::place`]), so a
+    /// field of more rows than the bound is taken where its vectors are
+    /// not. A list the room left holds is put in whole, one compare; past
+    /// it a piece the room holds at a time, and with no room left, a vector
+    /// at a time, each asked first whether it places a node -- refused
+    /// naming `field` where it does, what went in before it left in, for the
+    /// caller to let go of the graph. A graph made from documents: `create
+    /// index`, an open, a compact, a replica's room.
+    #[cfg(target_pointer_width = "64")]
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+    ) -> crate::error::Result<()> {
+        let mut rest = items;
+        while !rest.is_empty() {
+            let take = match MAX_NODES.saturating_sub(self.nodes()) {
+                0 if self.places(rest[0].0, &rest[0].1) => return Err(graph_full(field)),
+                0 => 1,
+                room => room.min(rest.len()),
+            };
+            let (now, next) = rest.split_at(take);
+            match later {
+                true => {
+                    self.defer_batch(now);
+                }
+                false => self.insert_batch(now),
+            }
+            rest = next;
+        }
+        Ok(())
+    }
+
+    /// [`Self::insert_held`] where no node can pass the bound: a 32-bit
+    /// build's memory stops far short of it.
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    pub fn insert_held(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        _field: &str,
+    ) -> crate::error::Result<()> {
+        match later {
+            true => {
+                self.defer_batch(items);
+            }
+            false => self.insert_batch(items),
+        }
+        Ok(())
+    }
+
+    /// Whether [`Self::place`] would place a node for `doc`'s `raw`: its
+    /// row's node does not hold it, nor does a live node.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    fn places(&mut self, doc: DocId, raw: &[f32]) -> bool {
+        if raw.len() != self.dim || self.holds(doc, raw) {
+            return false;
+        }
+        let held = self.as_held(raw);
+        self.find_copy(&held).1.is_none()
+    }
+
     /// Which of `ids` it holds, each with the vector its node holds and
     /// whether that node is live, and how many documents it holds: the same
     /// for two graphs holding the same rows, whatever nodes and links each
@@ -4645,6 +5418,46 @@ impl VectorIndex {
     #[inline]
     fn node_of(&self, doc: DocId) -> Option<u32> {
         self.by_doc.get(doc).checked_sub(1)
+    }
+
+    /// [`Self::node_of`], for a test holding a row to the node it had.
+    #[cfg(test)]
+    pub(crate) fn node_held(&self, doc: DocId) -> Option<u32> {
+        self.node_of(doc)
+    }
+
+    /// The entry, whether it is a tombstone, and the top level, for a test
+    /// holding a put-back to the entry it leaves ([`Self::enter_live`]).
+    #[cfg(test)]
+    pub(crate) fn entered(&self) -> (Option<u32>, bool, usize) {
+        let dead = self.entry.is_some_and(|e| self.is_deleted(e));
+        (self.entry, dead, self.max_level)
+    }
+
+    /// The documents of the live, linked nodes no walk from the entry
+    /// reaches, through tombstones and every level: for a test holding a
+    /// put-back to the graph it leaves.
+    #[cfg(test)]
+    pub(crate) fn unreached(&self) -> Vec<DocId> {
+        let n = self.doc_ids.len();
+        let mut seen = vec![false; n];
+        let mut stack: Vec<u32> = self.entry.into_iter().collect();
+        for &e in &stack {
+            seen[e as usize] = true;
+        }
+        while let Some(x) = stack.pop() {
+            for l in 0..=self.node_levels(x) {
+                for &y in self.neighbors(x, l) {
+                    if !std::mem::replace(&mut seen[y as usize], true) {
+                        stack.push(y);
+                    }
+                }
+            }
+        }
+        (0..n as u32)
+            .filter(|&x| !seen[x as usize] && !self.is_deleted(x) && !self.pending.contains(&x))
+            .map(|x| self.doc_ids[x as usize])
+            .collect()
     }
 
     /// Changes to the graph since it was made or restored: nodes added,
@@ -5202,6 +6015,13 @@ impl VectorIndex {
         if count > body.len() / 4 {
             return None;
         }
+        // Past what a graph holds: built again from the documents, which
+        // are held to it there (an open's rebuild refuses a field holding
+        // more vectors than that, naming it).
+        #[cfg(target_pointer_width = "64")]
+        if count + nodes_beside() > MAX_NODES {
+            return None;
+        }
         let read = match flat {
             true => Read::flat(body, count, ix.m0, stored, waits, aliased)?,
             false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
@@ -5666,6 +6486,146 @@ mod tests {
         let r = ix.search(&[10.2, 0.0], 3, None, |_| true);
         assert_eq!(r[0].0, 10);
         assert_eq!(ix.len(), 200);
+    }
+
+    /// limits.html's "bulk insert batch": a sixteenth of the graph, held
+    /// to 64..=512 -- a clamp the page calls one, not a refusal: a batch
+    /// is how many nodes are linked at once, and either side of its ends
+    /// links the same vectors. The floor is met where batches begin.
+    #[test]
+    fn a_batch_is_a_sixteenth_of_the_graph_held_to_its_range() {
+        assert_eq!(batch_len(PARALLEL_FROM), MIN_BATCH);
+        assert_eq!(batch_len(PARALLEL_FROM - 16), MIN_BATCH, "under the floor");
+        assert_eq!(batch_len(PARALLEL_FROM + 16), MIN_BATCH + 1);
+        assert_eq!(batch_len(2048), 128);
+        assert_eq!(batch_len(16 * MAX_BATCH - 16), MAX_BATCH - 1);
+        assert_eq!(batch_len(16 * MAX_BATCH), MAX_BATCH);
+        assert_eq!(
+            batch_len(16 * MAX_BATCH + 16),
+            MAX_BATCH,
+            "past the ceiling"
+        );
+        assert_eq!(batch_len(usize::MAX), MAX_BATCH);
+    }
+
+    thread_local! {
+        /// The batches [`counted`] linked on this thread, by their nodes.
+        static LINKED: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// [`VectorIndex::link_batch`], each batch's nodes noted.
+    fn counted(ix: &mut VectorIndex, computed: Candidates, threads: usize) {
+        LINKED.with(|l| l.borrow_mut().push(computed.len()));
+        VectorIndex::link_batch(ix, computed, threads);
+    }
+
+    /// limits.html's "parallel build threshold": below 1 024 nodes each
+    /// goes in on its own, from 1 024 in batches -- a path, not a
+    /// refusal. Every vector is linked either way.
+    #[test]
+    fn a_graph_links_in_batches_from_1024_nodes() {
+        let items: Vec<(DocId, Vec<f32>)> = (0..PARALLEL_FROM as u64 + 200)
+            .map(|i| (i, vec![(i % 97) as f32, (i / 97) as f32]))
+            .collect();
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert_batch_by(&items[..PARALLEL_FROM], counted);
+        assert_eq!(ix.len(), PARALLEL_FROM);
+        assert!(LINKED.with(|l| l.borrow().is_empty()), "in turn below it");
+        ix.insert_batch_by(&items[PARALLEL_FROM..], counted);
+        assert_eq!(ix.len(), items.len());
+        let batches = LINKED.with(|l| l.take());
+        match VectorIndex::threads() {
+            // One thread links every node in turn, whatever the graph.
+            1 => assert!(batches.is_empty(), "{batches:?}"),
+            _ => assert_eq!(batches, [64, 68, 68], "from it, a sixteenth at a time"),
+        }
+    }
+
+    /// limits.html's "vector index node count": a graph takes its
+    /// `MAX_NODES`th node, the id `u32::MAX - 1`, and refuses the next --
+    /// counting the nodes a statement has yet to place -- where the engine
+    /// asks (`takes_node`); the ids are `u32`s, held one up where a node is
+    /// looked up, so the last one still has room there. A graph that size is
+    /// past 100 GB of links at a dimension of 1: the engine's refusal of a
+    /// write is driven over a graph counted at the bound
+    /// (`engine::tests::a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`).
+    #[test]
+    fn a_graph_takes_its_last_node_and_refuses_one_more() {
+        assert_eq!(MAX_NODES, u32::MAX as usize);
+        let last = (MAX_NODES - 1) as u32;
+        assert_eq!(last.checked_add(1), Some(u32::MAX), "held one up");
+        assert!(takes_node(MAX_NODES - 1, 0));
+        assert!(takes_node(MAX_NODES - 3, 2));
+        assert!(!takes_node(MAX_NODES, 0));
+        assert!(!takes_node(MAX_NODES - 1, 1));
+        assert!(!takes_node(MAX_NODES - 3, 3));
+        let given: fn(&mut VectorIndex, DocId, usize) -> u32 = VectorIndex::alloc_links;
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert(7, &[1.0, 0.0]);
+        assert_eq!((given(&mut ix, 8, 0), ix.nodes()), (1, 2));
+        let refused = graph_full("v").to_string();
+        assert_eq!(
+            refused,
+            "query error: field `v`: a vector index holds at most 4294967295 nodes, its \
+             tombstones among them, which a compact drops"
+        );
+        // What counts a write's nodes exactly: a document's node holding
+        // the vector as the arena stores it places none, a tombstone's does.
+        assert!(ix.holds(7, &[1.0, 0.0]) && !ix.holds(7, &[2.0, 0.0]));
+        ix.remove(7);
+        assert!(!ix.holds(7, &[1.0, 0.0]), "a tombstone holds nothing");
+    }
+
+    /// The bound's last guard: a node placed past [`MAX_NODES`] -- which a
+    /// path the engine does not hold to it would place -- panics rather
+    /// than take an id a node holds, counted as the engine counts it
+    /// ([`NODES_BESIDE`]).
+    #[test]
+    #[should_panic(expected = "a graph holds 4294967295 nodes at most")]
+    fn a_node_past_the_bound_is_never_placed() {
+        struct Lifted;
+        impl Drop for Lifted {
+            fn drop(&mut self) {
+                NODES_BESIDE.with(|n| n.set(0));
+            }
+        }
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert(1, &[1.0, 0.0]);
+        let _lifted = Lifted;
+        NODES_BESIDE.with(|n| n.set(MAX_NODES - 2));
+        ix.insert(2, &[2.0, 0.0]);
+        assert_eq!(ix.nodes(), MAX_NODES);
+        ix.insert(3, &[3.0, 0.0]);
+    }
+
+    /// limits.html's "vector index node count": a graph record counting
+    /// more nodes than a graph holds is no graph of this build's, rebuilt
+    /// from the documents (`None`), where one at the bound is restored.
+    /// Counted as a graph's nodes are, past its own ([`NODES_BESIDE`]): a
+    /// record of 2^32 nodes is past 16 GiB.
+    #[test]
+    fn a_graph_record_counting_past_the_bound_is_rebuilt() {
+        let mut ix = VectorIndex::new(2, spec());
+        let held: HashMap<u64, Vec<f32>> = (1..=3u64).map(|i| (i, vec![i as f32, 1.0])).collect();
+        for (&i, v) in &held {
+            ix.insert(i, v);
+        }
+        let lookup = |doc: u64, out: &mut Vec<f32>| {
+            out.clear();
+            out.extend_from_slice(held.get(&doc).map_or(&[][..], |v| &v[..]));
+            held.contains_key(&doc)
+        };
+        for bytes in [ix.serialize(false), ix.serialize_varint(false)] {
+            let restore = |beside: usize| {
+                NODES_BESIDE.with(|n| n.set(beside));
+                let back = VectorIndex::restore_graph(&bytes, 2, VecPrec::F32, lookup);
+                NODES_BESIDE.with(|n| n.set(0));
+                back.map(|ix| ix.len())
+            };
+            assert_eq!(restore(0), Some(3));
+            assert_eq!(restore(MAX_NODES - 3), Some(3), "at the bound");
+            assert_eq!(restore(MAX_NODES - 2), None, "past it");
+        }
     }
 
     /// A beam as wide as a graph's ids reach -- `near ... ef 4294967295`,

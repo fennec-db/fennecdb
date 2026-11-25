@@ -655,7 +655,10 @@ create index: index built on `docs.v` in 3.2s, the lock held 9.8ms at most (the 
 
 <p>A compact that kept a vector index as it stood names it after the
 holds, with how many vectors were written during its last round -- or
-that a document of it could not be read:</p>
+that a document of it could not be read, or that the vectors written
+while it was rebuilt would take it past the
+<a href="/docs/limits">4&nbsp;294&nbsp;967&nbsp;295 nodes</a> an index holds
+(<code>its writes would pass 4294967295 nodes</code>):</p>
 
 <pre data-lang="text" data-label="logs">/data/db.fennec: compacted, 2088.0 MB -&gt; 1067.4 MB in 18.9s, the lock held 191.4ms at most (...); graph `docs.v` kept, 412 behind</pre>
 
@@ -900,7 +903,7 @@ must not change under you.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>8.52 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>8.58 MB</b> on
 amd64, that binary's bytes as CI measures them on every change, and smaller on
 arm64 — since no target is written in, both come out of the same file.
 <code>make docker</code> builds it, and

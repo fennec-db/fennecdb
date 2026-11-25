@@ -718,6 +718,111 @@ fn unwritten_id(id: DocId) -> Error {
     Error::Corrupt(format!("a frame puts document {id}, an id no write gives"))
 }
 
+/// The bytes a document's payload holds at most: a [`Loc`] keeps its
+/// length in a `u32`. Every release from 0.1.0 through 0.2.0 kept a longer
+/// one's length cut to its low 32 bits (`Store::append`, later
+/// `land_frame`), and an open read the frame's length again and cut it so
+/// too: the row read back short, or not at all. A document of two
+/// `vector<1000000000>` fields reaches it natively, as a `set` copying a
+/// large text into many fields does, and an import of SQLite rows holding
+/// several large values.
+pub const MAX_PAYLOAD: usize = u32::MAX as usize;
+
+/// [`MAX_PAYLOAD`], or what a test's thread holds payloads to instead
+/// ([`PAYLOAD_MOST`]): a document of 4 GiB is more than a test's machine
+/// holds twice over.
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
+#[inline(always)]
+pub(crate) fn payload_most() -> usize {
+    MAX_PAYLOAD
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn payload_most() -> usize {
+    PAYLOAD_MOST.with(std::cell::Cell::get)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    /// The bytes a test's thread holds a payload to ([`payload_most`]).
+    pub(crate) static PAYLOAD_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_PAYLOAD) };
+}
+
+/// Whether a write's encoded document fits a frame ([`MAX_PAYLOAD`]):
+/// asked where a `put`, a `set` and an upsert encode the document, before
+/// the row written over leaves its indexes, so a refusal changes nothing
+/// and the block is put back whole. A query error, as every limit is. A
+/// 32-bit build has none: its `Vec` stops at `isize::MAX`, 2 GiB.
+#[cfg(target_pointer_width = "64")]
+#[inline(always)]
+pub fn payload_fits(len: usize) -> Result<()> {
+    match len > payload_most() {
+        true => Err(payload_past(len)),
+        false => Ok(()),
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[cold]
+#[inline(never)]
+fn payload_past(len: usize) -> Error {
+    Error::Query(format!(
+        "a document is at most {} bytes encoded, a u32's length, not {len}",
+        payload_most()
+    ))
+}
+
+/// Whether a frame read -- an open's replay, a replica's apply -- puts a
+/// payload a write could have written ([`payload_fits`]): longer is damage,
+/// or a primary's record no write made.
+#[cfg(target_pointer_width = "64")]
+#[inline(always)]
+pub(crate) fn frame_fits(len: usize) -> Result<()> {
+    match len > payload_most() {
+        true => Err(frame_past(len)),
+        false => Ok(()),
+    }
+}
+
+/// Whether the frames of a record's body `bytes` put payloads a write could
+/// have written ([`frame_fits`]), read before any of them lands. Asked only
+/// of a body longer than a payload may be: a frame is held to what is left
+/// of its body, so a shorter body's all fit. One compare a record, where
+/// one a frame would be 100 000 instructions more an open of 100 000 rows.
+/// A frame that does not read is left to the walk, which refuses it.
+#[cfg(target_pointer_width = "64")]
+#[cold]
+#[inline(never)]
+pub(crate) fn frames_fit(bytes: &[u8]) -> Result<()> {
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let op = bytes[pos];
+        pos += 1;
+        let (Ok(_), Ok(len)) = (get_uvarint(bytes, &mut pos), get_uvarint(bytes, &mut pos)) else {
+            return Ok(());
+        };
+        let len = len as usize;
+        if len > bytes.len() - pos {
+            return Ok(());
+        }
+        if op == OP_PUT {
+            frame_fits(len)?;
+        }
+        pos += len;
+    }
+    Ok(())
+}
+
+#[cfg(target_pointer_width = "64")]
+#[cold]
+#[inline(never)]
+fn frame_past(len: usize) -> Error {
+    Error::Corrupt(format!(
+        "a frame puts a payload of {len} bytes, past the {} a write takes",
+        payload_most()
+    ))
+}
+
 /// A frame running past the end of the data record holding it, refused as
 /// a replica's apply refuses one. A record reaches a replay whole by its
 /// length, and past the durable point by its sum: a crash's torn tail is
@@ -1587,6 +1692,10 @@ impl Store {
         at: u64,
         note: &mut dyn FnMut(DocId),
     ) -> Result<usize> {
+        #[cfg(target_pointer_width = "64")]
+        if bytes.len() > payload_most() {
+            frames_fit(bytes)?;
+        }
         let mut pos = 0usize;
         let mut count = 0usize;
         while pos < bytes.len() {
@@ -1690,6 +1799,11 @@ impl Store {
         let bytes = file
             .get(at as usize..(at + len) as usize)
             .ok_or_else(|| Error::Corrupt("data record outside the mapped file".into()))?;
+        // A frame's length held to a location's before one is cut to it.
+        #[cfg(target_pointer_width = "64")]
+        if bytes.len() > payload_most() {
+            frames_fit(bytes)?;
+        }
         let mut pos = 0usize;
         let mut count = 0usize;
         while pos < bytes.len() {
@@ -2295,6 +2409,40 @@ mod tests {
     use crate::schema::Field;
     use crate::value::DataType;
 
+    /// limits.html's "document payload": a write takes a payload of
+    /// `u32::MAX` bytes and refuses one more, a query error naming the
+    /// bound; a frame read off a file or a primary's record past it is
+    /// damage. A location is three `u32`s, the length one of them. The
+    /// engine's refusals, before a write changes anything, are driven at a
+    /// bound a test's thread holds payloads to
+    /// (`engine::unwinding::torn::a_document_past_a_frames_length_is_refused_and_its_block_put_back`).
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_payload_of_u32_max_bytes_is_taken_and_one_more_refused() {
+        assert_eq!(std::mem::size_of::<Loc>(), 12);
+        let most = Loc::EMPTY.len.wrapping_sub(1) as usize;
+        assert_eq!(
+            (most, MAX_PAYLOAD, payload_most()),
+            (u32::MAX as usize, most, most)
+        );
+        assert_eq!(payload_fits(MAX_PAYLOAD), Ok(()));
+        assert_eq!(frame_fits(MAX_PAYLOAD), Ok(()));
+        assert_eq!(
+            payload_fits(MAX_PAYLOAD + 1),
+            Err(Error::Query(
+                "a document is at most 4294967295 bytes encoded, a u32's length, not 4294967296"
+                    .into()
+            ))
+        );
+        assert_eq!(
+            frame_fits(MAX_PAYLOAD + 1),
+            Err(Error::Corrupt(
+                "a frame puts a payload of 4294967296 bytes, past the 4294967295 a write takes"
+                    .into()
+            ))
+        );
+    }
+
     fn schema() -> Schema {
         Schema::new(
             "t",
@@ -2465,6 +2613,34 @@ mod tests {
 
         st.append(OP_DEL, id, &[]);
         assert_eq!(st.len(), 0);
+    }
+
+    /// limits.html's "gap in an externally given id": an id at most 4 096
+    /// past the dense array's end grows it, one further goes into the
+    /// sparse map -- a path, not a refusal: either way the id is found.
+    #[test]
+    fn a_gap_of_4096_grows_the_dense_array_and_one_more_does_not() {
+        let at = Loc {
+            seg: 0,
+            off: 0,
+            len: 1,
+        };
+        let mut ix = IdIndex::default();
+        ix.insert(1, at);
+        ix.insert(1 + MAX_DENSE_GAP, at);
+        assert_eq!(
+            (ix.dense.len() as u64, ix.sparse.len()),
+            (1 + MAX_DENSE_GAP, 0)
+        );
+        let far = 2 + 2 * MAX_DENSE_GAP;
+        ix.insert(far, at);
+        assert_eq!(
+            (ix.dense.len() as u64, ix.sparse.len()),
+            (1 + MAX_DENSE_GAP, 1)
+        );
+        for id in [1, 1 + MAX_DENSE_GAP, far] {
+            assert_eq!(ix.get(id), Some(at), "{id}");
+        }
     }
 
     #[test]
