@@ -15,7 +15,8 @@ instructions apart, every one of them the allocator's
 of those paths; `compare.py` runs several of each build and averages them.
 
 Only a copy is changed, never the build's own output: DST may not be SRC,
-nor inside a cargo profile directory (one holding `.fingerprint`), nor an
+nor inside a cargo profile directory (one holding `.fingerprint`, or
+`.cargo-lock` under Cargo's build-dir layout), nor an
 existing file unless `--force`. The signing is macOS's (`codesign`);
 elsewhere this says so and exits 0.
 """
@@ -79,10 +80,11 @@ def read_uuids(path):
 
 def build_output(path):
     """The cargo profile directory (`target/release`, ...) `path` is inside,
-    told by its `.fingerprint`, or None."""
+    told by its `.fingerprint` or, under Cargo's build-dir layout (1.100.0
+    on), which has none, its `.cargo-lock`; or None."""
     d = os.path.dirname(os.path.realpath(path))
     while True:
-        if os.path.isdir(os.path.join(d, ".fingerprint")):
+        if os.path.isdir(os.path.join(d, ".fingerprint")) or os.path.isfile(os.path.join(d, ".cargo-lock")):
             return d
         up = os.path.dirname(d)
         if up == d:

@@ -271,6 +271,11 @@ fn pty() -> (std::fs::File, std::fs::File) {
     const O_NOCTTY: i32 = 0o400;
     #[cfg(not(target_os = "linux"))]
     const O_NOCTTY: i32 = 0x20000;
+    // SAFETY: `posix_openpt` makes a descriptor nothing else owns, which
+    // `master` takes, and `grantpt` and `unlockpt` are calls on it alone.
+    // `ptsname` answers a NUL-ended name in a buffer of its own, copied
+    // into a `String` at once; no other test of this binary calls it, so
+    // no other call writes the buffer while it is read.
     unsafe {
         let fd = posix_openpt(O_RDWR | O_NOCTTY);
         assert!(fd >= 0, "no pseudo-terminal");

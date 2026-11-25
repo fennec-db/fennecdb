@@ -21,8 +21,13 @@ struct Counting;
 static HEAP: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
+// SAFETY: each call is handed on to `System` with the arguments it was given,
+// so every block is `System`'s and `GlobalAlloc`'s contract holds as `System`
+// keeps it; the counting beside is atomics, allocating nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees.
         let p = unsafe { System.alloc(l) };
         if !p.is_null() {
             let now = HEAP.fetch_add(l.size(), Ordering::Relaxed) + l.size();
@@ -31,10 +36,16 @@ unsafe impl GlobalAlloc for Counting {
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: `p` is `System`'s, made with `l` -- `alloc` and `realloc`
+        // hand on nothing else -- as `GlobalAlloc::dealloc`'s caller
+        // guarantees.
         unsafe { System.dealloc(p, l) };
         HEAP.fetch_sub(l.size(), Ordering::Relaxed);
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // SAFETY: `p` is `System`'s with layout `l`, as for `dealloc`, and
+        // `new` is nonzero and fits `isize` once rounded to `l.align()`, as
+        // `GlobalAlloc::realloc`'s caller guarantees.
         let q = unsafe { System.realloc(p, l, new) };
         if !q.is_null() {
             let now = HEAP.fetch_add(new, Ordering::Relaxed) + new;

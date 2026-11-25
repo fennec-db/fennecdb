@@ -538,6 +538,43 @@ fn a_second_shell_is_refused_until_the_first_has_quit() {
     assert!(text(&out.stdout).contains("1 records"));
 }
 
+/// What a crash left beside a file -- a compact's image -- goes as the
+/// shell opens the file to write it, and a file there with a lock file
+/// beside it, a database a user named so, stays: each said on the shell's
+/// stderr in the line a server logs, once an open, the kept one at every
+/// open. A `--read-only` open removes nothing, and says nothing.
+#[test]
+fn the_shell_says_what_its_open_removed_or_kept_beside_the_file() {
+    let d = Dir::new("swept");
+    let p = d.file("swept.fennec");
+    let out = fennec(&[&p, "-c", "create collection notes (body text)"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (beside, named) = (format!("{p}.beside"), format!("{p}.saving"));
+    std::fs::write(&beside, vec![7u8; 4096]).unwrap();
+    std::fs::write(&named, b"a database a user named so").unwrap();
+    std::fs::write(format!("{named}.lock"), b"").unwrap();
+    let out = fennec(&["--read-only", &p, "-c", "collections"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "", "a read-only open");
+    assert!(Path::new(&beside).exists(), "a read-only open removed it");
+    let removed =
+        format!("{beside}: removed, 4096 bytes a process writing {p} left beside it as it ended");
+    let kept = format!(
+        "{named}: kept: a lock file beside it, as a database of that name has; \
+         26 bytes beside {p}, to delete with its lock if it is no database"
+    );
+    let out = fennec(&[&p, "-c", "collections"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), format!("{removed}\n{kept}\n"));
+    assert!(!Path::new(&beside).exists(), "the shell's open left it");
+    assert!(
+        Path::new(&named).exists(),
+        "a file beside its lock file removed"
+    );
+    let out = fennec(&[&p, "-c", "collections"]);
+    assert_eq!(text(&out.stderr), format!("{kept}\n"), "the open after");
+}
+
 /// Every way the program writes a database file meets the lock: the shell
 /// with `-c`, piped or with nothing to read, a read too (the lock is taken
 /// at the open), `fennec import`, `backup` and `restore` into it, `fennec mcp
@@ -710,4 +747,80 @@ fn a_restore_or_a_backup_never_writes_over_a_database_unasked() {
     // `--force` belongs to those two alone.
     let verify = fennec(&["verify", &archive, "--force"]);
     assert_eq!(verify.status.code(), Some(2), "{}", text(&verify.stderr));
+}
+
+/// What the program makes -- a database the shell opens, its lock, a
+/// `.save`, a restore -- is its owner's alone under a umask of 022 and of
+/// 000, set by `sh` for the program alone, and a file there keeps the mode
+/// an operator gave it through a `.save` and a `restore --force` over it.
+/// Up to 0.2.0 each took the umask's mode, and a replacement the umask's
+/// in place of its own.
+#[cfg(all(unix, feature = "backup"))]
+#[test]
+fn what_the_program_makes_is_its_owners_alone_and_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    fn mode(p: &str) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+    fn chmod(p: &str, mode: u32) {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    for mask in ["022", "000"] {
+        let d = Dir::new(&format!("modes-{mask}"));
+        // `fennec <args>` under `mask`, `input` piped in.
+        let under = |args: &[&str], input: &str| {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "umask \"$0\" && exec \"$@\"", mask, BIN])
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+            // Its output once it exits, or killed past two minutes: one
+            // that hangs fails the test with what it printed.
+            let pid = child.id().to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(child.wait_with_output().unwrap()));
+            let out = rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap_or_else(|_| {
+                    let _ = Command::new("kill").args(["-KILL", &pid]).status();
+                    let out = rx.recv().unwrap();
+                    panic!("{args:?} killed past two minutes: {}", text(&out.stderr))
+                });
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        };
+        let (p, saved) = (d.file("made.fennec"), d.file("saved.fennec"));
+        under(
+            &[&p],
+            &format!("create collection notes (body text)\n.save {saved}\n"),
+        );
+        for (file, what) in [(&p, "a database"), (&saved, "a .save")] {
+            assert_eq!(mode(file), 0o600, "{what} under umask {mask}");
+            assert_eq!(mode(&format!("{file}.lock")), 0o600, "{what}'s lock");
+        }
+        chmod(&saved, 0o640);
+        under(
+            &[],
+            &format!("create collection other (x int)\n.save {saved}\n"),
+        );
+        assert_eq!(mode(&saved), 0o640, "a .save over a file, umask {mask}");
+
+        let archive = d.file("archive");
+        let mut db = fennec_core::prelude::Database::new();
+        db.execute(&fennec_ql::parse_one("create collection notes (body text)").unwrap())
+            .unwrap();
+        fennec_http::archive::Archive::with_key(&archive, None)
+            .unwrap()
+            .add_image(db.change_seq(), &db.snapshot())
+            .unwrap();
+        let out = d.file("restored.fennec");
+        under(&["restore", &archive, &out], "");
+        assert_eq!(mode(&out), 0o600, "a restore under umask {mask}");
+        chmod(&out, 0o640);
+        under(&["restore", &archive, &out, "--force"], "");
+        assert_eq!(mode(&out), 0o640, "a restore --force over a file");
+    }
 }

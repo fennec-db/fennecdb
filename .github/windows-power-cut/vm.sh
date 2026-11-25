@@ -328,9 +328,9 @@ boot_check() {
     wait_ssh 600 10 "boot$n-$label" 240 60
     say "TIMING cut${n}_${label}_boot_to_first_command=$(( $(now) - t0 ))s"
     # What the cut left beside the file: its lock, and the image a compact
-    # it stopped was writing (`.beside`, which the next compact writes
-    # anew). Windows keeps no sync log (docs/design/windows.md, decision 3),
-    # so nothing else.
+    # it stopped was writing (`.beside`, which the server's open below
+    # removes). Windows keeps no sync log (docs/design/windows.md, decision
+    # 3), so nothing else.
     gssh 'dir /b C:\d' | tr -d '\r' | grep -v '^$' > "$VM/files-$n-$label.txt"
     say "FILES cut $n $label: $(tr '\n' ' ' < "$VM/files-$n-$label.txt")"
     if grep -v -x -E 't\.fennec|t\.fennec\.lock|t\.fennec\.beside' "$VM/files-$n-$label.txt"; then

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- and the storage rules of its handover, maintenance beside the database and compaction are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/AGENTS.md](src/text/AGENTS.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's invariants, for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- and the storage rules of its handover, maintenance beside the database and compaction are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/AGENTS.md](src/text/AGENTS.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -30,17 +30,22 @@ ones framed anew, never after checked (`claimed_into`).
 Below the newest whole claim (`survey`) records are read unchecked
 (`fennec verify`: all), a plain one after checked refused; past it damage
 (a failing sum, a head none reads, a plain record) is refused if a whole
-record after it claims past it, else cut, said (`cut_on_open`), a segment
+record after it claims past it, else cut, said (`cut_on_open`) and marked
+where a kept record has a sum and no mark ends them, each synced: the
+file, the mark and a head past the end, the cut; the next open reads
+alike but in one window (`FileSink::cut`), a segment
 by its own claims: `judge_after` frames on, scans only past an unframed
 head, bounded; a record past the end is cut unjudged (Windows:
-`cut_and_open`), a frame past its record refused. A follower without
-`sums=1` gets none (`plain_records`).
+`cut_and_open`), a frame past its record refused, a record whole by its
+sum that does not read refused by name, never cut (`whole_head`,
+`checked_claim`). A follower without `sums=1` gets none (`plain_records`).
 Unchecked, zeros to the end are cut only from a head after a nonzero byte
 or the image's end (`zero_tail`); a torn image refused, an unknown kind
 names its byte; the file only grows; a looking tool opens
 `fs::open_read_only`, writing nothing. A new record or index kind, type
-tag or graph version is a number older binaries refuse, never misread (a
-graph's: rebuilds).
+tag, data op or graph version is a number older binaries refuse, never
+misread (a graph's: rebuilds; an op's: the image's index under a new
+`FRAMES_*` mark, which `adopt_index`, reading no op, leaves to the walk).
 
 **[A value read off the bytes nests no deeper than JSON's
 limit.](../../docs/design/crates.md#how-deep-a-value-nests)**
@@ -54,10 +59,15 @@ held to it (`DataType::depth`), no reader of a type recursing.
 
 **[A durable write syncs a log beside the file, not the file](../../docs/design/durability.md#the-sync-log)**
 (Linux and Android, `synclog.rs`). Whatever renames a file into a
-database's place removes the log first, durably (`fs::forget_sync_log`),
-and syncs the directory after (`fs::sync_dir`, which on Windows flushes
-the renamed file, then its directory). A clean close removes it once the
-file is synced, and begins none after: what exits holding a database it
+database's place gives it that file's mode (`fs::mode_like`), removes the
+log first, durably (`fs::forget_sync_log`), and syncs the directory after
+(`fs::sync_dir`, which on Windows flushes the renamed file, then its
+directory). [Every file is made `0600`, a directory `0700`, by the call
+that makes it](../../docs/design/durability.md#files-modes)
+(`fs::private`), never narrowed after; a log made takes its database's
+mode and a lock its writers' bits, a group's only in its group
+(`fs::kept_mode`). A clean close removes the log once
+the file is synced, and begins none after: what exits holding a database it
 never drops -- a server's shutdown -- asks for it (`Database::close_log`),
 and a sink around a file's passes it on.
 

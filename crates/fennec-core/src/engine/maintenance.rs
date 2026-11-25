@@ -110,17 +110,6 @@ struct BuiltIndex {
     index: Built,
 }
 
-/// A collection being compacted: its live documents in a fresh store, and
-/// once built, every index over them: the browser module's compact, which
-/// has no file to write beside.
-#[cfg(target_arch = "wasm32")]
-struct Part {
-    token: u64,
-    name: String,
-    collection: Collection,
-    reclaimed: usize,
-}
-
 /// Takes the maintenances' tails off the list however the run ends: on an
 /// error or a panic in the build, the write path would otherwise go on
 /// collecting ids for nobody.
@@ -647,117 +636,6 @@ impl Database {
         )))
     }
 
-    /// Whether a collection `compact` would take -- the one named, or every
-    /// one -- holds the places of a dropped field.
-    fn drops_in(&self, which: Option<&str>) -> Result<bool> {
-        Ok(match which {
-            Some(n) => !self.collection(n)?.schema.dropped.is_empty(),
-            None => self
-                .collections
-                .values()
-                .any(|c| !c.schema.dropped.is_empty()),
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn begin_compact(&self, which: Option<&str>) -> Result<Vec<Part>> {
-        self.may_write(true)?;
-        let targets: Vec<String> = match which {
-            Some(n) => {
-                self.collection(n)?;
-                vec![n.to_string()]
-            }
-            None => self.order.clone(),
-        };
-        let mut parts = Vec::with_capacity(targets.len());
-        for name in targets {
-            let c = &self.collections[&name];
-            let mut fresh = Collection::new(c.id, Schema::clone(&c.schema));
-            fresh.store = c.store.compacted()?;
-            parts.push(Part {
-                token: 0,
-                name,
-                collection: fresh,
-                reclaimed: c.store.dead_bytes(),
-            });
-        }
-        // Watched only once every copy is taken: a copy that failed leaves
-        // no tail behind.
-        for p in &mut parts {
-            p.token = self.watch(p.collection.id);
-        }
-        Ok(parts)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn finish_compact(&mut self, parts: Vec<Part>) -> Result<Response> {
-        let tails: Vec<Option<Tail>> = parts.iter().map(|p| self.unwatch(p.token)).collect();
-        self.refuse_if_failed()?;
-        for (p, t) in parts.iter().zip(&tails) {
-            let moved = t.as_ref().is_none_or(|t| t.schema);
-            if moved || self.named(p.collection.id).as_deref() != Some(&p.name) {
-                return Err(Error::Query(format!(
-                    "`{}` changed while it was compacted; run `compact` again",
-                    p.name
-                )));
-            }
-        }
-        let mut reclaimed = 0usize;
-        for (mut p, t) in parts.into_iter().zip(tails) {
-            let live = &self.collections[&p.name];
-            let c = &mut p.collection;
-            // Bound as the collection it takes the place of is now: a
-            // definition meanwhile notes no collection of its own.
-            c.bound = live.bound;
-            let mut ids = t.unwrap().ids;
-            ids.sort_unstable();
-            ids.dedup();
-            // Each document written during the build takes the state it has
-            // now, over the one the copy holds.
-            for id in ids {
-                let old = c.store.read(&c.schema, id)?;
-                let now = live.store.read(&live.schema, id)?;
-                if let Some(old) = &old {
-                    c.unindex_doc(old, now.as_ref());
-                }
-                match now {
-                    Some(doc) => {
-                        c.store
-                            .append(OP_PUT, id, &Store::encode_doc(&c.schema, &doc));
-                        c.index_doc(&doc, old.as_ref());
-                    }
-                    None if c.store.contains(id) => {
-                        c.store.append(OP_DEL, id, &[]);
-                    }
-                    None => {}
-                }
-            }
-            // An id handed out and deleted during the build left no record
-            // in the copy; it must not come back.
-            c.store.raise_next_id(live.store.next_id());
-            reclaimed += p.reclaimed;
-            self.collections.insert(p.name, p.collection);
-        }
-        // After compaction the persisted image is rewritten from scratch,
-        // streamed into the new file rather than built beside the data.
-        let mut len = 0;
-        let r = {
-            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| {
-                self.image_into(out, &[], &mut Vec::new())?;
-                len = out.at();
-                Ok(())
-            })
-        };
-        self.storage(r)?;
-        self.rewrote(len);
-        #[cfg(not(target_arch = "wasm32"))]
-        self.compacted_to(len);
-        Ok(Response::Ok(format!(
-            "compaction done, {reclaimed} bytes reclaimed"
-        )))
-    }
-
     /// The graphs a compact of a mapped database rebuilds: those of `which`
     /// holding tombstones, their vectors copied as `create index` copies
     /// them. Nothing else is: the records stay in the file until the
@@ -781,8 +659,16 @@ impl Database {
                 }
                 let pos = c.schema.field_pos(field).unwrap();
                 let mut values = Vec::with_capacity(c.store.len());
-                for id in c.store.iter_ids() {
+                let read: Result<()> = c.store.iter_ids().try_for_each(|id| {
                     values.push((id, c.store.read_field(id, pos)?));
+                    Ok(())
+                });
+                // A document it cannot read leaves the graph as it stands,
+                // tombstones and all, and answering as it did: one built
+                // without it would not, and the compact is never refused
+                // for what a document holds.
+                if read.is_err() {
+                    continue;
                 }
                 copies.push(IndexCopy {
                     token: 0,
@@ -824,13 +710,18 @@ impl Database {
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
-            for id in ids {
+            let caught: Result<()> = ids.into_iter().try_for_each(|id| {
                 ix.remove(id);
                 if let Some(Value::Vector(v)) = c.store.read_field(id, b.copy.pos)? {
                     ix.insert(id, &v);
                 }
+                Ok(())
+            });
+            // As where the copy was taken: a document it cannot read leaves
+            // the graph as it stands.
+            if caught.is_ok() {
+                c.vectors.insert(b.copy.field, ix);
             }
-            c.vectors.insert(b.copy.field, ix);
         }
         // The writes made meanwhile may have left the new graphs a tombstone
         // or two; those wait for the next compact rather than having the
@@ -953,14 +844,37 @@ impl Database {
         let side = &mut b.side;
         self.last_marks(&mut |body| put_record(side, super::REC_STATEMENT, 0, body))?;
         let len = b.side.at();
+        // In place, in bytes a mapping covers (`Beside::write`'s), which a
+        // `&[u8]` must never see change: its stores are this compact's
+        // alone until the swap below, on this thread, and no slice of it
+        // outlives the read that took it (`fs::Mapping`).
         b.side
             .patch(b.head_at + 1, &self.changes.seq().to_le_bytes())?;
         b.side
             .patch(b.head_at + 9, &(len - b.body_at).to_le_bytes())?;
         b.side.sync()?;
-        let r = self.sink_mut().adopt(b.side.path());
+        let r = self.sink_mut().adopt(b.side.path(), b.side.file());
         self.storage(r)?;
         b.side.adopted();
+        // The file is the new one now: a panic before every store points
+        // at it fails the database, as one in a compact under the lock does.
+        self.unwinding(
+            |db| Ok(db.adopted_beside(b, len, began)),
+            Self::compact_unwound,
+        )
+    }
+
+    /// [`Self::finish_beside`] once the side file took the file's place:
+    /// each store pointed at it, and the stores they replace handed back.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn adopted_beside(
+        &mut self,
+        mut b: Beside,
+        len: u64,
+        began: std::time::Instant,
+    ) -> (Response, Vec<Store>) {
+        #[cfg(test)]
+        super::unwinding::panic_at("adopted");
         *self.appended.get_mut() = len;
         // A database read into memory hands nothing over to its file.
         match b.mapped {
@@ -995,7 +909,7 @@ impl Database {
         self.compacted_to(len);
         self.swap_held = began.elapsed();
         let done = Response::Ok(format!("compaction done, {} bytes reclaimed", b.reclaimed));
-        Ok((done, retired))
+        (done, retired)
     }
 }
 
@@ -1120,10 +1034,14 @@ impl Beside {
         }
         // Read into memory, the live records are copied into fresh segments
         // here, with no lock held, and stay there: the database keeps them
-        // in memory, as it was opened to.
-        if !self.mapped {
-            for p in self.parts.iter_mut().filter(|p| p.compact) {
-                p.store = p.store.compacted()?;
+        // in memory, as it was opened to. Over a mapped file the documents
+        // holding a dropped field's value are written again into the copy's
+        // segments, until it is pointed at the new file below. Either way a
+        // dropped place's value becomes a `null` and the place stays.
+        for p in self.parts.iter_mut().filter(|p| p.compact) {
+            match self.mapped {
+                false => p.store = p.store.compacted()?,
+                true => p.store.reclaim()?,
             }
         }
         let mut placed = Vec::with_capacity(self.parts.len());
@@ -1145,7 +1063,7 @@ impl Beside {
                 let mut data = Summed::begin(side, REC_DATA, p.cid, bytes)?;
                 placed.push(Some(data.at()));
                 match p.compact {
-                    true => p.store.write_live(&mut data)?,
+                    true => p.store.compact_live(&mut data)?,
                     false => p.store.write_image(&mut data)?,
                 }
                 data.end()?;
@@ -1326,25 +1244,16 @@ fn compact_online(
     which: Option<&str>,
     during: &mut dyn FnMut(),
 ) -> Result<Response> {
-    // A dropped field's places are taken out of each document, which the
-    // copies made beside the database -- the records as they stand -- do
-    // not do: that compact holds the lock, as one in a shell does. Asked
-    // under the read lock first: a host compacting on its own looks every
-    // few seconds, and took the write lock for nothing each time.
-    if read(db).drops_in(which)? {
-        let mut g = write(db);
-        if g.drops_in(which)? {
-            g.may_write(true)?;
-            return g.compact(which, true);
-        }
-    }
     // No record is copied under a lock: the graphs holding tombstones are
     // rebuilt here, beside the database, and the rewrite -- the live records
-    // streamed into a new file, 2.1 s for 1 GB -- is written beside it too.
+    // streamed into a new file, 2.1 s for 1 GB, a dropped field's values
+    // reclaimed on the way and its places kept -- is written beside it too.
     // Copying every record into a fresh store under the read lock and
     // building every index again, as a database read into memory once did,
     // took a 427 MB file to +899 MB of heap; the indexes are keyed by id, and
-    // the documents are the same ones.
+    // the documents are the same ones. A collection holding a dropped place
+    // was compacted under the write lock, its places taken out, until a
+    // compact kept them (docs/design/storage.md#dropped-places).
     #[cfg(not(target_arch = "wasm32"))]
     {
         let copies = read(db).begin_graphs(which)?;
@@ -1359,23 +1268,15 @@ fn compact_online(
         r?;
         rewrite_beside(db, which, during)
     }
+    // The browser module has no thread to build beside the page and no
+    // file to write beside its own, and maintains nothing (fennec-wasm
+    // calls no `maintain`): its compact is `execute`'s, under the lock.
     #[cfg(target_arch = "wasm32")]
     {
-        let mut parts = read(db).begin_compact(which)?;
-        let mut watching = Watching {
-            db,
-            tokens: parts.iter().map(|p| p.token).collect(),
-        };
-        during();
-        for p in &mut parts {
-            let c = &mut p.collection;
-            for pos in 0..c.schema.fields.len() {
-                build_index(c, pos)?;
-            }
-        }
-        let r = write(db).finish_compact(parts);
-        watching.tokens.clear();
-        r
+        let _ = during;
+        let mut g = write(db);
+        g.may_write(true)?;
+        g.compact(which, true)
     }
 }
 
@@ -1425,6 +1326,11 @@ fn rewrite_beside(
                 b.past = true;
                 b.side.past_cache();
             }
+            // Past the room, the old file read from its start to its end
+            // rather than at random by id (`store::InTurn`).
+            if b.mapped {
+                b.side.copies_in_turn();
+            }
             let mut watching = Watching {
                 db,
                 tokens: b.parts.iter().map(|p| p.token).collect(),
@@ -1465,4 +1371,99 @@ fn rewrite_beside(
     let _ = during;
     let r = write(db).compact(which, false);
     r
+}
+
+#[cfg(all(test, feature = "vector"))]
+mod tests {
+    use super::*;
+    use crate::codec::{TAG_LIST, TAG_NULL};
+    use crate::schema::{Field, VectorIndexSpec};
+    use crate::value::VecPrec;
+
+    fn put(db: &mut Database, id: i64, v: [f32; 2]) {
+        db.execute(&Statement::Put {
+            collection: "g".into(),
+            docs: vec![vec![
+                ("id".into(), Expr::Lit(Value::Int(id))),
+                ("meta".into(), Expr::Lit(Value::Text("m".into()))),
+                ("v".into(), Expr::Lit(Value::Vector(v.to_vec()))),
+            ]],
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        })
+        .expect("put");
+    }
+
+    /// A compact builds a graph holding tombstones again from every
+    /// document's vector: one it cannot read leaves the graph as it stood,
+    /// tombstones and all -- answering as it did, where one built without
+    /// the document would not -- and the compact goes on, under the lock
+    /// and beside the database. No file brings such a document to it (an
+    /// open, `create index`, a write and a replica's apply each read the
+    /// vector first and refuse it: `tests/compact_places.rs`), so it is put
+    /// in the store here as an open would have held it.
+    #[test]
+    fn a_graph_a_compact_cannot_rebuild_stays_as_it_stood() {
+        for beside in [false, true] {
+            let mut db = Database::new();
+            let schema = Schema::new(
+                "g",
+                vec![
+                    Field::new("meta", DataType::Json),
+                    Field::new("v", DataType::Vector(2, VecPrec::F32))
+                        .indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
+                ],
+            )
+            .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .expect("create");
+            put(&mut db, 1, [1.0, 0.0]);
+            put(&mut db, 2, [0.0, 1.0]);
+            // Written over: a tombstone, which a compact takes out by
+            // building the graph again.
+            put(&mut db, 1, [1.0, 0.2]);
+            // `meta` 100 lists deep, then the vector.
+            let mut deep = Vec::new();
+            for _ in 0..100 {
+                deep.extend_from_slice(&[TAG_LIST, 1]);
+            }
+            deep.push(TAG_NULL);
+            crate::codec::encode_value(&mut deep, &Value::Vector(vec![0.6, 0.8]));
+            let c = db.collections.get_mut("g").expect("g");
+            c.store.append(OP_PUT, 3, &deep);
+            assert!(c.store.read_field(3, 1).is_err());
+            let graph = |db: &Database| {
+                let ix = &db.collection("g").expect("g").vectors["v"];
+                (ix.len(), ix.dead())
+            };
+            let stood = graph(&db);
+            assert_eq!(stood.1, 1);
+            let db = match beside {
+                false => {
+                    db.execute(&Statement::Compact(None)).expect("compact");
+                    db
+                }
+                true => {
+                    let lock = RwLock::new(db);
+                    Database::maintain(&lock, &Statement::Compact(None))
+                        .expect("a maintenance")
+                        .expect("compact");
+                    lock.into_inner().expect("lock")
+                }
+            };
+            assert_eq!(graph(&db), stood, "beside: {beside}");
+            assert_eq!(
+                db.collection("g").expect("g").store.len(),
+                3,
+                "beside: {beside}"
+            );
+        }
+    }
 }

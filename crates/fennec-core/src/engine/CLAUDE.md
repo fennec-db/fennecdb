@@ -16,11 +16,15 @@ it.
 **[A long read is pinned, and read with no lock held](../../../../docs/design/engine.md#pinned-reads)**
 (`Database::pin`), sharing nothing a write changes in place; it declines a
 read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
-stray read reruns under the lock. A stream's seed is one (`sse::seed`), its
-scope bound under the pin's lock and its inner `get`s answered on the pin
-(`Pinned::answer_subqueries`), the ring held back to it till the first look (`hold_changes`);
-it reads again under the lock where the ring passed it or an image was
-adopted (`Database::adoptions`), as every look reseeds. A look answering
+stray read reruns under the lock. An image sent is one
+(`Database::pin_image`), each record's sum made as it is written out. A
+stream's seed is one (`sse::seed`), read
+a page at a time, its scope bound under the pin's lock and its inner `get`s
+answered on the pin (`Pinned::answer_subqueries`), the ring held back to it
+till the first look (`hold_changes`); it reads again under the lock where
+the ring passed it or an image was adopted (`Database::adoptions`), as
+every look reseeds -- a long answer there pinned by its ids
+(`Database::pin_rows`). A look answering
 them again pins what they read and the rows written since alone
 (`Database::pin_lists`, `sse::look`), the shape where they moved.
 
@@ -40,9 +44,42 @@ changed (`Tails::all_changed`).
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by
 `Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.
+A compact renumbers no place and is refused for nothing a document holds:
+one it cannot read is copied as it is, a graph it cannot rebuild kept
+([dropped places](../../../../docs/design/storage.md#dropped-places)); a
+copy reads each primary's write as it was made (`Schema::read_written`),
+refusing one made by other places. From the first store it changes until
+each points at the new file, a panic, a store refusing or a file the sink
+cannot map fails the database (`compact_unwound`, `repoint`); a refusal the
+server's compaction meets again is logged once and counted.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room
 (`cache::room`): once a third of what it writes is dead and the file
 reached `ROOM_SHARE` of that room or the process faults
 (`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
+Past that room or faulting, a compact copies a collection of 4 MiB live
+or more reading the old file [in
+turn](../../../../docs/design/storage.md#reading-the-file-in-turn)
+(`store::in_turn`, asked by the image under the lock and the side file
+beside it, `ImageOut::in_turn`) and writes the bytes the walk by id
+writes, the records in id order whatever read them: through buckets of a
+quarter of the room, 16 MiB at most, dealt through buffers of 16 MiB
+together at most whatever the file (`BUCKETS_MOST`), and a scratch file
+`<file>.sorting` made by its open alone, following no link
+(`fs::Scratch`), only where the volume holds twice the live bytes --
+unlinked at once on a Unix, deleted on close on Windows; else, past 256
+buckets, or where the scratch file fails before a byte of the new file is
+written (said once), by id. One failing after, or reading back other than
+its sum, fails the compact as a write of its new file does.
+`tests/in_turn.rs` and `store::in_turn::tests` hold it to the walk by id,
+byte for byte.
+
+**[Dead bytes are whole frames](../../../../docs/design/storage.md#dead-bytes-are-whole-frames)**
+Live bytes are the live frames to the byte: a version written over or deleted adds its head and its payload to
+`dead_bytes`, through `store::dead_frame` alone; counting a payload alone,
+or a writer adding a dead version any other way, leaves its head counted
+live, and `Garbage::live`, `fennec_data_bytes` and the compact's trigger
+read it high. `store::tests::the_live_bytes_are_the_live_frames_to_the_byte`
+holds it through appends, an undone block and every load; a file an older
+build wrote counts its dead heads short until its next compact.

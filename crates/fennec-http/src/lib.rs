@@ -205,11 +205,14 @@ pub struct Config {
     /// Data footprint ceiling in bytes (0 = off): fennec-server's
     /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
-    /// What a router marks the requests it forwards with
-    /// ([`audit::router_mark`]): made from `admin_token` on a tenant node,
-    /// which a router reaches with it. A request bearing it is waited out
-    /// at the router after a refusal, keyed by the client it names.
-    pub router_mark: Option<String>,
+    /// What a router marks the requests it forwards with, of either class
+    /// of listener ([`audit::router_marks`]): made from `admin_token` on a
+    /// tenant node, which a router reaches with it. A request bearing one
+    /// is waited out at the router after a refusal, keyed by the client it
+    /// names; and on a node asking no token answered only where it is the
+    /// mark of a router on loopback alone, or under `--insecure`
+    /// ([`open_refusal`]).
+    pub router_mark: Option<Arc<audit::RouterMarks>>,
     /// The studio's files, served under `/_studio/` (`--studio`); `None`
     /// answers that path 404.
     pub studio: Option<Arc<studio::Studio>>,
@@ -380,7 +383,8 @@ impl Server {
         fennec_ql::install();
         let mut cfg = cfg.settled();
         if cfg.router_mark.is_none() {
-            cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
+            cfg.router_mark =
+                (cfg.admin_token.as_deref()).map(|t| Arc::new(audit::router_marks(t)));
         }
         // A tenant's hooks are its file's, kept beside it and set through
         // `/_admin/` ([`tenant_hooks`]): a node reads no hooks file, and
@@ -589,8 +593,23 @@ fn authenticate(
     // by a code as well (`token_expired`), which no other refusal carries:
     // a client refreshes at it without a second thought, and asks its
     // issuer at the others, which a fresh token may or may not cure.
+    // A refusal is counted as a guess at the server's token where the value
+    // could have been it, and as a JWT's otherwise: a good JWT starts the
+    // JWTs' count alone (`audit::Kind`), so its holder guessing the
+    // server's token waits the doubled waits. A value shaped as a JWT --
+    // two dots -- equals no token not so shaped, and is a JWT's guess
+    // unless the token has two dots too; none at all guesses nothing.
+    let refused_kind = |given: Option<&str>| {
+        let shaped = |s: &str| s.matches('.').count() == 2;
+        match (&cfg.token, given) {
+            _ if cfg.access.is_none() => audit::Kind::Token,
+            (Some(t), Some(g)) if !shaped(g) || shaped(t) => audit::Kind::Token,
+            _ => audit::Kind::Jwt,
+        }
+    };
     let refuse = |why: &'static str| {
         audit::refusal(why);
+        audit::refused_as(refused_kind(given));
         match access::refusal_code(why) {
             Some(code) => Response::coded(401, why, code),
             None => Response::error(401, why),
@@ -610,7 +629,7 @@ fn authenticate(
                 .map_or(0, |d| d.as_secs());
             return match access.scope(given, now) {
                 Ok(mut scope) => {
-                    audit::verified();
+                    audit::verified_jwt();
                     if let Some(db) = db {
                         scope.charge(calls::Runs::to(cfg.call_rate, db));
                         if let Some(refused) = rate::admitted(cfg.request_rate, db, &scope) {
@@ -971,6 +990,13 @@ fn warn_proxied(req: &Request) {
     }
 }
 
+/// What a node asking no token answers a request a router listening past
+/// loopback forwarded ([`open_refusal`]).
+const OPEN_BEHIND_A_ROUTER: &str = "this node asks no token, and the router that forwarded the \
+     request listens past loopback, where anyone on the network reaches it: give the node \
+     --http-token or --jwt-keys, or start it with --insecure if the network may read and write \
+     its tenants";
+
 /// Why a listener that asks for no token refuses `req` for where it comes
 /// from ([`cors::foreign`]), as a 403, or `None`. Open is no `--http-token`
 /// and no JSON Web Tokens: a tenant node with `--admin-token` alone runs
@@ -990,6 +1016,17 @@ fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Respon
     let scrape_token = matches!(backend, Backend::Metrics { .. }) && cfg.admin_token.is_some();
     if cfg.token.is_some() || cfg.access.is_some() || scrape_token {
         return None;
+    }
+    // A router whose listener is not loopback alone forwarded it, by the
+    // mark it bore ([`audit::router_mark`]): its clients are the network's,
+    // and their `Host` -- `localhost`, an address -- is theirs to name. A
+    // router asks a forward no token, so behind one with `--token` an open
+    // node ran every tenant's statements for anyone; such a router forwards
+    // nothing to an open node itself, and this holds a router from before,
+    // whose one mark is this one. A router on loopback alone sends the
+    // other mark, and `--insecure` says the network may reach it.
+    if !cfg.insecure && audit::routed_past_loopback() {
+        return Some(Response::error(403, OPEN_BEHIND_A_ROUTER));
     }
     cors::foreign(
         cfg.cors.as_deref(),
@@ -1032,6 +1069,20 @@ fn body_ceiling(
         },
         _ => Ok(cfg.max_body),
     }
+}
+
+/// Whether a request read as far as its head is an image's import whose
+/// body is read as it comes (`admin::import`), not whole: a tenant node's
+/// `PUT /_admin/tenants/<t>/file` carrying the admin token -- the ceiling
+/// [`body_ceiling`] gave it already asked it -- with a `Content-Length`
+/// within that ceiling. One past it is refused 413 as any body is, and a
+/// chunked one read whole, to `max_import`.
+#[inline]
+fn streamed(cfg: &Config, imports: bool, head: &http::Head, ceiling: usize) -> bool {
+    imports
+        && cfg.admin_token.is_some()
+        && admin::is_import(head.request())
+        && head.length().is_some_and(|len| len > 0 && len <= ceiling)
 }
 
 /// A single connection: reads consecutive requests on a keep-alive
@@ -1089,15 +1140,22 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             .and_then(|head| {
                 let Some(head) = head else { return Ok(None) };
                 match body_ceiling(cfg, imports, head.request()) {
+                    // An image's import carrying the admin token, of a
+                    // length within its ceiling: its body left to be read
+                    // as it comes (`admin::import`).
+                    Ok(ceiling) if streamed(cfg, imports, &head, ceiling) => {
+                        let len = head.length();
+                        Ok(Some((head.unread(), len)))
+                    }
                     Ok(ceiling) => head
                         .body(&mut reader, ceiling)
-                        .map(Some)
+                        .map(|req| Some((req, None)))
                         .map_err(Unread::Bad),
                     Err(refused) => Err(Unread::Refused(Box::new((head.unread(), refused)))),
                 }
             });
-        let mut req = match read {
-            Ok(Some(req)) => req,
+        let (mut req, streamed) = match read {
+            Ok(Some(read)) => read,
             Ok(None) => return,
             Err(unread) => {
                 let resp = match unread {
@@ -1116,7 +1174,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                         let (req, refused) = *refused;
                         request_id::begin_request(&req);
                         if cfg.router_mark.is_some() {
-                            audit::request(&req, cfg.router_mark.as_deref());
+                            audit::forwarded(&req, cfg.router_mark.as_deref());
                         }
                         trace::begin(&req);
                         audit::http(&req, refused.status, peer);
@@ -1137,7 +1195,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         metrics::begin_request();
         proxied(&req);
         if cfg.router_mark.is_some() {
-            audit::request(&req, cfg.router_mark.as_deref());
+            audit::forwarded(&req, cfg.router_mark.as_deref());
         }
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
@@ -1150,6 +1208,41 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 .is_err()
                 || !keep_alive
             {
+                return;
+            }
+            continue;
+        }
+
+        // An image's import, its body read as it comes into a file beside
+        // the tenant's rather than whole as the request's
+        // (`admin::import`): answered here, before any other route, as the
+        // admin's routes are -- past `open_refusal` alone of what is above
+        // them -- its body left unread until now, and the connection ended
+        // where it is left part read.
+        if let (Some(len), Backend::Tenants(tenants)) = (streamed, backend) {
+            let (status, sent, whole) = match open_refusal(cfg, backend, &req) {
+                Some(refused) => {
+                    let status = refused.status;
+                    let sent = cors(refused, cfg).write(&mut out, false, false);
+                    (status, sent.is_ok(), false)
+                }
+                None => {
+                    trace::begin(&req);
+                    let r =
+                        admin::import(&mut out, &mut reader, tenants, cfg, &req, len, keep_alive);
+                    trace::end(r.0);
+                    r
+                }
+            };
+            audit::http(&req, status, peer);
+            if !whole {
+                if sent {
+                    drop(reader);
+                    conn.end_refused();
+                }
+                return;
+            }
+            if !sent || !keep_alive {
                 return;
             }
             continue;
@@ -1289,6 +1382,21 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         // of the spans and none of the time.
         trace::begin(&req);
 
+        // A tenant's image going to a move, written out as it is read
+        // rather than as an answer's body, which held it whole
+        // (`admin::export`).
+        if let Backend::Tenants(tenants) = backend {
+            if admin::is_export(&req) {
+                let (status, sent) = admin::export(&mut out, tenants, cfg, &req, keep_alive);
+                audit::http(&req, status, peer);
+                trace::end(status);
+                if !sent || !keep_alive {
+                    return;
+                }
+                continue;
+            }
+        }
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
@@ -1398,7 +1506,12 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 // subscription: it takes the connection over.
                 trace::discard();
                 let _ = out.set_read_timeout(None);
-                match replication::handle(&mut out, db, repl, &req) {
+                // A tenant's copy is promoted by the node's admin alone.
+                let answered = match &tenant {
+                    Some(_) => replication::handle_tenant(&mut out, db, repl, &req),
+                    None => replication::handle(&mut out, db, repl, &req),
+                };
+                match answered {
                     None => return,
                     Some(resp) => {
                         audit::http(&req, resp.status, peer);
@@ -2066,8 +2179,14 @@ fn route_tenant(
     }
     // No body past `max_body` comes this far: an image's import, the one
     // read past it, is `/_admin/`'s, answered above ([`body_ceiling`]).
-    let name = match segs.as_slice() {
-        ["t", name, ..] => name.to_string(),
+    // A router's stand-in for a tenant it does not place names it past
+    // [`tenants::STAND_IN`]: asked as that tenant, answered as one with no
+    // file here.
+    let (name, standing_in) = match segs.as_slice() {
+        ["t", name, ..] => match name.strip_prefix(tenants::STAND_IN) {
+            Some(name) => (name.to_string(), true),
+            None => (name.to_string(), false),
+        },
         _ => {
             return Err(Response::error(
                 404,
@@ -2120,6 +2239,13 @@ fn route_tenant(
         scope
             .reaches(&name)
             .map_err(|why| Response::error(403, why))?;
+    }
+    // A router's stand-in, every credential asked as of a tenant held: the
+    // tenant is not here, whatever file of its name is -- one the router
+    // does not place is a leftover, opened by no request.
+    if standing_in {
+        let absent = tenants::Refused(404, format!("no tenant `{name}` on this node"));
+        return Err(absent.response().header(ABSENT_HEADER, "absent"));
     }
     // A tenant this node has no file of says so in a header besides the
     // words: a router reading a read replica's 404 tells a copy gone from

@@ -72,11 +72,12 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// it should refresh.
 pub const ADDRESSES: usize = 10_000;
 
-/// Appends the events to `path` from now on.
+/// Appends the events to `path` from now on: a log made here is its
+/// owner's alone (`fennec_core::fs::private`), since a refused request's
+/// line names its address, token subject and statement; one there keeps
+/// its mode.
 pub fn open(path: &std::path::Path) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let file = fennec_core::fs::private(std::fs::OpenOptions::new().create(true).append(true))
         .open(path)?;
     let _ = LOG.set(Mutex::new(file));
     Ok(())
@@ -112,10 +113,19 @@ thread_local! {
     // [`ROUTED`], whose router waited a refusal out already, the router
     // the entry sent the request to waits it out here.
     static NAMED: std::cell::Cell<Option<IpAddr>> = const { std::cell::Cell::new(None) };
-    // A token of the request this thread serves was verified, and the
-    // router forwarded it: the answer's head says so ([`VERIFIED_HEADER`]),
-    // since the router holds no keys and keeps the client's count.
-    static VERIFIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // What the router that forwarded the request this thread serves is to
+    // know of its credentials, as the answer's head says it
+    // ([`VERIFIED_HEADER`], [`REFUSED_HEADER`]): a token of a kind was
+    // verified ([`VERIFIED_TOKEN`], [`VERIFIED_JWT`]), or the request was
+    // refused as a JWT's ([`REFUSED_JWT`]) -- since the router holds no keys
+    // and keeps the client's counts.
+    static VERIFIED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    // The router that forwarded the request this thread serves listens past
+    // loopback ([`router_marks`]): set with [`ROUTED`], by the mark it bore.
+    static PAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // The kind of credential the request this thread serves is refused as
+    // ([`refused_as`]), its count's: a token unless a refusal says else.
+    static REFUSED_AS: std::cell::Cell<Kind> = const { std::cell::Cell::new(Kind::Token) };
     // Why the request this thread serves was refused its token, as the 401
     // says it ([`refusal`]): the `refused` line names the check that failed
     // -- an issuer, an audience, an expiry -- and never a value of the
@@ -153,12 +163,55 @@ const HELD: u8 = 2;
 /// a request that is no event pays nothing for it.
 const HOOKED: u8 = 4;
 
+/// [`VERIFIED`]: a token other than a JWT was verified -- the server's, the
+/// admin's, a replication or a scrape's.
+const VERIFIED_TOKEN: u8 = 1;
+/// [`VERIFIED`]: a JSON Web Token was verified.
+const VERIFIED_JWT: u8 = 2;
+/// [`VERIFIED`]: the request is refused as a JSON Web Token's.
+const REFUSED_JWT: u8 = 4;
+
+/// What a refused credential is counted as a guess at: its count is
+/// started again by a credential of its kind verified, never another's. A
+/// JSON Web Token's good signature started every count of its address
+/// again, so the holder of a scoped token guessing the server's or the
+/// admin's token sent its own between guesses, and each guess waited the
+/// first wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A token the server holds: its own, the admin's, a replication or a
+    /// scrape's, the router's -- and every refusal whose value could have
+    /// been one of them.
+    Token = 0,
+    /// A JSON Web Token: a refused value shaped as one, where the server's
+    /// token is not, or none, on a server taking JWTs (`authenticate`).
+    Jwt = 1,
+}
+
+/// The kinds a count is kept by, every one.
+const KINDS: [Kind; 2] = [Kind::Token, Kind::Jwt];
+
 /// The reason the request this thread serves is refused its token, for its
 /// `refused` line: one of the server's own texts, never the token's. Set
 /// where the 401 is made, and let go by [`request`] as the next request
 /// begins, so a line never names a reason of the request before.
 pub fn refusal(why: &'static str) {
     REASON.with(|r| r.set(Some(why)));
+}
+
+/// The request this thread serves is refused as a guess at `kind`
+/// ([`Kind`]), its 401 counted so ([`http`]), which lets it go; behind a
+/// router the answer tells it a JWT's ([`REFUSED_HEADER`]). Asked where
+/// each 401 of a credential is made, so none counts as the kind a refusal
+/// before it on the connection was.
+pub fn refused_as(kind: Kind) {
+    REFUSED_AS.with(|r| r.set(kind));
+    if ROUTED.with(|r| r.get()).is_some() {
+        VERIFIED.with(|v| match kind {
+            Kind::Jwt => v.set(v.get() | REFUSED_JWT),
+            Kind::Token => v.set(v.get() & !REFUSED_JWT),
+        });
+    }
 }
 
 /// The webhook event the request this thread serves sent was refused
@@ -319,11 +372,21 @@ fn bound_line(req: &crate::http::Request, path: &str, status: u16) {
 
 /// The header a node's answer to a forwarded request carries when a token
 /// of it was verified ([`verified`]): the router, which holds no keys,
-/// starts its client's count again on it alone. The router reads it only
-/// off a node's answer, over its own connection to the node, and drops it
-/// from what it sends on; a node writes it only on what the router
-/// forwarded ([`ROUTER_HEADER`]'s mark), so a client never sees it.
+/// starts its client's count again on it alone -- `1` a token's, `jwt` a
+/// JSON Web Token's ([`Kind`]). The router reads it only off a node's
+/// answer, over its own connection to the node, and drops it from what it
+/// sends on; a node writes it only on what the router forwarded
+/// ([`ROUTER_HEADER`]'s mark), so a client never sees it. A router from
+/// before takes any value for `1`.
 pub const VERIFIED_HEADER: &str = "Fennec-Verified";
+
+/// The header a node's 401 to a forwarded request carries, `jwt`, where it
+/// refused the request as a JSON Web Token's ([`refused_as`]): the router
+/// counts the refusal so, where it counted every one as a token's, and a
+/// good JWT, starting the JWTs' count alone, left an app's users behind
+/// one address waiting longer at each expiry. Read and dropped as
+/// [`VERIFIED_HEADER`] is, off a 401 alone.
+pub const REFUSED_HEADER: &str = "Fennec-Refused";
 
 /// The header a router names a forwarded request's client in: its address
 /// and the router's mark ([`router_mark`]), `<address> <mark>`. One header
@@ -343,6 +406,11 @@ pub const ROUTER_HEADER: &str = "fennec-router";
 /// node waits none for a request carrying this mark: the client's address
 /// is believed from no one else. Derived rather than the token itself, so
 /// a mark seen on the wire reaches no `/_admin/`.
+///
+/// This mark is a router's whose listener is not loopback alone -- or
+/// whose class is not known: a router from before sends it. One listening
+/// on loopback alone sends [`router_mark_local`] in its place, which a
+/// mark seen on the wire cannot be turned into without the admin token.
 pub fn router_mark(admin_token: &str) -> String {
     let mac = crate::crypto::hmac_sha256(
         admin_token.as_bytes(),
@@ -351,25 +419,97 @@ pub fn router_mark(admin_token: &str) -> String {
     crate::crypto::b64url_encode(&mac[..16])
 }
 
+/// The mark a router listening on loopback alone sends in place of
+/// [`router_mark`], for a request no other router relayed and the global
+/// entry named no client of: whoever sent it is on this machine. A node
+/// that asks no token answers a marked request only so marked, or under
+/// its own `--insecure` (`open_refusal`): behind a router listening past
+/// loopback it ran every tenant's statements for anyone on the network,
+/// the router asking a forward no token and the node taking the client's
+/// own `Host`, `localhost`, for this machine's.
+pub fn router_mark_local(admin_token: &str) -> String {
+    let mac = crate::crypto::hmac_sha256(
+        admin_token.as_bytes(),
+        b"fennec-router: a request forwarded by a router listening on loopback alone, \
+          the client named beside it",
+    );
+    crate::crypto::b64url_encode(&mac[..16])
+}
+
+/// The two marks a router may send a node ([`router_mark`],
+/// [`router_mark_local`]), made once from the node's admin token.
+#[derive(Debug)]
+pub struct RouterMarks {
+    pub past: String,
+    pub local: String,
+}
+
+/// Both marks of the router whose node's admin token is `admin_token`.
+pub fn router_marks(admin_token: &str) -> RouterMarks {
+    RouterMarks {
+        past: router_mark(admin_token),
+        local: router_mark_local(admin_token),
+    }
+}
+
 /// Whether `req` came through the router `mark` names, and from whom: a
-/// node asks at each request. With no mark, or a header that is not it, the
-/// request is the connection's own -- a client sending the headers itself
-/// is believed in nothing.
+/// router asks it of another's relay at each request. With no mark, or a
+/// header that is not it, the request is the connection's own -- a client
+/// sending the headers itself is believed in nothing.
 pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr> {
-    let client = mark.and_then(|mark| {
+    begin(req, mark, None)
+}
+
+/// [`request`] on a node, of a router's either mark ([`RouterMarks`]):
+/// whether `req` came through its router, and from whom, and the class of
+/// the router's listener ([`routed_past_loopback`]). The mark of one past
+/// loopback is compared first, a deployment's; the other only where it is
+/// not that one.
+pub fn forwarded(req: &crate::http::Request, marks: Option<&RouterMarks>) -> Option<IpAddr> {
+    begin(
+        req,
+        marks.map(|m| m.past.as_str()),
+        marks.map(|m| m.local.as_str()),
+    )
+}
+
+/// Whether the request this thread serves came through a router whose
+/// listener is not loopback alone, by the mark it bore ([`forwarded`]).
+#[inline]
+pub fn routed_past_loopback() -> bool {
+    ROUTED.with(|r| r.get()).is_some() && PAST.with(|p| p.get())
+}
+
+/// Whether something this router believes named the client of the request
+/// this thread serves: another router relaying it under the mark of the
+/// `--token` both hold ([`request`]), or the global entry ([`entry`]).
+#[inline]
+pub fn vouched() -> bool {
+    ROUTED.with(|r| r.get()).is_some() || NAMED.with(|n| n.get()).is_some()
+}
+
+fn begin(req: &crate::http::Request, past: Option<&str>, local: Option<&str>) -> Option<IpAddr> {
+    let mut from_past = true;
+    let client = past.and_then(|past| {
         let (client, given) = req.header(ROUTER_HEADER)?.trim().rsplit_once(' ')?;
-        if !crate::crypto::ct_eq(given.as_bytes(), mark.as_bytes()) {
-            return None;
+        if !crate::crypto::ct_eq(given.as_bytes(), past.as_bytes()) {
+            let local = local?;
+            if !crate::crypto::ct_eq(given.as_bytes(), local.as_bytes()) {
+                return None;
+            }
+            from_past = false;
         }
         client.parse::<IpAddr>().ok()
     });
     ROUTED.with(|r| r.set(client));
+    PAST.with(|p| p.set(from_past));
     // The request before on this connection named its client, and this
     // one names its own or none.
     NAMED.with(|n| n.set(None));
     // The request before on this connection -- the router's pool hands one
     // connection to many clients -- verified nothing of this one's.
-    VERIFIED.with(|v| v.set(false));
+    VERIFIED.with(|v| v.set(0));
+    REFUSED_AS.with(|r| r.set(Kind::Token));
     REASON.with(|r| r.set(None));
     UNWOKEN.with(|u| u.borrow_mut().take());
     if BOUND.with(|b| b.replace(0)) & HELD != 0 {
@@ -789,9 +929,11 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
         // address: counted here, by the router's, it would hold every
         // client of the router to one count. Sent by the global entry, by
         // the client it named: by its own, every client behind the entry
-        // would be Cloudflare's address.
+        // would be Cloudflare's address. Counted as the kind it was refused
+        // as, which the next request starts from a token's again.
+        let kind = REFUSED_AS.with(|r| r.replace(Kind::Token));
         if ROUTED.with(|r| r.get()).is_none() {
-            std::thread::sleep(failed(named().or(ip)));
+            std::thread::sleep(failed_as(named().or(ip), kind));
         }
         return;
     }
@@ -856,13 +998,14 @@ fn hook_line(req: &crate::http::Request, ip: Option<IpAddr>) {
     }
 }
 
-/// Refusals counted, by the address and a second key: a token's are
-/// [`TOKENS`], a hook's its name's digest (`hooks::failed`), in a table of
+/// Refusals counted, by the address and a second key: a token's are its
+/// [`Kind`]'s, a hook's its name's digest (`hooks::failed`), in a table of
 /// their own of this type -- one copy of the map's code for both.
 pub(crate) type Failures = HashMap<(IpAddr, u64), (u32, Instant)>;
 
-/// The second key of a token's count: an address has one.
-const TOKENS: u64 = 0;
+/// The second key of a token's count: an address has one a [`Kind`].
+#[cfg(test)]
+const TOKENS: u64 = Kind::Token as u64;
 
 /// The address a refusal is counted by, a token's and a hook's event's
 /// alike: an IPv4 address mapped into IPv6 as itself, an IPv6 address by
@@ -882,9 +1025,10 @@ pub(crate) fn counted_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// The key a token's count is kept by ([`counted_ip`]).
-fn counted_as(ip: IpAddr) -> (IpAddr, u64) {
-    (counted_ip(ip), TOKENS)
+/// The key a count of refused credentials of `kind` is kept by
+/// ([`counted_ip`]).
+fn counted_as(ip: IpAddr, kind: Kind) -> (IpAddr, u64) {
+    (counted_ip(ip), kind as u64)
 }
 
 /// The tokens' counts, and the order they were refused in.
@@ -949,11 +1093,16 @@ fn failures() -> &'static Mutex<Table> {
     F.get_or_init(Default::default)
 }
 
-/// How long to wait before answering a refusal to `peer`, the failure
-/// counted.
+/// How long to wait before answering a refusal of a token to `peer`, the
+/// failure counted.
 pub fn failed(peer: Option<IpAddr>) -> Duration {
+    failed_as(peer, Kind::Token)
+}
+
+/// [`failed`], the refused credential of `kind`.
+pub fn failed_as(peer: Option<IpAddr>, kind: Kind) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(key) = peer.filter(|_| base > 0).map(counted_as) else {
+    let Some(key) = peer.filter(|_| base > 0).map(|ip| counted_as(ip, kind)) else {
         return Duration::ZERO;
     };
     let mut table = failures().lock().unwrap_or_else(|e| e.into_inner());
@@ -970,16 +1119,23 @@ pub fn failed(peer: Option<IpAddr>) -> Duration {
 /// background` a 50 ms wait slept 229 to 257 -- and a CI runner's refusal
 /// of a 50 ms wait took 256.6 ms, which a bound of 200 read as the count
 /// of another address.
+///
+/// Of the longest of the address's counts, a [`Kind`] each: a test reads
+/// the count it moved without naming its kind.
 pub fn would_wait(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(key) = peer.filter(|_| base > 0).map(counted_as) else {
+    let Some(ip) = peer.filter(|_| base > 0) else {
         return Duration::ZERO;
     };
     let table = failures().lock().unwrap_or_else(|e| e.into_inner());
-    let before = match table.counts.get(&key) {
-        Some(&(n, at)) if at.elapsed() <= WINDOW => n,
-        _ => 0,
-    };
+    let before = KINDS
+        .iter()
+        .filter_map(|&kind| match table.counts.get(&counted_as(ip, kind)) {
+            Some(&(n, at)) if at.elapsed() <= WINDOW => Some(n),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
     wait(base, before.saturating_add(1))
 }
 
@@ -1001,30 +1157,74 @@ fn wait(base: u64, n: u32) -> Duration {
 ///
 /// An address with no count takes no lock: one relaxed load, and a
 /// thread-local's where the request came through the router.
+///
+/// A token's count alone ([`Kind::Token`]): a JWT verified starts the
+/// JWTs' ([`verified_jwt`]).
 pub fn verified() {
+    verified_as(Kind::Token)
+}
+
+/// [`verified`] of a JSON Web Token: the count of refused JWTs starts
+/// again, never a token's, so a scoped token's holder guessing the
+/// server's or the admin's token waits its doubled waits, however many of
+/// its own requests it sends between its guesses.
+pub fn verified_jwt() {
+    verified_as(Kind::Jwt)
+}
+
+/// A credential of `kind` was verified: its count starts again, here or
+/// at the router that forwarded the request.
+pub fn verified_as(kind: Kind) {
     if ROUTED.with(|r| r.get()).is_some() {
-        VERIFIED.with(|v| v.set(true));
+        let bit = match kind {
+            Kind::Token => VERIFIED_TOKEN,
+            Kind::Jwt => VERIFIED_JWT,
+        };
+        VERIFIED.with(|v| v.set((v.get() | bit) & !REFUSED_JWT));
         return;
     }
     if FAILING.load(Ordering::Relaxed) > 0 {
-        succeeded(named().or_else(|| WHO.with(|w| w.borrow().peer).map(|p| p.ip())));
+        succeeded_as(
+            named().or_else(|| WHO.with(|w| w.borrow().peer).map(|p| p.ip())),
+            kind,
+        );
     }
 }
 
 /// The [`VERIFIED_HEADER`] line, onto an answer's `head`, where a token of
-/// the forwarded request it answers was verified; taken, so the next
-/// request on the connection starts without it.
+/// the forwarded request it answers was verified, and the
+/// [`REFUSED_HEADER`] line where it was refused as a JWT's; taken, so the
+/// next request on the connection starts without them.
 pub fn push_verified(head: &mut String) {
-    if VERIFIED.with(|v| v.replace(false)) {
+    let told = VERIFIED.with(|v| v.replace(0));
+    if told == 0 {
+        return;
+    }
+    if told & VERIFIED_TOKEN != 0 {
         head.push_str(VERIFIED_HEADER);
         head.push_str(": 1\r\n");
+    } else if told & VERIFIED_JWT != 0 {
+        head.push_str(VERIFIED_HEADER);
+        head.push_str(": jwt\r\n");
+    } else if told & REFUSED_JWT != 0 {
+        head.push_str(REFUSED_HEADER);
+        head.push_str(": jwt\r\n");
     }
 }
 
-/// A token from `peer` was verified: its count starts again.
+/// `peer`'s counts start again, of every kind: a test's start from
+/// nothing.
 pub fn succeeded(peer: Option<IpAddr>) {
+    for kind in KINDS {
+        succeeded_as(peer, kind);
+    }
+}
+
+/// A credential of `kind` from `peer` was verified: its count starts
+/// again, and no other.
+pub fn succeeded_as(peer: Option<IpAddr>, kind: Kind) {
     if let Some(ip) = peer.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
-        let key = counted_as(ip);
+        let key = counted_as(ip, kind);
         let mut table = failures().lock().unwrap_or_else(|e| e.into_inner());
         table.counts.remove(&key);
         FAILING.store(table.counts.len() as u64, Ordering::Relaxed);

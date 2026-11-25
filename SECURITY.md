@@ -55,8 +55,10 @@ below. That removes the upstream CVE surface for all but TLS, and the
 desktop app's runtime, and puts the rest in this repository instead.
 
 The primitives we wrote are SHA-256, HMAC-SHA-256, PBKDF2-HMAC-SHA-256,
-ChaCha20-Poly1305, RSA PKCS#1 v1.5 verification with SHA-256, ECDSA P-256
-verification (ES256) and the client half of SCRAM-SHA-256 that
+ChaCha20-Poly1305 and HChaCha20 (each sealed file's own key, under
+HKDF-Expand of the sealing key), RSA PKCS#1
+v1.5 verification with SHA-256, ECDSA P-256 verification (ES256) and the
+client half of SCRAM-SHA-256 that
 `fennec import` signs in to PostgreSQL with. They are in
 `crates/fennec-http/src/crypto.rs` (ES256 in `crypto/p256.rs`) and
 `crates/fennec-wire/src/client.rs`, and are exactly the code that most
@@ -66,7 +68,11 @@ the keys and nonces come from. Each primitive is held to its RFC's vectors
 and, where Project Wycheproof has a file for it, to every case of that file:
 ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at 2048 to 4096 bits, ECDSA
 P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
-([docs/design/conventions.md](docs/design/conventions.md#secrets-compared)).
+([docs/design/conventions.md](docs/design/conventions.md#secrets-compared));
+HChaCha20 to draft-irtf-cfrg-xchacha's vector, a sealed file's key to a
+vector computed apart from our code and to RFC 5869's HKDF cases, and RS256 at each end of the
+keys it takes, 2041 and 8192 bits, and just past each, to signatures
+OpenSSL made.
 Vectors are no proof: a bug they miss is as welcome a report as any. What a
 browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.
 
@@ -111,9 +117,26 @@ In scope, and worth reporting:
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
   client surface.
-- An integrity break in a sealed file: a frame that opens in a file it was
-  not sealed into (a version 2 file binds each frame to its file, its place
-  and whether it is the last), or one changed byte that still opens.
+- An integrity break in a sealed file: a file that opens though no one
+  holding its key sealed it -- one built from another file's bytes; a
+  frame that opens in a file it was not sealed into, or after a frame it
+  did not follow; a changed byte that opens to changed contents; or a file
+  sealed now read without a refusal as
+  other than its head says it is -- another role (an image as a backup),
+  another archive or tenant, a segment under another change than its first
+  -- by `fennec restore`, `verify` or `restore --tenants`. A file cut at a
+  frame's edge, or made to look cut there (a frame's length pushed past the
+  end, or the head's version or name's length changed so that its first
+  frame's is),
+  opens as the shorter file by design (below).
+- An integrity break in a page's sealed store (`persist` or `sync` with a
+  `cryptoKey`): a record that opens under another name than the one it
+  was stored under, at another place, after another record than the one it
+  was sealed after -- a chunk the page cut, among those it sealed in their
+  places since -- or with a byte changed; or a replica that stores over a
+  store it could not restore, the writes it held unsent with it. A store
+  cut at a record's edge, or an older one put back whole, restores as it
+  stood by design (below).
 - Studio, the page the server serves: it is served before any token, under a
   strict CSP, and shows stored rows to whoever holds the server token, so a
   script injected through a row it shows would take that token
@@ -123,7 +146,9 @@ In scope, and worth reporting:
 
 Where each surface's rules are kept, and held by tests: the HTTP server,
 replication and webhooks in
-[`crates/fennec-http/CLAUDE.md`](crates/fennec-http/CLAUDE.md), the MCP
+[`crates/fennec-http/CLAUDE.md`](crates/fennec-http/CLAUDE.md), a
+connection's time, ceiling and TLS in
+[`crates/fennec-http/src/conn/CLAUDE.md`](crates/fennec-http/src/conn/CLAUDE.md), the MCP
 endpoint in
 [`crates/fennec-http/src/mcp/CLAUDE.md`](crates/fennec-http/src/mcp/CLAUDE.md), tokens,
 policies and tenant binding in
@@ -146,10 +171,14 @@ these boundaries in one table, each with the code that enforces it, the
 test that proves it -- or "no test", where none does yet -- and what it
 does not defend.
 
-Six parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
+Eight parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec
 (`codec`), a `.fennec` file's open, mapped as a server opens it, with a
-replica's apply (`image`), and a SQLite file (`sqlite`), under
+replica's apply (`image`), a SQLite file (`sqlite`), the walk of the
+certificate a PostgreSQL server shows that picks a channel binding's hash
+(`certificate`), and a primary's stream as a replica, an archiver and a
+backup read it, an image it sends adopted as a replica adopts one
+(`stream`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
 reader, the framing of a sealed file and of an archive, JWT and JWKS
@@ -181,7 +210,15 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   says `https://`, against Mozilla's roots or `--tls-ca`'s, and no client
   certificates are asked or presented; the shell's `fennec backup` dials its
   primary the same way
-  ([server docs](https://fennecdb.com/docs/server#tls)).
+  ([server docs](https://fennecdb.com/docs/server#tls)). The hop from a
+  router to its nodes carries the router's mark for each node
+  (`Fennec-Router`), a value fixed for that node: whoever reads an
+  `http://` hop can, with it, name any client to the node -- skipping the
+  wait after a refused token and choosing the address its audit lines
+  name -- though it opens no `/_admin/` and no `/_shard/`. Where the network
+  between a router and its nodes is not trusted, give each node an
+  `https://` address
+  ([sharding reference](https://fennecdb.com/docs/sharding-reference#https-nodes)).
 - **`--insecure` does what it says.** Binding to a non-loopback address without
   authentication is refused unless that flag is passed deliberately. A server
   that asks for no token answers only under this machine's name
@@ -190,7 +227,18 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   name was pointed at 127.0.0.1 reads nothing; to reach it by another name,
   give it a token. `--http-cors '*'` lets every origin in: any site can then
   read and write an open loopback server, so give a server that is open a
-  named origin, or a token.
+  named origin, or a token. A router asks a tenant's request no token, the
+  node does, and a client names any host it likes: so a `fennec-shard`
+  listening past loopback forwards nothing to a node asking no data token
+  (403, `fennec_router_open_node_refusals_total`), nor to one that has not
+  said whether it asks one (503), a node from before asked its `/_whoami`;
+  and such a node answers
+  a router listening past loopback -- told by the router's mark -- or a
+  request another region's router relayed or the global entry named, only
+  under its own `--insecure`; the router's `--insecure` lets it forward.
+  On one machine, router and nodes on 127.0.0.1, nothing changes. A router
+  on loopback behind a proxy or a tunnel on its machine cannot tell its
+  clients are the network's: give its nodes a data token there.
 - **A short token is taken on loopback alone.** Past loopback `fennec-server`
   and `fennec-shard` refuse at the start a token shorter than 32 bytes --
   `--http-token`, `--admin-token`, `--replication-token`, the router's
@@ -209,7 +257,10 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   doubled to 5 s, by its address -- an IPv6 address by its /64 -- in a table
   of 10 000 counts that lets the one refused longest ago go when full:
   against a client holding more addresses than that, the token's length is
-  what holds.
+  what holds. The counts are kept by kind, a server's own tokens apart from
+  JSON Web Tokens, and a good token starts its own kind's again alone: a
+  client holding a JWT does not clear its count of guesses at the server's
+  or the admin token by using it.
 - **A webhook's secret has no minimum.** One shorter than 32 bytes is taken
   and warned of -- at the start where `--http` is past loopback, through a
   proxy as a short token is, and in a node's log as a tenant's is set --
@@ -288,11 +339,71 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   A batch of reads alone holds the read lock: writers wait for it as for
   any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
-- **A sealed file from 0.1.7 to 0.2.0 is not bound to its file.** Its tags
-  cover a frame's place and whether it is the last, not its file, so a frame of another such file under the
-  same key, at the same place, opens in it. Such a file still opens and a
-  segment of one goes on as one; every file begun now binds its frames to its
-  own. A key that sealed a file of that version should be changed.
+- **A sealed file from 0.1.7 to 0.2.0 is not bound to its file,** nor
+  is one main sealed before 1.0 to what it is. The first's tags cover a
+  frame's place and whether it is the last, so a frame of another such file
+  under the same key, at the same place, opens in it; neither says what it
+  is, so one of any archive or tenant under the key reads where it is put
+  -- but past a line's first file sealed now, where an older image or
+  segment is refused by name: no archiver puts one there, so it is moved
+  out of the archive's directory, and the archive is read without it.
+  That first file is an image of the line's end, which an upgraded
+  archiver seals before it writes on (a node's archiver, each tenant's as
+  it starts), so a restore past the upgrade starts from it or a later
+  image; where a line's first file sealed now is a segment, no older image
+  is read at all. Before that image (the images and segments from before
+  the upgrade, which a restore to a moment before it reads), and anywhere
+  in a line holding no file sealed now (a line a node's archiver moved
+  aside before the upgrade, which takes no write, or one whose files
+  sealed now were deleted), one of another archive or tenant reads as the
+  line's own. Put in before the upgraded archiver seals that image -- no
+  archiver running, or its start not at the line yet -- an older image
+  standing after the line's own last one (of a later change up to the
+  line's end, or of its change taken later), or a segment running on past
+  the line's end, is what the image is assembled from: its rows are sealed
+  into it, and every restore past the upgrade holds them. A line's
+  history sealed so reads anywhere, in place of one sealed now too: read
+  by the archiver going on and by `fennec verify` alone, never by a
+  restore, all it decides is whether the archiver takes a primary's hello
+  as leading from the archive. Such files still open, and
+  nothing is sealed so any more: an archive one began goes on in files
+  sealed now, each under its own key -- made from the key so that nothing
+  an older file's bytes give away makes one -- its frames chained and its
+  head saying what it is. A key that sealed a file of either version
+  should be changed: `fennec key`, and a new archive begun under it.
+- **A sealed archive holds a file to its place, not to its age, and its end
+  can be cut.** Whoever can write where archives are kept can cut a segment
+  at a frame's edge, or delete one: the last segment cut is the archive's
+  shorter end, as a crash leaves it, which `fennec verify` reports with its
+  torn bytes; anywhere else the changes it held are missing, which `verify`
+  refuses, or names as a gap where an image of the archive's ends it. An
+  older copy of a file, or of a whole archive or tenant's line, put back
+  opens as what it was, and so does a line with a later file deleted: a
+  tenant's `presence` gone, the tenant restores as never gone. A backup
+  names no database, so one backup put in another's place opens as itself;
+  nor does one database's archive, so another database's archive, or a
+  node tenant's line, put in its place restores with `fennec restore <dir>`
+  as that database -- which says the tenant a line is sealed as, as
+  `fennec verify` does, and nothing of one database's.
+  Keeping archives and backups in a bucket that keeps versions or locks
+  objects is what holds them to their age. A plain archive promises nothing
+  against whoever can write it.
+- **A page's sealed store holds its records to their name, place and
+  order, not to their age, and its end can be cut.** Whoever can write the
+  browser's storage can delete a store's latest chunks: it restores as the
+  page left it before them, as one whose latest writes were never
+  persisted would, and the page seals its next chunks in their places,
+  each covering the tag of the record before it, so they open only after
+  each other, never after a chunk it cut
+  ([JavaScript docs](https://fennecdb.com/docs/javascript#sealed)). An
+  older copy of the whole store put back restores as what it was. A store
+  sealed by 0.2.0 holds its chunks to their place alone: until the page's
+  next `persist` replaces it with an image sealed now, chunks 0.2.0 sealed
+  after such a cut still open among those cut. A replica given another
+  key, or none, refuses to start and keeps the store, where 0.2.0's seeded
+  over it and lost the writes it held unsent. Sizes and names are
+  visible, a script of the page's own origin holds its `CryptoKey` as the
+  page does, and an `openFile` file is never sealed.
 - **Nothing in memory is encrypted, and the live file is plain on disk.** The
   indexes (a text index's terms, a hash index's keys, vectors), the documents
   written since the last handover to the file (16 MB, 65 536 records or
@@ -303,6 +414,31 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   leaves out shared file mappings. Only an archive or a backup can be sealed
   (`--key-file`), never the file a server serves: the disk's own encryption
   covers that one, and swap and core dumps are the host's to protect.
+- **On a shared machine, the files are their user's: other users read none,
+  that user and root read all.** On Linux and macOS every file
+  `fennec-server` and `fennec` make -- a database, its sync log and lock, a
+  node's tenants and their records, an archive, a backup, a restore, the
+  audit log -- is made mode `0600` by the call that makes it, whatever the
+  umask, and a directory they make `0700`
+  ([crates/fennec-core/src/fs.rs](crates/fennec-core/src/fs.rs)); up to 0.2.0
+  each took the umask's mode, usually readable by every user. Not defended:
+  anything running as the server's user or as root; a file made by 0.2.0 or
+  before, or given a wider mode by its operator, which keeps that mode -- a
+  file replaced keeps the mode of the one it replaces, a group's bits only
+  where the new file is in that group (a setgid directory keeps it), and
+  nothing of a file another user owns; a copy made elsewhere
+  with other modes; a user who may write the directory a database is in,
+  trusted with its files as one who may remove or replace the database
+  itself: a restore opens its `.restoring` there again by its name,
+  checkpoints it and renames it in, and `fennec unseal` reads its `.tmp`
+  so, each held to the file it wrote just before it opens it again, a link
+  put there after that check followed -- for a restore, the file the link
+  names opened, checkpointed and renamed in; and what the
+  process list shows, a password in
+  `--follow`'s connection string among it
+  ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
+  file takes its folder's access list, and a key or a tenant's hook secrets
+  are made their user's alone.
 - **What the process holds is resident,** with no buffer pool of its own to
   evict from: the indexes, and the documents too under `--no-mmap`, since a
   mapped file's pages are the system's to keep or drop. A `--dir` node does
@@ -318,16 +454,32 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   per address is the operator's, in front. A client that reads an answer
   slowly, taking some of each write within `--write-timeout`, is never cut.
 - **A PostgreSQL connection is protected as its `sslmode` says.** Only
-  `verify-full` keeps out someone standing in for the server. `prefer` is the
-  default, as libpq's, and goes on in plain text where the server, or whoever
-  stands in for it, refuses TLS; `require` checks nothing without a CA file,
-  and `verify-ca` checks the chain but not the host's name. And the client
-  answers a cleartext-password request under any mode, so whoever stands in
-  for the server gets the password as well as the rows. Use `verify-full`,
-  and a role that signs in by SCRAM-SHA-256 alone
-  ([import docs](https://fennecdb.com/docs/import#tls)).
+  `verify-full` keeps out someone standing in for the server, and it is the
+  default for a host off this machine; on this machine the default is
+  `prefer`, as libpq's everywhere, which goes on in plain text where the
+  server, or whoever stands in for it, refuses TLS. A string that names
+  `prefer`, `require` (which checks nothing without a CA file) or
+  `verify-ca` (the chain, not the host's name) gets what it names. Holding
+  a password, the client signs in by SCRAM-SHA-256 alone unless the
+  string's `require_auth` says otherwise, so the password itself never
+  goes out, and binds the sign-in to the TLS session where the server
+  offers `SCRAM-SHA-256-PLUS`. Under `verify-full` no stand-in finishes the
+  handshake, so nothing is relayed. Under `require` a stand-in can take the
+  `-PLUS` offer out and relay the sign-in to the server in plain text,
+  which a server takes unless its `pg_hba.conf` takes TLS alone
+  (`hostssl`): the relay is then signed in as the client. It is kept out
+  only by such a server or by `channel_binding=require` in the string,
+  and it gets the rows either way
+  ([import docs](https://fennecdb.com/docs/import#signing-in)).
+- **What a followed PostgreSQL sends is the mirror's content, and it can
+  stop the server.** A follower that cannot go on stops `fennec-server
+  --follow` on purpose (exit 1), so whoever answers at the follower's
+  address -- the server itself under `verify-full` -- can. Its words are
+  escaped and cut before a log line or a terminal shows them, and over a
+  connection no CA checked an error's own text is not shown at all.
 - **`md5` authentication is not supported** by `fennec import` and
-  `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
+  `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256, or cleartext
+  where `require_auth=password` asks for it.
 - **A GitHub webhook event carries no signed time,** so after its hook's
   `keep` (7 days by default) a captured one can be sent again and is taken
   again; until then its body's digest answers it.

@@ -36,6 +36,18 @@ SupplementaryGroups=fennec-archive
 # alone reads.
 EnvironmentFile=/etc/fennecdb/archive-sync.env
 LoadCredential=rclone.conf:/etc/fennecdb/rclone.conf
+# The archiver makes each file 0600 and each tenant's directory 0700,
+# whatever its UMask, as fennecdb makes every file: so each run first gives
+# the archiver's group read of what it made since, and copies only what the
+# group may then read (fennec-archive-sync, step 2): one made after this
+# step waits for the next run. The files are sealed, and the group holds
+# this unit's user alone. As root ("+"): this unit's user may not change
+# another's modes; a side file renamed away meanwhile is no failure ("-").
+# When the run began is noted first, as this unit's user in its own state
+# directory: a directory older than that the group still cannot read is
+# one the chmod never reached, which fails the run (fennec-archive-sync).
+ExecStartPre=/usr/bin/touch %S/fennecdb/sync/%i/began
+ExecStartPre=-+/usr/bin/chmod -R g+rX /var/lib/fennecdb/archive/%i
 ExecStart=/usr/local/libexec/fennecdb/fennec-archive-sync %i
 # Which archive it last copied from (copied-from): the archive directory's
 # filesystem and inode, so a disk replaced or the directory made again is a

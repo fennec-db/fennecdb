@@ -13,6 +13,11 @@
 //!   * `pipelined`: that request, 16 written at once before their answers
 //!     are read: each but the first in the router's buffer as its turn
 //!     comes.
+//!   * `read-past`: `read` through a router with `--token` listening on
+//!     `0.0.0.0` -- past loopback, as one the network reaches -- to a node
+//!     asking a data token, which each request carries: the router asks
+//!     what the node said of its token before it forwards (`open_node`),
+//!     and marks the request as one from past this machine.
 //!
 //! The node, the router and the client are threads of this process, over
 //! loopback. It prints ns a request, the median of 9 rounds of N / 9, and
@@ -33,9 +38,9 @@ const ROWS: usize = 500;
 /// Requests written at once in `pipelined`.
 const DEPTH: usize = 16;
 
-fn request(path: &str, body: &str) -> Vec<u8> {
+fn request(path: &str, auth: &str, body: &str) -> Vec<u8> {
     format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
@@ -102,9 +107,14 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "read".into());
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
-    if !matches!(mode.as_str(), "read" | "pipelined") {
-        panic!("no mode {mode}: read or pipelined");
+    if !matches!(mode.as_str(), "read" | "pipelined" | "read-past") {
+        panic!("no mode {mode}: read, pipelined or read-past");
     }
+    let past = mode == "read-past";
+    let auth = match past {
+        true => "Authorization: Bearer bench-data-token\r\n",
+        false => "",
+    };
     let dir = std::env::temp_dir().join(format!("fennec-routed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let tenants = Arc::new(Tenants::new(&dir).unwrap());
@@ -114,6 +124,7 @@ fn main() {
         fennec_http::Config {
             addr: "127.0.0.1:0".into(),
             admin_token: Some("bench-admin-token".into()),
+            token: past.then(|| "bench-data-token".into()),
             ..fennec_http::Config::default()
         },
     );
@@ -133,7 +144,11 @@ fn main() {
     let router = Router::new(
         d,
         Config {
-            addr: "127.0.0.1:0".into(),
+            addr: match past {
+                true => "0.0.0.0:0".into(),
+                false => "127.0.0.1:0".into(),
+            },
+            token: past.then(|| "a router's token of thirty-two bytes, at least".into()),
             ..Config::default()
         },
     );
@@ -147,6 +162,7 @@ fn main() {
     let query = "/t/acme/query";
     c.ask(&request(
         query,
+        auth,
         r#"{"query":"create collection t (n int, s text)"}"#,
     ));
     let rows: Vec<String> = (1..=ROWS)
@@ -154,12 +170,13 @@ fn main() {
         .collect();
     c.ask(&request(
         query,
+        auth,
         &format!(r#"{{"query":"put t [{}]"}}"#, rows.join(", ")),
     ));
     let reads: Vec<Vec<u8>> = (1..=ROWS)
         .map(|id| {
             let body = format!(r#"{{"query":"get t where id = $1","params":[{id}]}}"#);
-            request(query, &body)
+            request(query, auth, &body)
         })
         .collect();
     let batch: Vec<u8> = reads[..DEPTH].concat();
@@ -177,7 +194,7 @@ fn main() {
         let mut sent = 0;
         while sent < per {
             i += 1;
-            if mode == "read" {
+            if mode != "pipelined" {
                 c.ask(&reads[i % ROWS]);
                 sent += 1;
             } else {
@@ -216,6 +233,8 @@ fn retired() -> Option<(u64, u64)> {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
     }
     let mut info = [0u64; 37];
+    // SAFETY: `info` is the 37 words of `rusage_info_v4`, all that flavor 4
+    // (`RUSAGE_INFO_V4`) writes; the call keeps no pointer to it.
     let r = unsafe { proc_pid_rusage(std::process::id() as i32, 4, info.as_mut_ptr()) };
     (r == 0).then_some((info[31], info[32]))
 }

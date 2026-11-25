@@ -233,7 +233,9 @@ pub(crate) fn line_into(out: &mut String, name: &str, next: Option<i64>, kept: O
 pub fn write(dir: &Path, text: &str) -> io::Result<()> {
     let to = path(dir);
     let tmp = dir.join(format!("{FILE}.writing"));
-    let written = std::fs::File::create(&tmp)
+    // Tenants' names: its owner's alone, or the mode an operator set on
+    // the hint before (`fennec_core::fs::create_like`).
+    let written = fennec_core::fs::create_like(&tmp, &to)
         .and_then(|mut f| {
             f.write_all(text.as_bytes())?;
             f.sync_all()

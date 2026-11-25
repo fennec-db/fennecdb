@@ -96,7 +96,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--call-rate &lt;n&gt;</code></td><td>Calls a second from one scoped token's subject and issuer in each tenant, and runs of the statements bound to its writes (<a href="/docs/http-access#wakes">Waking a bound statement</a>), 429 with <code>Retry-After</code> past it; <code>0</code> for no bound. The server's token is not held. Default <code>100</code> (<a href="/docs/http-access#calls">Calling a named statement</a>).</td></tr>
 <tr><td><code>--request-rate &lt;n&gt;</code></td><td>Requests a second from one scoped token's subject and issuer to each database or tenant, every route counted, 429 with <code>Retry-After</code> and <code>retry_after_ms</code> past it, before anything of the request runs; <code>0</code> for no bound. The server's token is not held. A call is a request too, held to both. Default <code>1000</code> (<a href="/docs/http-access#request-rate">Requests a second</a>).</td></tr>
 <tr><td><code>--user &lt;uid&gt;:&lt;gid&gt;</code></td><td>Started as root, runs as this user and group, in numbers: the directory the server writes in (<code>--file</code>'s, or <code>--dir</code>) is handed to them first, where it is a volume of its own holding nothing but the database, then root is dropped for good, before any file is opened. Also read from <code>FENNEC_USER</code>, which the Docker image sets to <code>65534:65534</code>; started as any other user, the server passes the variable over and refuses a <code>--user</code> it is not. Unix only (<a href="cloud.html#volume-owner">Who owns the volume</a>).</td></tr>
-<tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
+<tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token, and, with no data token, answering a router that listens on one (<a href="/docs/sharding-reference#open-nodes">A node with no token behind a router</a>).</td></tr>
 <tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits, over TLS too where the server speaks it (<a href="#limits">health checks</a>).</td></tr>
 <tr><td><code>-V, --version</code></td><td>Prints <code>fennec-server &lt;version&gt;</code> on stdout and exits 0, before the file is opened or a port bound. Releases up to 0.1.12 have no such flag: the first line of <code>--help</code>, on stderr, names theirs.</td></tr>
 </tbody>
@@ -122,6 +122,9 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 open, before anything writes the file or runs beside it, so a failed start
 has written only <code>&lt;file&gt;.lock</code> and what an open writes — the
 file, or a node's directory, made empty where there was none, a torn tail cut,
+the side files a process writing it left as it ended removed and logged with
+their sizes (<a href="file-format.html#maintenance-operations">which, and when
+one is kept</a>),
 and on Linux the writes a crashed server had made durable written back from
 its sync log — and, started as root, the owner of a volume it handed to
 <code>--user</code> before it read the rest of its flags; a supervisor restarting
@@ -278,6 +281,41 @@ of the schema and each admin request (<a href="/docs/monitoring#audit">The
 audit log</a>).</p>
 </details>
 
+<p id="file-modes">On Linux and macOS every file the server and
+<code>fennec</code> make is readable and writable by their user alone (mode
+<code>0600</code>), whatever the umask, and a directory they make is
+<code>0700</code>: the database and its sync log and lock, a node's tenants and
+their records, archives, backups, restores and the audit log. Another user of
+the machine reads none of the rows, secrets or refused requests they hold. A
+file that is there keeps the mode it has, through every compaction, checkpoint
+and <code>restore --force</code> over it. Each of those writes a new file and
+renames it over the old one, and the new file is in the group new files in
+that directory get: the server's group on Linux, the directory's on macOS. It
+keeps the group's bits only where that group is the old file's, and otherwise
+drops them, so no other group ever gains the read. To let a backup group read
+the database, give the group the directory, searchable by it and setgid, so
+every file made in it is the group's, and set the database's mode once:</p>
+
+<pre data-lang="bash">chgrp backup /var/lib/fennec &amp;&amp; chmod g+xs /var/lib/fennec
+chgrp backup data.fennec &amp;&amp; chmod 640 data.fennec</pre>
+
+<p>A sync log made beside a database takes the database's mode, and its lock
+the bits of those who may write the database: a group that may only read it
+gets no lock to hold against the server's start. A file that another user
+owns lends its mode to nothing the server writes over it. A
+directory the server writes new files into -- an archive, a node's
+<code>--dir</code> -- gives each new file to its owner alone: a reader there
+runs as the server's user, or is given read of what is there before each
+read, as the deploy kit's bucket sync is (<code>chmod -R g+rX</code> as root,
+then a copy of what the group may read). Whoever may write the directory a
+database is in may remove or replace the database, so it is trusted with its
+files: a restore or an unseal there opens its scratch file again by its name,
+which such a user could swap for a link. Keep that directory writable by the
+server's user alone. Up to 0.2.0 files took the umask's mode, usually
+<code>0644</code>, readable by every user; a file made then keeps it until you
+change it (<code>chmod 600 data.fennec</code>). On Windows a file takes its
+folder's access list, as it always did.</p>
+
 <h2 id="tls">HTTPS</h2>
 
 <p>Give the server a certificate chain and its private key and it serves HTTPS
@@ -336,13 +374,19 @@ at most, so a scan or a client with the wrong CA cannot fill the log.</p>
 <p>Every connection the server ends on purpose ends with TLS's
 <code>close_notify</code>: an answer with <code>Connection: close</code>, a
 kept-alive connection's end, a stream of changes or a replica's stream, and
-each open connection at a shutdown. A client reading a stream to its end can
-tell that end from one cut short. A connection whose write failed gets none,
-and neither does a stream the router relays from a node that broke off. On
-Windows a shutdown also cuts an answer still being written to a slow
-client, which a Unix server lets finish for half a second, and resets a
-connection whose client had sent more than the server read, a pipelined
-request.</p>
+each open connection at a shutdown, one still in its handshake too, which
+the shutdown waits for as it waits for the others, half a second at most. A
+connection that has sent nothing yet is not waited for, and one whose
+handshake would begin after the shutdown began is closed before it. A
+client reading a stream to its end can tell that end from one cut short. A
+connection whose write failed gets none, and neither does a stream the
+router relays from a node that broke off. A request the server had not yet
+read when the shutdown came is still served on Linux if it had reached the
+server by then (one still on the way gets no answer); on macOS it is
+dropped, the connection ending with <code>close_notify</code> and no
+answer, and on Windows the connection is reset. Dropped or reset, it never
+ran. On Windows a shutdown also cuts an answer still being written to a
+slow client, which a Unix server lets finish for half a second.</p>
 
 <p>A connection refused at <code>--max-connections</code>, or for which no
 thread can be made, is told a TLS <code>internal_error</code> alert, where plain
@@ -408,8 +452,8 @@ scheme says so; <code>http://</code> works as it did.</p>
 <table>
 <thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
 <tbody>
-<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most the writes answered in the last 250 ms plus the sync's own time. Measured over ten power cuts of a Linux guest (ext4), in two runs: each cut lost 54 to 794 acknowledged writes, none answered more than 316 ms before it, and what was kept was always a prefix of the writes.</td></tr>
-<tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk.</td></tr>
+<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most the writes answered in the last 250 ms plus the sync's own time. Measured over ten power cuts of a Linux guest (ext4), in two runs: each cut lost 54 to 794 acknowledged writes, none answered more than 316 ms before it, and what was kept was always a prefix of the writes. A <code>--dir</code> node syncs each tenant on a thread of its own, so a tenant's window is a file's whatever its other tenants' syncs take: with four tenants, five cuts lost 7 to 141 writes a tenant, none answered more than 162 ms before its cut.</td></tr>
+<tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk. Held over power cuts of Linux guests on ext4, in each of its data modes (<code>ordered</code>, <code>writeback</code>, <code>journal</code>), and on XFS: every acknowledged write was there after every cut, the disk's lost cache included.</td></tr>
 <tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
 </tbody>
 </table>
@@ -580,7 +624,12 @@ third of what the compact writes is dead, where the file has reached three
 quarters of the memory the system has for its pages or the server is
 waiting for the disk, so that its reads stay in memory. The compact runs
 beside the queries, and takes the write lock only to put the new file in
-place.</p>
+place. A compact is refused for nothing a document holds: one it cannot
+read is copied as it is, and a dropped field's values become
+<code>null</code>s, its place kept. A refusal that stands -- a damaged
+file, a disk that will not take the new one -- is tried again at every
+look, logged once and counted in
+<code>fennec_auto_compactions_refused_total</code>.</p>
 
 <div class="tbl">
 <table>
@@ -655,6 +704,24 @@ of the machine as it compresses the other programs' memory, which it did
 in the fastest run at half the file dead and not in the slowest, and a
 file kept smaller is not given it -- steadier, never the best case. A file
 that fits in memory is compacted as before.</p>
+
+<p><b>A file past the page cache, read in turn.</b> After updates at keys
+drawn at random the records stand in the file in the order of their last
+writes, so a compact copying them in id order read a file larger than the
+memory the system has for it a page at a time, at random, from the disk: in
+a container of 512 MB (<code>docker run --memory 512m</code>), a million 1 KB
+records each updated once, 2.04 GB with 1.02 live, took 45 to 51 s and about
+530 000 major faults, as in every release from 0.1.5 to 0.2.0. Past that
+memory a compact now reads the file once, from its start to its end, deals
+the records a run of ids at a time into a scratch file beside it,
+<code>&lt;file&gt;.sorting</code>, and writes each run back in id order: 4.6
+to 6.6 s and about 2 000 major faults, the new file the same byte for byte.
+It holds 16 MB of memory at most and as much disk as the live records; it
+copies by id instead where the disk has no room for twice those, for a
+collection under 4 MB live or over 4 GB, where something already stands at
+the scratch file's name, or once the scratch file fails, which the server
+logs. The scratch file leaves its directory as soon as it is made, so a crash
+leaves nothing beside the database, or an empty one the next open removes.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
@@ -756,6 +823,11 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The image's command is <code>--http 0.0.0.0:8080 --file
 /data/data.fennec --sync 250</code>.</p>
 
+<p>A name without a tag pulls <code>latest</code>, the newest published
+release: it moves once a release is published, never to a release candidate
+or back to an older version. Name <code>:{{version}}</code> where a deploy
+must not change under you.</p>
+
 <ul>
   <li><b>Set a token of 32 bytes or more.</b> Without one, or with a shorter
     one, it refuses to listen beyond localhost, which a container's
@@ -774,7 +846,7 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>8.19 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>8.52 MB</b> on
 amd64, that binary's bytes as CI measures them on every change, and smaller on
 arm64 — since no target is written in, both come out of the same file.
 <code>make docker</code> builds it, and

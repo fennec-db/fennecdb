@@ -466,16 +466,14 @@ pub fn loaded() -> bool {
 /// Hands the browser module the table, the bytes of `zones.bin`: false
 /// for bytes that are not one, another version's among them.
 pub fn add_chunk(b: &[u8]) -> bool {
-    if !PARTIAL || Table::parse(b).is_none() {
-        return false;
-    }
+    let table = PARTIAL && Table::parse(b).is_some();
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = HANDED.set(b.to_vec());
-        true
+        if table {
+            let _ = HANDED.set(b.to_vec());
+        }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    true
+    table
 }
 
 static TABLE: std::sync::OnceLock<Option<Table<'static>>> = std::sync::OnceLock::new();

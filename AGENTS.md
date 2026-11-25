@@ -90,7 +90,7 @@ behind `std-fs`; the indexes are `vector`, `text`, `highlight`, `fuzzy`,
 `sparse`, `sorted`, `composite`, `geo`, `hll` and `maps`, and `off` stands
 in for one a build is made without.
 
-The browser client is `web/fennec.js` -- WASM glue (~636 lines),
+The browser client is `web/fennec.js` -- WASM glue (~693 lines),
 persistence and the sync layer -- re-exporting the query builder
 (`web/builder.js`) and the HTTP client (`web/http.js`), dependency-free ES
 modules; `web/fennec.d.ts`
@@ -144,8 +144,9 @@ The file format, FennecQL, the HTTP API and its OpenAPI document,
 flags and exit codes, `/_metrics` names and release asset names are added
 to, never changed or removed; a new record kind or tag takes the next
 number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Replicas
-upgrade before primaries. A change names the check that holds its surface,
-or the plan item that adds it, in the design file's table.
+upgrade before primaries (`compat.yml`). A change names the check that
+holds its surface, or the plan item that adds it, in the design file's
+table.
 
 ### The engine's lock and blocks
 
@@ -221,7 +222,9 @@ Covers `crates/`.
 *Conventions*
 - Unit tests live inline
 - Every parser of untrusted bytes is fuzzed
+- Every `unsafe` block says why it is sound.
 - A secret is compared by `crypto::ct_eq` alone
+- A file is made by `fennec_core::fs`'s helpers, its owner's alone
 
 ### `crates/fennec-core/CLAUDE.md`
 
@@ -332,6 +335,7 @@ Covers `crates/fennec-core/src/engine/`.
 - A lone `create index` or `compact` runs beside the database
 - A file compacts itself once half of it is dead
 - A file is compacted before it outgrows the page cache
+- Dead bytes are whole frames
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 
@@ -362,7 +366,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), a request read in time the router's clients and fennec-tls's reads (`conn::Paced`, `read_by`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access and connections aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -388,14 +392,10 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A text's lists are read as written at once from its second request.
-- A body is held to the ceiling its head earns.
-- A chunked body grows as it comes, held to the ceiling
+- A seed goes in parts, read a page at a time.
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
 - An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag.
-- A connection no thread can be made for is answered 503.
-- A request is read in time, and an answer written in time.
-- `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
 - The OpenAPI document is held to the routes.
 - A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
@@ -405,12 +405,26 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A write wakes the held writes reading what it wrote, a row going to the group ranking it first
 - One held request looks for every group, and a group finding nothing looks among the rows written since
 
+*Durability*
+- A node syncs each tenant on a thread of its own.
+
 ### `crates/fennec-http/src/mcp/CLAUDE.md`
 
 Covers `crates/fennec-http/src/mcp/`.
 
 *The HTTP server*
 - An agent's MCP tool is a statement, held to the token as `/query` is.
+
+### `crates/fennec-http/src/conn/CLAUDE.md`
+
+Covers `crates/fennec-http/src/conn.rs` and `src/conn/`; its rules bind the accept loops (`accept.rs`), a body's framing (`http.rs`), a connection's loop (`lib.rs`), the router's clients and fennec-tls's reads (`conn::Paced`, `read_by`) too.
+
+*The HTTP server*
+- A body is held to the ceiling its head earns.
+- A chunked body grows as it comes, held to the ceiling
+- A connection no thread can be made for is answered 503.
+- A request is read in time, and an answer written in time.
+- `--tls-cert` and `--tls-key` make a listener HTTPS alone
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
@@ -481,6 +495,7 @@ Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.j
 *The native library and sync*
 - A replica's sync is a state machine; the network is the binding's.
 - Both sync runners are held to one scenario file.
+- A seed's parts wait in the replica's file and land in one block.
 
 ### `crates/fennec-ffi/CLAUDE.md`
 
@@ -498,7 +513,9 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A seed in parts lands in one task.
 - A page's IndexedDB calls share one connection, and let it go when asked.
+- A sealed chunk opens only after its own, and a replica keeps a store it cannot restore.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 
@@ -529,13 +546,14 @@ Covers `deploy/`.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/toolchain_check.py`, `rust-toolchain.toml`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers the install channels' and release scripts in `tools/` and `site/` and every workflow, each file named in its first paragraph.
 
 *The crates*
 - The compiler CI tests with is the one that ships.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
+- A workflow runs actions pinned by commit, and a job that writes builds nothing.
 
 ### `crates/fennec-bench/CLAUDE.md`
 
@@ -544,7 +562,7 @@ Covers `crates/fennec-bench/`; its rules bind `tools/perf_gate.py`, `crates/fenn
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
-- A pull request is held to its base in instructions and heap bytes an op.
+- A pull request is held to its base in instructions and heap bytes an op, and in I/O to the call.
 - Two builds' instruction counts
 - A binary a release ships is held to its budget
 

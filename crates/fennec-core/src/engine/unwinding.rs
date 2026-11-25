@@ -193,6 +193,86 @@ mod on_file {
             let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         }
     }
+
+    /// A compact past the point where it changed a store, until every
+    /// store points at the file it wrote: a panic there -- in the rewrite
+    /// under the lock, or as one written beside the database takes the
+    /// file's place -- a later collection's store refusing once an
+    /// earlier one was compacted (a location outside the file, which no
+    /// write makes), and a rewritten file the sink cannot map fail the
+    /// database, as a storage error does, rather than leave it answering
+    /// from stores the file may not hold, behind a lock a server takes as
+    /// it stands. Opened again, the file holds every row.
+    #[test]
+    fn a_compact_stopped_after_it_changed_a_store_fails_the_database() {
+        let scratch = Scratch::new("fennecdb-compact-stopped");
+        let dir = &scratch.0;
+        for (at, beside) in [
+            ("compacted", false),
+            ("adopted", true),
+            ("remap", false),
+            ("refused", false),
+        ] {
+            let path = dir.join(format!("{at}.fennec"));
+            let _ = std::fs::remove_file(&path);
+            let mut db = crate::fs::open(&path).expect("open");
+            let schema = Schema::new("t", vec![crate::schema::Field::new("n", DataType::Int)])
+                .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .expect("create");
+            for n in 0..3 {
+                put(&mut db, n).expect("put");
+            }
+            // A second collection, compacted after `t`: the one whose
+            // store refuses.
+            let other = Schema::new("u", vec![crate::schema::Field::new("n", DataType::Int)])
+                .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema: other,
+                if_not_exists: false,
+            })
+            .expect("create");
+            db.sync().expect("sync");
+            PANIC_AT.with(|p| p.set(Some(at)));
+            super::PANIC_SKIP.with(|s| s.set(usize::from(at == "refused")));
+            let compact = Statement::Compact(None);
+            let db = match beside {
+                false => {
+                    let r = catch_unwind(AssertUnwindSafe(|| db.execute(&compact)));
+                    match at {
+                        "remap" => assert!(matches!(r, Ok(Err(Error::Io(_)))), "{at}: {r:?}"),
+                        "refused" => {
+                            assert!(matches!(r, Ok(Err(Error::Corrupt(_)))), "{at}: {r:?}")
+                        }
+                        _ => assert!(r.is_err(), "{at}: no panic"),
+                    }
+                    db
+                }
+                true => {
+                    let lock = std::sync::RwLock::new(db);
+                    let r = catch_unwind(AssertUnwindSafe(|| Database::maintain(&lock, &compact)));
+                    assert!(r.is_err(), "{at}: no panic");
+                    lock.into_inner().unwrap_or_else(|e| e.into_inner())
+                }
+            };
+            PANIC_AT.with(|p| p.set(None));
+            let mut db = db;
+            assert!(db.failure().is_some(), "{at}: the database goes on");
+            assert!(matches!(put(&mut db, 9), Err(Error::Io(_))), "{at}");
+            drop(db);
+            let mut db = crate::fs::open(&path).expect("reopen");
+            assert_eq!(rows(&db), 3, "{at}: the rows");
+            put(&mut db, 4).expect("a write after the reopen");
+            assert_eq!(rows(&db), 4, "{at}");
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+        }
+    }
 }
 
 /// A panic in the middle of a write, at each place a write changes
@@ -1359,7 +1439,9 @@ mod torn {
     /// is touched: `t`'s graph counts no change. Taken into the store and
     /// refused after, a payload's frame was put back as a torn write --
     /// what an error's put-back asks, which held the rows and indexes as
-    /// before -- its row taken out of the graph and placed in it again.
+    /// before -- its row taken out of the graph and placed in it again. An
+    /// op of neither is refused by its byte, the store's counts as they
+    /// were: `Store::land_frame` is handed none.
     #[test]
     fn a_frame_that_does_not_read_changes_nothing() {
         let (records, after) = landed(|p| p.execute(&write(Write::Over)).map(drop));
@@ -1374,9 +1456,15 @@ mod torn {
                 .map(|(_, g)| g.changes())
                 .collect()
         };
+        let counts = |db: &Database| {
+            let s = &db.collections["t"].store;
+            (s.len(), s.total_bytes(), s.dead_bytes(), s.live_bytes())
+        };
+        let counted = counts(&db);
         let bad = [
             ("a payload no document", Store::frame(OP_PUT, 1, &[0xfe; 4])),
             ("an op of neither", Store::frame(7, 1, &[])),
+            ("op 3", Store::frame(3, 1, &[0x01])),
         ];
         for (what, frame) in &bad {
             for first in [false, true] {
@@ -1389,11 +1477,19 @@ mod torn {
                 let graphed = graphs(&db);
                 let r = db.apply(&framed(REC_DATA, one.cid, &body));
                 assert!(matches!(r, Err(Error::Corrupt(_))), "{tag}: {r:?}");
+                if frame[0] != OP_PUT {
+                    let said = format!("a write op {} is neither a put nor a del", frame[0]);
+                    assert!(
+                        matches!(&r, Err(Error::Corrupt(m)) if *m == said),
+                        "{tag}: {r:?}"
+                    );
+                }
                 assert!(db.failure().is_none(), "{tag}: the replica failed");
                 if !first {
                     assert_eq!(graphs(&db), graphed, "{tag}: the graph touched");
                 }
                 assert_eq!(state(&db), before, "{tag}: put back");
+                assert_eq!(counts(&db), counted, "{tag}: counted");
                 unfed(&db, before.seq, &tag);
             }
         }

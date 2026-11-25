@@ -141,7 +141,8 @@ usage: fennec-server [options]
                             image sets to 65534:65534; started as anyone
                             else, the variable is passed over. Unix only
       --insecure            allow listening without a token on a non-loopback
-                            address
+                            address, and, with no token, answering a router
+                            that listens on one
       --tls-cert <pem>      serve HTTPS alone, with this certificate chain
       --tls-key <pem>       (the server's first, then its intermediates) and
                             its private key, both or neither. --metrics
@@ -359,14 +360,24 @@ usage: fennec-server [options]
                             its copy when there is no whole one, then its
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
-                            but the follower's. TLS is the URL's ?sslmode=,
-                            libpq's, and its &sslrootcert= (else
-                            ~/.postgresql/root.crt if there): prefer, the
-                            default, and require encrypt but check nothing
-                            of the server (require: unless a CA file is
-                            there), so anyone in the path can stand in for
-                            it; across a network, use verify-full, which
-                            checks its certificate and name
+                            but the follower's, and fills as the copy lands.
+                            TLS is the URL's ?sslmode=, libpq's, and its
+                            &sslrootcert= (else ~/.postgresql/root.crt if
+                            there): verify-full, the default for a host off
+                            this machine, checks the certificate and name,
+                            against Mozilla's CAs or the file's; prefer, the
+                            default on this machine, and require check
+                            nothing (require: unless a CA file is there).
+                            Holding a password, the follower signs in by
+                            SCRAM alone, bound to TLS where the server
+                            offers it (&require_auth=, &channel_binding=,
+                            libpq's); a sign-in is held to
+                            &connect_timeout=, 30 s. Give the password in
+                            PGPASSWORD rather than the URL, which any user
+                            of the machine can read in the process list. A
+                            follower that cannot go on stops the server
+                            (exit 1): the PostgreSQL it follows is trusted
+                            that far
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>
@@ -1457,6 +1468,13 @@ fn main() {
                             c.records
                         );
                     }
+                    // What the open removed beside the file -- an image a
+                    // compact, a checkpoint, a copy or a `.save` was writing
+                    // as the process before ended -- or kept for a lock file
+                    // beside it, a line each.
+                    for s in db.swept_on_open() {
+                        fennec_http::log!("{}", s.said(path));
+                    }
                     #[cfg(windows)]
                     say_volume(path, mmap);
                     db
@@ -1673,9 +1691,11 @@ fn main() {
 }
 
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
-/// thread the syncer a single file gets from [`durability::run_syncer`] --
-/// periodic sync, idle close, and on the shutdown signal a final sync and
-/// checkpoint of every open tenant.
+/// thread what a single file's [`durability::run_syncer`] does but its
+/// periodic sync -- idle close, and on the shutdown signal a final sync and
+/// checkpoint of every open tenant. Under `--sync <ms>` each tenant is
+/// synced on a thread of its own (`Tenants::sync_every`), so that its
+/// window is a file's, whatever the others' syncs take.
 #[allow(clippy::too_many_arguments)]
 fn serve_dir(
     dir: &str,
@@ -1785,6 +1805,14 @@ fn serve_dir(
         // started with the node's as the scheduler's is.
         #[cfg(feature = "test-clock")]
         fennec_http::test_clock::follow(&tenants)?;
+        // `--sync <ms>`: each tenant synced on a thread of its own, every
+        // interval. Synced in turn on this thread, a tenant's sync waited
+        // for every one before it and the next for the slowest: two
+        // tenants on the power-cut rig handed a write over 772 ms after its
+        // answer, past the 650 ms a file's window holds (run 43696612848).
+        if matches!(sync, SyncPolicy::Interval(_)) {
+            tenants.sync_every(sync.tick(), durability::stop_failed)?;
+        }
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();
         std::thread::Builder::new()
@@ -1835,9 +1863,6 @@ fn serve_dir(
             let open = tenants.shutdown_with(durability::checkpoints());
             fennec_http::log!("\nshutting down: {open} open tenant(s) synced");
             exit::now(durability::exit_code());
-        }
-        if matches!(sync, SyncPolicy::Interval(_)) {
-            tenants.sync_dirty();
         }
         tenants.rebind_hooks();
         if !idle_close.is_zero() {

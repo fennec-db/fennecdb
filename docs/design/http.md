@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, a body's ceiling, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room), [crates/fennec-http/src/conn/CLAUDE.md](../../crates/fennec-http/src/conn/CLAUDE.md) (a connection's, moved there for the same reason, beside `conn.rs` and `conn/`) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, a body's ceiling, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -54,8 +54,10 @@ engine writes it (`GET /_schema?as=fennecql`) and every change as its
 statement and `/_schema/plan` of the collection as it would be; a drop
 runs once its name is typed, and a text box's `change` on blur no longer
 asks the plan again, which held the apply button back. The live view is a
-subscription of the typed shape, refused past 10 000 rows since its seed
-holds them all; the admin view, for the server's token, reads
+subscription of the typed shape, refused past 10 000 rows: the seed comes
+in parts the server never holds whole ([Seeds in parts](#seeds-in-parts)),
+but the view keeps every row it shows and orders them again at each
+write, so the bound is the page's; the admin view, for the server's token, reads
 `/_stats/statements`, `/_metrics` and on a router `/_shard/tenants?bytes`
 (each node's `/_admin/sizes`). The site's playground is the same studio
 over a database in the page: every view reads through `state.db`, one
@@ -223,9 +225,21 @@ the browser module not a byte. `<file>.lock` (`fennec_abi::lock`, moved
 from fennec-ffi) is taken by `fennec mcp --file`, `fennec-server --file`, the
 native library and the shell alike, so any two refuse each other
 ([engine.md](engine.md#single-writer)). Calls are held to
-`--mcp-calls-per-sec` by a scoped token's subject or the caller's address,
-counted in `fennec_mcp_tool_calls_total` once a process serves MCP, and a
-write tool's call is an `mcp` line of the audit log. A row by id costs
+`--mcp-calls-per-sec` by a scoped token's issuer and subject or the
+caller's address, in the database it calls (`mcp::admitted_at`), counted in
+`fennec_mcp_tool_calls_total` once a process serves MCP, and a write
+tool's call is an `mcp` line of the audit log. Keyed by `sub` alone, one
+subject shared a bucket across every tenant of a node and with another
+issuer's user of its name (the G14 review); the database is its address in
+the process, so a tenant closed and another opened in its place shares no
+spent bucket for more than the second a bucket holds. The map keeps 4 096
+callers and, full, lets go first every bucket full again -- one a new
+caller would get, so forgetting it forgives nothing -- then the one called
+longest ago (`room_for_one`), a scan of the map as a caller new to a full
+one comes, where it was cleared whole and a client calling as that many
+subjects forgave its own spent bucket with the rest. `mcp/mod.rs`'s
+`a_callers_rate_is_its_own_in_each_database_and_a_full_map_forgives_no_one`
+holds both, its clock given. A row by id costs
 3.8 us through the `query` tool against `/query`'s 1.2 in process, 21.9
 against 17.7 us p50 over HTTP, a search 1-2% more (`make mcp-bench`);
 a server without `--mcp` pays a comparison a request, and `make
@@ -353,6 +367,102 @@ the mark of the `--token` they share (`audit::request`, the relay's
 at the router by reading a client's headers -- "no `Authorization`, so ask
 the `Host`" -- for a rebound page sets whichever it likes.
 
+That still left the network itself in (the G14 review, finding 1): a
+router with `--token` listening past loopback in front of an open node --
+`make node`'s recipe on the router's machine, or a node in a private
+network given `--insecure` to bind there -- forwarded `GET /t/acme/notes`
+with no `Authorization` and `Host: localhost` from any peer: the router
+asks a forward no token, the node took the client's own `localhost` for
+this machine's name, and every tenant answered, writes included, though
+no one had said `--insecure` for that. The host check holds off a page,
+never a peer, which names any host it likes. So the party that knows its
+listener decides, and the node holds the line where a router does not.
+A router whose listener is not loopback alone and that was not started
+`--insecure` forwards nothing to a node that asks no data token
+(fennec-shard's `Router::open_node`): 403 naming the node and the fix,
+counted (`fennec_router_open_node_refusals_total`) and said in its log once
+a node. It learns it from the node's `GET /_admin/stats`, which says
+`no_token` now, and of a node from before, which says nothing there, from
+its `GET /_whoami` asked with no token: v0.2.0 answers `"kind":"open"`
+where it asks none and its 401 where it asks one (`Router::word_of`). It
+asks as the node is added, and of a node it has not asked since it
+started -- one its directory held, one a standby's directory brought -- at
+the first request to it, before that request goes, one ask a node at a
+time (`ask_now`), a request meeting it answered 503 with `Retry-After: 1`
+as the ask goes on, never waiting for it: each waiting on a lock the ask
+held, every request to the node queued behind a call bounded by
+`--upstream-timeout` alone, against fennec-shard's rule that no lock is held across a
+call to a node (the review of the fixes' second and third rounds); a node
+that said so is asked again by a refused request
+once its word is 10 s old, so one given a token since is reached with no
+router started again. Not known is not forwarded to: a node that does not
+say -- its stats refusing the admin token recorded for it, or not
+answering -- is answered 503 naming it, `Retry-After: 1`, said in the log
+once as it stops saying, and asked again by the first request a second
+later; one that said it asks none and then
+says nothing stays refused. Not known meant forwarded in the first shape
+(the review of the G14 fixes, finding C): the first request went on while
+a thread asked, a node whose ask failed went back to not known, and a node
+saying nothing of `no_token` was taken for one asking a token -- so a
+v0.2.0 node asking none behind a new router, the routers upgraded first,
+and a node running `--insecure` itself whose stats failed after its admin
+token changed, answered whoever reached the router. A read replica's copy
+on a node not known to ask a token is passed by, the marked read going
+home, and its node asked on a thread beside it (`open_copy`). And
+the router says what it listens on under its mark: one bound on loopback
+alone marks a request no other router relayed and the global entry named
+no client of with `audit::router_mark_local`, an HMAC of the node's admin
+token over other words, which a mark seen on the wire cannot be turned
+into; every other forward carries the mark it always did. An open node
+answers a marked request only under that second mark or its own
+`--insecure` (`open_refusal`, `audit::routed_past_loopback`), so a router
+from before, or a new one past loopback, reaches it no further than the
+operator said: `--insecure` on the router lets the router forward, and on
+the node lets the node answer, each operator's word for its own
+listener. The local recipe -- `make shard` and `make node` on 127.0.0.1 --
+works as it did with no flag: the router is loopback alone, its marks say
+so. A relayed request, and one the global entry sent, came from past this
+machine whatever the router listens on, and goes with the first mark. Not
+closed: a router on loopback behind a proxy or a tunnel on its machine
+(nginx, `cloudflared`) is reached by the network through it, as an open
+server behind one is (above); its nodes take a token there, as the docs
+say. The class is judged of the address each listener is bound on
+(`serve_on`), `0.0.0.0` and `[::]` past loopback, and before a router
+serves it is past loopback. A node from before does not ask a
+mark's class: behind a new router listening past loopback it is held by
+the router, by its `/_whoami`; behind one on loopback it answers as it
+did. A router from before sends the first mark alone, so a new node asking
+no token refuses what it forwards, from loopback too, unless the node runs
+`--insecure`: routers upgrade before nodes ([compatibility.md](compatibility.md#upgrade-order)). The class costs
+nothing on a node with a token -- `open_refusal` returns before it -- and
+on an open node two thread-local loads; the router, one load where it is
+loopback alone or `--insecure`, two where it guards, and a node's second
+mark compared only where the first is not the one sent.
+`tests/cors.rs`'s `a_router_past_loopback_reaches_no_node_that_takes_no_token`
+holds the four cases, the operator of neither, the node, the router and
+both saying `--insecure`, on a router bound on `0.0.0.0` and reached on
+127.0.0.1; the recipe's `a_token_router_tells_an_open_node_the_name_its_client_reached_it_by`
+stays as it was. Against a node the test scripts (`scripted`): a node from
+before asking none refused, one asking a token forwarded, each asked its
+stats and then its `/_whoami`
+(`a_router_past_loopback_asks_a_node_from_before_whether_it_is_open`); a
+node not asked is asked before the first request goes, refused where it
+asks none, 503 where its stats refuse the admin token, and one asking a
+token asked once (`a_router_past_loopback_forwards_to_no_node_it_could_not_ask`);
+an open node's word held inside its 10 s, asked again past it -- the period
+set to nothing -- and kept where the node then says nothing
+(`a_router_past_loopback_asks_an_open_node_again_once_its_word_is_old`);
+a marked read passing a copy on a node not asked, and then one asking
+none, for home (`a_marked_read_goes_to_no_copy_on_a_node_past_loopback_could_not_tell_is_closed`);
+and a request meeting a node's ask out, its stats' answer held by the
+node, answered 503 with `Retry-After` while the first waits, the node
+asked once (`a_request_meeting_a_nodes_ask_out_waits_for_none`; before,
+it waited out the held ask).
+Each waits for the scripted node's requests, not a time. Before, the first
+two were answered 200 by the scripted node, and the marked read by the
+copy; the third needs the period this made a setting
+(`Config::open_asked_again`).
+
 `X-Forwarded-Host` rather than RFC 7239's `Forwarded: host=`, the
 standard's own: one value where `Forwarded` is a list of hops, each a list
 of quoted pairs, parsed on every request of an open server; and it is the
@@ -388,7 +498,7 @@ sends no `Origin`.
 with no id makes a row each time, so a retry after a timeout wrote it
 twice. A keyed REST write, `/query` or `/batch` runs as a block under the
 write lock, and its answer is kept in the same block as a row of
-`_idempotency` -- the key the subject's for a scoped token, and the
+`_idempotency` -- the key its caller's for a scoped token, and the
 request's hash beside it -- so the write and its key land together, a
 second request with the key waits for the lock and is handed the answer
 (`Idempotent-Replayed`), the key with another request is 422, a failed
@@ -399,6 +509,104 @@ leaves them out.
 A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
+
+**A key is its caller's** (`Scope::authority`). It was the subject's,
+`sub` alone (the G14 review): another issuer's user of the same `sub` --
+two identity providers taken, each with its `vera` -- or the same
+subject's token of another team or role was replayed an answer kept for
+the first, its `returning` rows those of a team the second token cannot
+read. A caller is now everything of its token that decides what it may
+do: its issuer and subject, the claims naming its tenants and its roles
+(`--jwt-tenant-claim`, `--jwt-role-claim`), and every claim a rule reads,
+each value as JSON, an absent one told from a `null`, under SHA-256; the
+server's own token is one caller, as before. Two tokens of one caller name one key, and a token of
+another issuer or other rights another, which runs the write as a key
+seen for the first time does. The names are worked out once a policy
+(`authority_claims`, in the `Lines` every scope shares), and the digest
+only where a key is sent, once a token: kept with the claims of a token
+the server keeps verified (`access::Verified`), so a token's keyed writes
+after its first pay a load for it. Made at each keyed write, it cost a
+scoped keyed `set` 9 700 instructions of 94 000 (the review of the G14
+fixes, measured; `make replay-bench MODE=scoped-keyed`). A write without
+a key asks nothing new, and the statement cache, a row's tag and the
+token cache read nothing of it -- none hashes a token on a request's
+path. `tests/idempotency.rs`'s
+`a_key_is_replayed_only_to_a_caller_of_the_same_authority` holds another
+team, another issuer and a role, each of them run and never replayed.
+
+**A key's caller is 16 bytes of the digest, and the key is bytes**
+(`idempotent::key`, `access::AUTHORITY_LEN`). `key bytes @hash` holds a
+first byte saying whose a key is -- `0xff` the server's token, `0xfe` a
+scoped caller, whose 16 bytes of the SHA-256 follow -- and then the key as
+the header gave it. Neither byte begins a text, so the server's keys and a
+caller's never meet, a caller's being of one width, and the hash index's
+UTF-8 test of a bytes key (`codec::key_bytes_tag`) fails at its first
+byte, some 40 instructions a lookup. 128 bits: two callers name one with a chance of 2^-128 a
+pair, 2^-65 that any two of a server's 2^32 callers do; a token whose
+claims were ground to name a given caller's needs 2^128 SHA-256s, and the
+claims are its issuer's to sign. The first form kept the caller as the
+digest's 32 hex digits where the subject had been, a `text` key: with
+`replays`' 5-letter `sub` and keys `k-<n>`, the `_idempotency` row of a
+scoped keyed `set` passed the 64 bytes `Store::encode_doc` begins a record
+in (a realloc to 128 and a copy) and every copy of the key -- the key's
+own, the lookup's, the hash index's, the `put`'s and the document's --
+went to a larger block: +2 532 instructions a request against the base
+(SipHash +174, `malloc` +1 233, `memcpy` and the system +568 in one
+traced call). In 17 bytes the row stays under 64 for that bench's keys,
+and the lookup is handed the key's value as `Key` holds it rather than a
+copy, one allocation a keyed write fewer, the server token's too; a
+subject of an identity provider's length (30 characters) took more than
+17 bytes in the base already. A collection whose `key` is not `bytes` --
+any server's from before -- is made again at the first keyed write, as
+one from before the expiry is, so a key sent before the upgrade, the
+server token's among them, runs again if it is sent again after it
+within its day.
+
+What the 17 bytes still cost -- 11 more than `bench` and its separator,
+hashed three times, tested for UTF-8 three times, and the key's copies
+and encodings in 32-byte blocks where the base's fit in 16 -- a scoped
+keyed `set` read +1 200 instructions a request against the base
+(`replays`, 8 identities a build, 7 runs each). The keyed write pays it
+back: `keep`'s `del` of the row a key had, for a key sent again after
+its time, ran at every keyed write, and a `del` finding nothing is a
+statement the engine runs whole -- its filter copied and bound to the
+parameter, the collection found by name, the bucket looked up, the copy
+dropped: in one traced call of a scoped keyed `set`, 5 515 instructions
+of its own code, 7 386 of the allocator's and 884 of the system's. It
+runs now only where the look under the same write
+lock found a row (`Key::absent`, set by `answered`; every path asks
+`replay` under the lock it then keeps the key in, and a key whose look
+found none is written over by no one before `keep`); and the expiry's
+text is written only to make or move the collection, a `format!` a
+write before. A look under an expiry the write then moves is not
+believed: a server started again with a longer `--idempotency-ttl`
+brings back, as its first keyed write moves the expiry (`ensure`, `alter
+field at @ttl`), the rows past the old one the sweeper has not reached
+-- its first pass comes a minute after the start -- which that write's
+look, made before the move, did not see; with the `del` skipped, a key
+brought back so was two live rows, the older answering its retries with
+its own answer, or a 422 for the write that landed (the review of the
+fixes' second and third rounds). `ensure` says whether it moved the
+expiry, and the `del` runs on that write. `tests/idempotency.rs`'s
+`a_key_a_longer_ttl_brings_back_is_written_over` opens the file again
+two minutes on (the database's clock) under an hour's keys: one row for
+the key, the retry handed the new answer; with the `del` skipped, 422.
+Against train-d, the mean of each build's 8 identities:
+
+| instructions a request | train-d | 32 hex digits | 16 bytes | and no `del` |
+|---|---|---|---|---|
+| `keyed` (the server's token) | 80 411.9 | -24.9 | -116.6 | -14 846.3 |
+| `scoped` (no key) | 35 656.2 | -21.5 | -21.7 | -84.3 |
+| `scoped-keyed`, `sub` `bench` | 93 925.8 | +2 472.7 | +1 200.4 | -13 939.7 |
+| `scoped-keyed`, a 30-character `sub` | 96 634.5 | +37.9 | -1 407.0 | -16 389.0 |
+
+Two standard errors are 84 to 199 instructions in every row; `scoped`
+sends no key, and every figure of its row is inside them. Counted again
+with the `del` on the write that moves the expiry (the same way, under a
+load of 2.5): `keyed` 65 670.6 against 46ae74f3's 65 612.6 (+58.0, two
+standard errors 147) and train-d's 80 365.4, and `scoped-keyed` 79 985.8
+against 79 992.7 (-6.9, 125) and 93 908.5: the table holds, the `del`
+running on the one write a restart's longer expiry moves.
 
 **A replay answers only once the first try's record is as durable, and as
 sent, as its answer was to be** (`idempotent::replay`,
@@ -561,13 +769,44 @@ sends on and clears its client's count on it alone. Against main in
 three ABBA rounds (`make requests-bench` with and without a token, `make
 shard-bench`'s latency, a node and the router asked with a data token and
 a JWT; one side of twelve left out, the machine's load past 6 from other
-builds), every median stayed inside the runs' spread. The count is an
-address's, not a token's: a client holding any good token -- a JWT an app
-hands every user among them -- clears its own between guesses at another,
-as it always could. `tests/audit.rs` (fennec-http) and `tests/refusals.rs`
+builds), every median stayed inside the runs' spread. `tests/audit.rs` (fennec-http) and `tests/refusals.rs`
 (fennec-shard) send a guessed token to each of those answers and hold the
 count where it was, a good token to the others and see it cleared, and
 fail with the inference put back.
+
+The count is an address's, and a kind's (`audit::Kind`): a good token
+clears the count of refusals of its own kind alone. It was every count of
+the address, so a client holding any good token -- a JWT an app hands every
+user among them -- cleared its own count between guesses at another (the
+G14 review, finding 3): one request with its own JWT after each guess at
+the server's or the admin's token, and every guess waited the first 100
+ms, never the doubling to 5 s. Two kinds: a token the server holds -- its
+own, the admin's, a replication or a scrape's, the router's -- and a JSON
+Web Token. A JWT verified starts the JWTs' count again
+(`audit::verified_jwt`), any other the tokens' (`verified`). A refusal is a
+token's where its value could have been one: `admin::refused`, the
+replication tokens', a scrape's (`metrics::allowed`), and `authenticate`'s
+where the server holds a token and the value is not shaped as a JWT --
+two dots -- unless the token is so shaped too; any other of
+`authenticate`'s is a JWT's, a missing token's among them, which guesses
+nothing (`refused_as`, read as the 401 is counted). A value with two dots
+equals no token without two, so a guess shaped to be counted as a JWT's
+can never be the server's token, and a JWT an app refreshes still clears
+its user's expiry the way it did. Behind a router the node says which:
+`Fennec-Verified: jwt` for a JWT verified, `1` for a token as before, and
+on a 401 refused as a JWT's `Fennec-Refused: jwt`, both read and dropped
+by the router (`answer_out`, the second off a 401 alone, one comparison a
+header there); a router counting every node's 401 as a token's would have
+left a JWT app's users behind one address -- a NAT, an office -- waiting
+longer at each expiry within a minute, their good tokens clearing nothing
+of it. A router from before takes `jwt` for `1`, and passes
+`Fennec-Refused` on. The success path asks the table as before -- only
+while a count is held -- and a refusal counts one key: `would_wait`, which
+tests read, the longest of an address's counts. `tests/audit.rs`'s
+`a_good_jwt_clears_no_count_of_guesses_at_a_servers_token` interleaves
+guesses at the data and the admin token with the guesser's own good JWT and
+holds the doubled waits, and a JWT-only server's refused JWT cleared by a
+good one.
 An IPv6 address is counted by its /64 (`audit::counted_ip`, the hooks'
 count's key too): a /64 is the least a network is given -- the prefix
 SLAAC hands a link's hosts their addresses from, what a provider gives a
@@ -609,6 +848,17 @@ waits none for a request bearing `Fennec-Router: <address> <mark>`, the mark
 `Config::router_mark`), the address the log's `peer` (the router `via`):
 the router drops the header from what a client sends, and a node believes
 it from no one else. At the router the count is one across every node.
+The mark is a value fixed for each node, sent on every forwarded request,
+and in the clear over an `http://` hop: whoever reads that hop holds it,
+and with it a request to the node skips the node's wait after a refused
+token and names any address as its client in the node's audit lines --
+and, of a router on loopback alone, its second mark lets an open node
+answer it. It opens no `/_admin/` and no `/_shard/`. So the hop between a
+router and its nodes is `https://` wherever the network between them is
+not trusted, which is the node's URL's to say ([Dialing HTTPS](#dialing-https));
+binding the mark to each request, as the entry's is bound to its address
+and time, was weighed against an HMAC a request at the node and left for
+a hop that needs no TLS (the G14 review, a known finding).
 Behind the global entry the router's peer is Cloudflare's address, so with
 `--entry-token` it counts, clears, logs and names onwards the address the
 entry's `Fennec-Client` names (`audit::entry`, `NAMED`; under *One URL
@@ -1256,7 +1506,9 @@ server; `gzip`'s test holds every piece to the mark). No window is carried from 
 next: zlib's streaming deflate keeps 256 KB a stream for its window and
 hash chains, where a stream here keeps 8 bytes, the CRC and the length,
 and the tables a seed is compressed with (sized to it: 24 KB for a 2 KB
-event, 320 KB at most) are let go as it is sent. A live event of a few
+event, 320 KB at most) are let go as it is sent -- a part's, for a seed in
+parts, each part an event deflated alone ([Seeds in parts](#seeds-in-parts)),
+so a stream's tables are at most a part's whatever its seed. A live event of a few
 rows loses the window's matches against the seed, and one under the bytes
 is stored -- a change is mostly small, and a stored piece costs 5 bytes.
 The stream's end writes the member's end (`Drop for Events`): Node's zlib
@@ -1368,6 +1620,110 @@ An answer under the bytes: one compare. `make instr-compare` against main
 The server's release binary grows 33 056 bytes (+0.48%, 6 842 080 to
 6 875 136 on macOS arm64): `__text` +27 008, `__const` +8 192 (the CRC's
 tables). The browser module holds none of it.
+
+## Seeds in parts
+
+**A seed goes in parts, read a page at a time.** A stream's seed was one
+event: the server read the shape, decoded every row, wrote their JSON,
+copied it into the event's text and deflated that, all of it held at once,
+and the client parsed and wrote the event whole. A 300 000-row seed of
+155-byte rows (46.7 MB of JSON) took the server's physical footprint from
+6.5 to 207.8 MB while it was sent, and every stream seeding at once held
+its own. Now a seed past `SEED_PART` (1 MiB) of rows is several `seed`
+events of the same `seq`:
+
+```text
+event: seed
+data: {"seq":42,"rows":[...],"more":true}
+
+event: seed
+data: {"seq":42,"part":1,"rows":[...]}
+```
+
+`part` is there past the first, `more` before the last, and a seed under a
+mebibyte is the one event it always was. The rows are read a page at a time
+(`sse::send_seed`): the shape's statement with `id > $1` ANDed in after its
+own terms -- a scan starts from it (`Expr::conjunct_id_floor`) -- and `limit
+$2`, one statement whose parameters each page's are, so a filter holding a
+long list is never copied a page. The first page is 1 000 rows; each after
+it is sized to the room left in the part by the bytes the rows so far took,
+64 to 65 536 rows. Each page is written straight into the part's event
+text, which is sent once it passes the mebibyte; the gzip of a stream
+deflates each event alone, as it always did ([A stream](#a-stream)).
+
+Where the rows are read from is where the whole seed was:
+
+- **The pin** ([engine.md](engine.md#pinned-reads)): a shape the pin takes
+  is read on it a page at a time with no lock held, as its one read was.
+  The pin lives until the last part is sent, rather than until the read
+  ended: its copy of the id index (12 bytes a row) and the segments it
+  shares are held through the sending, as the change ring already was.
+  Before the last part, as before the one event, the lock is asked whether
+  the ring still reaches back to the pin's change and no image was adopted
+  since; where not, the seed is read again under the lock.
+- **The lock**: a shape an index answers, a short one, or one read again,
+  was read whole under the lock, its rows decoded there. Now the lock reads
+  its first 1 000 rows and one past them; a shape that short is sent from
+  that answer. A longer one has its ids read under the lock and those rows
+  pinned (`Database::pin_rows`, 12 bytes a row of the answer, not of the
+  collection), the hold taken under the same lock, and is read on that pin
+  a page at a time as a pinned shape is: the lock holds what it held to
+  read the ids, and no row's JSON. Past the pins' budget, or where a page
+  of that pin reached for an index, it is read whole under the lock, as
+  every seed was.
+
+A seed read again after parts of it went out -- the ring passed its pin --
+is sent from its start, its first part without `part`: a client lets go of
+the parts it holds whenever a part without `part` comes, so the server may
+begin a seed anew at any point and the client never lands a mix. A part
+whose number is not the next is a stream to end, opened again and seeded
+from its start. No part is resumed: the parts after a dropped stream's last
+are of a pin that is gone, and a stream opened again is seeded whole at the
+change it then reads.
+
+Rejected: building the parts from the whole answer (the rows decoded at
+once were most of the footprint); a page of ids read under the lock and
+its rows read under the lock a page at a time, the lock let go between
+(the pages would be of different moments); a page per `offset` (each would
+scan from the start, a 300 000-row seed's pages 45 times over); resuming a
+dropped stream's seed from its last id (the rows past it would be of
+another change than the ones before, and only a reseed tells their
+deletions).
+
+Measured on an M1 at loads of 1.9 to 3.5 (other work on the machine), a
+fresh `fennec-server --sync off` a run over a file of 155-byte rows (a
+name, an email, an age, a city, a bio of words), the seed of the whole
+collection read to its last byte by a Python client on loopback, the
+server's footprint sampled every millisecond (`proc_pid_rusage`), the old
+binary against the new in ABBA turns, six runs a side:
+
+| seed | identity | gzip | the server's footprint at its peak (idle) | its resident peak (idle) |
+| --- | ---: | ---: | ---: | ---: |
+| 100 000 rows (15.5 MB, 15 parts) | 91.7 -> 51.0 ms | 173.1 -> 111.8 ms | 70.3 -> 9.0 MB (2.5) | 104.6 -> 22.6 MB (15.2) |
+| 300 000 rows (46.7 MB, 45 parts) | 285.5 -> 144.5 ms | 453.0 -> 314.4 ms | 207.8 -> 14.5 MB (6.5) | 295.5 -> 49.6 MB (40.8) |
+
+A seed takes as long to send as the rows it holds, but its first byte no
+longer waits for its last row's JSON: the parts are read while the ones
+before them are on the wire. Through a proxy sending the server's bytes at
+a set rate (four runs a side): at 200 Mbit 169 -> 130 ms for 100 000 rows
+in gzip, 457 -> 314 for 300 000 (again at a load under 3), 641 -> 621 and
+1 944 -> 1 868 as they are; at 50 Mbit in gzip 450 -> 417 and 1 317 ->
+1 247. In gzip the parts
+are 2.59 MB on the wire for 100 000 rows either way, 7.76 -> 7.79 MB for
+300 000 (+0.4%: each part's first 32 KB find no window behind them). The
+resident peak counts the file's mapped pages the read touched, the same
+either way. The server's release binary grows 16 528 bytes (6 941 776 to
+6 958 304 on macOS arm64).
+
+The writes beside a seed are as they were: the pin and the ring's hold are
+taken as before, and the lock path holds its lock for no longer -- the
+ids, rather than the rows decoded and written as JSON. `make seed-bench`
+(single writes at 1 000 a second beside a subscriber seeded over and over
+from a million rows, 57 MB a seed, now 57 parts; two turns a side, ABBA,
+at a load under 3): the writes beside the seeds 0.73 and 0.72 ms at p99
+before, 0.57 and 0.58 after, 5.6 and 5.3 ms at most against 5.1 and 5.1,
+and the seeds themselves 283 and 279 ms at their median against 217 and
+218, so 32 seeds in the run where 26 were.
 
 ## Connections without a thread
 
@@ -1983,9 +2339,11 @@ a `BufReader` and writes its answers, both before over a `TcpStream` and a
 `Conn`, read and written through `&Conn` as std reads and writes a
 `&TcpStream`: `Conn::Plain` is the socket itself, `Conn::Tls` the session
 in a `RefCell` -- every read and write is the connection's own thread's and
-none nests in another -- beside a `dup` of the socket for what is asked of
-it while the session may be borrowed: its options, its address, and the
-router's `poll` of a held request's client. `sse`, `replication` and
+none nests in another -- beside a handle of the socket for what is asked
+of it while the session may be borrowed: its options, its address, and the
+router's `poll` of a held request's client. The session's own handle,
+shared: a `dup`'s timeouts are its own on Windows ([Slow
+clients](#slow-clients)). `sse`, `replication` and
 `node_stream` take `&mut &Conn` where they took `&mut TcpStream`, their
 bodies unchanged. The node's archive stream writes non-blocking and marks
 itself held where a write would block (`Sender::held`,
@@ -2040,18 +2398,83 @@ its own `close_notify`, its session its own, and the shutdown waits up to
 descriptor, each let go of under the list's lock before it closes, so a
 shutdown never shuts a descriptor a new connection took
 (`every_tls_end_is_a_close_notify_the_shutdown_s_too`). Before, only a
-refused request's end sent one. On Windows the list keys a socket's
-`SOCKET` (`conn/windows.rs`), and a shut read side wakes no thread blocked
-reading it -- a connection waiting for its request was cut by the exit
-with a reset -- so the socket's pending I/O is cancelled after the
+refused request's end sent one. A handshake under way is waited for too:
+TLS 1.3 ends the client's handshake once it has the server's `Finished`,
+the server's only once it reads the client's, so a client can begin its
+session -- a request to send, an answer to read -- while the server's
+thread is still in `Tls::handshake`, not yet listed. A connection is
+counted from the peek that saw its record's first byte (0x16) until it is
+listed (`open::Shaking`, an atomic beside the list), `end_all` waiting
+until both are empty, up to its grace: a client that sent that byte and
+stalls holds every shutdown `END_GRACE` at most. One listed after the
+shutdown has begun has its read side shut too, by whichever of
+`open::note` and `open::shut_reading` takes the list's lock second --
+`note` where `shut_reading` ran first, seeing `ending()` through the lock
+-- and ends as the others do, its `close_notify` sent. A handshake that
+would begin after the shutdown does not (`Shaking::begin`, sequentially
+consistent with `end_all`'s store: either it sees the shutdown or the wait
+sees its count), its socket closed before a byte of the server's, so no
+client has a session the exit cuts. A connection still in the peek is not
+counted: the server has written it nothing, so its client has no session
+to cut, and the exit closes it -- or its first byte, come after the
+shutdown began, is refused as above. Counted from before the peek, as the
+count first was, a TCP connection that had sent nothing -- a scan, a
+balancer's connection made ahead -- held every shutdown its whole grace,
+where the wait had ended about 2 ms after the list emptied. Nothing is shut
+in the middle of a handshake: macOS's read shutdown discards the bytes
+queued, and Winsock resets a connection bytes arrive on after it, either
+of which would lose the client's `Finished`. What a client sent that the
+server had not read when its read side was shut -- a request sent right
+after its `Finished`, or, on a listed connection, as the shutdown came --
+goes by the platform: Linux serves it, then sends `close_notify`, if it
+had arrived by the connection thread's next read -- a read side shut
+answers an empty queue with an end, so a request still on the wire goes
+unanswered, `close_notify` and then a reset; macOS discards it, the
+connection ending with its `close_notify` and no answer; Windows resets
+the connection, as the exit reset it before.
+
+Before, such a connection was neither listed nor waited for, and the exit
+ended it with a TCP end alone:
+`every_tls_end_is_a_close_notify_the_shutdown_s_too` failed once in a
+merge group on CI's macOS runner (#681): the connection it dials just
+before the `SIGTERM` had a server thread that took the client's `Finished`
+after the syncer's look had begun the shutdown. On this Mac beside busy
+loops it passed 700 runs of 700; its processes at background QoS
+(`taskpolicy -c background`, eight at a time, twelve busy loops) it failed
+36 times in 64, each at that connection, and after, never there in 400
+(once at the stream, its `close_notify` later than `END_GRACE`).
+fennec-http's `tls_ending`, a binary of its own (the shutdown is the
+process's, never undone), holds the handshake's end by events alone: a
+listed connection, one whose client's `Finished` a relay holds, and one
+that has sent nothing, its peek bounded past the shutdown's; `end_all` on
+a thread of its own with a bound only a failure meets (60 s), the order
+asserted by a channel -- the shutdown has not returned once the listed
+connection has read its `close_notify`; the relay lets the `Finished` go,
+the held connection reads its own, and the shutdown returns under its
+bound, the silent connection not waited for -- and then neither the silent
+connection's first byte nor a new connection's gets a handshake. With no
+count it failed 4 runs of 4, at the held connection (no `close_notify`
+before its idle timeout); with the count taken before the peek 4 of 4, the
+shutdown held to its bound by the silent connection; after, it passed 500
+runs of 500 beside twelve busy loops, eight at a time, and 300 of 300 with
+its processes at background QoS. It replaced a fennec-server test that
+held the relay until the shutdown had woken a stream and stood on
+`END_GRACE` as the stream does -- 19 failures in 160 at background QoS,
+none with the grace made 5 s -- timing the grace, which is not the
+property. The count is three atomic operations a TLS handshake, beside its
+milliseconds, and nothing on a plain connection; the release
+`fennec-server` was 7 223 184 bytes either way. On Windows the list
+keys a socket's `SOCKET` (`conn/windows.rs`), and a shut read side wakes no
+thread blocked reading it -- a connection waiting for its request was cut
+by the exit with a reset -- so the socket's pending I/O is cancelled after the
 shutdown (`CancelIoEx`; std makes every socket overlapped), the read after
 it meeting the shut side. The cancel takes every request on the socket,
 not its read alone: a send blocked on a slow reader fails too, and an
 answer in the middle of its write is cut there, with no `close_notify`,
 where on Unix it goes on through the grace. And Winsock resets a TCP
 connection shut for receiving with bytes queued that the server had not
-read, or arriving after (`SD_RECEIVE`): a client that had sent more -- a
-pipelined request -- reads a reset, not a `close_notify`
+read, or arriving after (`SD_RECEIVE`): a client that had sent a request
+the server had not read reads a reset, not a `close_notify`
 ([windows.md](windows.md#7-what-else-windows-differs-in), 7g).
 
 *The key's file.* On Unix a key file open to more than its owner is said
@@ -2226,6 +2649,70 @@ record is not whole in its time has had no byte read: its connection ends
 with nothing written, as a silence before a request's first byte does;
 one cut later is 408. Where the idle timeout is nearer than the request's
 deadline, a record is whole within it, earning nothing: a silence's bound.
+
+*One handle, never two.* A TLS connection's timeouts and modes are set on
+the handle its session reads and writes through: `Conn::Tls` keeps the
+session's own socket (`fennec_tls::TlsStream::socket`, one
+`Arc<TcpStream>`), never a `dup`, so nothing rests on what two handles of
+one socket share. On Unix a `dup` shares the open file description and the
+socket, timeouts and `O_NONBLOCK` alike. On Windows std's `try_clone` is
+`WSADuplicateSocketW` and `WSASocketW`, a `SOCKET` of its own, and the
+`SO_RCVTIMEO` that bounds a blocking `recv` held that handle's calls
+alone, whatever the `WSADuplicateSocket` page says of state held in common
+-- the request-time test below says so, and `clone_probe` is there to name
+it -- and `SO_SNDTIMEO`, its sending twin, is taken to be so too. The first
+version made a `dup` before the handshake and set every timeout through it,
+while the handshake set and cleared its own on the session's handle: on
+Windows a session's reads and writes ran under no timeout once it was done. An idle TLS connection was
+held until its client left; a request silent past its time was answered
+when its bytes came (`a_requests_time_over_tls_runs_from_its_first_records_first_part`
+answered 200 at 7.5 s on `windows (http)`, three runs of three, where 408
+was owed at 5 s, and passed with the one handle: `windows (http)` green in
+#672's run 44896135886); `--write-timeout` and a stream's write timeout bounded none
+of the session's writes; and where Windows keeps the non-blocking mode a
+handle's too -- which `clone_probe`, below, says -- neither did the node's
+archive stream's (`write_or_hold`) nor the one a connection's end sends its
+`close_notify` under. `read_by`'s own timeouts, set on the session's handle,
+held: the trickle tests passed there. The dialing side set its options
+through the session's socket already (`dial::Stream::socket`,
+`TlsStream::get_ref`). A follower's halt shuts its socket down from another
+thread through a duplicate: a shutdown is the socket's, not a handle's
+option, and on Windows it ends a read already waiting, not one begun after
+it, which is why the follower looks at its flag
+([replication.md](replication.md#replication)); the router's cut shuts the
+session's own descriptor, on Unix alone. The one shutdown's `SD_RECEIVE` and
+`CancelIoEx` (`end_all`, `conn/windows.rs`) act on the socket and its file
+object, which a duplicate shares -- they ended a read through the other
+handle -- and act on the one handle now. A setter needs no borrow of the
+session's `RefCell`: the handle is beside it, so a setter run while a read
+or a write holds the session -- `write_or_hold`'s blocking flush sets the
+mode so -- is no panic. Rejected: each option set on both handles, the
+session's reached through the `RefCell`, a borrow at every setter; and a
+`ManuallyDrop` view of the session's raw handle, unsafe and per platform
+where an `Arc` is neither. A TLS connection has one descriptor where it had
+two, and one `getpeername` before its handshake, for a failure's line,
+where it had a `dup` and its `close`; a request's path makes the calls it
+made. Tests: `tests/tls.rs`'s
+`a_silence_over_tls_ends_the_connection_at_the_idle_timeout` (after a
+handshake and between requests: ended by the server, never by the client's
+own 30 s), `an_unread_answer_over_tls_is_let_go_at_the_write_timeout` (as
+`an_unread_answer_frees_its_slot` over TLS: the one slot served again) and
+the request's time above, each failure saying what `clone_probe` found --
+on a loopback pair, whether a read timeout and the non-blocking mode set
+through a `try_clone` bound a read through the original -- and the timing
+test the process's `fennec_client_timeouts_total` too, so a red run names
+the platform's fact; `tests/dials.rs`'s
+`a_dialed_connections_timeouts_bound_its_session` (a dial's read and write
+timeouts against a server sending and reading nothing); fennec-tls's
+`what_is_set_through_the_socket_bounds_the_session` (Linux's and macOS's
+test jobs: no Windows job runs fennec-tls's own). On macOS, where a `dup`
+shares both, each timing passes before the change and after; Windows is
+told by CI's `windows (http)`, which runs fennec-http's. So the one handle
+is held on every platform by the handles' numbers, which a `dup` cannot
+share: fennec-tls's test compares `socket()`'s with `get_ref()`'s, a
+dial's and an accept's, and conn.rs's
+`a_tls_connections_socket_is_its_sessions_own_handle` a served
+connection's `Conn::socket` with its session's `get_ref`.
 
 *Counted.* `fennec_client_timeouts_total{reason}`, the router's
 `fennec_router_client_timeouts_total`, counts each connection so ended by

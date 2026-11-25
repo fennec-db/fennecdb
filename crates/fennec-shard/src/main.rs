@@ -29,7 +29,8 @@ usage: fennec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token.
                             Past loopback 32 bytes at least
-      --insecure            allow a non-loopback address without --token
+      --insecure            allow a non-loopback address without --token, and
+                            forwarding there to a node that asks no token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
       --tls-key <pem>       chain and its private key, both or neither. Read
                             at the start: a renewed certificate takes a
@@ -565,6 +566,12 @@ fn main() {
         }
     };
     let mut db = db;
+    // What the open removed beside the directory's file -- a compact's or a
+    // checkpoint's image a crash left -- or kept for a lock file beside it,
+    // a line each, as a server logs its file's.
+    for s in db.swept_on_open() {
+        fennec_http::log!("{}", s.said(&path));
+    }
     if let Err(e) = replication::settle_history(
         &mut db,
         &path,
@@ -605,6 +612,9 @@ fn main() {
                 "could not open the global directory's copy {gpath}: {e}"
             )),
         };
+        for s in gdb.swept_on_open() {
+            fennec_http::log!("{}", s.said(&gpath));
+        }
         let lineage = gdb.history().lineage.clone();
         if let Err(e) = gdb.follow(lineage) {
             fail(&format!("could not settle {gpath}'s history: {e}"));

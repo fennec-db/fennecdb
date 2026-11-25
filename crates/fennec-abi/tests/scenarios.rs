@@ -537,7 +537,7 @@ impl Run {
             "seed" | "change" => {
                 let c = shape_collection(self);
                 let mut data = vec![("seq", member(step, "seq").cloned().unwrap_or(Value::Int(0)))];
-                for k in ["rows", "puts", "dels", "schema"] {
+                for k in ["part", "rows", "puts", "dels", "schema", "more"] {
                     if let Some(v) = member(step, k) {
                         data.push((k, v.clone()));
                     }

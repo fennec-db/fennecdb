@@ -367,7 +367,15 @@ impl Router {
             return None;
         }
         let n = dir.node(&r.node)?;
-        Some((r.node.clone(), n.addr.clone(), self.mark(&n.token)))
+        let marked = self.marked(n);
+        // A copy on a node not known to ask a token -- one that said it
+        // asks none, or not asked yet -- this router listening past
+        // loopback: its reads go home, which is asked as any forward is
+        // (`Router::open_node`).
+        if self.guards_open_nodes() && self.open_copy(&n.addr, &marked) {
+            return None;
+        }
+        Some((r.node.clone(), n.addr.clone(), self.mark_of(&marked)))
     }
 
     /// Whether `tenant`'s marked reads pass its read replica on `node` by
@@ -601,7 +609,7 @@ impl Router {
                 self.ask_region(&region, "GET", &target, &[], b"")
                     .and_then(|(status, _, body)| match status {
                         200 => Ok(body),
-                        s => Err(Fail(s, String::from_utf8_lossy(&body).into_owned())),
+                        s => Err(Fail(s, crate::words(&body))),
                     });
             let listed = answer.and_then(|body| {
                 let fields = fennec_core::json::parse_object(&String::from_utf8_lossy(&body))
@@ -842,7 +850,7 @@ impl Router {
             Ok((status, body)) => Err(format!(
                 "`{}` answered {status}: {}",
                 r.node,
-                String::from_utf8_lossy(&body).trim()
+                crate::words(&body)
             )),
             Err(e) => Err(format!("`{}` did not answer: {e}", r.node)),
         }
@@ -877,7 +885,7 @@ impl Router {
             }
             Ok((status, body)) => Err(format!(
                 "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
+                crate::words(&body)
             )),
             Err(e) => Err(format!("`{node}` did not answer: {e}")),
         }
@@ -1298,7 +1306,7 @@ impl Router {
             }
             Ok((status, _, body)) => Traced::Unknown(format!(
                 "its router answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
+                crate::words(&body)
             )),
             Err(e) => Traced::Unknown(e),
         }
@@ -1331,7 +1339,7 @@ impl Router {
             Ok((200 | 204, _, _)) => Ok(()),
             Ok((status, _, body)) => Err(format!(
                 "the global router answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
+                crate::words(&body)
             )),
             Err(e) => Err(format!("the global router was not reached: {e}")),
         }
@@ -1497,10 +1505,7 @@ impl Router {
                 .map_err(|e| format!("`{node}` did not answer: {e}"))
         };
         let answered = |status: u16, body: Vec<u8>| {
-            format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )
+            format!("`{node}` answered {status}: {}", crate::words(&body))
         };
         let follow = format!("{base}/follow");
         if !create {
@@ -1687,7 +1692,7 @@ impl Router {
             return Err(format!(
                 "{}'s router answered {status}: {}",
                 region_name(region),
-                String::from_utf8_lossy(&answer).trim()
+                crate::words(&answer)
             ));
         }
         let fields = fennec_core::json::parse_object(&String::from_utf8_lossy(&answer))
@@ -2833,6 +2838,12 @@ mod tests {
             ..Config::default()
         };
         let router = Router::new(Directory::in_memory(), cfg);
+        // As it serves on loopback alone: one taken for a router past it
+        // passes a copy on a node it has not asked.
+        router.listens.fetch_or(
+            crate::LISTENS_LOOPBACK,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         {
             let mut dir = router.write_dir();
             for (name, region) in [("eu1", "eu"), ("us1", "us")] {
@@ -2985,6 +2996,61 @@ mod tests {
                 .wants("acme", "us1"),
             "the next look wants it sent"
         );
+    }
+
+    /// A reader node's refusal reaches the router's errors, and its log
+    /// through them, escaped (`crate::words`): a newline and the line after
+    /// it, a terminal's escape, never as they came. The node is the test's,
+    /// answering a quota's send 500 with such a body; the error once wrote
+    /// it verbatim, a forged line of the router's log among it.
+    #[test]
+    fn a_reader_nodes_words_are_escaped() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let router = Router::new(Directory::in_memory(), Config::default());
+        let us1 = Node {
+            addr: node.local_addr().unwrap().to_string(),
+            token: "t".into(),
+            region: "us".into(),
+            ..Node::default()
+        };
+        router.write_dir().set_node("us1", us1).unwrap();
+        let said = b"refused\nfennec-shard: failover of `n1`: forged \x1b[2J";
+        let answering = std::thread::spawn(move || {
+            let (s, _) = node.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            r.read_exact(&mut vec![0; len]).unwrap();
+            let mut answer = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                said.len()
+            )
+            .into_bytes();
+            answer.extend_from_slice(said);
+            (&s).write_all(&answer).unwrap();
+        });
+        let refused = router
+            .send_reader_quota("acme", "us1", Some(r#"{"streams":5}"#))
+            .unwrap_err();
+        answering.join().unwrap();
+        assert_eq!(
+            refused,
+            r#"`us1` answered 500: "refused\nfennec-shard: failover of `n1`: forged \u{1b}[2J""#
+        );
+        assert!(!refused.contains(['\n', '\x1b']), "{refused}");
     }
 
     /// A change asked for while another of the same read replica is under

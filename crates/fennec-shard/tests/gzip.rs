@@ -43,6 +43,9 @@ fn node(tag: &str, local: bool) -> Node {
         admin_token: Some("adm".into()),
         gzip_local: local,
         stream_keepalive: Duration::from_secs(30),
+        // It asks no token, and a client the entry names is the network's,
+        // which such a node answers only under `--insecure`.
+        insecure: true,
         ..fennec_http::Config::default()
     };
     let server = fennec_http::Server::with_tenants(tenants, cfg);

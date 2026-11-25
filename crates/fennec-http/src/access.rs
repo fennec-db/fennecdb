@@ -382,7 +382,43 @@ fn unix_now() -> u64 {
 /// How long a token `mint` signs lives when its claims name no `exp`.
 pub const MINTED_FOR: u64 = 3600;
 
-type Claims = Arc<Vec<(String, Value)>>;
+type Claims = Arc<Verified>;
+
+/// A verified token's claims, kept with its text in [`Access::verified`],
+/// and the caller it is worked out once ([`Scope::authority`]): a SHA-256
+/// a keyed write, 9 700 instructions of a scoped keyed `set`'s 94 000
+/// (`make replay-bench MODE=scoped-keyed`), is one a token while it is
+/// kept.
+#[derive(Debug)]
+struct Verified {
+    claims: Vec<(String, Value)>,
+    authority: std::sync::OnceLock<[u8; AUTHORITY_LEN]>,
+}
+
+/// The bytes of a caller's digest ([`Scope::authority`]): 128 bits of a
+/// SHA-256. Two callers name one with a chance of 2^-128 a pair, a server
+/// of 2^32 callers 2^-65 that any two of them do, and a token whose claims
+/// were ground to name another's needs 2^128 hashes; and the claims are an
+/// issuer's to sign, not a caller's to choose.
+pub const AUTHORITY_LEN: usize = 16;
+
+impl Verified {
+    fn new(claims: Vec<(String, Value)>) -> Verified {
+        Verified {
+            claims,
+            authority: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for Verified {
+    type Target = Vec<(String, Value)>;
+
+    fn deref(&self) -> &Vec<(String, Value)> {
+        &self.claims
+    }
+}
+
 const SHARDS: usize = 16;
 /// Tokens a shard keeps, emptied when full.
 const KEPT: usize = 256;
@@ -400,8 +436,33 @@ struct Source {
     path: PathBuf,
     /// The second the file was last looked at.
     looked: AtomicU64,
-    modified: Mutex<Option<SystemTime>>,
+    /// What the looks at the file found.
+    seen: Mutex<Seen>,
 }
+
+/// What [`Access::look`] found of a JWKS file.
+struct Seen {
+    /// When the file read last was modified.
+    read: Option<SystemTime>,
+    /// Of a file that did not parse, when it was modified and the second
+    /// it was read at: read again [`JWKS_FAILED_AGAIN`] later.
+    unparsed: Option<Failed>,
+    /// Of a file that could not be read, when it was modified: said once,
+    /// and read again at the next look.
+    unread: Option<Option<SystemTime>>,
+}
+
+/// A JWKS file that did not parse: when it was modified, and the second it
+/// was read at.
+type Failed = (Option<SystemTime>, u64);
+
+/// How long, in seconds, a JWKS file that did not parse is let be before
+/// a request reads it again, its modification time unchanged: one changed
+/// is read at the next look, and so is one that could not be read at all.
+/// Read at every look, a file that did not parse cost a request each
+/// second its read -- on a slow mount, a stall each second -- for as long
+/// as it failed.
+const JWKS_FAILED_AGAIN: u64 = 60;
 
 struct Jwk {
     kid: Option<String>,
@@ -548,6 +609,7 @@ struct Rule {
 
 /// `transfer, refund call [for teller]`: the statements a line grants
 /// calling, to its role or to every token.
+#[derive(Clone)]
 struct CallLine {
     line: usize,
     names: Vec<String>,
@@ -561,6 +623,7 @@ struct CallLine {
 /// granted -- a `Vec` and a `String` made and freed for one `wake` line --
 /// cost every write of a token a line granted 918 instructions, 2.7% of a
 /// scoped `set` (`docs/design/named-statements.md`, F2's slice 4).
+#[derive(Clone)]
 struct Lines {
     /// The collections no scoped token updates or deletes in (`append-only`
     /// lines), `*` for every one.
@@ -570,6 +633,27 @@ struct Lines {
     /// The `wake` lines: the statements bound to writes a role's writes
     /// may wake.
     wakes: Vec<CallLine>,
+    /// The claims that decide what a token may do, sorted, each once
+    /// ([`authority_claims`]): what a caller is, for what is kept for one
+    /// caller alone ([`Scope::authority`]).
+    authority: Vec<String>,
+}
+
+/// The claims that decide what a token may do: its issuer and subject, the
+/// claim naming its tenants and the one naming its roles, and every claim a
+/// rule reads -- sorted, each once. Two tokens holding the same values of
+/// these are one caller to the server, whatever else they hold.
+fn authority_claims(rules: &[Rule], demands: &Demands) -> Vec<String> {
+    let mut names: Vec<String> = ["iss", "sub"]
+        .into_iter()
+        .map(str::to_string)
+        .chain([demands.tenant_claim.clone(), demands.role_claim.clone()])
+        .chain(rules.iter().flat_map(|r| r.claims.iter().cloned()))
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// A token's rules, its claims bound in.
@@ -736,7 +820,11 @@ impl Access {
         let source = Source {
             path: path.to_path_buf(),
             looked: AtomicU64::new(0),
-            modified: Mutex::new(modified),
+            seen: Mutex::new(Seen {
+                read: modified,
+                unparsed: None,
+                unread: None,
+            }),
         };
         Access::with(keys, Some(source), policy)
     }
@@ -812,6 +900,7 @@ impl Access {
         if let Some(why) = ring(&rules, &lines) {
             return Err(why);
         }
+        let authority = authority_claims(&rules, &Demands::default());
         Ok(Access {
             keys: RwLock::new(Arc::new(keys)),
             source,
@@ -821,6 +910,7 @@ impl Access {
                 append_only,
                 calls,
                 wakes,
+                authority,
             }),
             verified: Default::default(),
             role_claim: Arc::from(Demands::default().role_claim.as_str()),
@@ -848,6 +938,11 @@ impl Access {
     /// those kept are let go.
     pub fn demanding(mut self, demands: Demands) -> Access {
         self.role_claim = Arc::from(demands.role_claim.as_str());
+        // The claims naming a token's tenants and roles may be others now.
+        self.lines = Arc::new(Lines {
+            authority: authority_claims(&self.rules, &demands),
+            ..Lines::clone(&self.lines)
+        });
         self.demands = demands;
         for v in &self.verified {
             v.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -856,32 +951,91 @@ impl Access {
     }
 
     /// The keys, the file's read again first where it changed -- looked at
-    /// once in a second `now`, at most.
+    /// once in a second `now`, at most, by one request: another meeting
+    /// its read goes on with the keys as they are, never waiting on it.
+    ///
+    /// The time the file was modified is kept once a read of it took, and
+    /// only then: a file rewritten in place and read half-written fails,
+    /// and the whole file is read at a later look even where it was
+    /// finished under the same time -- a file system keeping whole
+    /// seconds, a write inside one tick. Kept as the read began, the
+    /// finished file was never read, and a key the rotation took out went
+    /// on verifying tokens. A file that does not parse is read again until
+    /// it does: at the next look where its time moved, and
+    /// [`JWKS_FAILED_AGAIN`] after where it did not, said once a time it
+    /// was modified at. One that could not be read -- an error opening or
+    /// reading it, which says nothing of what it holds -- is read again at
+    /// the next look whatever its time, said once a time too.
     fn keys(&self, now: u64) -> Arc<Vec<Jwk>> {
         if let Some(src) = &self.source {
             if src.looked.swap(now, Ordering::Relaxed) != now {
-                let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
-                let mut last = src.modified.lock().unwrap_or_else(|e| e.into_inner());
-                if modified != *last {
-                    *last = modified;
-                    match std::fs::read_to_string(&src.path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|t| read_jwks(&t))
-                    {
-                        Ok(keys) => {
-                            *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
-                            for v in &self.verified {
-                                v.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                            }
-                        }
-                        Err(e) => {
-                            crate::log!("{}: {e}; the keys read before stay", src.path.display())
-                        }
-                    }
-                }
+                self.look(src, now);
             }
         }
         self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// [`Self::keys`]' look at the file, at `now`.
+    #[cold]
+    #[inline(never)]
+    fn look(&self, src: &Source, now: u64) {
+        let mut seen = match src.seen.try_lock() {
+            Ok(seen) => seen,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
+        if modified == seen.read {
+            return;
+        }
+        let unparsed = seen.unparsed.filter(|(m, _)| *m == modified);
+        if unparsed.is_some_and(|(_, at)| now < at.saturating_add(JWKS_FAILED_AGAIN)) {
+            return;
+        }
+        // An error reading the file is no word on what it holds -- a
+        // process out of descriptors under load, a mount gone stale, a
+        // file renamed in before it could be read -- and the next look
+        // reads it again. Held back the minute a file that did not parse
+        // is, a rotation renamed in under a new time and met by such an
+        // error was taken a minute late: its new key's tokens refused, a
+        // key it took out verifying, all that minute.
+        let text = match std::fs::read_to_string(&src.path) {
+            Ok(text) => text,
+            Err(e) => {
+                if seen.unread != Some(modified) {
+                    crate::log!(
+                        "{}: {e}; the keys read before stay, and the file is read again at \
+                         the next request, until it reads",
+                        src.path.display()
+                    );
+                    seen.unread = Some(modified);
+                }
+                return;
+            }
+        };
+        match read_jwks(&text) {
+            Ok(keys) => {
+                *seen = Seen {
+                    read: modified,
+                    unparsed: None,
+                    unread: None,
+                };
+                *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
+                for v in &self.verified {
+                    v.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                }
+            }
+            Err(e) => {
+                if unparsed.is_none() {
+                    crate::log!(
+                        "{}: {e}; the keys read before stay, and the file is read again as it \
+                         changes, or in a minute, until it parses",
+                        src.path.display()
+                    )
+                }
+                seen.unparsed = Some((modified, now));
+            }
+        }
     }
 
     /// A token for `claims`, a JSON object -- what `fennec-server --mint-token`
@@ -1039,8 +1193,12 @@ impl Access {
             true => Some(Vec::new()),
             false => tenants,
         };
+        // Saturated: an `exp` whose milliseconds a `u64` cannot hold is the
+        // furthest instant. Multiplied, it wrapped and ended a stream at once
+        // -- acceptance is asked of the `f64` (`verify`), so nothing failed
+        // open -- and in a debug build panicked the connection's thread.
         let expires = match claim("exp") {
-            Some(Value::Int(i)) => Some((*i).max(0) as u64 * 1000),
+            Some(Value::Int(i)) => Some(((*i).max(0) as u64).saturating_mul(1000)),
             Some(Value::Float(f)) => Some((f.max(0.0) * 1000.0) as u64),
             _ => None,
         };
@@ -1160,7 +1318,7 @@ impl Access {
                 "no key has the token's kid"
             });
         }
-        let claims = Arc::new(object(body)?);
+        let claims = Arc::new(Verified::new(object(body)?));
         // Asked once, before the token is kept, as its signature is: the
         // demands are fixed with the `Access`, unlike the time `exp` is
         // asked against. After the signature, so a token no key signed is
@@ -2747,6 +2905,57 @@ impl Scope {
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
+    }
+
+    /// The token's `iss` where it is a text: with [`Self::subject`], the
+    /// user a caller is -- two issuers may each have a `vera`.
+    pub fn issuer(&self) -> Option<&str> {
+        match self.roles.0.iter().find(|(k, _)| k == "iss") {
+            Some((_, Value::Text(t))) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The caller the token is, as what it may do is decided: the first 16
+    /// bytes ([`AUTHORITY_LEN`]) of a SHA-256 over the values of the claims
+    /// that decide it -- its issuer, its subject, its tenants', its roles'
+    /// and every claim a rule reads ([`authority_claims`]), each named, an
+    /// absent one told from a `null` -- so two tokens of one caller name
+    /// one, and a token of another issuer, or of the same subject with
+    /// other rights, another. What is kept for a caller alone is kept under
+    /// it: an `Idempotency-Key`'s answer, whose `returning` rows are those
+    /// its first caller could read. Made where it is asked, a keyed
+    /// write's, never as a scope is made: no request without a key pays
+    /// for it; and once a token, kept with its claims while the token is
+    /// ([`Verified`]). Bytes, not text: a key's caller in the 32 hex
+    /// digits of these made the `_idempotency` row of a keyed write past
+    /// the 64 bytes its record is begun in ([`crate::idempotent`]).
+    pub fn authority(&self) -> &[u8; AUTHORITY_LEN] {
+        let verified = &self.roles.0;
+        verified
+            .authority
+            .get_or_init(|| self.authority_of(verified))
+    }
+
+    /// [`Self::authority`] of `claims`, worked out.
+    #[cold]
+    fn authority_of(&self, claims: &[(String, Value)]) -> [u8; AUTHORITY_LEN] {
+        let mut text = String::new();
+        for name in &self.lines.authority {
+            fennec_core::json::escape_into(&mut text, name);
+            match claims.iter().find(|(k, _)| k == name) {
+                Some((_, v)) => {
+                    text.push('=');
+                    fennec_core::json::value_into(&mut text, v);
+                }
+                None => text.push('!'),
+            }
+            text.push('\n');
+        }
+        let digest = crate::crypto::sha256(text.as_bytes());
+        let mut out = [0u8; AUTHORITY_LEN];
+        out.copy_from_slice(&digest[..AUTHORITY_LEN]);
+        out
     }
 
     /// Whether the token holds a `sub` that is no text -- a number, a bool,
@@ -4696,6 +4905,143 @@ mod tests {
             Some("no key has the token's kid")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A JWKS rewritten in place, read while half-written, and finished
+    /// under the same modification time -- a file system keeping whole
+    /// seconds, or a second write inside one tick: the half read refused,
+    /// the finished file is read at the next look all the same. Its time
+    /// was noted before the read, and the finished file, its time
+    /// unchanged, was never read: a key the rotation took out went on
+    /// verifying tokens.
+    #[test]
+    fn a_jwks_read_half_written_is_read_again_once_whole() {
+        let dir = std::env::temp_dir().join(format!("fennec-jwks-torn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        let stamp = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        let a = Access::from_jwks(&path, "").unwrap();
+        let old = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+        assert!(a.scope(&old, now).is_ok());
+
+        // The rotation, written in place: its first half read at a look.
+        let at = SystemTime::now() + std::time::Duration::from_secs(5);
+        let whole = oct("new", 2);
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+        stamp(at);
+        assert!(a.scope(&old, now + 1).is_ok(), "the keys read before stay");
+        // Finished under the same time: read again a minute after the read
+        // that failed, not at each look before -- the read of a file that
+        // does not parse costs a request once a minute, not each second.
+        std::fs::write(&path, &whole).unwrap();
+        stamp(at);
+        assert!(a.scope(&old, now + 2).is_ok(), "read again within a minute");
+        assert!(a.scope(&old, now + JWKS_FAILED_AGAIN).is_ok());
+        assert_eq!(
+            a.scope(&old, now + 1 + JWKS_FAILED_AGAIN).err(),
+            Some("no key has the token's kid"),
+            "the key the rotation took out still verifies"
+        );
+        // A file whose time moves is read at the next look.
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+        stamp(at + std::time::Duration::from_secs(1));
+        let new = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(a.scope(&new, now + 70).is_ok(), "the keys read before stay");
+        std::fs::write(&path, oct("third", 3)).unwrap();
+        stamp(at + std::time::Duration::from_secs(2));
+        assert_eq!(
+            a.scope(&new, now + 71).err(),
+            Some("no key has the token's kid"),
+            "a file changed since was not read at the next look"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A JWKS file that could not be read -- an error opening or reading
+    /// it, which says nothing of what it holds: here a directory in its
+    /// place -- is read again at the next look, its modification time
+    /// unchanged; the minute's wait is a file's that did not parse. Held
+    /// back that minute, a rotation renamed in and met by a passing error
+    /// -- a process out of descriptors, a mount gone stale -- was taken a
+    /// minute late: its new key's tokens refused, a key it took out
+    /// verifying.
+    #[test]
+    fn a_jwks_file_that_could_not_be_read_is_read_at_the_next_look() {
+        let dir = std::env::temp_dir().join(format!("fennec-jwks-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        let stamp = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        // An hour back: no directory made now shares its time.
+        stamp(SystemTime::now() - std::time::Duration::from_secs(3600));
+        let a = Access::from_jwks(&path, "").unwrap();
+        let old = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+        assert!(a.scope(&old, now).is_ok());
+
+        // The look meets a file it cannot read.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let at = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(std::fs::read_to_string(&path).is_err());
+        assert!(a.scope(&old, now + 1).is_ok(), "the keys read before stay");
+        // The rotation in its place, under the time that look met.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, oct("new", 2)).unwrap();
+        stamp(at);
+        assert_eq!(
+            a.scope(&old, now + 2).err(),
+            Some("no key has the token's kid"),
+            "a file that could not be read was let be past the next look"
+        );
+        let new = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(a.scope(&new, now + 2).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An `exp` past what milliseconds in a `u64` hold: the token verifies
+    /// (its `exp` is asked as an `f64`), and the instant a stream ends at
+    /// is the furthest one, never a product that wrapped -- which ended a
+    /// stream at once, and in a debug build panicked the connection's
+    /// thread.
+    #[test]
+    fn an_exp_past_the_range_ends_nothing_early() {
+        let a = access("notes read where owner = $jwt.sub");
+        for exp in ["9223372036854775807", "18446744073709551615", "1e300"] {
+            let token = a
+                .mint(&format!(r#"{{"sub":"alice","exp":{exp}}}"#))
+                .unwrap();
+            let scope = a.scope(&token, unix_now()).unwrap();
+            assert_eq!(scope.expires_ms(), Some(u64::MAX), "{exp}");
+        }
+        // One in range keeps its milliseconds.
+        let token = a.mint(r#"{"sub":"alice","exp":4102444800}"#).unwrap();
+        let scope = a.scope(&token, unix_now()).unwrap();
+        assert_eq!(scope.expires_ms(), Some(4_102_444_800_000));
     }
 
     #[test]

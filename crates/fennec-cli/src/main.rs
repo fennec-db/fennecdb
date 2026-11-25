@@ -278,7 +278,17 @@ fn main() {
                 false => fennec_core::fs::open(p),
             };
             match opened {
-                Ok(db) => db,
+                Ok(db) => {
+                    // What the open removed beside the file, or kept for a
+                    // lock file beside it, in the line a server logs: a
+                    // file as large as the database gone, or one still
+                    // there, said where the shell says anything. A
+                    // read-only open looks at none.
+                    for s in db.swept_on_open() {
+                        eprintln!("{}", s.said(p));
+                    }
+                    db
+                }
                 Err(e) => {
                     eprintln!("could not open {p}: {e}");
                     exit::now(Code::Failed);
@@ -862,12 +872,14 @@ fn meta(db: &mut Database, cmd: &str) -> bool {
             }
         }
         ".stats" => {
+            // Live and dead apart, as `/_metrics` and the studio say them:
+            // every record's bytes, shown alone, read as the live ones.
             for s in db.stats() {
                 println!(
-                    "{:<16} {:>8} docs  {:>9}  dead {:>9}  {} segments",
+                    "{:<16} {:>8} docs  {:>9} live  {:>9} dead  {} segments",
                     s.name,
                     s.documents,
-                    human(s.bytes),
+                    human(s.live_bytes()),
                     human(s.dead_bytes),
                     s.segments
                 );
@@ -943,7 +955,8 @@ fn save(db: &Database, path: &str) -> std::result::Result<(), String> {
     let path = fennec_core::fs::resolved(Path::new(path));
     let side = fennec_core::fs::beside(&path, "saving");
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&side)?;
+        // Its owner's alone, or the mode of the file it replaces.
+        let mut f = fennec_core::fs::create_like(&side, &path)?;
         f.write_all(&db.snapshot())?;
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(&path)?;

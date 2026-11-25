@@ -1,0 +1,10 @@
+-- A graph of 70 000 nodes, its record's links and steps three bytes wide:
+-- every later build restores it and walks it as the release did.
+describe wide
+get wide count
+get wide where n = 69999
+get wide near v [12345] limit 3 select n, v
+get wide near v [12345] exact limit 3 select n, v
+get wide near v [69999.5] limit 2 select n, v
+get wide near v [-10] limit 2 select n, v
+get wide near v [35000.25] limit 5 select n

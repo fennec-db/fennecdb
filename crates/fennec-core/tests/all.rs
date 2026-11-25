@@ -18,6 +18,8 @@ mod calls;
 mod changes;
 mod claims;
 mod collate;
+mod compact_places;
+mod compat;
 mod composite;
 mod composite_lookup;
 mod counts;
@@ -38,6 +40,7 @@ mod having;
 mod highlight;
 mod hooked;
 mod in_param;
+mod in_turn;
 mod insert;
 mod int_range;
 mod json;
@@ -55,6 +58,7 @@ mod mixed_numbers;
 mod model;
 mod nan;
 mod read_calls;
+mod reader;
 // Its fold is held to Python's by the fold's own functions, which a build
 // without the feature has no fold to call.
 #[cfg(feature = "nocase")]
@@ -73,6 +77,7 @@ mod require;
 mod returning;
 mod rewrite;
 mod scheduled;
+mod side_files;
 mod sorted;
 mod sparse;
 mod spill;

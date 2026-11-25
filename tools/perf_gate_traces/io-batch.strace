@@ -1,0 +1,40 @@
+1426  ioctl(0<pipe:[29829]>, TIOCGWINSZ, 0xffffcf03d8c8) = -1 ENOTTY (Not a tty)
+1426  openat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 3</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock>
+1426  fcntl(3</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock>, F_SETFD, FD_CLOEXEC) = 0
+1426  fcntl(3</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock>, F_SETLK, {l_type=F_WRLCK, l_whence=SEEK_SET, l_start=0, l_len=0}) = 0
+1426  write(3</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock>, ""..., 19) = 19
+1426  ftruncate(3</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.lock>, 19) = 0
+1426  openat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>
+1426  fcntl(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>, F_SETFD, FD_CLOEXEC) = 0
+1426  unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync", 0) = -1 ENOENT (No such file or directory)
+1426  write(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>, ""..., 8) = 8
+1426  write(2<pipe:[29830]>, ""..., 63) = 63
+1426  write(2<pipe:[29830]>, ""..., 96) = 96
+1432  write(2<pipe:[29830]>, ""..., 66) = 66
+1432  accept4(5<socket:[30733]>, {sa_family=AF_INET, sin_port=htons(32850), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[30734]>
+1432  accept4(5<socket:[30733]> <unfinished ...>
+1436  write(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>, ""..., 24) = 24
+1436  fdatasync(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>) = 0
+1436  openat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>
+1436  fcntl(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>, F_SETFD, FD_CLOEXEC) = 0
+1436  pwrite64(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>, ""..., 266240, 0) = 266240
+1436  fsync(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>) = 0
+1436  openat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 9</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4>
+1436  fcntl(9</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4>, F_SETFD, FD_CLOEXEC) = 0
+1436  fsync(9</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4>) = 0
+1436  writev(6<socket:[30734]>, [...], 2) = 220
+1432  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(32862), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[30735]>
+1432  accept4(5<socket:[30733]> <unfinished ...>
+1438  write(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>, ""..., 23883) = 23883
+1438  pwrite64(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>, ""..., 64, 0) = 64
+1438  pwrite64(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>, ""..., 23915, 4096) = 23915
+1438  fdatasync(8</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync>) = 0
+1438  writev(7<socket:[30735]>, [...], 2) = 15236
+1432  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(32876), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[30736]>
+1432  accept4(5<socket:[30733]> <unfinished ...>
+1439  writev(6<socket:[30736]>, [...], 2) = 153
+1430  write(2<pipe:[29830]>, ""..., 28) = 28
+1426  write(2<pipe:[29830]>, ""..., 34) = 34
+1426  fdatasync(4</tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec>) = 0
+1426  unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4/io.fennec.sync", 0) = 0
+1432  <... accept4 resumed> <unfinished ...>) = ?

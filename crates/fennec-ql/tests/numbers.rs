@@ -16,6 +16,15 @@ fn run(db: &mut Database, sql: &str) -> Result<Response> {
     db.execute_with(&parse_one(sql)?, &[])
 }
 
+/// A file holding the create of `schema` and nothing else, its record made
+/// by hand (kind 1, collection 1): what a crafted file or a version before
+/// holds of a schema no create makes now.
+fn old_file(schema: &Schema) -> Vec<u8> {
+    let mut file = fennec_core::engine::MAGIC.to_vec();
+    file.extend_from_slice(&fennec_core::engine::record(1, 1, &schema.encode()));
+    file
+}
+
 #[test]
 fn a_number_past_its_range_is_refused_naming_it() {
     let v = "create collection v (e vector<3>";
@@ -371,16 +380,19 @@ fn a_field_made_out_of_range_before_is_refused_at_the_open() {
         ),
     ] {
         // Made as a version before made it: `Schema::new` refuses it now,
-        // and a create takes the schema it is handed.
+        // and so does a create of a schema it was pushed into past
+        // `Schema::new`; the create's record by hand.
         let mut schema = Schema::new("b", vec![Field::new("n", DataType::Int)]).unwrap();
         schema.fields.push(field);
         let mut db = Database::new();
-        db.execute(&Statement::CreateCollection {
-            schema,
+        match db.execute(&Statement::CreateCollection {
+            schema: schema.clone(),
             if_not_exists: false,
-        })
-        .unwrap();
-        match Database::new().load(&db.snapshot()) {
+        }) {
+            Err(Error::Type(m)) => assert_eq!(m, says),
+            other => panic!("{says}: created {:?}", other.map(|_| ())),
+        }
+        match Database::new().load(&old_file(&schema)) {
             Err(Error::Corrupt(m)) => assert_eq!(m, says),
             other => panic!("{says}: {other:?}"),
         }
@@ -395,9 +407,10 @@ fn a_field_made_out_of_range_before_is_refused_at_the_open() {
 /// is read back from the database's image as it was made, a refused one
 /// refused naming the range, and the field where no parser read the
 /// number. In code the write and the read take exactly the same fields,
-/// both asking `schema::out_of_range`: with a test each, the check held a
-/// field's own vector alone, and `[vector<0>]` was taken and written, and
-/// its file refused as damage at the next open.
+/// both asking `schema::out_of_range`, and a create asks it again of a
+/// schema built past `Schema::new` (`Schema::readable`): with a test each,
+/// the check held a field's own vector alone, and `[vector<0>]` was taken
+/// and written, and its file refused as damage at the next open.
 #[test]
 fn whatever_a_write_takes_an_open_reads_back() {
     // `c`'s fields as an open makes them of `db`'s image.
@@ -419,8 +432,9 @@ fn whatever_a_write_takes_an_open_reads_back() {
     let within = |d: usize| (1..=1_000_000_000).contains(&d);
 
     // In code: each field taken by the write exactly where the read takes
-    // it. One the write refuses is made as a crafted file or a version
-    // before holds it, for a create takes the schema it is handed.
+    // it. One the write refuses -- `Schema::new`, and a create of a schema
+    // it was pushed into past `Schema::new` -- is made by hand, as a
+    // crafted file or a version before holds it.
     let n = || Field::new("n", DataType::Int);
     let mut fields = Vec::new();
     for d in dims {
@@ -458,19 +472,23 @@ fn whatever_a_write_takes_an_open_reads_back() {
             }
         };
         let mut db = Database::new();
-        db.execute(&Statement::CreateCollection {
-            schema,
+        let created = db.execute(&Statement::CreateCollection {
+            schema: schema.clone(),
             if_not_exists: false,
-        })
-        .unwrap();
-        match (written, reopened(&db, "c")) {
-            (Ok(w), Ok(read)) => assert_eq!(read, w.fields),
-            (Err(Error::Type(_)), Err(Error::Corrupt(_))) => {}
-            (w, r) => panic!(
-                "{} {:?}: written {:?}, read {:?}",
+        });
+        let read = match &created {
+            Ok(_) => reopened(&db, "c"),
+            Err(_) => Database::new().load(&old_file(&schema)).map(|_| Vec::new()),
+        };
+        match (written, created, read) {
+            (Ok(w), Ok(_), Ok(read)) => assert_eq!(read, w.fields),
+            (Err(Error::Type(_)), Err(Error::Type(_)), Err(Error::Corrupt(_))) => {}
+            (w, c, r) => panic!(
+                "{} {:?}: written {:?}, created {:?}, read {:?}",
                 field.ty.name(),
                 field.index,
                 w.err(),
+                c.err(),
                 r.err()
             ),
         }

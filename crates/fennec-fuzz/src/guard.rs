@@ -185,18 +185,25 @@ pub struct Capped;
 unsafe impl GlobalAlloc for Capped {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         capped(l.size());
-        System.alloc(l)
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
+        unsafe { System.alloc(l) }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         capped(l.size());
-        System.alloc_zeroed(l)
+        // SAFETY: as `alloc`'s.
+        unsafe { System.alloc_zeroed(l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
         capped(size);
-        System.realloc(p, l, size)
+        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
+        // on to it -- and `size` is nonzero and fits `isize` once rounded
+        // to `l.align()`, as `GlobalAlloc::realloc`'s caller guarantees.
+        unsafe { System.realloc(p, l, size) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
+        // SAFETY: `p` is `System`'s, made with `l`, as for `realloc`.
+        unsafe { System.dealloc(p, l) }
     }
 }
 
@@ -402,6 +409,13 @@ pub fn cap(cpu: Option<Duration>, runs: u64) {
     sys::set_cpu_timer(ms.saturating_mul(1000));
 }
 
+/// What is left of the cap of CPU time [`cap`] set, read off its timer
+/// rather than what was asked of it: zero once stopped, or where nothing
+/// set it. What a test of the smoke's cap, and of its stop, reads.
+pub fn cap_left() -> Duration {
+    sys::cpu_timer_left()
+}
+
 /// The run is over, its timer stopped.
 pub fn disarm() {
     sys::set_timer(0);
@@ -443,6 +457,7 @@ mod sys {
     extern "C" {
         fn signal(sig: c_int, handler: usize) -> usize;
         fn setitimer(which: c_int, new: *const Itimerval, old: *mut Itimerval) -> c_int;
+        fn getitimer(which: c_int, value: *mut Itimerval) -> c_int;
         fn creat(path: *const c_char, mode: c_uint) -> c_int;
         fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
         fn close(fd: c_int) -> c_int;
@@ -462,13 +477,20 @@ mod sys {
         unsafe { write_all(2, bytes.as_ptr(), bytes.len()) };
     }
 
+    /// # Safety
+    /// `p` is valid to read for `n` bytes.
     unsafe fn write_all(fd: c_int, mut p: *const u8, mut n: usize) {
         while n > 0 {
-            let w = write(fd, p as *const c_void, n);
+            // SAFETY: `p` is valid to read for `n` bytes (the contract, and
+            // below), which `write` reads no more of.
+            let w = unsafe { write(fd, p as *const c_void, n) };
             if w <= 0 {
                 return;
             }
-            p = p.add(w as usize);
+            // SAFETY: `write` took `w` of the `n` bytes from `p`, at most
+            // all of them: `p + w` is inside them or at their end, and the
+            // `n - w` from it are the rest.
+            p = unsafe { p.add(w as usize) };
             n -= w as usize;
         }
     }
@@ -599,6 +621,21 @@ mod sys {
         set(ITIMER_PROF, us);
     }
 
+    /// What the CPU-time timer has left to go off in: zero where stopped.
+    pub fn cpu_timer_left() -> std::time::Duration {
+        let none = || Timeval { sec: 0, usec: 0 };
+        let mut timer = Itimerval {
+            interval: none(),
+            value: none(),
+        };
+        // SAFETY: a timer of the C layout, written by the call.
+        unsafe {
+            getitimer(ITIMER_PROF, &mut timer);
+        }
+        std::time::Duration::from_secs(timer.value.sec.max(0) as u64)
+            + std::time::Duration::from_micros(timer.value.usec.max(0) as u64)
+    }
+
     fn set(which: c_int, us: u64) {
         let value = Timeval {
             sec: (us / 1_000_000).min(i64::MAX as u64) as i64,
@@ -628,6 +665,10 @@ mod sys {
     pub fn on_cap() {}
 
     pub fn set_cpu_timer(_: u64) {}
+
+    pub fn cpu_timer_left() -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 
     pub fn say(bytes: &[u8]) {
         use std::io::Write;

@@ -628,6 +628,34 @@ impl Field {
     }
 }
 
+/// The most places a collection holds over its life: its fields and the
+/// places of those dropped from it ([`Schema::dropped`]), which a compact
+/// keeps. Each dropped place a field follows is a byte in every document
+/// written since and a value every read of that field passes, so the
+/// places a collection gathers are bounded: past them a `create
+/// collection` and an `alter ... add field` are refused, saying to make the
+/// collection again, which is rid of them. PostgreSQL's dropped columns
+/// count toward its 1 600 alike; 4 096 is MySQL's columns, past SQLite's
+/// 2 000 that `fennec import` copies a table of. A file holding more opens
+/// as it is -- no read refuses what a write took -- and its collection
+/// takes every alter but an add: a rename and a drop add no place.
+pub const MAX_PLACES: usize = 4096;
+
+/// The refusal of a primary's write or alter of `collection` made by other
+/// places than the copy applying it holds ([`Schema::read_written`],
+/// `keeps_places`): what a compact of 0.2.0 or before left, taking a
+/// dropped field's places out of one side's documents. A server's follower
+/// takes an image of its primary on it.
+#[cold]
+#[inline(never)]
+pub(crate) fn places_moved(collection: &str) -> Error {
+    Error::Corrupt(format!(
+        "the primary's writes moved the fields of `{collection}`: a compact of 0.2.0 or before \
+         took a dropped field's places out of the primary's documents or this copy's, and told \
+         the other nothing; seed the copy again from its primary"
+    ))
+}
+
 /// The most parts an index over several fields takes: past a handful, a key
 /// is wider than the rows a prefix of it narrows to are worth.
 pub const MAX_COMPOSITE_KEYS: usize = 8;
@@ -698,6 +726,20 @@ impl Composite {
 /// prefix names -- `(done, created)` is a to-do list's every page.
 pub fn composite_part(ty: &DataType) -> bool {
     *ty == DataType::Bool || crate::sorted::orderable(ty)
+}
+
+/// Refuses a field whose type nests past the levels a value read back may
+/// ([`crate::codec::MAX_DEPTH`], `DataType::depth`): `Schema::new`'s test
+/// and a create's ([`Schema::readable`]), one copy of its message.
+fn nests_within(f: &Field) -> Result<()> {
+    if f.ty.depth() > crate::codec::MAX_DEPTH {
+        return Err(Error::Type(format!(
+            "`{}`: a type nests at most {} levels, a list one and a point one",
+            f.name,
+            crate::codec::MAX_DEPTH
+        )));
+    }
+    Ok(())
 }
 
 /// Refuses a second `@ttl` among `fields`: a row expires by one time, and
@@ -793,13 +835,16 @@ pub struct Schema {
     /// position in `fields` stays a place in the payload. The schema writes
     /// each with the field it reads into ([`Schema::encode`]).
     pub paths: Vec<Field>,
-    /// Where a dropped field's value still is in the documents written
-    /// before its drop, ascending: a document is a run of values in field
-    /// order, so `alter ... drop field` leaves the place, skipped on read
-    /// and written as `null`, rather than rewrite every document under the
-    /// write lock. `compact` writes the documents without them and empties
-    /// this. Every field after one sits a place further in the documents
-    /// than in `fields` ([`Schema::place`]).
+    /// Where a dropped field's value is in the documents written before
+    /// its drop, ascending: a document is a run of values in field order,
+    /// so `alter ... drop field` leaves the place, skipped on read and
+    /// written as `null`, rather than rewrite every document under the
+    /// write lock. Kept for the collection's life: `compact` makes each
+    /// value there a `null` ([`reclaim`]) and renumbers nothing, since a
+    /// copy applying its primary's writes reads them by the places it
+    /// holds and no record tells it of a compact. Every field after one
+    /// sits a place further in the documents than in `fields`
+    /// ([`Schema::place`]).
     pub dropped: Vec<usize>,
     /// The indexes over several fields, in the order they were made.
     pub composites: Vec<Composite>,
@@ -830,6 +875,101 @@ pub fn split_path(name: &str) -> Option<(&str, &str)> {
     name.split_once('.')
 }
 
+/// A payload as a write after its drops would have written it, into `out`:
+/// the value at each of the `dropped` places (ascending) a `null` of one
+/// byte, and the dropped places it ends with left out, as a write leaves
+/// out those no field follows -- what `compact` reclaims of a dropped
+/// field. Every other value is copied as its bytes stand, at the place it
+/// stood: places are never renumbered, since a copy applying its
+/// primary's writes reads them by the places it holds, and no record
+/// tells it of a compact (docs/design/storage.md#dropped-places).
+///
+/// `false`, `out` left empty, where nothing would change -- each dropped
+/// place a `null` already and none ending the payload -- and where the
+/// payload cannot be read as far as its last dropped place: a value
+/// nested past [`MAX_DEPTH`] or cut short. Copied as it is, such a
+/// document is refused where it is read, in the same words, after the
+/// compact as before it, and the compact is never refused for it.
+pub fn reclaim(dropped: &[usize], buf: &[u8], out: &mut Vec<u8>) -> bool {
+    out.clear();
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    // Where the last value kept ends in `out`: the dropped places after it
+    // end the payload, and go.
+    let mut kept = 0;
+    let mut changed = false;
+    while at <= last && pos < buf.len() {
+        let from = pos;
+        if skip_value(buf, &mut pos).is_err() {
+            out.clear();
+            return false;
+        }
+        match dropped.get(gap) == Some(&at) {
+            true => {
+                gap += 1;
+                changed |= pos - from != 1 || buf[from] != TAG_NULL;
+                out.push(TAG_NULL);
+            }
+            false => {
+                out.extend_from_slice(&buf[from..pos]);
+                kept = out.len();
+            }
+        }
+        at += 1;
+    }
+    match pos < buf.len() {
+        // Past the last dropped place every value is kept, copied whole
+        // and never walked.
+        true => out.extend_from_slice(&buf[pos..]),
+        false if out.len() > kept => {
+            out.truncate(kept);
+            changed = true;
+        }
+        false => {}
+    }
+    if !changed {
+        out.clear();
+    }
+    changed
+}
+
+/// Whether [`reclaim`] would change `buf`: a value other than a one-byte
+/// `null` at a dropped place, or a dropped place ending it. Walked a value
+/// at a time as far as its last dropped place, a `null` there passed by its
+/// byte and nothing copied: every document a compact meets after the first
+/// since an open is one the reclaim leaves as it is, and building its copy
+/// to compare took a compact over 100 000 rows from 86 to 127 million
+/// instructions. `false` where it cannot be read so far, which `reclaim`
+/// copies as it is; `true` may still meet a value it cannot read past it,
+/// which `reclaim` tells.
+pub fn reclaims(dropped: &[usize], buf: &[u8]) -> bool {
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    let mut ends_dropped = false;
+    while at <= last && pos < buf.len() {
+        match dropped.get(gap) == Some(&at) {
+            true if buf[pos] == TAG_NULL => {
+                gap += 1;
+                pos += 1;
+                ends_dropped = true;
+            }
+            true => return true,
+            false => {
+                if skip_value(buf, &mut pos).is_err() {
+                    return false;
+                }
+                ends_dropped = false;
+            }
+        }
+        at += 1;
+    }
+    ends_dropped && pos >= buf.len()
+}
+
 /// Where the field at `pos` is in a document, past the `dropped` places
 /// before it (ascending): what the store and the schema both work out.
 #[inline]
@@ -845,11 +985,44 @@ pub fn place(dropped: &[usize], pos: usize) -> usize {
 }
 
 impl Schema {
-    pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
-        let name = name.into();
-        let mut seen = Vec::new();
+    /// A collection's schema as a `create` declares it: no more fields
+    /// than [`MAX_PLACES`], each checked as [`Schema::checked`] checks it.
+    pub fn new(name: impl Into<String>, fields: Vec<Field>) -> Result<Schema> {
+        Schema::checked(name.into(), fields, true)
+    }
+
+    /// Each field's name, type, collation and index checked, no two of one
+    /// name, and with `counted` no more of them than [`MAX_PLACES`]. The
+    /// count is held where a collection is made -- a `create`, a declared
+    /// schema, an import, through [`Schema::new`] -- and where an alter
+    /// adds a field (`places_full`), never by an alter that adds no place:
+    /// a rename of a collection holding more -- one 0.2.0 made, which had
+    /// no bound -- was refused ("declares 4097 fields"). One copy of the
+    /// checks, the count among them: the browser module's size.
+    pub(crate) fn checked(name: String, mut fields: Vec<Field>, counted: bool) -> Result<Schema> {
+        if counted && fields.len() > MAX_PLACES {
+            return Err(Error::Query(format!(
+                "`{name}` declares {} fields, and a collection holds {MAX_PLACES} at most",
+                fields.len()
+            )));
+        }
         for f in &mut fields {
             f.index = f.index.resolved();
+        }
+        // The names met so far. Natively in a set: each against every one
+        // before it was 5.4e8 comparisons for the 32 767 fields an import of
+        // a SQLite table may declare, and 3.8e9 for the 87 376 one did before
+        // the importer held a table to SQLite's own ceiling (G14 F2b). An
+        // import of more than `MAX_PLACES` columns is refused by the count
+        // above now, but a collection a release made of them, with no bound,
+        // takes its alters here uncounted. The browser module keeps the list
+        // it had: it reads no SQLite file, its schemas are its page's or its
+        // server's, and the set's table was 1 568 bytes of it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut seen = std::collections::HashSet::with_capacity(fields.len());
+        #[cfg(target_arch = "wasm32")]
+        let mut seen = Vec::new();
+        for f in &fields {
             if f.name == "id" {
                 return Err(Error::Query(
                     "`id` is a reserved field, it cannot be declared in a schema".into(),
@@ -872,14 +1045,12 @@ impl Schema {
                     f.name
                 )));
             }
-            if f.ty.depth() > crate::codec::MAX_DEPTH {
-                return Err(Error::Type(format!(
-                    "`{}`: a type nests at most {} levels, a list one and a point one",
-                    f.name,
-                    crate::codec::MAX_DEPTH
-                )));
-            }
-            if seen.contains(&f.name) {
+            nests_within(f)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let again = !seen.insert(f.name.as_str());
+            #[cfg(target_arch = "wasm32")]
+            let again = seen.contains(&f.name);
+            if again {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
             if let Some(c) = f.collate.filter(|_| !collatable(&f.ty)) {
@@ -907,6 +1078,7 @@ impl Schema {
             if let Some(spec) = f.beside {
                 IndexKind::Text(spec).check(&f.name, &f.ty)?;
             }
+            #[cfg(target_arch = "wasm32")]
             seen.push(f.name.clone());
         }
         one_expiry(&name, fields.iter())?;
@@ -917,6 +1089,31 @@ impl Schema {
             dropped: Vec::new(),
             composites: Vec::new(),
         })
+    }
+
+    /// Holds each field to what an open or a read of the file refuses: a
+    /// type nesting past what a value read back may ([`nests_within`]), and
+    /// its index's rule ([`IndexKind::check`]) -- a number past its range
+    /// (`out_of_range`, the test the open reads a schema with) and,
+    /// natively, a beam a 32-bit reader refuses. What `Schema::new` asks of
+    /// every field, asked again by a create of whatever schema it is handed
+    /// (`Database::create_collection`), the one place every collection is
+    /// made. A schema's fields are public, so one built in code past
+    /// `Schema::new` was written as handed -- 64 lists around a point, a
+    /// `vector<0>` -- and the file refused at its next open. So are its
+    /// indexes over several fields, each held to [`Self::check_composite`]
+    /// -- whose 2 to 8 parts `Schema::decode` holds a file's to -- its
+    /// answer that one over the same fields is there aside: that is the
+    /// index itself.
+    pub(crate) fn readable(&self) -> Result<()> {
+        for f in &self.fields {
+            nests_within(f)?;
+            f.index.check(&f.name, &f.ty)?;
+        }
+        for c in &self.composites {
+            self.check_composite(c)?;
+        }
+        Ok(())
     }
 
     /// The type of what a composite's part `key` reads: a field's, or
@@ -1116,8 +1313,11 @@ impl Schema {
         let (mut pos, mut at) = (0, 0);
         for (i, f) in self.fields.iter().enumerate() {
             let want = self.place(i);
+            // Only dropped places are passed here, each field read in
+            // turn: a `null` by its byte, as a write or a compact leaves
+            // one (`skip_passing`). No other collection's read enters it.
             while at < want {
-                skip_field(buf, &mut pos)?;
+                skip_passing(buf, &mut pos)?;
                 at += 1;
             }
             let v = match pos < buf.len() {
@@ -1130,20 +1330,42 @@ impl Schema {
         Ok(crate::value::Document { id, fields })
     }
 
-    /// A payload without its dropped places: what `compact` writes. Each
-    /// value kept is copied as its bytes stand.
-    pub fn without_dropped(&self, buf: &[u8]) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(buf.len());
+    /// [`Self::read_doc`] of a payload a write made under this schema --
+    /// a primary's, which a copy applies -- refused unless it holds a value
+    /// at every place up to its last field and none past it, as every
+    /// write of every release since dropped places came (0.1.7) encodes
+    /// one ([`crate::store::Store::encode_doc`]). One that does not was
+    /// written by other places than the copy holds: a compact of 0.2.0 or
+    /// before took a dropped field's out of one side's documents and told
+    /// the other nothing, and read on, every field after the place would
+    /// be the next one's value. Only a document stored before an `add
+    /// field` ends early, and no write sends one. A loop of its own rather
+    /// than `read_doc` telling it where the payload ended: that was 9
+    /// instructions more on every document every read decodes.
+    pub fn read_written(
+        &self,
+        id: crate::value::DocId,
+        buf: &[u8],
+    ) -> Result<crate::value::Document> {
+        let mut fields = Vec::with_capacity(self.fields.len());
         let (mut pos, mut at) = (0, 0);
-        while pos < buf.len() {
-            let from = pos;
-            skip_value(buf, &mut pos)?;
-            if !self.dropped.contains(&at) {
-                out.extend_from_slice(&buf[from..pos]);
+        for (i, f) in self.fields.iter().enumerate() {
+            let want = self.place(i);
+            while at < want {
+                skip_passing(buf, &mut pos)?;
+                at += 1;
             }
+            if pos >= buf.len() {
+                return Err(places_moved(&self.name));
+            }
+            let v = decode_value(buf, &mut pos)?;
             at += 1;
+            fields.push((f.name.clone(), v));
         }
-        Ok(out)
+        match pos == buf.len() {
+            true => Ok(crate::value::Document { id, fields }),
+            false => Err(places_moved(&self.name)),
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {
@@ -1537,4 +1759,55 @@ fn unknown(what: &str, byte: u8) -> Error {
     m.push(' ');
     crate::json::int_into(&mut m, byte as i64);
     Error::Corrupt(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Schema::new` refuses a name met before, naming the first one met
+    /// again in the fields' order, wherever the two stand -- and so do its
+    /// checks without the count (`Schema::checked`, an alter's of a
+    /// collection a release made past `MAX_PLACES`) over a schema of
+    /// SQLite's 32 767 columns, its last field the first's name, which
+    /// `Schema::new` refuses by its count first -- and the refusals it makes
+    /// before that one in a field's checks (`id`, a dot) still come first.
+    /// The names are looked up in a set.
+    #[test]
+    fn a_field_named_twice_is_refused_by_the_first_name_met_again() {
+        let fields = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| Field::new(*n, DataType::Int))
+                .collect::<Vec<_>>()
+        };
+        let refused = |names: &[&str]| Schema::new("t", fields(names)).unwrap_err().to_string();
+        assert!(refused(&["a", "b", "c", "b", "a"]).contains("duplicate field `b`"));
+        assert!(refused(&["a", "a", "id"]).contains("duplicate field `a`"));
+        assert!(refused(&["a", "id", "a"]).contains("`id` is a reserved field"));
+        assert!(refused(&["a", "a.b", "a"]).contains("`a.b` cannot name a field"));
+        assert!(Schema::new("t", fields(&["a", "A", "b"])).is_ok());
+
+        let mut wide: Vec<String> = (0..32_767).map(|i| format!("c{i}")).collect();
+        let named = |names: &[String]| {
+            names
+                .iter()
+                .map(|n| Field::new(n.as_str(), DataType::Text))
+                .collect::<Vec<_>>()
+        };
+        let e = Schema::new("w", named(&wide)).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("`w` declares 32767 fields, and a collection holds 4096 at most"),
+            "{e}"
+        );
+        let uncounted = |names: &[String]| Schema::checked("w".into(), named(names), false);
+        assert_eq!(uncounted(&wide).unwrap().fields.len(), 32_767);
+        wide.push("c0".into());
+        let e = uncounted(&wide).unwrap_err();
+        assert!(
+            matches!(&e, Error::Exists(m) if m == "duplicate field `c0`"),
+            "{e}"
+        );
+    }
 }

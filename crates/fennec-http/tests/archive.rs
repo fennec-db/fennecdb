@@ -228,6 +228,62 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
         .unwrap();
 }
 
+/// An archive restored to a moment after a compact, from an image taken
+/// before it, reads the writes after the compact as the primary does, and
+/// so does the image it takes of its own end; `verify` says it restores.
+/// A compact appends no record, and keeps every place: while one took a
+/// dropped field's places out, the image before it kept them and every
+/// write after it was read a field early, in each restore and in each
+/// image the archive took after.
+#[test]
+fn a_restore_across_a_compact_reads_the_writes_after_it_as_the_primary_did() {
+    let d = dir("places");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection x (a int, b int, c int, d int)");
+    p.exec("put x {a: 1, b: 2, c: 3, d: 4}");
+    let arch = d.join("archive");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    first_image(&arch);
+    p.exec("alter collection x drop field b");
+    p.exec("compact");
+    p.exec("put x {a: 10, c: 30, d: 40}");
+    let xs = "get x select a, c, d order id";
+    let want = rows(&p.db.read().unwrap(), xs);
+    assert_eq!(want[1].1, [Value::Int(10), Value::Int(30), Value::Int(40)]);
+    archived(&arch, p.seq());
+    // The image from before the compact alone, and the writes after it.
+    assert_eq!(files(&arch, "image-"), 1);
+    let (db, r) = restored(&arch, &d.join("end.fennec"), Target::End);
+    assert_eq!(r.seq, p.seq());
+    assert_eq!(rows(&db, xs), want);
+    drop(db);
+    let (db, _) = restored(&arch, &d.join("change.fennec"), Target::Change(p.seq()));
+    assert_eq!(rows(&db, xs), want);
+    drop(db);
+    let v = shared.verify().unwrap();
+    assert_eq!((v.images, v.last, v.torn), (1, p.seq(), 0));
+    assert!(v.gaps.is_empty() && v.to.is_some(), "{v:?}");
+    // An image of the archive's own end, and a restore from it.
+    assert!(shared.consolidate().unwrap().is_some());
+    p.exec("put x {a: 100, c: 300, d: 400}");
+    archived(&arch, p.seq());
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+    let (db, _) = restored(&arch, &d.join("again.fennec"), Target::End);
+    assert_eq!(rows(&db, xs), rows(&p.db.read().unwrap(), xs));
+    assert_eq!(db.collection("x").unwrap().schema.dropped, [1]);
+    let v = shared.verify().unwrap();
+    assert!(v.gaps.is_empty() && v.to.is_some(), "{v:?}");
+}
+
 #[test]
 fn an_archiver_stopped_goes_on_and_one_behind_takes_an_image() {
     let d = dir("resume");
@@ -1050,16 +1106,50 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
 
         // The next segment as it was being made, cut at each length short
         // of its magic: plain, a start of it; sealed, a start of the seal's
-        // magic, of the file's id or of the frame after them.
-        let head = std::fs::read(named(&arch, "writes-").remove(0)).unwrap();
+        // magic, of the file's id, of what it is or of the frame after
+        // them -- the head `take` makes for a segment of change `first`.
+        let segment = std::fs::read(named(&arch, "writes-").remove(0)).unwrap();
+        let head_of = |first: u64| -> Vec<u8> {
+            let Some(k) = &key else {
+                return segment.clone();
+            };
+            let mut b = seal::bound_in(&segment).unwrap();
+            b.change = first;
+            let mut head = Vec::new();
+            let mut frames = seal::begin(k, &b, &mut head).unwrap();
+            frames.seal(false, b"FENECLG\x01", &mut head).unwrap();
+            head
+        };
+        // A whole segment of change `first` holding the first one's writes:
+        // sealed, bound to that change as `take` binds one, so a reader
+        // refuses it for nothing but where it stands.
+        let segment_at = |first: u64| -> Vec<u8> {
+            let Some(k) = &key else {
+                return segment.clone();
+            };
+            let plain = seal::open_appended(k, &segment).unwrap().plain;
+            let mut b = seal::bound_in(&segment).unwrap();
+            b.change = first;
+            let mut out = Vec::new();
+            let mut frames = seal::begin(k, &b, &mut out).unwrap();
+            frames.seal(false, &plain[..8], &mut out).unwrap();
+            frames.seal(false, &plain[8..], &mut out).unwrap();
+            out
+        };
         let cuts: &[usize] = match sealed {
             false => &[0, 3],
-            true => &[0, 5, seal::MAGIC.len() + 6, seal::START + 10],
+            true => &[
+                0,
+                5,
+                seal::MAGIC.len() + 6,
+                seal::START - 3,
+                seal::START + 10,
+            ],
         };
         let next = |dir: &Path| dir.join(format!("writes-{:020}.log", p.seq() + 1));
         for &cut in cuts {
             let copy = copy_of(&arch, &d.join(format!("copy-{sealed}-{cut}")));
-            std::fs::write(next(&copy), &head[..cut]).unwrap();
+            std::fs::write(next(&copy), &head_of(p.seq() + 1)[..cut]).unwrap();
             let c = Archive::with_key(&copy, key.clone()).unwrap();
             let v = c
                 .verify()
@@ -1074,13 +1164,19 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
             // Only the last may hold no write: with a segment after it, one
             // is refused by name.
             let after = copy.join(format!("writes-{:020}.log", p.seq() + 2));
-            std::fs::write(&after, &head).unwrap();
+            std::fs::write(&after, segment_at(p.seq() + 2)).unwrap();
             let e = c.verify().unwrap_err().to_string();
             let name = format!("writes-{:020}.log", p.seq() + 1);
             assert!(
                 e.contains(&name) && e.contains("holds no write"),
                 "cut at {cut}, sealed {sealed}: {e}"
             );
+            // The one after is a segment of its own name: without the one
+            // cut, all `verify` refuses is the change between them.
+            std::fs::remove_file(next(&copy)).unwrap();
+            let e = c.verify().unwrap_err().to_string();
+            let between = format!("changes {0} to {0} are missing", p.seq() + 1);
+            assert!(e.contains(&between), "cut at {cut}, sealed {sealed}: {e}");
         }
 
         // An archiver stopped as it made one goes on in the segment before:
@@ -1092,7 +1188,7 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
         let whole = if sealed { seal::START + 40 } else { 8 };
         for (writes, image, cut) in [(2, false, short), (2, false, whole), (200, true, short)] {
             let (images, segments) = (files(&arch, "image-"), files(&arch, "writes-"));
-            std::fs::write(next(&arch), &head[..cut]).unwrap();
+            std::fs::write(next(&arch), &head_of(p.seq() + 1)[..cut]).unwrap();
             put(writes);
             let archiver = follow();
             if image {
@@ -1238,23 +1334,20 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
 }
 
-/// An archive and a backup 0.2.0 sealed -- version 1, its frames bound to
-/// their places alone, as that code wrote them (`tests/sealed-v1/`, key
-/// `ab` 32 times) -- open as they did: verified, restored and unsealed,
-/// the wrong key refused. Files the archive takes after them are version
-/// 2 beside them, and a segment an older archiver began goes on as one of
-/// its own version.
+/// An archive and a backup as 0.2.0 sealed them -- version 1, their frames
+/// bound to their places alone (`tests/sealed-v1/`) -- and as main sealed
+/// them before 1.0's review -- version 2, bound to their file's id
+/// (`tests/sealed-v2/`) -- each written by that code, key `ab` 32 times,
+/// open as they did: verified, restored and unsealed, the wrong key
+/// refused. Files the archive takes after them are version 3 beside them;
+/// a segment an older archiver began is gone on in by none, its tail cut
+/// short cut off, and the next write begins a segment of version 3, after
+/// an image of version 3 of the line's end.
 #[test]
-fn a_v1_sealed_archive_still_opens() {
-    use fennec_http::seal::{self, FileId, Key};
-    let d = dir("sealed-v1");
+fn older_sealed_archives_still_open() {
+    use fennec_http::seal::{self, Frames, Key};
     let key = Key::from_hex(&"ab".repeat(32)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sealed-v1");
-    let arch = copy_of(&fixture.join("archive"), &d.join("archive"));
-    for e in std::fs::read_dir(&arch).unwrap() {
-        let bytes = std::fs::read(e.unwrap().path()).unwrap();
-        assert!(bytes.starts_with(seal::MAGIC_V1));
-    }
+    let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
     let want: Vec<Vec<Value>> = (0..6)
         .map(|i| vec![Value::Int(i), Value::Text(format!("secret {i}"))])
         .collect();
@@ -1262,33 +1355,45 @@ fn a_v1_sealed_archive_still_opens() {
         let rows = rows(db, "get c select x, t order x");
         rows.into_iter().map(|r| r.1).collect()
     };
-    let a = Archive::with_key(&arch, Some(key.clone())).unwrap();
-    let v = a.verify().unwrap();
-    assert_eq!((v.images, v.segments, v.last, v.torn), (1, 1, 7, 0));
-    let out = d.join("restored.fennec");
-    assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
-    assert_eq!(values(&fennec_core::fs::open(&out).unwrap()), want);
-    let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
-    assert!(Archive::with_key(&arch, Some(wrong.clone()))
-        .unwrap()
-        .verify()
-        .is_err());
-    let opened = d.join("unsealed.fennec");
-    let backup = fixture.join("backup.sealed");
-    assert_eq!(archive::unseal(&backup, &key, &opened).unwrap(), 7);
-    assert_eq!(values(&fennec_core::fs::open(&opened).unwrap()), want);
-    assert!(archive::unseal(&backup, &wrong, &d.join("wrong.fennec")).is_err());
-    // An image of its end taken beside the version 1 files is version 2,
-    // and the archive reads both.
-    assert_eq!(a.consolidate().unwrap(), Some(7));
-    let images = named(&arch, "image-");
-    assert_eq!(images.len(), 2);
-    assert!(std::fs::read(&images[1]).unwrap().starts_with(seal::MAGIC));
-    assert_eq!(a.verify().unwrap().last, 7);
-    assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
+    for (version, magic) in [(1, seal::MAGIC_V1), (2, seal::MAGIC_V2)] {
+        let d = dir(&format!("sealed-v{version}"));
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/sealed-v{version}"));
+        let arch = copy_of(&fixture.join("archive"), &d.join("archive"));
+        for e in std::fs::read_dir(&arch).unwrap() {
+            let bytes = std::fs::read(e.unwrap().path()).unwrap();
+            assert!(bytes.starts_with(magic), "version {version}");
+        }
+        let a = Archive::with_key(&arch, Some(key.clone())).unwrap();
+        let v = a.verify().unwrap();
+        assert_eq!((v.images, v.segments, v.last, v.torn), (1, 1, 7, 0));
+        let out = d.join("restored.fennec");
+        assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
+        assert_eq!(values(&fennec_core::fs::open(&out).unwrap()), want);
+        assert!(Archive::with_key(&arch, Some(wrong.clone()))
+            .unwrap()
+            .verify()
+            .is_err());
+        let opened = d.join("unsealed.fennec");
+        let backup = fixture.join("backup.sealed");
+        assert!(std::fs::read(&backup).unwrap().starts_with(magic));
+        assert_eq!(archive::unseal(&backup, &key, &opened).unwrap(), 7);
+        assert_eq!(values(&fennec_core::fs::open(&opened).unwrap()), want);
+        assert!(archive::unseal(&backup, &wrong, &d.join("wrong.fennec")).is_err());
+        // An image of its end taken beside the older files is version 3,
+        // and the archive reads them all.
+        assert_eq!(a.consolidate().unwrap(), Some(7));
+        let images = named(&arch, "image-");
+        assert_eq!(images.len(), 2);
+        assert!(std::fs::read(&images[1]).unwrap().starts_with(seal::MAGIC));
+        assert_eq!(a.verify().unwrap().last, 7);
+        assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
+    }
 
-    // A segment an older archiver began, its writes in version 1 frames:
-    // the archiver goes on in it with version 1 frames, which it opens.
+    // A segment an older archiver began, its writes in version 1 frames
+    // and a frame cut short after them: the archiver cuts that off, durably,
+    // and begins a segment of this version after it.
+    let d = dir("sealed-older-segment");
     let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
     p.exec("create collection c (x int)");
     let live = d.join("live");
@@ -1311,32 +1416,184 @@ fn a_v1_sealed_archive_still_opens() {
     }
     archiver.finish();
     let segment = named(&live, "writes-").remove(0);
-    let (plain, _, _, file) = seal::open_appended(&key, &std::fs::read(&segment).unwrap()).unwrap();
-    assert_ne!(file, FileId::V1, "a segment begun now has an id");
+    let opened = seal::open_appended(&key, &std::fs::read(&segment).unwrap()).unwrap();
+    assert_eq!(opened.next.version(), 3, "a segment begun now is version 3");
     let mut older = seal::MAGIC_V1.to_vec();
-    seal::seal_frame(&key, &FileId::V1, 0, false, &plain[..8], &mut older).unwrap();
-    seal::seal_frame(&key, &FileId::V1, 1, false, &plain[8..], &mut older).unwrap();
+    let mut frames = Frames::v1(&key);
+    frames.seal(false, &opened.plain[..8], &mut older).unwrap();
+    frames.seal(false, &opened.plain[8..], &mut older).unwrap();
+    let whole = older.len();
+    older.extend_from_slice(&[1, 2, 3]);
     std::fs::write(&segment, &older).unwrap();
+    // Its image and history as that archiver sealed them too: an older
+    // segment after an image of this version is no older archiver's, and
+    // is refused (`older_files_put_past_a_lines_newer_ones_are_refused`).
+    let (images, history) = (named(&live, "image-"), live.join("history"));
+    for path in images.iter().chain([&history]) {
+        let (plain, _) = seal::open_whole(&key, &std::fs::read(path).unwrap()).unwrap();
+        let mut v1 = seal::MAGIC_V1.to_vec();
+        let mut frames = Frames::v1(&key);
+        let chunks: Vec<&[u8]> = plain.chunks(seal::FRAME).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            frames.seal(i + 1 == chunks.len(), c, &mut v1).unwrap();
+        }
+        std::fs::write(path, v1).unwrap();
+    }
+    // Read afresh: what an archive is, from its files, is learned once.
+    let b = Archive::with_key(&live, Some(key.clone())).unwrap();
+    let older_end = p.seq();
     let archiver = follow();
     for i in 5..10 {
         p.exec(&format!("put c {{x: {i}}}"));
         reached(&b, &probe, p.seq());
     }
     archiver.finish();
-    assert_eq!(named(&live, "writes-"), std::slice::from_ref(&segment));
-    let bytes = std::fs::read(&segment).unwrap();
-    let (_, end, frames, file) = seal::open_appended(&key, &bytes).unwrap();
-    assert_eq!((file, end), (FileId::V1, bytes.len()));
-    assert!(
-        frames > 2,
-        "{frames} frames: the writes after went on in it"
+    // The line's first file of version 3 is an image of its end as the
+    // older archiver left it, sealed as the archiver went on and before its
+    // first segment of version 3: an older image is read only before it.
+    let images = named(&live, "image-");
+    assert_eq!(images.len(), 2, "{images:?}");
+    let upgrade = seal::bound_in(&std::fs::read(&images[1]).unwrap()).unwrap();
+    assert_eq!(
+        (upgrade.role, upgrade.change),
+        (seal::Role::Image, older_end)
     );
+    let segments = named(&live, "writes-");
+    assert_eq!((segments.len(), &segments[0]), (2, &segment));
+    let bytes = std::fs::read(&segment).unwrap();
+    let o = seal::open_appended(&key, &bytes).unwrap();
+    assert_eq!(
+        (o.next.version(), o.next.index(), o.end, bytes.len()),
+        (1, 2, whole, whole),
+        "cut, and gone on in by none"
+    );
+    assert!(std::fs::read(&segments[1])
+        .unwrap()
+        .starts_with(seal::MAGIC));
     let v = b.verify().unwrap();
     assert_eq!((v.last, v.torn), (p.seq(), 0));
     let out = d.join("live.fennec");
     assert_eq!(b.restore(&out, Target::End).unwrap().seq, p.seq());
     let db = fennec_core::fs::open(&out).unwrap();
     assert_eq!(rows(&db, "get c").len(), 10);
+}
+
+/// 1.0's review: a sealed segment was bound to its own id and nothing
+/// more, and a write's record carries no change number -- a segment's are
+/// numbered from its name. A middle segment deleted and the next renamed
+/// into its name, where it began after an image of the archive's own,
+/// verified, naming a gap after the writes, and a restore to a change
+/// inside it held the later segment's writes in place of the deleted
+/// one's. Its first change is sealed in its head, and every reader holds
+/// the name to it.
+#[test]
+fn a_segment_renamed_into_anothers_place_is_refused() {
+    use fennec_http::seal::Key;
+    let d = dir("renamed");
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    let arch = d.join("archive");
+    let (shared, stop, done) = sealed_follow(&arch, &p.url, &key);
+    let probe = d.join("probe.fennec");
+    first_image(&arch);
+    let mut x = 0;
+    let mut batch = |n: usize| {
+        for _ in 0..n {
+            p.exec(&format!("put c {{x: {x}}}"));
+            x += 1;
+        }
+        reached(&shared, &probe, p.seq());
+    };
+    batch(5);
+    assert_eq!(shared.consolidate().unwrap(), Some(p.seq()));
+    let b = p.seq() + 1;
+    batch(10);
+    assert_eq!(shared.consolidate().unwrap(), Some(p.seq()));
+    let c = p.seq() + 1;
+    batch(3);
+    stop.store(true, Ordering::SeqCst);
+    done.join().unwrap().unwrap();
+    let seg = |first: u64| arch.join(format!("writes-{first:020}.log"));
+    assert!(seg(b).is_file() && seg(c).is_file());
+    std::fs::remove_file(seg(b)).unwrap();
+    std::fs::rename(seg(c), seg(b)).unwrap();
+    let said =
+        format!("writes-{b:020}.log: its writes begin at change {c}, where its name says {b}");
+    let e = shared.verify().unwrap_err().to_string();
+    assert!(e.contains(&said), "{e}");
+    let e = shared
+        .restore(&d.join("inside.fennec"), Target::Change(b + 1))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains(&said), "{e}");
+    // Named back, the archive verifies, the deleted segment's changes a
+    // gap the image after them ends.
+    std::fs::rename(seg(b), seg(c)).unwrap();
+    let v = shared.verify().unwrap();
+    assert_eq!(v.gaps, [(b, c - 1)]);
+}
+
+/// An archive's image and a backup are each sealed as what they are: an
+/// image -- its history its primary's, no database of its own -- given to
+/// `unseal` as a backup is refused, and a backup put in an image's place is
+/// refused by every read of the archive. Both opened before.
+#[test]
+fn an_image_and_a_backup_do_not_stand_in_for_each_other() {
+    use fennec_http::seal::Key;
+    let d = dir("roles");
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    let arch = d.join("archive");
+    let (shared, stop, done) = sealed_follow(&arch, &p.url, &key);
+    first_image(&arch);
+    stop.store(true, Ordering::SeqCst);
+    done.join().unwrap().unwrap();
+    let image = named(&arch, "image-").remove(0);
+    let e = archive::unseal(&image, &key, &d.join("from-image.fennec")).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("sealed as an archive's image, not a backup"),
+        "{e}"
+    );
+    assert!(!d.join("from-image.fennec").exists());
+    let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
+    let backup = d.join("backup.sealed");
+    assert_eq!(
+        archive::backup(&upstream, &backup, Some(&key)).unwrap(),
+        p.seq()
+    );
+    std::fs::copy(&backup, &image).unwrap();
+    let e = shared.verify().unwrap_err().to_string();
+    assert!(
+        e.contains("sealed as a backup, read as an archive's image"),
+        "{e}"
+    );
+    assert!(shared.restore(&d.join("end.fennec"), Target::End).is_err());
+}
+
+/// An archiver of `arch` sealing with `key` on its own thread, the archive
+/// it writes through shared: what it takes images of is its own.
+fn sealed_follow(
+    arch: &Path,
+    url: &str,
+    key: &fennec_http::seal::Key,
+) -> (
+    Arc<Archive>,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<std::io::Result<()>>,
+) {
+    let shared = Arc::new(Archive::with_key(arch, Some(key.clone())).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), url.to_string());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    (shared, stop, done)
 }
 
 /// A primary restored to an earlier moment and served again is on a history

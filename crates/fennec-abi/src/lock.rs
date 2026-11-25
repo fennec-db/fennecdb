@@ -117,8 +117,11 @@ impl Sink for Holding {
     fn side(&self) -> Option<std::path::PathBuf> {
         self.sink.side()
     }
-    fn adopt(&mut self, side: &std::path::Path) -> CoreResult<()> {
-        self.sink.adopt(side)
+    fn image_side(&self) -> Option<std::path::PathBuf> {
+        self.sink.image_side()
+    }
+    fn adopt(&mut self, side: &std::path::Path, written: &File) -> CoreResult<()> {
+        self.sink.adopt(side, written)
     }
     fn sync_existing(&mut self) -> CoreResult<()> {
         self.sink.sync_existing()
@@ -307,23 +310,68 @@ pub fn waiting_for(path: impl AsRef<std::path::Path>) -> bool {
     lock_waiting().contains(&name)
 }
 
+/// Gives `lock`, a lock file just made (`made` its metadata), the bits of
+/// `db`'s mode a class -- the group, the others -- has where it may write
+/// `db`, as `fennec_core::fs::kept_mode` reads them (none where `db` is
+/// another user's, a group's only where the lock is of `db`'s group): whoever
+/// an operator let write the database opens its lock. A class that may only
+/// read it gets none: a reader opening the lock could take a read lock on
+/// it, which refuses the server's next start, and no reader needs it
+/// (`--read-only` takes none). Before, the lock took the database's whole
+/// mode, and a backup group given `chmod 640` could hold a server's start.
+#[cfg(unix)]
+fn writers_mode(
+    lock: &File,
+    made: &std::fs::Metadata,
+    db: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mode) = fennec_core::fs::kept_mode(made, &std::fs::metadata(db)?) else {
+        return Ok(());
+    };
+    let mut want = mode & 0o700;
+    if mode & 0o020 != 0 {
+        want |= mode & 0o070;
+    }
+    if mode & 0o002 != 0 {
+        want |= mode & 0o007;
+    }
+    if made.permissions().mode() & 0o777 != want {
+        lock.set_permissions(std::fs::Permissions::from_mode(want))?;
+    }
+    Ok(())
+}
+
 /// Takes the lock file `name` no lock of this process holds, under
 /// [`LOCKED`]'s guard.
 fn take(
     name: std::path::PathBuf,
     mut locked: MutexGuard<'_, Vec<Key>>,
 ) -> Result<FileLock, Refused> {
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&name)
-        .map_err(Refused::Io)?;
+    // Made its owner's alone, as every file is, and never opened through a
+    // link put at its name, whose file the holder's line would go into
+    // (`fennec_core::fs::private_beside`).
+    let lock = fennec_core::fs::private_beside(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(&name)
+    .map_err(Refused::Io)?;
     let meta = lock.metadata().map_err(Refused::Io)?;
     let key = key_of(&lock, &meta).map_err(Refused::Io)?;
     #[cfg(any(unix, windows))]
     record::take(&lock)?;
+    // Made just now -- a holder writes its line at once -- it takes the
+    // mode of the database it guards, there already, for those who may
+    // write it (`writers_mode`). One there keeps its own. Missed, the lock
+    // is only narrower.
+    #[cfg(unix)]
+    if meta.len() == 0 {
+        let _ = writers_mode(&lock, &meta, &name.with_extension(""));
+    }
     locked.push(key);
     // Written only now, under the lock: before it, the line was the
     // holder's to keep. Over the old one in place, and cut only where that
@@ -542,6 +590,9 @@ mod record {
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pub fn take(file: &File) -> Result<(), super::Refused> {
         let l = whole();
+        // SAFETY: the descriptor is `file`'s, open across the call; `l` is
+        // a whole `struct flock` as this system lays it out (above), which
+        // `F_SETLK` reads and keeps no pointer to.
         match unsafe { fcntl(file.as_raw_fd(), F_SETLK, &l as *const Flock) } {
             0 => Ok(()),
             _ => Err(super::Refused::Held),
@@ -553,6 +604,8 @@ mod record {
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pub fn holder(file: &File) -> Option<Option<i32>> {
         let mut l = whole();
+        // SAFETY: as in `take`; `F_GETLK` writes the holder's `struct flock`
+        // back into `l`, writable and of that very layout.
         if unsafe { fcntl(file.as_raw_fd(), F_GETLK, &mut l as *mut Flock) } != 0 {
             return None;
         }
@@ -566,6 +619,8 @@ mod record {
         }
         const LOCK_EX: i32 = 2;
         const LOCK_NB: i32 = 4;
+        // SAFETY: the descriptor is `file`'s, open across the call; no
+        // pointer is passed.
         match unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } {
             0 => Ok(()),
             _ => Err(super::Refused::Held),
@@ -769,6 +824,170 @@ pub fn file_id(path: &std::path::Path) -> std::io::Result<(u64, u128, std::time:
 mod tests {
     use super::*;
 
+    /// A lock file made is its owner's alone whatever the umask -- 022,
+    /// the usual one, and 000, the widest, each set by `sh` for a child
+    /// running this test alone, since the umask is the process's and the
+    /// tests beside this one on cargo's threads make files too -- and one
+    /// made beside a database takes that file's mode, so whoever may write
+    /// the database may open its lock; one there keeps its own. Up to 0.2.0
+    /// it took the umask's: 0644, 0666.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_is_made_its_owners_alone_or_as_its_database() {
+        use std::os::unix::fs::PermissionsExt;
+        const UMASK: &str = "FENNEC_TEST_UMASK";
+        fn mode(p: &str) -> u32 {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+        let Ok(mask) = std::env::var(UMASK) else {
+            for mask in ["022", "000"] {
+                let child = std::process::Command::new("/bin/sh")
+                    .args(["-c", "umask \"$0\" && exec \"$@\"", mask])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "lock::tests::a_lock_file_is_made_its_owners_alone_or_as_its_database",
+                        "--exact",
+                        "--test-threads=1",
+                    ])
+                    .env(UMASK, mask)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                // Its output once it exits, or killed past two minutes: a
+                // child that hangs fails the test with what it printed.
+                let pid = child.id().to_string();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || tx.send(child.wait_with_output().unwrap()));
+                let out = rx
+                    .recv_timeout(Duration::from_secs(120))
+                    .unwrap_or_else(|_| {
+                        let _ = std::process::Command::new("kill")
+                            .args(["-KILL", &pid])
+                            .status();
+                        let out = rx.recv().unwrap();
+                        panic!(
+                            "under umask {mask}, killed past two minutes:\n{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    });
+                let said = String::from_utf8_lossy(&out.stdout);
+                assert!(
+                    out.status.success() && said.contains("1 passed"),
+                    "under umask {mask}:\n{said}{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            return;
+        };
+        let mask = u32::from_str_radix(&mask, 8).unwrap();
+        let path = scratch("modes.fennec");
+        let lock = format!("{path}.lock");
+        // The umask is the one asked: a plain create takes it.
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(mode(&path), 0o666 & !mask, "the child's umask");
+        std::fs::remove_file(&path).unwrap();
+
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o600, "a lock file made before its database");
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o600, "a lock file there");
+
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o660, "a lock file made beside its database");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o640)).unwrap();
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o640, "a lock file there keeps its mode");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A lock file made beside a database takes of the database's mode
+    /// only what a class that may write the database has: a group or the
+    /// others that may only read it get none of the lock, which they could
+    /// open and hold a read lock on, refusing the server's next start; a
+    /// group's bits only where the lock is of the database's group; and a
+    /// link put at the lock's name is never opened through. Up to this fix
+    /// the lock took the database's whole mode, whatever its group, and the
+    /// holder's line went into the file a link there named.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_is_given_only_to_those_who_may_write_its_database() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        fn mode(p: &str) -> u32 {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+        let chmod = |p: &str, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let path = scratch("writers.fennec");
+        let lock = format!("{path}.lock");
+        for (db, want) in [
+            (0o600, 0o600),
+            (0o640, 0o600),
+            (0o644, 0o600),
+            (0o604, 0o600),
+            (0o660, 0o660),
+            (0o664, 0o660),
+            (0o666, 0o666),
+        ] {
+            let _ = std::fs::remove_file(&lock);
+            std::fs::write(&path, b"").unwrap();
+            chmod(&path, db);
+            drop(hold(&path).unwrap());
+            assert_eq!(mode(&lock), want, "a lock made beside a database {db:o}");
+        }
+
+        // A database of a group the lock is not made with: the group's
+        // bits stay with that group.
+        std::fs::remove_file(&lock).unwrap();
+        let made = std::fs::metadata(&path).unwrap().gid();
+        let other = std::process::Command::new("id")
+            .arg("-G")
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .filter_map(|g| g.parse::<u32>().ok())
+                    .filter(|&g| g != made)
+                    .find(|&g| std::os::unix::fs::chown(&path, None, Some(g)).is_ok())
+            });
+        match other {
+            Some(g) => {
+                chmod(&path, 0o660);
+                drop(hold(&path).unwrap());
+                let m = std::fs::metadata(&lock).unwrap();
+                assert!(
+                    m.gid() == g || m.permissions().mode() & 0o070 == 0,
+                    "a lock of group {} given the writes of group {g}: {:o}",
+                    m.gid(),
+                    m.permissions().mode() & 0o777
+                );
+                std::fs::remove_file(&lock).unwrap();
+            }
+            None => eprintln!(
+                "skipped a lock beside a database of another group: the user running the tests \
+                 is in no group but {made} (`id -G`)"
+            ),
+        }
+
+        // A link at the lock's name: refused, the file it names untouched.
+        let target = format!("{path}.elsewhere");
+        std::fs::write(&target, b"another file").unwrap();
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(hold(&path).is_err(), "a lock taken through a link");
+        assert_eq!(std::fs::read(&target).unwrap(), b"another file");
+        for f in [&lock, &target, &path] {
+            std::fs::remove_file(f).unwrap();
+        }
+    }
+
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("fennec-abi-lock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -884,6 +1103,106 @@ mod tests {
             other.wait().unwrap();
             drop(hold(&p).expect("let go with the other process"));
         }
+    }
+
+    /// A side file a crash left beside a database goes as the database is
+    /// opened to be written (`fennec_core::fs::LEFT_BESIDE`), but not one
+    /// with a lock file beside it, held or not: no writer of ours makes one
+    /// there, so it is a database a user named so. Held by another process,
+    /// it stays as it was, and its holder keeps the lock -- this process's
+    /// hold is refused after the open, the lock file looked at, never
+    /// opened. Let go, its lock file left as a close or a crash leaves one,
+    /// it stays all the same, said kept at each open. Its lock file gone, it
+    /// goes, said with its size, beside a `.saving` with no lock file,
+    /// beside which none is made, and, on a Unix, a link at `.taking` to the
+    /// database itself, whose lock the opener holds: a link goes as a link,
+    /// no lock looked at. Without the look at the lock file, the first open
+    /// fails it.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_side_file_with_a_lock_file_beside_it_stays() {
+        use fennec_core::fs::Swept;
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let p = scratch("swept.fennec");
+        let (side, saving) = (format!("{p}.beside"), format!("{p}.saving"));
+        let kept = b"a database a user named so";
+        let said = |at: &str, bytes: usize, kept: bool| Swept {
+            path: at.into(),
+            bytes: bytes as u64,
+            kept,
+        };
+        // The database's own lock first, as every writer takes it before
+        // its open.
+        let ours = hold(&p).unwrap();
+        std::fs::write(&side, kept).unwrap();
+        let mut other = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lock::tests::holds_for_another_process"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(HOLD, &side)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(other.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains(HELD) {
+            line.clear();
+            let read = out.read_line(&mut line).unwrap();
+            assert!(read > 0, "the other process ended before it held the lock");
+        }
+        let held = [said(&side, kept.len(), true)];
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &held[..], "held by another process");
+        drop(db);
+        assert_eq!(
+            std::fs::read(&side).unwrap(),
+            kept,
+            "held by another process"
+        );
+        assert!(
+            matches!(hold(&side), Err(Refused::Held)),
+            "the other process's lock let go"
+        );
+        drop(other.stdin.take());
+        other.wait().unwrap();
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &held[..], "let go");
+        drop(db);
+        assert_eq!(std::fs::read(&side).unwrap(), kept, "let go");
+        std::fs::remove_file(format!("{side}.lock")).unwrap();
+        let part = b"part of a .save";
+        std::fs::write(&saving, part).unwrap();
+        let mut want = Vec::new();
+        #[cfg(unix)]
+        {
+            let link = format!("{p}.taking");
+            std::os::unix::fs::symlink(&p, &link).unwrap();
+            want.push(said(&link, p.len(), false));
+        }
+        want.extend([
+            said(&side, kept.len(), false),
+            said(&saving, part.len(), false),
+        ]);
+        let db = fennec_core::fs::open(&p).unwrap();
+        assert_eq!(db.swept_on_open(), &want[..], "no lock file");
+        drop(db);
+        assert!(
+            std::path::Path::new(&p).is_file(),
+            "the database a link named"
+        );
+        assert!(
+            std::fs::symlink_metadata(&side).is_err(),
+            "no lock file: it stayed"
+        );
+        assert!(
+            std::fs::symlink_metadata(&saving).is_err(),
+            "no lock file: .saving stayed"
+        );
+        let made = std::path::Path::new(&format!("{saving}.lock")).exists();
+        assert!(!made, "a lock file made beside a side file");
+        drop(ours);
     }
 
     #[test]
@@ -1027,7 +1346,11 @@ mod tests {
                 self.note("side");
                 None
             }
-            fn adopt(&mut self, _: &std::path::Path) -> CoreResult<()> {
+            fn image_side(&self) -> Option<std::path::PathBuf> {
+                self.note("image_side");
+                None
+            }
+            fn adopt(&mut self, _: &std::path::Path, _: &File) -> CoreResult<()> {
                 self.ok("adopt")
             }
             fn sync_existing(&mut self) -> CoreResult<()> {
@@ -1065,7 +1388,12 @@ mod tests {
         assert!(s.syncing());
         s.land(1, &[], b"").unwrap();
         s.side();
-        s.adopt(std::path::Path::new("x")).unwrap();
+        s.image_side();
+        s.adopt(
+            std::path::Path::new("x"),
+            &File::open(lock_path(&p)).unwrap(),
+        )
+        .unwrap();
         s.sync_existing().unwrap();
         s.write_out().unwrap();
         s.write_behind(true);
@@ -1083,6 +1411,7 @@ mod tests {
             "syncing",
             "land",
             "side",
+            "image_side",
             "adopt",
             "sync_existing",
             "write_out",

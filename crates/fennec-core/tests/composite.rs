@@ -903,6 +903,63 @@ fn a_schema_holding_an_index_over_too_few_or_too_many_fields_is_refused() {
     ));
 }
 
+/// A create holds an index over several fields to the parts a file's
+/// schema is read with, whoever built the schema: one pushed into it in
+/// code past `add_composite` -- a schema's fields are public -- was written
+/// as handed, one part or nine, and the file refused at its next open (the
+/// fuzz fix's third review's check). Two parts pushed so are created and
+/// read back: the create does not ask whether one over the same fields is
+/// there, which is the index itself.
+#[test]
+fn a_create_holds_an_index_built_in_code_to_the_parts_a_file_is_read_with() {
+    let Statement::CreateCollection { schema, .. } = stmt_of(
+        "create collection s (a int, b int, c int, d int, e int, f int, g int, h int, i int)",
+    ) else {
+        panic!()
+    };
+    let with = |parts: usize| {
+        let mut s = schema.clone();
+        s.composites.push(fennec_core::schema::Composite {
+            keys: s.fields[..parts]
+                .iter()
+                .map(|f| (f.name.clone(), false))
+                .collect(),
+            unique: false,
+        });
+        s
+    };
+    for (parts, says) in [
+        (
+            1,
+            "an index of one field is that field's own: `@sorted`, which walks both ways, \
+             or `@unique`",
+        ),
+        (9, "an index takes at most 8 fields, not 9"),
+    ] {
+        let mut db = Database::new();
+        match db.execute(&Statement::CreateCollection {
+            schema: with(parts),
+            if_not_exists: false,
+        }) {
+            Err(Error::Query(m)) => assert_eq!(m, says),
+            other => panic!("{parts} parts: created {:?}", other.map(|_| ())),
+        }
+        assert!(db.collection_names().is_empty(), "{parts} parts");
+    }
+    let mut db = Database::new();
+    db.execute(&Statement::CreateCollection {
+        schema: with(2),
+        if_not_exists: false,
+    })
+    .unwrap();
+    let mut back = Database::new();
+    back.load(&db.snapshot()).unwrap();
+    assert_eq!(
+        back.collection("s").unwrap().schema.composites,
+        with(2).composites
+    );
+}
+
 fn stmt_of(text: &str) -> Statement {
     fennec_ql::parse_one(text).unwrap()
 }

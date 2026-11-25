@@ -15,6 +15,10 @@ use std::sync::{Arc, Mutex};
 
 const LEVELS: usize = 100_000;
 const REC_DATA: u8 = 3;
+const REC_NEXTID: u8 = 7;
+const REC_BLOCK: u8 = 9;
+const REC_SPILL: u8 = 10;
+const REC_LAND: u8 = 11;
 const DEEP: &str = "a value nests more than 64 levels deep";
 
 /// Every record a database appends, in order.
@@ -91,6 +95,25 @@ fn file(records: &[Vec<u8>]) -> Vec<u8> {
         f.extend_from_slice(r);
     }
     f
+}
+
+/// Where the body of the record at the front of `record` starts, past its
+/// kind, collection id and length, checked or not.
+fn body_at(record: &[u8]) -> usize {
+    let mut p = 1;
+    get_uvarint(record, &mut p).unwrap();
+    get_uvarint(record, &mut p).unwrap();
+    p
+}
+
+/// A record as a block, a spill or a land holds it: plain, no claim and no
+/// sum.
+fn inner(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
+    let mut r = vec![kind];
+    put_uvarint(&mut r, cid as u64);
+    put_uvarint(&mut r, body.len() as u64);
+    r.extend_from_slice(body);
+    r
 }
 
 #[test]
@@ -221,6 +244,206 @@ fn a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied
         assert_eq!(memory.load(&torn).unwrap(), whole);
         assert_eq!(rows(&memory), 1);
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A frame whose op is neither a put (1) nor a del (2) -- a later
+/// version's, or damage the replay reads unchecked -- is refused by its
+/// byte and its place in the file wherever the file holds it: a data record
+/// of its own, a block's, a spill's and a land's, each replayed from where
+/// its bytes lie (`load_from`'s `at`, `load_block`'s inner records), read
+/// into memory and mapped. A replica refuses it before it lands, the block
+/// put back whole, and a mapped database handed an image walks it where
+/// its file then holds it (`repoint_at`). Replayed as a frame that changed
+/// nothing, as every release through 0.2.0 did, it left the version before
+/// it counted dead with the index still pointing at it, and the next
+/// compact dropped the frame with no word.
+#[test]
+fn a_frame_of_an_op_neither_a_put_nor_a_del_is_refused_where_a_file_is_opened_and_applied() {
+    let (create, cid) = made("create collection d (n int)", "put d {n: 1}");
+    let mut n = Vec::new();
+    fennec_core::codec::encode_value(&mut n, &Value::Int(1));
+    // A whole put of document 1, then a frame of op 3 over it, `third` bytes
+    // into the record.
+    let (mut body, mut third) = (Vec::new(), 0);
+    for op in [fennec_core::store::OP_PUT, 3] {
+        third = body.len();
+        body.push(op);
+        put_uvarint(&mut body, 1);
+        put_uvarint(&mut body, n.len() as u64);
+        body.extend_from_slice(&n);
+    }
+    // Where the records after the create start in the file, and where the
+    // frame starts in the data record a block, a spill or a land holds.
+    let from = file(&create).len();
+    let data = inner(REC_DATA, cid, &body);
+    let in_data = body_at(&data) + third;
+    let alone = fennec_core::engine::record(REC_DATA, cid, &body);
+    let block = fennec_core::engine::record(REC_BLOCK, 0, &data);
+    let spill = fennec_core::engine::record(REC_SPILL, 0, &data);
+    let mut named = Vec::new();
+    for v in [1, from + body_at(&spill), data.len()] {
+        put_uvarint(&mut named, v as u64);
+    }
+    let land = fennec_core::engine::record(REC_LAND, 0, &named);
+    let landed = fennec_core::engine::record(REC_LAND, 0, &[&[0u8][..], &data[..]].concat());
+    // Each way: the records after the create, where in them the frame
+    // starts, and the record a primary's feed sends of them.
+    let ways = [
+        (
+            "a data record",
+            vec![alone.clone()],
+            body_at(&alone) + third,
+            alone.clone(),
+        ),
+        (
+            "a block",
+            vec![block.clone()],
+            body_at(&block) + in_data,
+            block,
+        ),
+        (
+            "a spill",
+            vec![spill.clone(), land.clone()],
+            body_at(&spill) + in_data,
+            fennec_core::engine::landed_block(&[&data], &land).unwrap(),
+        ),
+        (
+            "a land",
+            vec![landed.clone()],
+            body_at(&landed) + 1 + in_data,
+            fennec_core::engine::landed_block(&[], &landed).unwrap(),
+        ),
+    ];
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-op-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    for (i, (what, records, at, fed)) in ways.iter().enumerate() {
+        let said = format!("unknown write op 3 at {}", from + at);
+        let refused = |r: Result<()>| match r {
+            Err(Error::Corrupt(m)) => assert_eq!(m, said, "{what}"),
+            other => panic!("{what}: {other:?}"),
+        };
+        let bytes = file(&[&create[..], &records[..]].concat());
+        refused(Database::new().load(&bytes).map(drop));
+        let path = dir.join(format!("{i}.fennec"));
+        std::fs::write(&path, &bytes).unwrap();
+        refused(fennec_core::fs::open(&path).map(drop));
+
+        let mut replica = Database::new();
+        replica.apply(&create.concat()).unwrap();
+        match replica.apply(fed) {
+            Err(Error::Corrupt(m)) => {
+                assert_eq!(m, "a write op 3 is neither a put nor a del", "{what}")
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+        assert_eq!(rows(&replica), 0, "{what}");
+    }
+
+    // A mapped database handed an image to adopt walks it once it is its
+    // file, no places coming with it (`repoint_at`): handed one other than
+    // the image its new contents were loaded from, which no caller does,
+    // the walk meets the frame where the file holds it.
+    let path = dir.join("adopt.fennec");
+    std::fs::write(&path, file(&create)).unwrap();
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    if db.is_mapped() {
+        let mut fresh = Database::new();
+        fresh.load(&file(&create)).unwrap();
+        match db.adopt(fresh, &file(&[&create[..], &[alone.clone()][..]].concat())) {
+            Err(Error::Corrupt(m)) => assert_eq!(
+                m,
+                format!("unknown write op 3 at {}", from + body_at(&alone) + third)
+            ),
+            other => panic!("adopt: {other:?}"),
+        }
+    }
+    drop(db);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An image's index of its data record, behind the id counter (kind 7), is
+/// taken by a mapped open in the place of the walk where its first byte is a
+/// mark this build knows, and reads no frame's op: reading each frame's head
+/// is the cost it removes. A frame of op 3 there is served as the put its
+/// entry says. A version that adds an op writes its images' index under a
+/// mark of its own (crates/fennec-core/CLAUDE.md's file format), which
+/// `Store::adopt_index` passes over: the open walks the record, mapped and
+/// read-only, and the walk refuses the frame by its byte and its place.
+/// Read into memory, the walk reads every op whatever the mark.
+#[test]
+fn an_image_index_under_a_mark_this_build_does_not_know_leaves_its_record_to_the_walk() {
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-mark-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("image.fennec");
+    let mapped = {
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        exec(&mut db, "create collection d (n int)");
+        exec(&mut db, "put d {n: 1}");
+        exec(&mut db, "put d {n: 2}");
+        db.checkpoint().unwrap();
+        db.is_mapped()
+    };
+    let image = std::fs::read(&path).unwrap();
+    // The index's mark and the data record's first op, found by stepping
+    // over each record's head past the change counter's, 17 bytes.
+    let (mut mark, mut op) = (None, None);
+    let mut at = fennec_core::engine::MAGIC.len() + 17;
+    while at < image.len() {
+        let mut p = at + 1;
+        get_uvarint(&image, &mut p).unwrap();
+        let len = get_uvarint(&image, &mut p).unwrap() as usize;
+        if let Some(counter) = fennec_core::engine::record_body(&image[at..], REC_NEXTID) {
+            let mut q = 0;
+            get_uvarint(counter, &mut q).unwrap();
+            mark = Some(p + q);
+        }
+        if fennec_core::engine::record_body(&image[at..], REC_DATA).is_some() {
+            op = op.or(Some(p));
+        }
+        at = p + len;
+    }
+    let (mark, op) = (mark.expect("an index"), op.expect("a data record"));
+    assert_eq!(image[mark], fennec_core::store::FRAMES_SPLIT);
+    assert_eq!(image[op], fennec_core::store::OP_PUT);
+    // Each byte at `at` made 3, its record summed again: whole, so what it
+    // holds is read rather than cut as torn.
+    let damaged = |at: &[usize]| {
+        let mut f = image.clone();
+        for &a in at {
+            f[a] = 3;
+            assert!(fennec_core::engine::resum(&mut f, a));
+        }
+        std::fs::write(&path, &f).unwrap();
+        f
+    };
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    let said = format!("unknown write op 3 at {op}");
+    let refused = |r: Result<()>, how: &str| match r {
+        Err(Error::Corrupt(m)) => assert_eq!(m, said, "{how}"),
+        other => panic!("{how}: {other:?}"),
+    };
+
+    let op3 = damaged(&[op]);
+    match mapped {
+        true => assert_eq!(rows(&fennec_core::fs::open(&path).unwrap()), 2),
+        false => refused(fennec_core::fs::open(&path).map(drop), "not mapped"),
+    }
+    refused(
+        fennec_core::fs::open_in_memory(&path).map(drop),
+        "in memory",
+    );
+    refused(Database::new().load(&op3).map(drop), "loaded");
+
+    damaged(&[mark]);
+    assert_eq!(rows(&fennec_core::fs::open(&path).unwrap()), 2);
+    damaged(&[mark, op]);
+    refused(fennec_core::fs::open(&path).map(drop), "mapped");
+    refused(
+        fennec_core::fs::open_read_only(&path).map(drop),
+        "read-only",
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -381,10 +604,11 @@ fn a_record_naming_a_collection_no_create_gives_is_refused_where_a_file_is_opene
 /// and holding one vector had the open's index ask for 2^41 links a node,
 /// and the process was killed. No `create` makes such a field --
 /// `Schema::new` asks the decoder's own test (`schema::out_of_range`), a
-/// list's dimension too -- so one a version before made is refused alike,
-/// a list of vectors past the range among them, which `Schema::new` and
-/// SQL's `vector(1000000001)[]` took until the check held a list's
-/// dimension as the decoder does: fennecdb is alpha.
+/// list's dimension too, and a create asks it again of a schema built past
+/// `Schema::new` (`Schema::readable`) -- so one a version before made is
+/// refused alike, a list of vectors past the range among them, which
+/// `Schema::new` and SQL's `vector(1000000001)[]` took until the check
+/// held a list's dimension as the decoder does: fennecdb is alpha.
 #[test]
 fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_applied() {
     let hnsw = |dim: usize, m: usize| {
@@ -423,30 +647,29 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
     .enumerate()
     {
         // Made as no `create` makes it -- `Schema::new` refuses the field,
-        // with the words the open refuses it with -- and as a crafted file
-        // or a version before holds it: a create takes the schema it is
-        // handed, and its record is the file's.
+        // with the words the open refuses it with, and so does a create of
+        // a schema it was pushed into past `Schema::new` -- and as a crafted
+        // file or a version before holds it: the create's record by hand.
         let written = Schema::new("w", vec![Field::new("n", DataType::Int), field.clone()]);
         match written {
             Err(Error::Type(m)) => assert_eq!(m, says),
             other => panic!("{says}: written {:?}", other.map(|_| ())),
         }
-        let sink = Records::default();
-        let mut db = Database::with_sink(Box::new(sink.clone()));
         let mut schema = Schema::new("w", vec![Field::new("n", DataType::Int)]).unwrap();
         schema.fields.push(field);
-        db.execute(&Statement::CreateCollection {
-            schema,
+        let mut db = Database::new();
+        match db.execute(&Statement::CreateCollection {
+            schema: schema.clone(),
             if_not_exists: false,
-        })
-        .unwrap();
-        let mut records = sink.0.lock().unwrap().clone();
-        // The create's record, kind 1 in a checked record's low five bits:
-        // `[kind][cid][len]`.
-        let create = records.iter().find(|r| r[0] & 0x1f == 1).expect("a create");
-        let cid = get_uvarint(create, &mut 1).unwrap() as u32;
-        // And a document holding a vector, put by hand: the in-memory
-        // database above would build the index it names.
+        }) {
+            Err(Error::Type(m)) => assert_eq!(m, says),
+            other => panic!("{says}: created {:?}", other.map(|_| ())),
+        }
+        assert!(db.collection_names().is_empty(), "{says}");
+        let cid = 1;
+        let mut records = vec![fennec_core::engine::record(1, cid, &schema.encode())];
+        // And a document holding a vector, its record by hand as the
+        // create's is: no database holds the collection to put it into.
         let mut doc = Vec::new();
         fennec_core::codec::encode_value(&mut doc, &Value::Int(1));
         fennec_core::codec::encode_value(&mut doc, &Value::Vector(vec![1.0, 2.0]));
@@ -462,5 +685,66 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
         refused(fennec_core::fs::open(&path).map(|_| ()));
         refused(Database::new().apply(&records.concat()).map(|_| ()));
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A point is a level of its field's type, as it is of the value it reads
+/// as: 64 lists around one are a type 65 levels deep, which `Schema::new`
+/// and a create refuse, and a file declaring it is refused for, read into
+/// memory, mapped and applied by a replica. Read off the bytes as it was,
+/// the schema opened, and every row's point was then refused at each read
+/// (the fuzz fix's second review). 63 lists down -- the most a write makes
+/// -- a file opens and its row reads back. A version before bounded no
+/// type's depth, so such a field one made is refused at the open as
+/// damage: fennecdb is alpha.
+#[test]
+fn a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied() {
+    let around = |lists: usize| (0..lists).fold(DataType::Geo, |t, _| DataType::List(Box::new(t)));
+    let brackets = |n: usize, inner: &str| format!("{}{inner}{}", "[".repeat(n), "]".repeat(n));
+    let sink = Records::default();
+    let mut db = Database::with_sink(Box::new(sink.clone()));
+    exec(
+        &mut db,
+        &format!("create collection g (p {})", brackets(63, "geo")),
+    );
+    // Parsed for the database, whose field reads the point's numbers as
+    // written.
+    let put = format!("put g {{p: {}}}", brackets(64, "13.4, 52.5"));
+    db.execute(&fennec_ql::parse_one_for(&db, &put).unwrap())
+        .unwrap();
+    let mut back = Database::new();
+    back.load(&file(&sink.0.lock().unwrap())).unwrap();
+    let written = query(&db, "get g").unwrap();
+    assert_eq!(query(&back, "get g").unwrap(), written);
+
+    let says = "`p`: a type nests at most 64 levels, a list one and a point one";
+    match Schema::new("g", vec![Field::new("p", around(64))]) {
+        Err(Error::Type(m)) => assert_eq!(m, says),
+        other => panic!("written: {:?}", other.map(|_| ())),
+    }
+    // Nor does a create of a schema it was pushed into past `Schema::new`,
+    // whose fields are public: taken as handed, it was written, and the
+    // file refused at its next open (the third review).
+    let mut schema = Schema::new("g", vec![Field::new("n", DataType::Int)]).unwrap();
+    schema.fields.push(Field::new("p", around(64)));
+    let mut db = Database::new();
+    match db.execute(&Statement::CreateCollection {
+        schema: schema.clone(),
+        if_not_exists: false,
+    }) {
+        Err(Error::Type(m)) => assert_eq!(m, says),
+        other => panic!("created: {:?}", other.map(|_| ())),
+    }
+    assert!(db.collection_names().is_empty());
+    // Made as a crafted file or a version before holds it: the create's
+    // record by hand.
+    let records = vec![fennec_core::engine::record(1, 1, &schema.encode())];
+    deep_refusal(Database::new().load(&file(&records)));
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-point-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("deep.fennec");
+    std::fs::write(&path, file(&records)).unwrap();
+    deep_refusal(fennec_core::fs::open(&path).map(|_| ()));
+    deep_refusal(Database::new().apply(&records.concat()).map(|_| ()));
     std::fs::remove_dir_all(&dir).unwrap();
 }

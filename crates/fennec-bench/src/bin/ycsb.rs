@@ -2131,6 +2131,9 @@ fn major_faults() -> u64 {
         rest: [0; 14],
     };
     // RUSAGE_SELF.
+    // SAFETY: the struct is a whole `struct rusage` of 64-bit Linux and macOS
+    // -- two `timeval`s of two words, then fourteen longs -- writable, and the
+    // call keeps no pointer to it.
     unsafe { getrusage(0, &mut r) };
     r.rest[5] as u64
 }
@@ -2537,8 +2540,8 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                     ));
                     continue;
                 }
-                for f in 0..FIELDS {
-                    if !may_hold(model, (*key, f as u8), *s, *e, got.1[f]) {
+                for (f, &held) in got.1.iter().enumerate() {
+                    if !may_hold(model, (*key, f as u8), *s, *e, held) {
                         v.wrong(format!(
                             "read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
                         ));

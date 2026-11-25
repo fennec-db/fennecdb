@@ -72,14 +72,31 @@ sink, at which `tests/behind.rs` holds the write behind or fails it, and
 the library's code grew 512 bytes. The Kotlin binding's JNI
 functions are the library's (feature `jni`), four entries of the JNI table
 by hand, a call one `byte[]` -- its code, its JSON -- and text as UTF-8
-bytes, since JNI's modified UTF-8 splits an emoji. Each binding runs its
+bytes, since JNI's modified UTF-8 splits an emoji. A `byte[]`'s length is
+a Java `int`: an answer it cannot hold, 2 GiB or more with its code, is a
+query error naming its length (`array_len`), what the statement wrote
+standing. Up to 0.2.0 (from 0.1.8) the length was cast to the `int`
+unchecked, so such an answer went over as a negative length -- an
+exception the VM threw where Kotlin reads a code -- or, from 4 GiB, as its length past a multiple of 4
+GiB, the answer cut to it (1.0's review); the unit test holds the check on
+the length, as no test allocates 2 GiB. Below the check the VM may refuse
+the array itself: HotSpot makes no `byte[]` of `i32::MAX - 1` or
+`i32::MAX` bytes, and ART none past its heap, so those answers come back as
+the `OutOfMemoryError` `NewByteArray` throws, never cut short. The JNI functions' own work --
+reading their arrays, making the answer -- ran outside `call`'s
+`catch_unwind`, and a panic leaving an `extern "system"` function aborts
+the process: each now runs under one (`guarded`), a panic answered as
+`call` answers one, `FENNEC_PANIC` and its message; a stand-in `JNIEnv` of
+the two table entries an answer takes holds both without a JVM
+(`crates/fennec-ffi/src/jni.rs`'s tests, which `cargo test -p fennec-ffi`
+builds without the feature). Each binding runs its
 calls off the main thread (a dispatch queue, `Dispatchers.IO`, a worker
 isolate a database), sends a vector as its `f32` bytes and a json field's
 `exact` refusal again as JSON, holds its builder to every golden case, and
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 3.07 MB stripped on aarch64-apple-darwin, 3.52 on
+the shared one 4% larger. 3.12 MB stripped on aarch64-apple-darwin, 3.58 on
 x86_64 Linux with JNI (CI's figures, `integrations/ffi-sizes.md`, held by
 `site/build.py`), the sync (below) 165 and 198 KB of them, measured by hand
 when the libraries were 1.68 and 1.88 MB; a buffered put of a 128-dim vector 4.6 us against
@@ -221,10 +238,11 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 115 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 119 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
-past the horizon, the network's signal, a token, a provider that failed or
+past the horizon, a seed in parts and a stream dropped between them, the
+network's signal, a token, a provider that failed or
 never returns and the app's own token meanwhile, a stop, an answer held
 back until the script releases it (a stream's open or
 `GET /collections` answered after a token was handed over; given to no one
@@ -263,7 +281,8 @@ never saw, an insert the shape did not hold kept its row until the next
 seed, a seed cleared the collection and every pending row with it, a
 write made offline was gone with the page, and each tab sent its own
 writes. Its state is now the core's, in the replica: `_sync_shapes`,
-`_sync_queue` and `_sync_temps`, stored the moment a write is made
+`_sync_queue` and `_sync_temps` (and natively `_sync_seed`, a seed's parts:
+[Seeds in parts](#seeds-in-parts)), stored the moment a write is made
 (`persist`'s journal, or the file of an `openFile`d `local`); a follower
 tab applies its write and hands it to the leader, which keeps it in its
 own queue and tells every tab the answer, and a tab taking the lead reads
@@ -273,3 +292,58 @@ without which a page on another origin could not send the one or read the
 other. `fennec.js` grew 113.3 -> 132.5 KB, 31.1 -> 35.8 KB brotli -- 3.1 KB
 of it code, the rest the comments -- and the browser module did not change
 by a byte.
+
+## Seeds in parts
+
+**A seed's parts wait in the replica's file and land in one block.** A
+seed past a mebibyte comes in parts ([http.md](http.md#seeds-in-parts)).
+The core read one seed as one event: the stream's buffer held its line
+whole, it was parsed whole into documents, and the documents were written
+in one block -- a 300 000-row seed of 155-byte rows took the process to a
+542 MB footprint. Now each part but the last is kept as it came, a row of
+`_sync_seed` (`collection`, `part`, `rows`: its text) written in a block of
+its own (`Sync::seed`), so the stream's buffer holds a part. The last part
+lands them all in one block (`Sync::land`), the cursor in it: each kept
+part read back and parsed in turn, its rows written over the shape's
+collection, so a part's documents are in memory at a time; then what the
+replica holds and the seed does not deleted, but the rows of writes not
+yet answered, the temporary rows the seed answered dropped, and the parts
+deleted. The block spills past 16 MB ([storage.md](storage.md#spills));
+what it holds is what any block of those rows holds -- the rows in the
+store until it lands, no handover with a block open, and their undo.
+
+Nothing reads half a seed: the parts are in a collection of the sync's
+own, which no shape and no app reads, and the rows land in one block, which
+a read sees whole or not at all. A part out of turn -- not the next, or of
+another change -- is an error, which ends the stream; the stream opened
+again is seeded from its start, at the change it then reads. A stream that
+drops mid-seed leaves the rows as they were: its parts are deleted at the
+next event (`Sync::sweep`, `loose`), and any an earlier process left as
+the replica opens (`Sync::start`). A write the app makes while parts come
+is applied at once and queued, in a block of its own, and the landing keeps
+its row as a seed always kept one. A part is not resumed: the rows after a
+dropped stream's last part are of a pin that is gone, and a seed's
+deletions are told only by the whole of it.
+
+Rejected: the parts held in memory (the seed whole again, in a process an
+operating system may end for it); each part landed as it came (a read
+between two would see half a seed, and a drop would leave it); the rows
+written to a collection of their own and swapped in at the end (the store
+holds no rename of a collection, and the rows would be written twice
+anyway).
+
+Measured on an M1 (load under 2.5): a seed fed to the core over a file in
+64 KB pieces, as a binding hands them, the buffer written behind after
+each, as `fennec-ffi` does -- one event before, parts after -- from the
+first byte to the seed landed, the process's peak from `/usr/bin/time -l`,
+six runs a side in ABBA turns:
+
+| seed | time | peak footprint | resident peak |
+| --- | ---: | ---: | ---: |
+| 100 000 rows (15.5 MB) | 214.0 -> 205.9 ms | 193.4 -> 96.5 MB | 223.6 -> 98.3 MB |
+| 300 000 rows (46.7 MB) | 679.0 -> 628.8 ms | 542.3 -> 182.3 MB | 711.0 -> 217.5 MB |
+
+What is left is the block's: the rows in the store and their undo. A seed
+of one part is one event as before: `make sync-bench`'s seed of 10 000 rows
+took 15.0 and 13.7 ms before, 13.6 and 13.8 after (a text row), 71.8 and
+68.7 against 69.1 and 68.9 (a 128-dim vector under HNSW).

@@ -57,6 +57,31 @@ never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 and `EC` keys on P-256 for its ES256 (below), a `kid` picking the key; an
 RSA modulus taken for an HS256 secret would sign anything. The file is
 read again as it changes, looked at once a second, which is the rotation.
+Its time is kept only once a read of it took, so a file read half-written
+in place is read again once whole even under the same time; the read is
+one request's, the others going on with the keys as they are (`look`, a
+`try_lock`, never a wait); and a file that does not parse is read again
+as its time moves, or a minute after the read that failed
+(`JWKS_FAILED_AGAIN`): read again each second, it cost a request a read a
+second for as long as it failed, under the mutex every look takes -- on a
+slow mount, a stall a second, and the request in the next second waiting
+behind it (the review of the G14 fixes). A rotation written in place under
+one time is taken a minute late; the docs say to replace the file by a
+rename. The minute is a parse's alone: a file that could not be read --
+an error opening or reading it, a process out of descriptors under load,
+a mount gone stale -- says nothing of what it holds, and is read again at
+the next look, said once a modification time (`Seen::unread`). Held back
+the minute as the first shape held it, a rotation renamed in under a new
+time and met by such an error was taken a minute late, its new key's
+tokens refused and a key it took out verifying that long (the review of
+the fixes' second and third rounds).
+`access::tests::a_jwks_read_half_written_is_read_again_once_whole`
+holds the minute and the moved time with its clock given,
+`a_jwks_file_that_could_not_be_read_is_read_at_the_next_look` a directory
+in the file's place and the rotation under the time that look met, taken
+at the next look (before, a minute later), and
+`tests/access.rs`'s `a_jwks_file_rotated_by_a_rename_is_read_through_a_request`
+a rotation, a broken file and the next through a server's requests.
 A verified token is kept by its text (`verified`, 16 shards of 256,
 emptied when the keys change, `exp` asked each time): 0.27 us against 2.9
 for HS256.
@@ -826,11 +851,12 @@ module is the same to the byte.
 rule's reach** (`access::covers`, `access::own_refused`, `path_refusal`,
 `own_declared`, `fennec_core::declared::own` and `OWN`). The server keeps
 its bookkeeping in collections of its file: `_idempotency` (each
-`Idempotency-Key` under its subject, with the answer kept for it),
+`Idempotency-Key` under its caller, with the answer kept for it),
 `_consumers` (`/_changes`' cursors), `_migrations` (the migrations a
 schema declared in code ran), `--follow`'s `_follow`, a webhook consumer's
 `_hook_events` (F4, an event's key a row, `Database::take_event`), and in a synced replica's
-own file `_sync_shapes`, `_sync_queue` and `_sync_temps`. Most surfaces
+own file `_sync_shapes`, `_sync_queue`, `_sync_temps` and `_sync_seed`
+(the parts of a seed held aside until its last). Most surfaces
 held them out already by the name's `_` (`declared::own`): the description
 `/_schema` writes, `fennec types`, MCP's listing, a named statement's or a
 binding's body, the row quota. A rule did not: `*` matched every name

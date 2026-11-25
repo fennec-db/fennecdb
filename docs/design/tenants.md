@@ -44,7 +44,12 @@ install's renamed file, the create's made one -- and answers 500: kept, it
 was a file at the place that no router placed and none could take back by
 its identity, unstamped, which every install after it met as there (409).
 Each is removed under `<file>.lock`: the install's under the hold it took
-for the rename, the create's -- whose hold went with its database's sink --
+before it made its image's file beside the tenant's, with its claim of the
+name, held through the rename -- so that the file is the install's own, a
+second install, a create or a reclaim of the name refused at once, a 503
+naming its wait ([below](#an-install-under-way-is-no-file-there);
+[replication.md](replication.md#an-image-taken-as-it-arrives), the move's
+image) -- the create's -- whose hold went with its database's sink --
 under the lock taken again once the database is let go
 (`Tenants::take_back_made`, as `delete_unfrozen` removes a file), the file
 left where another process took the lock meanwhile. The #497 review found
@@ -408,7 +413,87 @@ its lineage (the review's `empty_refused.rs`). `{"force": true}` on `POST
 /_admin/tenants/<t>/promote` or `POST /_shard/nodes/<n>/failover` promotes
 whatever the copy holds, an audit event on each (`promote_forced`,
 `failover_forced`), and `promoted()` then records the other file's lineage
-as the tenant's, the one before among those it was. And a repair gives no
+as the tenant's, the one before among those it was. Every promotion goes
+through that route (`Tenants::promote_as`). A copy's own replication route,
+`/t/<t>/_replication/promote`, forked it with the replication token alone --
+every node of a `--replicas` region holds that token, so does every
+archiver, and a stand-in at a primary's address read it off a follow over
+plain HTTP -- past the lease's fence (`admin::superseded`), the lineage and
+history it is held to (`refusal`), `forget_following`, the identity, the
+node's stream and the audit: a standby forked unknown to the router, which
+counted it a standby still, and on a node without `--lease` took writes
+beside its primary. No router called it. A tenant node answers it 404, as
+any path it does not serve (`replication::handle_tenant`, G14's review,
+area D, a break before 1.0: [compatibility.md](compatibility.md)); a
+file's server and a router's directory keep theirs. Nor does a copy stop
+following any other way and stay promotable as though current: its
+follower ends for good only where its database failed -- its disk, or a
+panic that may have left it part way ([replication.md](replication.md#replication),
+`Changing`) -- whose fork every promotion is refused with, forced or not
+(500, named among a failover's `failed`), until the file is opened again;
+where its primary was of another lineage, the copy deleting itself; and at
+a halt, which a promotion forks after and a release closes the tenant or
+starts the follower again behind (`reopen_streams`). A copy whose follower
+runs but is behind -- its primary slow, or its images refused -- or is not
+connected -- reconnecting, its primary unreachable from it, or a stand-in
+on a plain-HTTP hop cutting its stream at will -- is promoted where it
+stands, the trade a failover makes; the router asks no position. So
+`--sync always` loses no write the copy was sent, and nothing more is
+promised: a durable write waits a `SENT_WAIT` at most for the streams
+keeping up and none for one lagging, reconnecting or failed, and what such
+a copy was not sent is lost with its primary, a write the primary answered
+among it (G14's review, area D, second round: the site said a failover
+under `--sync always` lost none, from 0.1.5 on). It is seen before it
+matters: a copy's status names `connected`, `behind` and
+`last_contact_ms`, and a node counts its copies a failover may promote --
+a standby's and a tenant's replica of its own, never a read replica's --
+not connected or with no follower running, and the most writes one is
+behind (`fennec_copies_disconnected`,
+`fennec_copies_behind`, `Tenants::stats`' `Copies`, never by tenant),
+which the kit's `FennecTenantCopiesDisconnected` (two minutes) and
+`FennecTenantCopiesBehind` (more than 1 000 writes for five) alert on,
+with promtool's tests in `deploy/alerts/fennecdb.rules.test.yml` and a
+RUNBOOK section of their own ("A copy not following"). A copy a failover
+may promote stays open whether its follower runs or not
+(`Tenants::promotable`, asked by `close` and the scrape alike): one whose
+follower ended -- its database failed -- was closed as idle after
+`--idle-close`, and one nothing follows for -- a standby's file on a node
+started without `--replica-of` -- once a request had opened it; closed,
+nothing opened either again but a request or the failover, and the
+scrape, which reads open tenants alone (a closed one's role is in its
+file), counted it no more, `FennecTenantCopiesDisconnected` resolving while
+it followed nothing (the review's third round). Counting closed copies
+instead would have the scrape open files, or the registry keep a list of
+closed copies by name beside the files that every install, follow and
+delete would have to keep right; kept open, such a copy costs its
+memory, as a copy whose follower runs does, until a follow, a release or
+a delete. A restart opens only the tenants a `.follows` names, or every
+tenant on a standby (`Tenants::resume_following`), so after one a copy
+nothing follows for is counted once something opens it -- a request, the
+failover: only an open reads whether a file follows, its history a record
+in it, and looking at every tenant at a start would open each file --
+mapped, its index of frames adopted, a few milliseconds a tenant
+([storage.md](storage.md)) and its pages after -- on a node of thousands
+for the few copies a node started without `--replica-of` holds. Its
+`behind` counts from a keep-alive a stream
+sends every `ALIVE` behind as caught up ([replication.md](replication.md#replication)):
+sent only once a stream had caught up, a copy as far behind as its
+primary's buffer read 0 until the third round. And it is seen as
+it happens: the admin's promotion answers what its copy knew as the
+promotion began and its follower stopped (`replication::Heard`, by the
+status's names, `Follower::promote_heard`, `Tenants::promote_heard`), the
+router's failover logs them in its line for the tenant (`promote_on`) and
+counts the copy by them, `fennec_router_promotions_total{copy="connected"
+| "not_connected" | "unknown"}` (unknown: a node before the fields). A
+node whose process is killed ends its copies' streams with it, so its
+failover counts them not connected too; `last_contact_ms` against when the
+node stopped answering tells a copy cut off long before from one its
+node's end cut off. A node whose machine is lost or cut off leaves them
+connected: `connected` holds until a read fails, `SILENCE` (10 s) on, past
+a 5 s lease's lapse. So the router's line says what the copy was not sent
+is lost unless it was connected, nothing behind and heard from within two
+keep-alives (`STALE_MS`, 4 s; the review's third round), while the count
+stays by `connected`, as the node said it. And a repair gives no
 tenant a copy while its primary does not answer its `GET /_admin/tenants`
 -- one that ran between a node's death and its lapse attached a copy
 following nothing, which the failover promoted and the node's return wiped
@@ -755,6 +840,57 @@ record kind a binary before refuses and a replica is sent. The change cost
 aarch64-apple-darwin release): the put-away beside a restored file and a
 delete's refusal came to what the once-said log of no birth time left.
 
+**A birth time is held where both sides name one.** A sidecar's binding is
+what its writer read, and a node holds it to what it reads now: a Linux
+release binary, musl, writes and reads every birth time as 0, where a
+glibc build, macOS and Windows read one. Compared as written, a node moved
+from one to the other -- a release's Linux binary and a build of its
+owner's, either way -- met every tenant's file under a binding naming
+another file: each identity was lost, a file a router left reported and
+never taken back, an old primary back from a failover followed by none;
+and each `<t>.hooks` was put away, its secrets with it, which no router
+keeps ([named-statements.md](named-statements.md#where-the-secret-lives)).
+`compat.yml`'s first run on main found it: f2, a 0.2.0 musl node's tenant
+opened by this tree's glibc build, its hooks answering 401 until every
+secret was set again. 0.2.0 has it between its own musl and glibc builds:
+the birth time was bound in #454, `<t>.hooks` in #507, both first
+released in 0.2.0. So every comparison of two bindings -- the identity's
+(`carried`, `held`, `closing`) and the hook set's (`Store::read`,
+`opened`, `settle`, `rebind`) -- is `instance::same`: the same device and
+inode, and the same birth time where both name one; where either names
+none, the device and inode alone, the inode not 0. What that gives up is
+the birth time's check where one side has none, the check every Linux
+release binary already makes of every sidecar it reads: device and inode,
+the sidecar put away before its file goes (above). One written and read
+where both name a birth time is held to it as before, and a close or a
+rebind finding the same file leaves the sidecar as written, so the binary
+that wrote it still reads it. A glibc node so keeps a 0.2.0 sidecar's
+birth time of 0 until a write of its own rewrites it -- a hook's `PUT`, a
+compact's rebind -- and until then that tenant has the device-and-inode
+check alone. Left: a sidecar this tree writes with a
+birth time -- a `PUT` of a hook, a compact's rebind, a stamp -- is another
+file to 0.2.0's musl binary, which compares as written, after a downgrade.
+The tests: `a_binding_naming_no_birth_time_names_its_file_to_a_node_reading_one`
+(both ways) and fennec-http's
+`a_set_a_linux_0_2_0_node_saved_with_no_birth_time_is_read_by_a_node_reading_one`,
+a sidecar and an identity laid out as 0.2.0's writers lay them out.
+Rejected: *0 compared as written*, the loss above for a file that is the
+tenant's; *a sidecar naming no birth time held to its own mtime*, a file
+born after the sidecar was last written being another, which a node
+reading no birth time cannot ask and a copy keeping times or a `touch`
+moves; *the birth time written into the sidecar as a node first meets the
+file*, which makes 0.2.0 put away, after a downgrade, a set it wrote;
+*birth times read on musl* (`statx` asked directly), for now: with `same`
+an upgrade between two musl releases keeps every set, but 0.2.0 compares
+as written, so after a downgrade to it any set a later version wrote with
+a birth time is put away -- every musl node's, where today only a glibc
+build's. A raw `statx` system call on musl, its birth time read whatever
+std asks, is a possible follow-up. Until then this tree's own Linux
+release binaries are musl too: they write and read every birth time as 0,
+and the guard the birth time gives against a reused inode has never been
+on in a shipped Linux binary -- device and inode, the sidecar put away
+before its file goes (above), are what a Linux release holds.
+
 An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
 carries the sidecar's identity only where the sidecar names that binding,
@@ -1017,6 +1153,77 @@ rest; `fennec-shard` 15.3 (2 936.3 -> 2 951.6): `reclaim_noted` with the
 reclaim in it 4.4, `place_replica`'s nodes kept 1.7, `left_on` with its
 identities 1.6, the repair's look 1.5, the directory's `leftovers` and
 `forget_leftover` 2.2, the move's and the attach's notes the rest.
+
+### An install under way is no file there
+
+**A node refuses a name an install is taking an image for with a 503
+naming its wait, and the router waits it out and asks again**
+(`Tenants::claim`, `tenants::claimed`, `Tenants::reclaim`'s
+`refuse_if_claimed`, `ComeBack`, `named_wait`, `Router::come_back`,
+`clear_target`, `look_at_leftovers`). An install claims the tenant's name
+in its process and takes `<file>.lock` before it writes a byte of its
+image beside the tenant's file, and holds both through the take, the
+check and the rename ([replication.md](replication.md#an-image-taken-as-it-arrives)).
+The image review's second round refused a second install or a create of
+the name meanwhile with 409 -- the status that says a file is there -- and
+let a reclaim judge the place: no file yet, so 200, `"taken": false`. The
+router reads a 409 from an install or an attach's `PUT` as a file of the
+tenant at its target and has the node take it back where it noted one
+(`clear_target`). So a move whose own install had gone unanswered -- the
+image whole on the node, its check or its sync past the router's
+`--upstream-timeout`, or the answer cut -- noted the file under the
+identity it proposed, failed, and, tried again while that install went
+on, met the 409, had the reclaim judge the place empty, forgot its note,
+met the 409 again and failed; the first install then landed, a file under
+an identity no row named, which every later move or attach met as one
+this router did not leave: an operator's to clear. With no note, the move
+noted a file that did not exist.
+
+Now the refusal is 503 with `Retry-After` and `retry_after` (a second),
+as every 503 says when to come back: nothing of the request ran, and what
+holds the name ends. A create claims the name the same way, in the one
+step that looks for another's claim -- only looked for, an install
+claiming the name between the look and the open's lock had the create
+wait the lock out under the tenant's slot, every request for the name
+with it, then answer 500 -- and a reclaim is refused while an install
+holds it (a create holds the slot a reclaim waits on). The router asks a
+node that answered so again after the wait it named, never sooner, each
+wait after twice the one before up to 8 s, while `--upstream-timeout`
+from the first lasts (`ComeBack`): a move's install, its source frozen
+meanwhile as through the copy; a cross-region install (`region::install`);
+the reclaim clearing a move's or an attach's target, its note kept. Past
+the bound the last answer stands -- the install's 503 a 502 naming the
+node's words, the reclaim's a 409 -- the note kept and the source thawed.
+An attach's own `PUT` meeting the 503 fails the attach, which a repair
+tries again (`try_again`). And the repair's look, which forgot a noted
+file its node's `GET /_admin/tenants` did not list, forgets one noted
+under an identity only on the node's word: it asks the reclaim, which
+takes it, says it is gone (200) or refuses (503, kept for the next look);
+a node from before identities, which cannot judge (404), is taken at the
+listing's word as before. A name being installed is never listed -- its
+file is not there -- and listing it would have the look note a copy the
+router did not place.
+
+The wait costs nothing where no install is under way: one look at the
+answer's status. A 503 naming no wait -- none of fennec's -- is not
+waited for. Bounded by `--upstream-timeout`, a move holds its source
+frozen no longer than one call to a node may take. Rejected: *a body field
+on the 409* -- every router before it, and every reader of the status,
+still reads a file there; *the router polling the reclaim until the
+install ends* -- the install's own `PUT` says the same thing at no more
+cost, and a reclaim during an install judges nothing anyway.
+`tests/tenants.rs`' `an_install_under_way_holds_its_name_and_another_is_refused`
+holds the second install's and the create's refusal and the answer's
+`Retry-After` and `retry_after`, and
+`a_reclaim_during_an_install_of_its_name_judges_nothing` the reclaim's;
+fennec-shard's `replica_retries.rs`,
+`a_move_meeting_an_install_of_its_name_under_way_waits_for_it`, a proxy
+stalling a move's install half way and cutting the router off: the move
+fails noting the file, a repair meanwhile keeps the note, the move tried
+again waits, asks again, takes the first install's file back once it
+lands and installs its own, nothing left noted. Each fails on the round
+before it: the reclaim answered `Ok(false)`, the install's refusal was a
+409, and the repair forgot the note.
 
 ### A detached copy taken back by its identity
 

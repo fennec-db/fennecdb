@@ -161,7 +161,7 @@ On every machine (Debian 12 or later, Ubuntu 22.04 or later -- systemd 248
 or later for `LoadCredential=`'s `%d`):
 
 ```sh
-install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # from a release
+install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # fennec-server and fennec from a release; fennec-shard built from its tag (no release publishes it yet)
 install -m 0644 systemd/fennecdb.sysusers /etc/sysusers.d/fennecdb.conf && systemd-sysusers
 install -m 0644 systemd/*.service systemd/*.timer /etc/systemd/system/
 install -D -m 0755 bin/fennec-archive-sync /usr/local/libexec/fennecdb/fennec-archive-sync   # an archiver's machine
@@ -218,12 +218,16 @@ unit: the servers take SIGHUP for a shutdown.
 
 The servers write their log to the journal and refusals, schema changes
 and admin changes to an audit log, `/var/log/fennecdb/<role>/audit.log`
-(`node`, `router`, `global`), 0600 under the units' `UMask` -- it names
-clients' addresses and every tenant changed. A log shipper reads it through
-an ACL, set once on the directory so each new file inherits it:
+(`node`, `router`, `global`), 0600 whatever the units' `UMask`, as
+fennecdb makes every file -- it names clients' addresses and every tenant
+changed. A log shipper reads it through an ACL. A directory's default ACL
+reaches no file fennecdb makes, whose mode masks the ACL's group class to
+nothing; the file keeps the ACL it is given, so give it once, after the
+first start made it:
 
 ```sh
-setfacl -m u:<shipper>:rx -m d:u:<shipper>:r /var/log/fennecdb/node
+setfacl -m u:<shipper>:rx /var/log/fennecdb/node
+setfacl -m u:<shipper>:r /var/log/fennecdb/node/audit.log
 ```
 
 The server opens the file once and appends; it does not reopen it, and
@@ -447,9 +451,25 @@ the bytes leaving it: a write answered then is on a disk no one can read
 until the machine is back, and the promoted replica never had it. And a
 stream that has missed a write for a second is not waited for until it
 catches up (`SENT_WAIT`): while a replica is behind, writes are answered
-with no copy beside them, and a primary lost then loses them. Writes the
-old primary took that were never sent are dropped when it comes back as a
-replica (A node back).
+with no copy beside them, and a primary lost then loses them. A replica
+reconnecting or one whose copy failed is not waited for at all. The router
+asks no position of the copy it promotes: one not connected, or behind, as
+its node is lost is promoted where it stands, and whoever sits on a
+plain-HTTP hop between the two nodes can hold it there by cutting its
+stream. Watch for it before it matters (A copy not following); after a
+failover the router's line for each tenant (`failover of <node>: <tenant>
+promoted on <to>, its copy connected to its primary, 0 writes behind it as
+it last said, last heard from it 812 ms before`) says what the copy knew,
+and `fennec_router_promotions_total{copy="not_connected"}` counts the ones
+promoted not connected -- every copy of a node whose process was killed
+among them, its stream ended with it: read `last_contact_ms` against when
+the node stopped answering. A copy of a machine lost or cut off stays
+connected until 10 s of silence, so the line ends `what it was not sent is
+lost` wherever the copy was last heard from more than 4 s before. A copy
+taking an image is counted as sent each write from the image's flush on:
+promoted before it applied the image, it loses the writes answered
+meanwhile, `connected` false. Writes the old primary took that were never sent are dropped
+when it comes back as a replica (A node back).
 
 Seen in `make drill` (lease 2 s, the routers' upstream timeout 4 s, three
 tenants a region, the node cut off the network and then killed, as a
@@ -535,6 +555,40 @@ restores).
 lapses because you know it is gone: `POST /_shard/nodes/<n>/failover` on
 the region's router. Never on a node that may still be running and
 reachable by clients without leases: that makes two primaries.
+
+## A copy not following
+
+`FennecTenantCopiesDisconnected` and `FennecTenantCopiesBehind` read a
+node's `fennec_copies_disconnected` and `fennec_copies_behind`: the copies
+it holds that a failover may promote -- its pair's standby copies, the
+tenants' replicas of their own, never a read replica -- not connected to
+their primary now or with no follower running (its database failed, or
+nothing follows for it: the node keeps such a copy open, and after a
+restart counts one nothing follows for once something opens it, a request
+or the promotion), and the most
+writes one trails its primary's disk by, as its primary says every 2 s.
+A failover promotes such a copy where it stands, and every write its
+primary answered after it stopped being sent is lost with the primary,
+`--sync always` or not. With its primary's node lost, every copy of it
+disconnects too: `FennecNodeDown` and the failover come first.
+
+1. Find the tenants: `GET /t/<tenant>/_replication/status` on the copy's
+   node, with the replication token, for each tenant it holds (`GET
+   /_admin/tenants`): `connected`, `behind`, `last_contact_ms` and the
+   `error` its follower last met. The node's log says the same as it
+   happens (`replication: ...; connecting again`).
+2. A primary's node that does not answer the copy's node -- a firewall, a
+   route, a name -- is fixed there; a copy refused by its primary (401, its
+   replication token) is given the right token. A plain-HTTP hop between
+   the nodes that someone else can reach lets them cut the stream at will:
+   run the nodes' listeners with `--tls-cert` and `--tls-key`, or keep the
+   hop on a network no one else is on.
+3. A copy whose `error` names a failure of its own -- its disk, a panic --
+   takes nothing more until its node opens it again: `POST
+   /_admin/tenants/<t>/follow` closes and opens it, or restart the node.
+4. Until it follows, a failover of its primary's node loses what it was not
+   sent: keep that node up, or move the tenant (Placing and moving a
+   tenant) to a node whose copy follows.
 
 ## A node back
 
@@ -680,8 +734,9 @@ run again once it is gone.
 
 **Remove `<t>.instance` when you replace a tenant's file by hand.** The
 identity is bound to the file's device, inode and birth time; where the
-node reads no birth time -- every Linux build, and file systems keeping
-none -- to its device and inode alone, and a file copied into place after
+node reads no birth time -- every Linux release binary, and file systems
+keeping none -- or the node that wrote the sidecar read none, to its device
+and inode alone, and a file copied into place after
 an `rm` may be given
 the inode of the one it replaced -- and with the sidecar kept, its
 identity, which a router's reclaim or follow would then act on. Every way
@@ -800,15 +855,65 @@ alerts between steps:
    through it as the connection ends: the entry sends a read or a keyed
    write on to the standby, and answers any other write 502, which may have
    run (send writes with an `Idempotency-Key` and they are retried safely).
-   Then the global standby and the global router the same way.
-3. **Nodes**, one at a time, a zone at a time: replace the binary and
-   `systemctl restart fennec-node`. A restart shorter than the lease costs
-   its tenants the restart; one longer -- a shutdown checkpointing large
-   graphs -- has them failed over to their replicas, and the node comes
-   back as a replica of each (A node back). Either way no acknowledged
-   write is lost. Wait for `FennecTenantsWithoutReplica` to clear before the
-   next node.
+   Not across this upgrade, though: a key a 0.2.0 node kept is not looked
+   up once its node runs the new release (a key is its caller's now, kept
+   another way), so a keyed write first sent to a 0.2.0 node and sent
+   again after that node's upgrade in step 3 runs twice. Let the clients'
+   retries of writes made before a node's upgrade end before it.
+   Then the global standby and the global router the same way. No release
+   publishes `fennec-shard` yet: upgrading a router means building it from
+   the release's tag (`cargo build --release --locked -p fennec-shard`, or
+   the `kit` image `deploy/Dockerfile` builds). Routers first holds a node
+   that asks no data token too: such a node refuses (403) what a 0.2.0
+   router forwards it, a router on loopback included -- that router's one
+   mark is the one a router listening past loopback sends -- unless the
+   node runs `--insecure`; and a new router listening past loopback asks a
+   0.2.0 node's `/_whoami` and forwards nothing to one asking no token.
+   The kit's nodes take a data token, and meet neither.
+3. **Nodes**, one at a time, a zone at a time, and in a node pair the
+   standby's node first: replace the binary and `systemctl restart
+   fennec-node`. A restart shorter than the lease costs its tenants their
+   writes for the restart -- the router answers each "the request was not
+   sent" (503, `Fennec-Unsent`), safe to send again; one longer -- a
+   shutdown checkpointing large graphs -- has them failed over to their
+   replicas (the kit's routers run `--auto-failover`; a router started
+   without it never fails a node over), and the node comes back as a
+   replica of each (A node back). Either way no acknowledged write is
+   lost. Before the next node, wait until its standby holds what its
+   primary does: on the primary's node `/t/<tenant>/_replication/status`
+   (with the replication token) lists the standby's stream with `sent`
+   equal to `durable`, or the standby's own says `"connected": true` and
+   `"behind": 0` -- for a file's replica, `fennec_replica_connected` 1 and
+   `fennec_replica_behind` 0. Not `FennecTenantsWithoutReplica`: it fires
+   only for a tenant with no copy at all, after 15 minutes, never for a
+   standby that is behind after its restart.
 4. **The entry Worker** last: it reads only the routers' answers.
+
+Every reader -- an archiver, a router, a node, the `fennec` that restores
+-- runs the new release before any primary does, and one a release back
+works beside the new one or stops in words, never reading wrong
+(RELEASING.md). A node holding both primaries and replicas -- its own
+tenants and another node's standbys -- cannot be upgraded before every
+primary: in such a fleet nothing uses a feature that moves the format
+until every node runs the release. Upgrading from 0.2.0, drop no field
+(`alter collection ... drop field`) until every node runs 1.x: a 0.2.0
+node's compact -- its `--auto-compact` too -- takes a dropped field's place
+out of its documents and tells no copy, so a 1.x standby of a 0.2.0
+primary takes an image at the next write, and a 0.2.0 standby of a 1.x
+primary reads every later write of that collection a field late, which a
+failover onto it makes the tenant's. Where a drop cannot wait, run the
+0.2.0 nodes with `--auto-compact off`, and no `compact` on their tenants,
+until they are upgraded (docs/design/compatibility.md, *A 0.2.0 node and
+a compact*).
+`compat.yml` drives steps 2 and 3 with
+the last release's `fennec-server` and `fennec` and its router -- built
+from the release's tag with its `Cargo.lock` by the tree's toolchain, a
+debug build, since no release publishes one -- weekly and on every
+release tag: a router restarted, then a standby's node, then its
+primary's, under durable writes, waiting on the condition above before
+each node, every acknowledged write read back from both nodes and none the
+router said it did not send landed. A file 0.2.0 wrote holding a value
+1.x does not read whole is RELEASING.md's *The first 1.x release's notes*.
 
 **Named statements move the format by their first use, not their
 install.** A `create statement` writes record kind 13, which every binary
@@ -901,21 +1006,50 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
-**A sealed archive's next file is bound to itself, which older readers
-refuse.** From the release that binds a sealed frame to its file, an
+**A sealed archive's next file is bound to what it is, which older readers
+refuse.** From the release that binds a sealed file to what it is, an
 archiver restarted on it seals its next image and segment, and `fennec
-backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
-`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
-file (`not a sealed file`, `<image>: not sealed, where the archive is`).
-The files sealed before still open in the new release, and a segment an
-older archiver began goes on as it was. So `fennec` is upgraded on every
-machine that restores or verifies -- an operator's, the weekly restore's --
-with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+backup --key-file` its backup, as version 3 (`FENECSL\x03`: its own key,
+its frames chained, its head naming its role, archive, tenant and first
+change), and a `fennec restore` or `fennec verify` from 0.2.0 or earlier
+refuses such a file (`not a sealed file`, `<image>: not sealed, where the
+archive is`). The files sealed before still open in the new release, and a
+segment an older archiver began is closed: before the next write the
+archiver seals an image of the archive's end as version 3 -- read from the
+archive as the hourly image is, once a line; a node's archiver seals each
+tenant's as it starts, on the thread beside its stream, and a tenant
+written before its turn at that write -- and the write begins a version 3
+segment after it. That image is a one-time lag of the archiver's: about
+9 s a GB of database (2.1 to 2.4 s for a 267 MB image on an 8-core arm64
+Mac), which `fennec archive` of one database spends on its stream before
+it takes the primary's next write. Its primary meanwhile fills the stream's socket and
+then waits for it at most `SENT_WAIT` (1 s), once, on one durable write,
+marks the stream lagging and answers the writes after without it until it
+catches up; a send held up past `SILENCE` (10 s) ends the stream, which the
+archiver makes again and goes on from its end. A node's archiver
+assembles beside its stream, so its stream lags only for a tenant written
+before the pass reaches it, by that tenant's assembly. An archive whose
+end does not restore stops `fennec archive` (a node's archiver passes over
+that tenant) naming why and the ways out: put right what `fennec verify`
+refuses in it, or begin a new line and keep the old one for restores to
+earlier moments -- `fennec archive` into a new directory, or, for a node's
+tenant, with the archiver stopped, its directory moved aside as
+`<root>/<tenant>.<any name>` beside it, and the archiver begins the new
+line with the node's image. So `fennec` is upgraded on every machine that
+restores or verifies -- an operator's, the weekly restore's -- with step 1, before
+any archiver is restarted on the new release. The older files still open
+under their key, bound to nothing a restore holds them to, and whoever
 holds two of them can build a third from their frames: to be rid of that,
 make a new key (`fennec key`), point every archiver and backup at it, and
 begin a new archive under it, keeping the old key to read the older one
 (Archives and restores; the site's replication page, *How archives and
-backups are sealed*).
+backups are sealed*). A file sealed before the upgrade that `verify` or a
+restore refuses as standing at or past the archive's first file of
+version 3 (`<file>: an image of change N, sealed before version 3, at or
+past its image of change N taken at <ms>, the first file this archive
+holds of version 3: no archiver puts it there, so it is not this
+archive's`) was put there by no archiver: move it out of the archive's
+directory, and the archive is read without it.
 
 **A tenant's `github` hook set with `key delivery` is kept, its events
 refused.** From the release that refuses `key delivery`, a set a node kept
@@ -985,7 +1119,16 @@ is in the archive once its node's stream has sent it -- under load the
 stream may be behind its node (Known gaps) -- and in the bucket after the
 next `fennec-archive-sync` run that succeeds: the timer starts one every
 five minutes, so a write is there five minutes and a run's length after
-the archive took it, while runs succeed. One that fails is retried at the
+the archive took it, while runs succeed. The archiver makes each file 0600
+whatever its `UMask`, as fennecdb makes every file, so each run first gives
+the archiver's group read of the archive, as root (the unit's
+`ExecStartPre=`), and copies what that group may then read: a segment or
+image made after that step waits for the next run, five minutes on. A
+directory there before the run that the group still cannot read fails the
+run ("... older than this run are not readable ...: did the unit's
+ExecStartPre= chmod run?"): the step never reached it, and a copy around
+it would leave that tenant out of the bucket while every run succeeded.
+One that fails is retried at the
 next tick, and `FennecArchiveSyncStale` fires once no run has succeeded for
 half an hour. Each success is written into node_exporter's textfile
 collector, `/var/lib/prometheus/node-exporter`, which the `fennec-sync` user
@@ -1288,6 +1431,7 @@ textfile collector).
 | `FennecTextfileUnread` | warning | node_exporter cannot read a file of its textfile collector | Archives and restores |
 | `FennecArchiveSyncUnreported` | warning | no sync's success read anywhere for an hour | Archives and restores |
 | `FennecCopiesRefused` | info | a copy of a tenant made again deleted itself | Read replicas |
+| `FennecTenantCopiesDisconnected`, `FennecTenantCopiesBehind` | warning | a copy a failover may promote not connected to its primary, or behind it: promoted now, it loses what it was not sent | A copy not following |
 
 ## The drill
 

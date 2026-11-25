@@ -37,12 +37,19 @@ fennec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the t
 <p><code>--file</code> holds the database itself and takes
 <code>notes.fennec.lock</code> while the session lasts — a server, an app or
 the shell over the same file is refused, as it is refused while they hold it: two
-processes writing one file corrupt it. Each write is on the disk before it is
-answered. <code>--read-only</code> takes no lock and writes nothing, and reads
+processes writing one file corrupt it. What a crash left beside the file goes
+as the shell's open removes it, a line each on stderr (<a
+href="shell.html#left-beside">the shell</a>). Each write is on the disk before
+it is answered. <code>--read-only</code> takes no lock and writes nothing, and reads
 the file as it stood when the session began, beside a server writing it (on
 Linux, after the machine went down and before a writer opens the file again,
 without the last durable writes, which wait in the sync log beside it); to
-read what a server serves now, use <code>--url</code>. Over
+read what a server serves now, use <code>--url</code>. It reads into memory
+what the server has not yet made durable, with no bound but the file — every
+write since its last sync, all of them under <code>--sync off</code> — and
+none of a file with nothing past its image, what a compact or a backup
+writes: <a href="shell.html#the-lock">the shell's <code>--read-only</code></a>
+says what, as it opens a file the same way. Over
 <code>--url</code> the tools are the server's, under its options and the
 token's rules, and the bridge decides nothing.</p>
 
@@ -238,7 +245,7 @@ when a statement is defined or dropped: the server says
 <tbody>
 <tr><td><code>--mcp-max-rows</code></td><td class="n">100</td><td>refused, 413: a <code>query</code> with no <code>limit</code> is asked for one row more than the bound, so a larger answer is known without being fetched</td></tr>
 <tr><td><code>--mcp-max-bytes</code></td><td class="n">64K</td><td>refused, 413, measured on the JSON the model would read; a statement's tool that writes is put back, as past the rows</td></tr>
-<tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's subject, or an address for the server's token. A scoped token's request is held to <a href="/docs/http-access#request-rate"><code>--request-rate</code></a> first, as on every route</td></tr>
+<tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's issuer and subject, or an address for the server's token, in each database (a tenant's apart). A scoped token's request is held to <a href="/docs/http-access#request-rate"><code>--request-rate</code></a> first, as on every route</td></tr>
 </tbody>
 </table>
 

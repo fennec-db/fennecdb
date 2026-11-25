@@ -136,9 +136,10 @@ fn warn_if_open(key: &str) {
 
 /// Who besides its owner a key file of `mode`, owned by `uid`, is open
 /// to, by PostgreSQL's rule for its own key: no one, or its group where
-/// root owns it and the group may only read it.
-#[cfg(any(test, all(feature = "tls", unix)))]
-fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
+/// root owns it and the group may only read it. A seal's key file is held
+/// to the same rule (`seal::open_key`).
+#[cfg(any(test, unix))]
+pub(crate) fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
     if mode & 0o007 != 0 {
         Some("every user")
     } else if mode & 0o070 != 0 && !(uid == 0 && mode & 0o070 == 0o040) {
@@ -157,9 +158,16 @@ pub fn scheme(tls: Option<&Tls>) -> &'static str {
     }
 }
 
-/// A connection's TLS session, and a `dup` of its socket for what is asked
-/// of the socket while the session is borrowed: its options, its address,
-/// and the router's `poll` of a held request's client.
+/// A connection's TLS session, and a handle of its socket for what is
+/// asked of the socket while the session is borrowed: its options, its
+/// address, and the router's `poll` of a held request's client. The
+/// session's own handle, shared ([`fennec_tls::TlsStream::socket`]), never
+/// a `dup`: on Windows a `dup` is a socket handle of its own, whose read and
+/// write timeouts bound its own calls alone, and every timeout set through
+/// it -- the idle timeout, a request's time in a silence, `--write-timeout`,
+/// a stream's -- left the session's reads and writes with none: a request
+/// silent past its time was answered when its bytes came, and an idle
+/// connection was held for good (docs/design/http.md#slow-clients).
 ///
 /// Its end sends `close_notify` ([`Drop`]), so that a client reading a
 /// stream to its end -- SSE, a replica's, a node's answer with no length
@@ -173,7 +181,7 @@ pub fn scheme(tls: Option<&Tls>) -> &'static str {
 #[cfg(feature = "tls")]
 pub struct Secured {
     tls: RefCell<fennec_tls::TlsStream>,
-    sock: TcpStream,
+    sock: Arc<TcpStream>,
     /// No `close_notify` at the end: a write failed or the caller cut the
     /// connection, or its end sent one already ([`Conn::end_refused`]).
     quiet: Cell<bool>,
@@ -229,9 +237,14 @@ pub fn ending() -> bool {
 /// waits for them up to `grace`. A connection in the middle of an answer
 /// sends its end after it, if the process is still there. Before, the
 /// process exiting closed them all with a TCP end alone, which a TLS client
-/// reads as a stream cut short.
+/// reads as a stream cut short. A connection in its handshake -- its first
+/// record's byte come -- is waited for too, and ends as its handshake does;
+/// one that has sent nothing is not (`open::Shaking`).
 pub fn end_all(grace: Duration) {
-    ENDING.store(true, Ordering::Relaxed);
+    // Sequentially consistent, against a handshake's count
+    // ([`open::Shaking::begin`]): either it sees this, or the wait below
+    // sees it.
+    ENDING.store(true, Ordering::SeqCst);
     #[cfg(all(feature = "tls", any(unix, windows)))]
     {
         for wake in open::shut_reading() {
@@ -254,6 +267,7 @@ pub fn end_all(grace: Duration) {
 #[cfg(feature = "tls")]
 mod open {
     use std::net::TcpStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(any(unix, windows))]
     use std::sync::{Arc, Mutex};
 
@@ -274,10 +288,64 @@ mod open {
         OPEN.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// TLS connections in their handshake, not yet listed: [`end_all`]
+    /// waits for them as for those listed.
+    ///
+    /// [`end_all`]: super::end_all
+    static SHAKING: AtomicUsize = AtomicUsize::new(0);
+
+    /// A connection counted in its handshake, from the peek that saw its
+    /// record's first byte -- nothing read nor written yet -- to after it
+    /// is listed ([`note`]): the one shutdown either waits for its
+    /// handshake and lists it, read side shut, or finds it not begun. A
+    /// TLS 1.3 client's handshake is done once it has the server's
+    /// `Finished`, the server's only once it reads the client's: a
+    /// shutdown landing between them found the connection neither listed
+    /// nor waited for, and the exit cut a session its client had begun
+    /// with no `close_notify`. One still in the peek is not waited for:
+    /// the server has written it nothing, so its client has no session to
+    /// cut; the exit closes it, or a first byte that comes after the
+    /// shutdown began is refused ([`Shaking::begin`]). A client that sent
+    /// that byte and stalls holds the shutdown up to its grace
+    /// ([`END_GRACE`], half a second).
+    ///
+    /// [`END_GRACE`]: super::END_GRACE
+    pub(super) struct Shaking(());
+
+    impl Shaking {
+        /// Counted, or `None` where the shutdown is ending the connections
+        /// already: a handshake begun now could send its `Finished` after
+        /// [`end_all`] stopped waiting, so none is, and the client's ends
+        /// before it had a session. Sequentially consistent with
+        /// [`end_all`]'s store: it sees this count, or this sees its store.
+        ///
+        /// [`end_all`]: super::end_all
+        pub(super) fn begin() -> Option<Shaking> {
+            SHAKING.fetch_add(1, Ordering::SeqCst);
+            let counted = Shaking(());
+            (!super::ENDING.load(Ordering::SeqCst)).then_some(counted)
+        }
+    }
+
+    impl Drop for Shaking {
+        fn drop(&mut self) {
+            SHAKING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `sock` listed, its handshake done. Where the shutdown has begun its
+    /// read side is shut by whichever of this and [`shut_reading`] takes
+    /// the list's lock second -- here once that ran before, seeing
+    /// [`ending`](super::ending) through the lock -- and this connection
+    /// ends as those it shut do.
     #[cfg(any(unix, windows))]
     pub(super) fn note(sock: &TcpStream) {
         use super::sock::AsRawFd;
-        open().insert(sock.as_raw_fd(), None);
+        let mut open = open();
+        open.insert(sock.as_raw_fd(), None);
+        if super::ending() {
+            let _ = sock.shutdown(std::net::Shutdown::Read);
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -301,8 +369,10 @@ mod open {
         let open = open();
         let mut wakers = Vec::new();
         for (fd, wake) in open.iter() {
-            // SAFETY: open while it is listed, let go of under this lock
-            // before it closes; `ManuallyDrop` keeps it from closing here.
+            // SAFETY: open while it is listed: the `Secured` owning it lets
+            // it go (`forget`, in its drop, a panic's unwinding too) under
+            // this lock before its `sock` field closes it; `ManuallyDrop`
+            // keeps it from closing here.
             let s = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(*fd) });
             let _ = s.shutdown(std::net::Shutdown::Read);
             #[cfg(windows)]
@@ -312,9 +382,12 @@ mod open {
         wakers
     }
 
+    /// No connection listed nor in its handshake: the count read under the
+    /// lock, which a handshake done is listed under before it is let go of.
     #[cfg(any(unix, windows))]
     pub(super) fn none() -> bool {
-        open().is_empty()
+        let open = open();
+        open.is_empty() && SHAKING.load(Ordering::SeqCst) == 0
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -404,6 +477,9 @@ impl Conn {
         // which rustls would answer with an alert its client prints as a
         // garbled answer.
         let mut first = [0u8; 1];
+        // The client's address, for a failure's line: taken before the
+        // handshake, which takes the socket.
+        let from = stream.peer_addr().ok();
         let looked = stream
             .set_read_timeout(Some(tls.handshake.max(Duration::from_millis(1))))
             .and_then(|()| stream.peek(&mut first));
@@ -412,33 +488,34 @@ impl Conn {
             Ok(1) if first[0].is_ascii_uppercase() => {
                 failed(
                     Failed::PlainHttp,
-                    &stream,
+                    from,
                     &"a plain HTTP request, answered 400",
                 );
                 plain_refused(stream);
                 return None;
             }
             Ok(1) => {
-                failed(
-                    Failed::Protocol,
-                    &stream,
-                    &"its first byte is no TLS record's",
-                );
+                failed(Failed::Protocol, from, &"its first byte is no TLS record's");
                 return None;
             }
             Ok(_) => {
-                failed(Failed::Closed, &stream, &"it ended before its first byte");
+                failed(Failed::Closed, from, &"it ended before its first byte");
                 return None;
             }
             Err(e) => {
-                failed(failure_of(&e), &stream, &e);
+                failed(failure_of(&e), from, &e);
                 return None;
             }
         }
+        // Counted from its record's first byte until it is listed, so the
+        // one shutdown waits for its handshake ([`open::Shaking`]); none
+        // begun once that is ending, its socket closed before a byte of
+        // ours. Not before the peek: a connection that has sent nothing --
+        // a scan, a balancer's connection made ahead -- would hold every
+        // shutdown for the whole grace, and the server, having written
+        // nothing, leaves its client no session to cut.
+        let shaking = open::Shaking::begin()?;
         let left = deadline.saturating_duration_since(Instant::now());
-        // A `dup` refused -- no descriptor left -- is the process's
-        // failure, not the client's handshake's: not counted among them.
-        let sock = stream.try_clone().ok()?;
         let tls = match tls.server.accept_within(stream, left) {
             Ok(t) => t,
             Err(e) => {
@@ -447,11 +524,15 @@ impl Conn {
                     fennec_tls::Error::Alert(_) => Failed::Alert,
                     _ => Failed::Protocol,
                 };
-                failed(why, &sock, &e);
+                failed(why, from, &e);
                 return None;
             }
         };
+        // The session's own handle: what is set through it bounds the
+        // session's reads and writes ([`Secured`]).
+        let sock = tls.socket();
         open::note(&sock);
+        drop(shaking);
         Some(Conn::Tls(Box::new(Secured {
             tls: RefCell::new(tls),
             sock,
@@ -460,7 +541,9 @@ impl Conn {
     }
 
     /// The socket beneath: for a `poll`, an option or an address, never
-    /// for reading or writing past a TLS session.
+    /// for reading or writing past a TLS session. Over TLS the session's
+    /// own handle, so an option set through it bounds the session's reads
+    /// and writes ([`Secured`]).
     #[inline]
     pub fn socket(&self) -> &TcpStream {
         match self {
@@ -600,11 +683,13 @@ impl Conn {
             Conn::Plain(s) => crate::accept::end_refused(s),
             #[cfg(feature = "tls")]
             Conn::Tls(t) => {
-                let sock = t.sock.try_clone();
+                let sock = Arc::clone(&t.sock);
                 let closed = t.tls.borrow_mut().close().is_ok();
                 t.quiet.set(true);
                 drop(t);
-                if let (true, Ok(sock)) = (closed, sock) {
+                // The session gone, this is the socket's last handle: the
+                // socket itself, read off as a plain refusal's is.
+                if let (true, Ok(sock)) = (closed, Arc::try_unwrap(sock)) {
                     crate::accept::end_refused(sock);
                 }
             }
@@ -1035,7 +1120,7 @@ fn failure_of(e: &io::Error) -> Failed {
 #[cfg(feature = "tls")]
 #[cold]
 #[inline(never)]
-fn failed(why: Failed, sock: &TcpStream, what: &dyn std::fmt::Display) {
+fn failed(why: Failed, from: Option<SocketAddr>, what: &dyn std::fmt::Display) {
     FAILED[why as usize].fetch_add(1, Ordering::Relaxed);
     let due = {
         let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
@@ -1048,9 +1133,7 @@ fn failed(why: Failed, sock: &TcpStream, what: &dyn std::fmt::Display) {
     };
     if due {
         let reason = FAILURES[why as usize].1;
-        let from = sock
-            .peer_addr()
-            .map_or_else(|_| "?".into(), |a| a.to_string());
+        let from = from.map_or_else(|| "?".into(), |a| a.to_string());
         crate::log!(
             "a TLS handshake from {from} failed ({reason}): {what} (said a minute apart at \
              most; /_metrics counts each by reason)"
@@ -1154,5 +1237,52 @@ mod tests {
         assert_eq!(open_to(0o100660, 0), Some("its group"));
         assert_eq!(open_to(0o100644, 0), Some("every user"));
         assert_eq!(open_to(0o100444, 1000), Some("every user"));
+    }
+
+    /// Over TLS a connection's socket is its session's own handle, so what
+    /// is set through it -- the idle timeout, `--write-timeout`, a mode --
+    /// bounds the session's reads and writes. A `dup` in its place passes
+    /// every timing test on Linux and macOS, where both handles share one
+    /// file description, and bounded none of the session's reads on Windows
+    /// (docs/design/http.md#slow-clients): the handles' numbers tell it on
+    /// every platform.
+    #[cfg(all(feature = "tls", any(unix, windows)))]
+    #[test]
+    fn a_tls_connections_socket_is_its_sessions_own_handle() {
+        use super::sock::AsRawFd;
+        use super::{Conn, Tls};
+        use std::net::{TcpListener, TcpStream};
+        use std::path::Path;
+        use std::time::Duration;
+
+        let certs = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/certs");
+        let tls =
+            Tls::from_pem_files(&certs.join("server.pem"), &certs.join("server.key")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ca = certs.join("ca.pem");
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let _s = fennec_tls::Client::trusting_pem_file(&ca)
+                .unwrap()
+                .alpn(&[b"http/1.1"])
+                .dial(s, "localhost")
+                .unwrap();
+            // Held open until the server's side was looked at.
+            let _ = wait.recv_timeout(Duration::from_secs(30));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let conn = Conn::open(stream, Some(&tls)).expect("a handshake done");
+        let Conn::Tls(t) = &conn else {
+            panic!("a connection over TLS opened plain")
+        };
+        assert_eq!(
+            conn.socket().as_raw_fd(),
+            t.tls.borrow().get_ref().as_raw_fd()
+        );
+        done.send(()).unwrap();
+        client.join().unwrap();
     }
 }

@@ -12,6 +12,7 @@ u     fennec-node   -   "fennecdb node"    /var/lib/fennecdb/node    /usr/sbin/n
 u     fennec-router -   "fennecdb router"  /var/lib/fennecdb         /usr/sbin/nologin
 u     fennec-archive -  "fennecdb archive" /var/lib/fennecdb/archive /usr/sbin/nologin
 u     fennec-sync   -   "fennecdb sync"    /var/lib/fennecdb         /usr/sbin/nologin
-# The bucket sync reads the archives, group-readable, through the
-# archiver's group (fennec-archive-sync@.service's SupplementaryGroups=).
+# The bucket sync reads the archives, made group-readable by its run's first
+# step, through the archiver's group (fennec-archive-sync@.service's
+# SupplementaryGroups= and ExecStartPre=).
 m     fennec-sync    fennec-archive

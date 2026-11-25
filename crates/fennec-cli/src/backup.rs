@@ -388,6 +388,27 @@ pub fn main(command: &str, args: &[String]) -> Code {
     // file made. Looked at once: the restore below is the one this says.
     let sealed = command == "restore" && !tenants && Path::new(&positional[0]).is_file();
     if sealed && key_file.is_none() {
+        // What the file is, from its first bytes: a backup taken without a
+        // key is the database itself, which nothing restores, and was told
+        // to give a key it never had.
+        let mut first = [0u8; 8];
+        let read = std::fs::File::open(&positional[0])
+            .and_then(|mut f| std::io::Read::read(&mut f, &mut first));
+        let first = &first[..read.unwrap_or(0)];
+        let path = &positional[0];
+        if first.starts_with(&fennec_core::engine::MAGIC[..]) {
+            fail(&format!(
+                "{path} is a database file, not a sealed backup: a backup taken without \
+                 --key-file is the database itself, opened as it is; `fennec restore` takes a \
+                 sealed backup or an archive's directory"
+            ));
+        }
+        if !fennec_http::seal::is_sealed(first) {
+            fail(&format!(
+                "{path} is neither a sealed backup nor a database file: `fennec restore` takes \
+                 a sealed backup or an archive's directory"
+            ));
+        }
         fail("a sealed backup opens with --key-file");
     }
     // The files the flags name, once the line is not refused.
@@ -436,6 +457,11 @@ pub fn main(command: &str, args: &[String]) -> Code {
         return match archive(dir).and_then(|a| a.verify()) {
             Ok(v) => {
                 println!("{dir}: {} images, {} segments", v.images, v.segments);
+                // A tenant's line read as one database's says whose it is:
+                // only `--tenants` holds it to its directory's name.
+                if let Some(t) = &v.tenant {
+                    println!("  sealed as tenant `{t}`'s archive");
+                }
                 println!(
                     "  restores changes {} to {}, from {} to {}",
                     v.first,
@@ -554,6 +580,12 @@ pub fn main(command: &str, args: &[String]) -> Code {
                     "{b}: change {} -- image {} and the writes after it{when}",
                     r.seq, r.image
                 );
+                // A tenant's line restored as one database's says whose it
+                // is, as `verify` does: only `--tenants` holds a line to its
+                // directory's name, and one database's archive names none.
+                if let Some(t) = &r.tenant {
+                    println!("  sealed as tenant `{t}`'s archive");
+                }
             }),
         _ => unreachable!("dispatched by main"),
     };
@@ -628,11 +660,19 @@ fn every_tenant(
             let iso = |t: u64| fennec_core::time::format_iso(t as i64);
             let mut failed = 0;
             for line in &lines {
-                let (name, dir) = (&line.label, &line.dir);
-                let arch = Archive::with_key(dir, key.cloned());
-                let gone = node_archive::gone_at(dir).map_or(String::new(), |t| {
-                    format!(", gone from the node {}", iso(t))
-                });
+                let name = &line.label;
+                // Held to its tenant: another tenant's files in its place
+                // are refused by name (`Line::archive`).
+                let arch = line.archive(key);
+                // A presence that does not read fails the line's verify,
+                // which reads it, and says why.
+                let gone = arch
+                    .as_ref()
+                    .ok()
+                    .and_then(|a| node_archive::gone_at(a).ok().flatten())
+                    .map_or(String::new(), |t| {
+                        format!(", gone from the node {}", iso(t))
+                    });
                 match keep {
                     None => match arch.and_then(|a| a.verify()) {
                         Ok(v) => println!(

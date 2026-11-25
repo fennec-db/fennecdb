@@ -92,9 +92,9 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
     let (a1, d1, n1) = node("n1");
     let (a2, d2, _) = node("n2");
     // A node nothing listens on: what a crashed one looks like from here.
-    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let dead = gone.local_addr().unwrap().to_string();
-    drop(gone);
+    // Port 1, which no test's server takes: a port let go of is the next
+    // `bind` to port 0's (`docs/design/conventions.md`, *Ports*).
+    let dead = "127.0.0.1:1".to_string();
     let mut dir = Directory::in_memory();
     for (name, addr, token) in [
         ("n1", a1, "adm-n1"),
@@ -203,7 +203,10 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         assert!(t.elapsed() < Duration::from_secs(20), "never counted gone");
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(call(port, "GET", "/t/nosuch/", "", None).0, 404);
+    // A tenant the directory does not hold: the router's own 404, to a
+    // caller holding its token (anyone else's goes to a node in the
+    // tenant's place, `region::stand_in`).
+    assert_eq!(call(port, "GET", "/t/nosuch/", "", Some("root")).0, 404);
     // Its node not reached: the router's own 503, counted against the node.
     assert_eq!(call(port, "GET", "/t/lost/", "", None).0, 503);
     assert_eq!(call(port, "GET", "/elsewhere", "", None).0, 404);

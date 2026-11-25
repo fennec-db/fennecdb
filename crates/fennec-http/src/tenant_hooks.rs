@@ -7,7 +7,10 @@
 //!
 //! **Bound to its file, as `.instance` is.** The sidecar's first line names
 //! the file it was written for -- its device, inode and birth time
-//! ([`crate::instance::binding`]) -- and every way of fennec's that makes,
+//! ([`crate::instance::binding`]), the birth time held only where the node
+//! that wrote it and the one reading it both read one
+//! ([`crate::instance::same`]: 0.2.0's Linux binary, musl, reads none) --
+//! and every way of fennec's that makes,
 //! removes or replaces a tenant's file puts it away first, synced: a
 //! create, an install, a follow, a delete, a reclaim, `fennec restore`,
 //! `backup --force` and `unseal` ([`Store::put_away`], [`put_away_beside`]).
@@ -340,7 +343,7 @@ impl Store {
         };
         let bound = (dev, ino, born);
         match instance::binding(&self.file(name)) {
-            Ok(now) if now == bound => {}
+            Ok(now) if instance::same(bound, now) => {}
             Ok(_) => return Err(Unread::Bound("name another file than the tenant's")),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(Unread::Bound("lie beside no file of the tenant"))
@@ -389,6 +392,12 @@ impl Store {
         let path = self.path(name);
         let tmp = self.writing(name);
         let written = (|| {
+            // Made `0600` by its open, never through a link put at its
+            // name, and given the mode an operator set on the sidecar, as
+            // every file keeps its mode (`fennec_core::fs::create_like`).
+            #[cfg(unix)]
+            let mut f = fennec_core::fs::create_like(&tmp, &path)?;
+            #[cfg(windows)]
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -499,7 +508,7 @@ impl Store {
             let Some(e) = map.get_mut(name) else {
                 return;
             };
-            if Some(e.bound) == at {
+            if at.is_some_and(|at| instance::same(e.bound, at)) {
                 e.held = open;
                 return;
             }
@@ -517,7 +526,7 @@ impl Store {
             return;
         };
         let mine = match open {
-            0 => instance::binding(&self.file(name)).ok() == Some(bound),
+            0 => (instance::binding(&self.file(name))).is_ok_and(|now| instance::same(bound, now)),
             open => held == open,
         };
         if !mine {
@@ -555,7 +564,7 @@ impl Store {
         let Ok(now) = instance::binding(&self.file(name)) else {
             return;
         };
-        if bound == now {
+        if instance::same(bound, now) {
             return;
         }
         let text = Self::text(now, set.version, &exported(&set));
@@ -1065,19 +1074,16 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// A file opened readable by its owner alone -- mode 0600, on Windows a
-/// DACL set before a byte is written (`owner_only`): the sidecar holds secrets.
+/// A file opened readable by its owner alone on Windows, a DACL set
+/// before a byte is written (`owner_only`): the sidecar holds secrets. A
+/// Unix makes it `0600` by `fennec_core::fs::create_like`.
+#[cfg(windows)]
 trait Private {
     fn mode_private(&mut self) -> &mut Self;
 }
 
+#[cfg(windows)]
 impl Private for std::fs::OpenOptions {
-    #[cfg(unix)]
-    fn mode_private(&mut self) -> &mut Self {
-        use std::os::unix::fs::OpenOptionsExt;
-        self.mode(0o600)
-    }
-    #[cfg(windows)]
     fn mode_private(&mut self) -> &mut Self {
         crate::owner_only::options(self)
     }

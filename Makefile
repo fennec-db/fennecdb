@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
@@ -75,6 +75,9 @@ test:
 ##   fennec.https.test.js FennecHttp against fennec-server --tls-cert: reached
 ##                     with NODE_EXTRA_CA_CERTS naming the test CA, refused
 ##                     without it; skipped without the binary
+##   fennec.compat.test.js  each release's page restored by this client: its
+##                     IndexedDB image and chunks, sealed or not, and its OPFS
+##                     file (crates/fennec-core/tests/compat/)
 ##   studio/test/statements.test.mjs  fennec studio's statements: every value a
 ##                     parameter, every name one FennecQL writes, its first load
 ##                     under 120 KB gzipped and holding nothing of the playground's
@@ -84,7 +87,7 @@ test:
 ##                     `web/fennec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js web/fennec.compat.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -395,6 +398,20 @@ perf-gate:
 	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),5) \
 	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
 
+## The I/O half of the gate, which CI's `perf (instructions)` job also
+## judges: this tree's fennec-server and BASE's (origin/main), built in
+## perf-gate's trees and target directories (KEEP=1 there leaves them),
+## each sent the I/O workloads of crates/fennec-http/examples/gate.rs by
+## this tree's program under `strace -f` -- the server's fsyncs, renames
+## and bytes written to files, RUNS (3) times a side -- and any count
+## that is not the base's fails unless the pull request adds a
+## PERF_ACCEPTED entry naming it. HEAD=<ref> and TARGET as perf-gate.
+## Linux with strace: on macOS, in Docker (docs/design/benchmarks.md#the-gate)
+perf-gate-io:
+	python3 tools/perf_gate.py io --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),3) \
+	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
+
 ## This tree's build against BASE's (origin/main) in instructions an op, on
 ## macOS: the allocator there takes paths a binary's identity picks, moving a
 ## request by hundreds of instructions with the code unchanged, so each build
@@ -477,8 +494,9 @@ fennecql-corpus:
 	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 # The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
-# the fuzz targets and the jobs running them take one (ci.yml's fuzz-smoke,
-# fuzz.yml). Moved forward in a pull request of its own.
+# the fuzz targets, the sanitized tests (`make sanitize`) and the jobs
+# running them take one (ci.yml's fuzz-smoke and sanitize, fuzz.yml). Moved
+# forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
 # Flags for each run, CI's: `--corpus none`, and the weekly run's
@@ -523,6 +541,28 @@ fuzz-smoke:
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
 	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
 
+## The tests of fennec-ffi, fennec-abi and fennec-core -- the C ABI an
+## app's pointers and lengths reach, the file's mapping, the kernels, the
+## arenas -- under AddressSanitizer on FUZZ_NIGHTLY (`make fuzz-toolchain`):
+## CI's sanitize job (docs/design/conventions.md#sanitizers). For the host's
+## triple, as the fuzzer is built, so build scripts and proc macros run
+## uninstrumented; a report ends the run, failed. Leaks are not looked for
+## (SANITIZE_ASAN_OPTIONS): the engine's tests forget a database on purpose,
+## as a killed process leaves one
+SANITIZE_RUSTFLAGS = -Zsanitizer=address
+SANITIZE_ASAN_OPTIONS ?= detect_leaks=0
+# The tests held to the standard library's own Unicode, which a nightly
+# moves ahead of the pinned release's: they fail on a new Unicode by design,
+# for the case tables to be written again (src/case.rs, tests/nocase.rs),
+# and say nothing of memory.
+SANITIZE_SKIP = --skip case::tests::the_tables_are_the_standard_library_s \
+	--skip case::tests::the_unlike_runs_are_the_standard_library_s \
+	--skip nocase::the_fold_is_python_s_casefold_at_every_code_point
+sanitize:
+	RUSTFLAGS="$(SANITIZE_RUSTFLAGS)" ASAN_OPTIONS="$(SANITIZE_ASAN_OPTIONS)" \
+	  $(CARGO) +$(FUZZ_NIGHTLY) test --profile sanitize --target $(FUZZ_HOST) --no-fail-fast \
+	  -p fennec-ffi -p fennec-abi -p fennec-core --lib --tests -- $(SANITIZE_SKIP)
+
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:
 	rustup toolchain install $(FUZZ_NIGHTLY) --profile minimal
@@ -542,9 +582,25 @@ packages: wasm
 	@if command -v dotnet >/dev/null 2>&1; then integrations/dotnet/package.sh; \
 	else echo "dotnet not found: FennecDb (NuGet) not checked"; fi
 
-## One version wherever a release reads it: make version V=0.1.5
+## One version wherever a release reads it: make version V=0.1.5. Refused
+## while the release it moves on from has no fixture set (compat-fixtures)
 version:
 	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
+
+## A release's fixture set, from its tag alone: its fennec-server, fennec,
+## module and engine built in a scratch directory (deleted after; BIN=<dir>
+## keeps the binaries instead) and run into
+## crates/fennec-core/tests/compat/v$(V)/, the files they write and the
+## answers they gave, which every later build's compat:: tests open
+## (RELEASING.md, step 7), by the programs MANIFEST.json names. A further
+## set of the tag is `write <bin-dir> .../v$(V)+2` with BIN's programs.
+## macOS or Linux: the builds about ten minutes, the writes about twelve
+compat-fixtures:
+	@test -n "$(V)" || (echo "V=<version> is required: make compat-fixtures V=0.2.0"; exit 1)
+	@bin=$${BIN:-$$(mktemp -d)}; \
+		python3 tools/compat_fixtures.py build v$(V) "$$bin" && \
+		python3 tools/compat_fixtures.py write "$$bin" crates/fennec-core/tests/compat/v$(V); \
+		status=$$?; if [ -z "$(BIN)" ]; then rm -rf "$$bin"; fi; exit $$status
 
 ## A page's database kept in real browsers (web/browser/run.mjs): persist,
 ## restore and openFile against the engine's own IndexedDB, WebCrypto and
@@ -686,6 +742,24 @@ node-archive-bench:
 	$(CARGO) build --release -p fennec-server -p fennec-cli
 	$(CARGO) run --release -p fennec-http --example node_archive -- $(or $(ARGS),1000 10 20 always)
 	$(CARGO) run --release -p fennec-http --example node_archive_passes -- $(or $(PASSES),node 20 32)
+
+## A --dir node's window under --sync 250, as the power-cut rig reads it: a
+## node of each of TENANTS (2,8,32,64) tenants, every one written RATE (100)
+## times a second, its pages' gaps and its writes' handover read from
+## /_changes; HEAVY=spill,batch the first tenant slow to sync beside the
+## rest, FILE=1 a file's server too, SECONDS (20) a run. This tree's release
+## build against BASE_BIN (another build's fennec-server, copied aside) in
+## turns, ROUNDS (2) of each, each run once the 1-minute load is under QUIET
+## (4): one line a run to OUT (target/node-syncs/results.jsonl), the medians
+## to its .log (crates/fennec-http/examples/node_syncs.py;
+## docs/design/durability.md#a-nodes-syncs)
+node_sync_tenants := 2,8,32,64
+node-sync-bench:
+	$(CARGO) build --release -p fennec-server
+	python3 crates/fennec-http/examples/node_syncs.py $(if $(BASE_BIN),--base '$(BASE_BIN)') \
+	  --tenants '$(or $(TENANTS),$(node_sync_tenants))' --rate $(or $(RATE),100) --seconds $(or $(SECONDS),20) \
+	  --heavy '$(or $(HEAVY),none)' --rounds $(or $(ROUNDS),2) --quiet $(or $(QUIET),4) \
+	  $(if $(FILE),--file) $(if $(OUT),--out '$(OUT)')
 
 ## Writers and readers at once, fennecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
@@ -1442,6 +1516,30 @@ packaging-test:
 upgrade-check:
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/upgrade-order.sh $(CURDIR)/target/debug $(or $(BASE),12d6f8db^)
+
+## Two releases' processes beside each other: this tree's fennec-server,
+## fennec and fennec-shard against the last published release's, OLD (a tag;
+## `latest`, the default, is the published release highest in version order
+## up to this tree's, asked of GitHub with gh), through
+## tools/compat-matrix.sh: replication both ways, archives and backups plain
+## and sealed, the values 0.2.0 wrote that this tree does not read whole, a
+## router over nodes of the other release, and a rolling upgrade of a router
+## and a node pair under durable writes, each write classed and read back
+## (docs/design/compatibility.md#the-compatibility-matrix). The harness's
+## own tests run first. The release's fennec-server and fennec come from its
+## tarball, checked against its SHA256SUMS by site/install.sh
+## (OLD_ASSETS_DIR, a directory holding the two files, in place of `gh
+## release download`); its fennec-shard, which no release ships, is built
+## from the tag's sources into target/compat-shard (SHARD_TARGET_DIR), kept
+## (tools/release-bins.sh). compat.yml runs it weekly, on release tags and
+## by dispatch: minutes. Needs curl, jq, openssl and python3, and gh unless
+## OLD_ASSETS_DIR holds the release's files and this clone its tag.
+compat-check:
+	bash tools/compat-matrix.sh --self-test
+	bash tools/test_release_bins.sh
+	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
+	CARGO=$(CARGO) bash tools/release-bins.sh $(or $(OLD),latest) $(CURDIR)/target/compat-old
+	bash tools/compat-matrix.sh $(CURDIR)/target/compat-old $(CURDIR)/target/debug
 
 ## Publishes to Cloudflare Workers (fennecdb.com). Needs `wrangler login`
 ## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.

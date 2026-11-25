@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # No external dependencies. The SQLite file format is read by hand; the
 # PostgreSQL wire protocol is spoken through fennec-wire's client.
@@ -17,6 +20,12 @@ fennec-core = { workspace = true, features = ["std-fs", "full"] }
 fennec-wire.workspace = true
 # `--where` and `--index` are read by FennecQL's own parser (`args`).
 fennec-ql.workspace = true
+
+[dev-dependencies]
+# A name of the tests' own, resolved to a stand-in on this machine
+# (`dial::stand_in`): a host off this machine, whose keepalives the
+# follower does not take as the server's.
+fennec-http.workspace = true
 
 [features]
 default = ["tls"]

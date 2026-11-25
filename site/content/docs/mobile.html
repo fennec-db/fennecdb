@@ -554,17 +554,25 @@ shape's cursor, so a crash leaves the two agreeing. A change saying the
 server's schema changed, or rows with a field the replica has not got, has
 the collection made again from <code>GET /collections</code> -- its rows kept
 in the fields that are left -- and the whole shape sent again.</p>
-<p>The file holds three collections of the sync's own beside the
+<p>The file holds four collections of the sync's own beside the
 replica's: <code>_sync_shapes</code> (each shape's cursor),
-<code>_sync_queue</code> (the writes not yet answered) and
+<code>_sync_queue</code> (the writes not yet answered),
 <code>_sync_temps</code> (rows an insert made under a temporary id, until
-the server's copy). A collection with no shape is the app's own, written
+the server's copy) and <code>_sync_seed</code> (the parts of a seed that
+came in parts, until the last). A collection with no shape is the app's own, written
 and read as in a file of its own; a synced collection's schema is the
 server's, and <code>create index</code> or <code>drop</code> over it is
 refused. A change of one row costs the replica 18.4 µs against 7.1 for the
 same put straight into the engine (the cursor is written in the same
 block), rows in changes of 100 cost 3.8 µs either way, and a seed of 10 000
 rows 72 ms (<code>make sync-bench</code>).</p>
+<p>A seed past 1 MiB of JSON comes in parts
+(<a href="sync.html#seeds-in-parts">a seed in parts</a>). The replica holds
+them in <code>_sync_seed</code> in its file and lands the seed in one block
+once the last part came, so every read answers the rows as they were until
+then, and <code>ready()</code> waits for that last part. A stream that drops
+mid-seed leaves the replica as it was: the parts are deleted at the drop and
+when the replica opens again, and the next stream seeds from its start.</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
@@ -867,9 +875,9 @@ whole open.</p>
 <table>
 <thead><tr><th>the native library, stripped</th><th class="n">size</th></tr></thead>
 <tbody>
-<tr><td>macOS, Apple silicon</td><td class="n">3.07 MB</td></tr>
-<tr><td>macOS, Intel</td><td class="n">3.34 MB</td></tr>
-<tr><td>Linux x86-64, with the JNI functions</td><td class="n">3.52 MB</td></tr>
+<tr><td>macOS, Apple silicon</td><td class="n">3.12 MB</td></tr>
+<tr><td>macOS, Intel</td><td class="n">3.39 MB</td></tr>
+<tr><td>Linux x86-64, with the JNI functions</td><td class="n">3.58 MB</td></tr>
 </tbody>
 </table>
 </div>

@@ -142,6 +142,11 @@ pub struct Config {
     /// The longest a call a read replica's upkeep makes may take
     /// ([`readers::CALL`] unless set).
     pub reader_timeout: Duration,
+    /// How long a node's word that it asks no data token is taken, by a
+    /// router guarding against such a node, before a request it refuses
+    /// asks the node again ([`OPEN_ASKED_AGAIN`] unless set): set to
+    /// nothing by a test, which then asks at every refusal.
+    pub open_asked_again: Duration,
     /// The global entry's token (`--entry-token`, its `ENTRY_TOKEN`): a
     /// request whose `Fennec-Client` header carries the entry's mark for
     /// its address and a time within a minute of this clock is the named
@@ -182,6 +187,7 @@ impl Default for Config {
             replica_rest: readers::RESTING,
             health_wait: readers::HEALTH_WAIT,
             reader_timeout: readers::CALL,
+            open_asked_again: OPEN_ASKED_AGAIN,
             entry_token: None,
             tls: None,
         }
@@ -221,10 +227,15 @@ pub struct Router {
     /// `upstream_timeout`, so a node that does not answer cannot hold up
     /// the others' renewals until theirs lapse too.
     leases: Option<(lease::Leases, Pool)>,
-    /// Each node's mark for what is forwarded to it
-    /// (`fennec_http::audit::router_mark`), by its admin token: an HMAC
-    /// worked out once, not a request.
-    marks: Mutex<std::collections::HashMap<String, Arc<str>>>,
+    /// Each node's marks for what is forwarded to it, of either class of
+    /// listener (`fennec_http::audit::router_marks`), and whether it asks
+    /// no data token, by its address ([`Marked`]): HMACs worked out once,
+    /// not a request.
+    marks: Mutex<std::collections::HashMap<String, Arc<Marked>>>,
+    /// The classes of the listeners this router serves on
+    /// ([`LISTENS_LOOPBACK`], [`LISTENS_PAST`]): one on loopback alone
+    /// marks what it forwards so ([`Router::loopback_only`]).
+    listens: std::sync::atomic::AtomicU8,
     /// A region's router's copy of the global directory, which says where
     /// every other tenant lives: followed from the global router. `None` on
     /// a router of the global directory, whose own it is.
@@ -500,6 +511,10 @@ enum Reclaimed {
     /// Not judged: the node refused, did not answer, or is from before
     /// identities -- or nothing names the file by one.
     Kept(String),
+    /// Not judged yet: the node said to come back after the wait it named
+    /// (503) -- an install of the name under way there, which may put the
+    /// file noted there yet ([`ComeBack`]) -- and what it said.
+    Later(Duration, String),
     /// No file is noted as left there ([`Router::reclaim_noted`]).
     Unnoted,
 }
@@ -527,6 +542,63 @@ fn instances_at(fields: &[(String, Value)]) -> Vec<u64> {
         .and_then(fennec_http::instance::parse)
         .into_iter()
         .collect()
+}
+
+/// The longest a router waits between two asks of a node that answered
+/// one of its operations with a 503 naming its wait ([`ComeBack`]).
+const COME_BACK_MOST: Duration = Duration::from_secs(8);
+
+/// A node's 503s naming their wait, met by one operation of the router on
+/// one node -- a move's install, the reclaim clearing a move's or an
+/// attach's target: an install of the tenant's name under way there
+/// (`Tenants::claim`), the node going down. Nothing it was asked ran, so it
+/// is asked again after the wait it named, never sooner, each wait after
+/// twice the one before, to [`COME_BACK_MOST`], while the first ask's
+/// `--upstream-timeout` lasts; then the last answer stands. The node's
+/// install refusal was a 409, a file there, until the image review's
+/// second round: a move whose own install had gone unanswered had the
+/// target's reclaim judge a place no file was in yet, forgot its note of
+/// that install, and failed, and the file the install then put there was
+/// no router's to take back.
+struct ComeBack {
+    until: Option<Instant>,
+    next: Duration,
+}
+
+impl ComeBack {
+    fn new() -> ComeBack {
+        ComeBack {
+            until: None,
+            next: Duration::ZERO,
+        }
+    }
+
+    /// The wait before the next ask, where a node named `named` at `now`:
+    /// none once it would end past `within` from the first.
+    fn after(&mut self, named: Duration, now: Instant, within: Duration) -> Option<Duration> {
+        let until = *self.until.get_or_insert(now + within);
+        let wait = named.max(self.next).min(COME_BACK_MOST);
+        if now + wait > until {
+            return None;
+        }
+        self.next = (wait * 2).min(COME_BACK_MOST);
+        Some(wait)
+    }
+}
+
+/// The wait a node's answer names where it is a 503 saying when to come
+/// back (`retry_after`, as `Response::retry_after` writes it), a second at
+/// the least: none otherwise.
+fn named_wait(answer: &std::io::Result<(u16, Vec<u8>)>) -> Option<Duration> {
+    let Ok((503, body)) = answer else {
+        return None;
+    };
+    fields_of(body).into_iter().find_map(|(k, v)| match v {
+        Value::Int(secs) if k == "retry_after" => {
+            Some(Duration::from_secs(secs.clamp(1, 60) as u64))
+        }
+        _ => None,
+    })
 }
 
 /// Why [`Router::place_replica`] gave a tenant no replica.
@@ -661,8 +733,85 @@ struct Toward {
     node: String,
     addr: String,
     mark: Option<Arc<str>>,
+    /// The node's marks and what it said of its token, where the request
+    /// goes to a node: asked before it goes ([`Router::open_node`]).
+    marked: Option<Arc<Marked>>,
     routers: Option<(String, Vec<String>)>,
     home: Option<String>,
+    /// The target sent in place of the request's own: a stand-in's, its
+    /// tenant named past [`fennec_http::tenants::STAND_IN`]
+    /// ([`Router::stand_in`]).
+    target: Option<String>,
+}
+
+/// [`Router::listens`]: a listener bound on a loopback address.
+const LISTENS_LOOPBACK: u8 = 1;
+/// [`Router::listens`]: a listener bound on an address past loopback.
+const LISTENS_PAST: u8 = 2;
+
+/// [`Marked::open`]: not asked yet.
+const OPEN_UNKNOWN: u64 = 0;
+/// [`Marked::open`]'s low two bits, what the node said: it asks a data
+/// token.
+const WORD_TOKEN: u64 = 0;
+/// It asks none.
+const WORD_OPEN: u64 = 1;
+/// It said nothing: asked, it did not answer, or refused the admin token
+/// recorded for it.
+const WORD_NONE: u64 = 2;
+/// [`Router::ask_now`]'s answer, never kept: not asked yet, and another
+/// request's ask is out.
+const WORD_ASKING: u64 = 3;
+
+/// The router process's seconds, from one: what a node's word on its data
+/// token is timed by ([`Marked::open`]).
+fn open_clock() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs() + 1
+}
+/// How long a node's word that it asks no token is taken before it is
+/// asked again, as a refusal comes: one given a token since is forwarded
+/// to within this, the router started again or not.
+const OPEN_ASKED_AGAIN: Duration = Duration::from_secs(10);
+/// How long, in seconds, a node that said nothing of its token is let be
+/// before a request asks it again: what a request meanwhile is told to
+/// wait (`Retry-After`), and the most a node that does not answer is asked
+/// a second.
+const SILENT_ASKED_AGAIN: u64 = 1;
+
+/// A node as the router marks what it forwards to it: the marks made from
+/// its admin token, of either class of the router's listener, and what the
+/// node said last of its data token ([`Router::open_node`]).
+pub(crate) struct Marked {
+    /// The admin token the marks were made from: a node given another is
+    /// marked again.
+    token: String,
+    past: Arc<str>,
+    local: Arc<str>,
+    /// [`OPEN_UNKNOWN`], or the second of [`open_clock`] the node was asked
+    /// at, shifted left two, and in the low two bits what it said: a
+    /// [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`].
+    open: std::sync::atomic::AtomicU64,
+    /// Claimed by whoever asks the node: one ask a node at a time, a
+    /// request meeting it answered as the node's word stands, never
+    /// waiting for the ask ([`Router::ask_now`]).
+    asking: std::sync::atomic::AtomicBool,
+    /// Whether a thread asks it beside a read ([`Router::open_copy`]).
+    beside: std::sync::atomic::AtomicBool,
+}
+
+impl Marked {
+    fn new(token: &str) -> Marked {
+        let marks = fennec_http::audit::router_marks(token);
+        Marked {
+            token: token.to_string(),
+            past: marks.past.into(),
+            local: marks.local.into(),
+            open: std::sync::atomic::AtomicU64::new(OPEN_UNKNOWN),
+            asking: std::sync::atomic::AtomicBool::new(false),
+            beside: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -722,6 +871,7 @@ impl Router {
             busy: Mutex::new(HashSet::new()),
             freed: std::sync::Condvar::new(),
             marks: Mutex::new(Default::default()),
+            listens: std::sync::atomic::AtomicU8::new(0),
             live: Arc::default(),
             fail_spawns: Default::default(),
             leases: cfg
@@ -786,6 +936,13 @@ impl Router {
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
         fennec_http::metrics::started();
+        // The class of what this router listens on, judged of the address
+        // the listener is bound on: `0.0.0.0` and `[::]` are past loopback.
+        let class = match listener.local_addr()?.ip().is_loopback() {
+            true => LISTENS_LOOPBACK,
+            false => LISTENS_PAST,
+        };
+        self.listens.fetch_or(class, Ordering::Relaxed);
         // The read replicas this router keeps follow their tenants'
         // primaries wherever those go ([`readers`]).
         self.start_following()?;
@@ -1370,6 +1527,27 @@ impl Router {
             .call_with(&n.addr, method, target, &n.token, &headers[..named], body)
     }
 
+    /// [`Self::as_holder`]'s `PUT` of a tenant's image of `len` bytes read
+    /// off `image` as it goes out ([`upstream::Pool::call_streamed`]): a
+    /// move's, relayed from its source as it comes.
+    fn as_holder_streamed(
+        &self,
+        n: &Node,
+        target: &str,
+        id: u64,
+        len: u64,
+        image: &mut dyn std::io::Read,
+    ) -> std::io::Result<(u16, Vec<u8>)> {
+        let holder = self.holder_header();
+        let id = fennec_http::instance::text(id);
+        let headers = [
+            (fennec_http::lease::HOLDER_HEADER, holder.as_str()),
+            (fennec_http::instance::HEADER, id.as_str()),
+        ];
+        self.pool
+            .call_streamed(&n.addr, "PUT", target, &n.token, &headers, len, image)
+    }
+
     /// Grants `node` its lease at once, over what the directory places there
     /// now: after a create or a move, so a tenant takes writes on the node it
     /// was placed on before the next round.
@@ -1775,16 +1953,282 @@ impl Router {
         }
     }
 
-    /// The mark of what is forwarded to the node whose admin token is
-    /// `token`.
-    fn mark(&self, token: &str) -> Arc<str> {
+    /// The node `n` as what is forwarded to it is marked ([`Marked`]), by
+    /// its address: made again where its admin token is another.
+    fn marked(&self, n: &Node) -> Arc<Marked> {
         let mut marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(m) = marks.get(token) {
+        if let Some(m) = marks
+            .get(&n.addr)
+            .filter(|m| ct_eq(m.token.as_bytes(), n.token.as_bytes()))
+        {
             return Arc::clone(m);
         }
-        let m: Arc<str> = fennec_http::audit::router_mark(token).into();
-        marks.insert(token.to_string(), Arc::clone(&m));
+        let m = Arc::new(Marked::new(&n.token));
+        marks.insert(n.addr.clone(), Arc::clone(&m));
         m
+    }
+
+    /// Whether every listener this router serves on is bound on loopback:
+    /// whoever reaches it is on this machine. False before it serves.
+    fn loopback_only(&self) -> bool {
+        self.listens.load(Ordering::Relaxed) == LISTENS_LOOPBACK
+    }
+
+    /// The mark of the request this thread serves, to the node `m`: a
+    /// router on loopback alone says so (`audit::router_mark_local`) of a
+    /// request no other router relayed and the global entry named no
+    /// client of -- either came from past this machine -- and any other
+    /// sends the mark a router from before sends, which a node asking no
+    /// token answers only under its own `--insecure`.
+    fn mark_of(&self, m: &Marked) -> Arc<str> {
+        match self.loopback_only() && !fennec_http::audit::vouched() {
+            true => Arc::clone(&m.local),
+            false => Arc::clone(&m.past),
+        }
+    }
+
+    /// Whether this router forwards nothing to a node that asks no data
+    /// token: its listener is not loopback alone, and its operator did not
+    /// say `--insecure`. Behind such a router, with `--token`, an open node
+    /// ran every tenant's statements for anyone on the network: the router
+    /// asks a forward no token, and the node took the client's own `Host`,
+    /// `localhost` or an address, for this machine's.
+    fn guards_open_nodes(&self) -> bool {
+        !self.cfg.insecure && !self.loopback_only()
+    }
+
+    /// The router's refusal to forward to `node`, at `addr`, marked `m`,
+    /// where it cannot tell that the node asks a data token
+    /// ([`Self::guards_open_nodes`]): 403 naming the node and what to give
+    /// it, counted (`fennec_router_open_node_refusals_total`), where it
+    /// asks none; 503 naming it where it said nothing. What the node says
+    /// of its token is its `GET /_admin/stats`'s `no_token`, and of a node
+    /// from before, which says nothing there, its `GET /_whoami` asked with
+    /// no token ([`Self::word_of`]): asked as the node is added
+    /// ([`Self::set_node`]), and of a node not asked since the router
+    /// started -- one its directory held, or a standby's directory brought
+    /// -- by the first request to it, before it goes, one ask out a node at
+    /// a time, a request meeting it answered 503 rather than waiting
+    /// ([`Self::ask_now`]).
+    /// A node that said so is asked again by a request refused once its
+    /// word is [`Config::open_asked_again`] old, so one given a token since
+    /// is forwarded to with no router started again; one that said nothing
+    /// by the first request [`SILENT_ASKED_AGAIN`] after. A node that said
+    /// it asks a token is not asked again: given none since, it refuses
+    /// what this router sends it unless it runs `--insecure`. Not known
+    /// means not forwarded: sent on while its word was not in, a node from
+    /// before, or one running `--insecure` itself, answered whoever reached
+    /// this router. The forward pays one load and a compare.
+    #[inline]
+    fn open_node(&self, node: &str, addr: &str, m: &Arc<Marked>) -> Option<Response> {
+        let state = m.open.load(Ordering::Relaxed);
+        if state != OPEN_UNKNOWN && state & 3 == WORD_TOKEN {
+            return None;
+        }
+        self.open_node_asked(node, addr, m, state)
+    }
+
+    /// [`Self::open_node`] of a node that did not say it asks a token, as
+    /// `state` held it.
+    #[cold]
+    #[inline(never)]
+    fn open_node_asked(
+        &self,
+        node: &str,
+        addr: &str,
+        m: &Arc<Marked>,
+        state: u64,
+    ) -> Option<Response> {
+        let word = match self.word_aged(state) {
+            true => self.ask_now(addr, m, state),
+            false => state & 3,
+        };
+        match word {
+            WORD_TOKEN => None,
+            WORD_OPEN => {
+                metrics::open_node_refused();
+                Some(Response::error(
+                    403,
+                    &format!(
+                        "node `{node}` asks no token, and this router listens past loopback, \
+                         where anyone on the network reaches it: give the node --http-token or \
+                         --jwt-keys, or start this router with --insecure if the network may \
+                         read and write its tenants (the node too, unless it runs with it)"
+                    ),
+                ))
+            }
+            WORD_ASKING => Some(Response::retry_after(
+                503,
+                &format!(
+                    "node `{node}` is being asked whether it asks a data token, and this \
+                     router listens past loopback, where it forwards to no node that may ask \
+                     none"
+                ),
+                SILENT_ASKED_AGAIN,
+            )),
+            _ => Some(Response::retry_after(
+                503,
+                &format!(
+                    "node `{node}` did not say whether it asks a data token -- its \
+                     /_admin/stats did not answer the admin token recorded for it -- and this \
+                     router listens past loopback, where it forwards to no node that may ask \
+                     none"
+                ),
+                SILENT_ASKED_AGAIN,
+            )),
+        }
+    }
+
+    /// Whether a node's word `state` is to be asked again now: not asked,
+    /// nothing said [`SILENT_ASKED_AGAIN`] ago, or no token
+    /// [`Config::open_asked_again`] ago.
+    fn word_aged(&self, state: u64) -> bool {
+        let age = open_clock().saturating_sub(state >> 2);
+        match state & 3 {
+            _ if state == OPEN_UNKNOWN => true,
+            WORD_OPEN => age >= self.cfg.open_asked_again.as_secs(),
+            WORD_NONE => age >= SILENT_ASKED_AGAIN,
+            _ => false,
+        }
+    }
+
+    /// Whether the node at `addr`, marked `m`, may hold a read replica's
+    /// read this router sends it, listening past loopback: only where it
+    /// said it asks a token. One not asked, or whose word is old, is asked
+    /// on a thread beside the read, which goes home meanwhile, as asked of
+    /// the home's node as any forward is ([`Self::open_node`]).
+    fn open_copy(&self, addr: &str, m: &Arc<Marked>) -> bool {
+        let state = m.open.load(Ordering::Relaxed);
+        if state != OPEN_UNKNOWN && state & 3 == WORD_TOKEN {
+            return false;
+        }
+        if self.word_aged(state) {
+            self.ask_beside(addr, m);
+        }
+        true
+    }
+
+    /// [`Self::ask_now`] on a thread of its own, one at a time a node: the
+    /// read asking goes on meanwhile, and one meeting a request's ask out
+    /// leaves it that one.
+    #[cold]
+    fn ask_beside(&self, addr: &str, m: &Arc<Marked>) {
+        if m.beside.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(router) = self.me.upgrade() else {
+            m.beside.store(false, Ordering::Relaxed);
+            return;
+        };
+        let (addr, marked) = (addr.to_string(), Arc::clone(m));
+        let spawned = std::thread::Builder::new()
+            .name("fennec-open-node".into())
+            .spawn(move || {
+                let state = marked.open.load(Ordering::Relaxed);
+                router.ask_now(&addr, &marked, state);
+                marked.beside.store(false, Ordering::Relaxed);
+            });
+        if spawned.is_err() {
+            m.beside.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Asks the node at `addr` what it says of its data token, unless
+    /// another asked it since its word was `seen`, and keeps the word in
+    /// `m`: the word, a [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`]. One
+    /// ask a node at a time, and no request waits for it: one meeting an
+    /// ask out has the word as it stands, [`WORD_ASKING`] where there is
+    /// none yet -- 503, `Retry-After` -- as a node that said nothing is
+    /// answered. Each waiting on a lock the ask held, every request to the
+    /// node queued behind a call bounded by `--upstream-timeout` alone,
+    /// against fennec-shard's rule that no lock is held across a call to a
+    /// node.
+    fn ask_now(&self, addr: &str, m: &Marked, seen: u64) -> u64 {
+        if m.asking.swap(true, Ordering::Acquire) {
+            return match m.open.load(Ordering::Relaxed) {
+                OPEN_UNKNOWN => WORD_ASKING,
+                s => s & 3,
+            };
+        }
+        // Let go as this returns, a panic's unwinding too.
+        struct Asking<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Asking<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _one = Asking(&m.asking);
+        let state = m.open.load(Ordering::Relaxed);
+        if state != seen {
+            return match state {
+                OPEN_UNKNOWN => WORD_NONE,
+                s => s & 3,
+            };
+        }
+        let word = match self.pool.call(addr, "GET", "/_admin/stats", &m.token, b"") {
+            Ok((200, body)) => self.word_of(addr, &body),
+            _ => WORD_NONE,
+        };
+        self.note_word(addr, m, word)
+    }
+
+    /// What the node at `addr` says of its data token by its `/_admin/stats`
+    /// answer `stats`: its `no_token`, or where it says nothing of it -- a
+    /// node from before, v0.2.0 among them -- its `GET /_whoami` asked with
+    /// no token, `"kind":"open"` from a node asking none and its 401 from
+    /// one asking one. Read as asking one, a v0.2.0 node asking none stayed
+    /// open to the network behind a router past loopback for as long as a
+    /// rolling upgrade, routers first, left it so.
+    fn word_of(&self, addr: &str, stats: &[u8]) -> u64 {
+        match fields_of(stats).into_iter().find(|(k, _)| k == "no_token") {
+            Some((_, Value::Bool(true))) => return WORD_OPEN,
+            Some((_, Value::Bool(false))) => return WORD_TOKEN,
+            _ => {}
+        }
+        match self.pool.call(addr, "GET", "/_whoami", "", b"") {
+            Ok((200, body)) => match (fields_of(&body).into_iter())
+                .any(|(k, v)| k == "kind" && matches!(v, Value::Text(t) if t == "open"))
+            {
+                true => WORD_OPEN,
+                false => WORD_NONE,
+            },
+            Ok((401, _)) => WORD_TOKEN,
+            _ => WORD_NONE,
+        }
+    }
+
+    /// The node at `addr`'s `word`, kept in `m` and returned as kept: a node
+    /// that said it asks no token and now says nothing goes on as having
+    /// said so -- reset to not known, it was forwarded to. Said in the log
+    /// where it asks none or says nothing and this router guards against
+    /// such a node, once as it says so after it said otherwise.
+    fn note_word(&self, addr: &str, m: &Marked, word: u64) -> u64 {
+        let was = m.open.load(Ordering::Relaxed);
+        let word = match word {
+            WORD_NONE if was != OPEN_UNKNOWN && was & 3 == WORD_OPEN => WORD_OPEN,
+            w => w,
+        };
+        let was = m.open.swap((open_clock() << 2) | word, Ordering::Relaxed);
+        let again = was != OPEN_UNKNOWN && was & 3 == word;
+        if again || !self.guards_open_nodes() {
+            return word;
+        }
+        match word {
+            WORD_OPEN => fennec_http::log!(
+                "warning: the node at {addr} asks no token, and this router listens past \
+                 loopback: it forwards nothing to that node's tenants, answering 403, until \
+                 the node has --http-token or --jwt-keys, or this router (and the node, unless \
+                 it does) runs --insecure (fennec_router_open_node_refusals_total counts them)"
+            ),
+            WORD_NONE => fennec_http::log!(
+                "warning: the node at {addr} did not say whether it asks a data token -- its \
+                 /_admin/stats did not answer the admin token this router holds for it -- and \
+                 this router listens past loopback: it forwards nothing to that node's tenants, \
+                 answering 503, and asks it again each second a request comes"
+            ),
+            _ => {}
+        }
+        word
     }
 
     /// `resp` with the CORS headers `--http-cors` asks for: on every answer
@@ -2115,12 +2559,22 @@ impl Router {
             node,
             addr,
             mark,
+            marked,
             routers,
             home,
+            target,
         } = match self.toward(req, tenant, relayed) {
             Ok(t) => t,
             Err(resp) => return reply(out, resp),
         };
+        let target = target.as_deref().unwrap_or(&req.target);
+        // A node asking no token, behind a listener past loopback: one
+        // load, unless the router guards against such a node.
+        if let Some(m) = marked.as_ref().filter(|_| self.guards_open_nodes()) {
+            if let Some(refused) = self.open_node(&node, &addr, m) {
+                return reply(out, refused);
+            }
+        }
         if fennec_http::trace::recording() {
             fennec_http::trace::attr("fennec.node", node.clone());
         }
@@ -2178,7 +2632,7 @@ impl Router {
             None => self.pool.send_held(
                 &addr,
                 req.method.name(),
-                &req.target,
+                target,
                 &headers,
                 &req.body,
                 held,
@@ -2249,26 +2703,39 @@ impl Router {
             let dir = self.read_dir();
             dir.placement(tenant).and_then(|p| {
                 dir.node(&p.node).map(|n| {
-                    let home = region::home_asked(req, &n.region);
-                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
+                    let home = self.home_asked(req, &n.region);
+                    (p.node.clone(), n.addr.clone(), self.marked(n), home)
                 })
             })
         };
         Ok(match placed {
-            Some((node, addr, mark, home)) => Toward {
+            Some((node, addr, marked, home)) => Toward {
                 node,
                 addr,
-                mark: Some(mark),
+                mark: Some(self.mark_of(&marked)),
+                marked: Some(marked),
                 routers: None,
                 home,
+                target: None,
             },
-            None => match self.elsewhere(tenant, relayed.is_some()) {
-                region::Target::Node(node, addr, mark, region) => Toward {
+            None => match self.elsewhere(req, tenant, relayed.is_some()) {
+                region::Target::Node(node, addr, marked, region) => Toward {
                     node,
                     addr,
-                    mark: Some(mark),
+                    mark: Some(self.mark_of(&marked)),
+                    marked: Some(marked),
                     routers: None,
-                    home: region::home_asked(req, &region),
+                    home: self.home_asked(req, &region),
+                    target: None,
+                },
+                region::Target::StandIn(node, addr, marked) => Toward {
+                    node,
+                    addr,
+                    mark: Some(self.mark_of(&marked)),
+                    marked: Some(marked),
+                    routers: None,
+                    home: None,
+                    target: Some(region::stand_in_target(&req.target, tenant)),
                 },
                 region::Target::Region(region, routers) => {
                     let first = self.first_router(&region, &routers);
@@ -2277,8 +2744,10 @@ impl Router {
                         node: region::label(&region),
                         addr,
                         mark: self.relay_mark.clone(),
+                        marked: None,
                         routers: Some((region, routers)),
                         home: None,
+                        target: None,
                     }
                 }
                 region::Target::Answer(resp) => return Err(resp),
@@ -2368,12 +2837,21 @@ impl Router {
                 node: to,
                 addr,
                 mark,
+                marked,
                 routers,
                 home,
+                target,
             } = match self.toward(req, tenant, relayed) {
                 Ok(t) => t,
                 Err(resp) => return reply(out, resp),
             };
+            let target = target.as_deref().unwrap_or(&req.target);
+            // The tenant's node now may ask no token, as its first did not.
+            if let Some(m) = marked.as_ref().filter(|_| self.guards_open_nodes()) {
+                if let Some(refused) = self.open_node(&to, &addr, m) {
+                    return reply(out, refused);
+                }
+            }
             let mut headers = forwarded_headers(req, traced, &self.cfg, relayed.is_some());
             let cut = matches!(ended, upstream::Ended::Cut { .. });
             if ended == whole && !upstream::replayable(req.method.name(), &req.target, &headers) {
@@ -2410,7 +2888,7 @@ impl Router {
                 None => self.pool.send_held(
                     &addr,
                     req.method.name(),
-                    &req.target,
+                    target,
                     &headers,
                     &req.body,
                     left,
@@ -2909,7 +3387,8 @@ impl Router {
         head.push_str(http::reason(status));
         head.push_str("\r\n");
         let cors = self.cfg.cors.as_deref();
-        let mut verified = false;
+        let mut verified = None;
+        let mut refused_jwt = false;
         for (k, v) in &answer.headers {
             // The node answers with the id it was sent; the router's own
             // goes out in its place all the same, which a node from before
@@ -2921,7 +3400,12 @@ impl Router {
             // the router's (`fennec_http::accept::UNSERVED_HEADER`); its
             // word that it sent the request nowhere, a router's alone.
             if k.eq_ignore_ascii_case(fennec_http::audit::VERIFIED_HEADER) {
-                verified = true;
+                verified = Some(match v.trim() {
+                    "jwt" => fennec_http::audit::Kind::Jwt,
+                    _ => fennec_http::audit::Kind::Token,
+                });
+            } else if status == 401 && k.eq_ignore_ascii_case(fennec_http::audit::REFUSED_HEADER) {
+                refused_jwt = v.trim() == "jwt";
             } else if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fennec_http::request_id::HEADER)
@@ -2951,8 +3435,13 @@ impl Router {
         // no token without looking at one. Then a refusal waits here, by
         // the client's address, before it is answered: the node waits none
         // for what the router forwards.
-        if verified {
-            fennec_http::audit::verified();
+        // Of the kind the node names: a JWT's starts the count of refused
+        // JWTs alone, and a 401 the node says was a JWT's is counted so.
+        if let Some(kind) = verified {
+            fennec_http::audit::verified_as(kind);
+        }
+        if refused_jwt {
+            fennec_http::audit::refused_as(fennec_http::audit::Kind::Jwt);
         }
         // Relayed, it is the relaying router's to know, which keeps the
         // client's count.
@@ -3759,7 +4248,11 @@ impl Router {
         }
         // A node is checked before it is recorded: an address or token that
         // does not work would otherwise surface on the first placement.
-        let (status, _) = self
+        // Its answer says whether it asks a data token -- a node from before
+        // says nothing, and its `/_whoami` is asked -- which a router
+        // listening past loopback asks before it forwards to it, and says
+        // in its log where it does not ([`Self::open_node`]).
+        let (status, stats) = self
             .pool
             .call(&node.addr, "GET", "/_admin/stats", &node.token, b"")
             .map_err(|e| Fail(502, format!("{addr} did not answer: {e}")))?;
@@ -3769,6 +4262,8 @@ impl Router {
                 format!("{addr} refused its admin token ({status})"),
             ));
         }
+        let word = self.word_of(addr, &stats);
+        self.note_word(addr, &self.marked(&node), word);
         let mut dir = self.write_dir();
         // A region or a zone left out is the one recorded: a node given a
         // new token keeps where it is.
@@ -3914,7 +4409,7 @@ impl Router {
             Ok((status, _)) if done(status) => None,
             Ok((status, body)) => Some(format!(
                 "standby `{name}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
+                words(&body)
             )),
             Err(e) => Some(format!("standby `{name}` did not answer: {e}")),
         }
@@ -4099,10 +4594,7 @@ impl Router {
                             .collect(),
                     ),
                     Ok((status, body)) => {
-                        return Err(format!(
-                            "`{on}` answered {status}: {}",
-                            String::from_utf8_lossy(&body).trim()
-                        ))
+                        return Err(format!("`{on}` answered {status}: {}", words(&body)))
                     }
                     Err(e) => {
                         return Err(left(
@@ -4115,10 +4607,7 @@ impl Router {
                 match follow_over(&ids) {
                     Ok((200, body)) => (how, instances_at(&fields_of(&body))),
                     Ok((status, body)) => {
-                        let why = format!(
-                            "`{on}` answered {status}: {}",
-                            String::from_utf8_lossy(&body).trim()
-                        );
+                        let why = format!("`{on}` answered {status}: {}", words(&body));
                         return Err(left(how, &ids, why));
                     }
                     Err(e) => return Err(left(how, &ids, format!("`{on}` did not answer: {e}"))),
@@ -4170,10 +4659,7 @@ impl Router {
             let target = format!("/_admin/tenants/{tenant}");
             match self.pool.call(&n.addr, "DELETE", &target, &n.token, b"") {
                 Ok((204 | 404, _)) => None,
-                Ok((status, body)) => Some(format!(
-                    "`{on}` answered {status}: {}",
-                    String::from_utf8_lossy(&body).trim()
-                )),
+                Ok((status, body)) => Some(format!("`{on}` answered {status}: {}", words(&body))),
                 Err(e) => Some(format!("`{on}` did not answer: {e}")),
             }
         });
@@ -4268,6 +4754,9 @@ impl Router {
         let body = format!("{{\"instances\":[{}]}}", named.join(","));
         let target = format!("/_admin/tenants/{tenant}/reclaim");
         let answer = self.as_holder(&n, "POST", &target, None, body.as_bytes());
+        if let Some(wait) = named_wait(&answer) {
+            return Reclaimed::Later(wait, said(node, &answer));
+        }
         match &answer {
             Ok((200, _)) => Reclaimed::Gone,
             // The node's judgment, naming what the file carries: another
@@ -4289,8 +4778,20 @@ impl Router {
     /// its flip left, an old primary a failover took the tenant off, or one
     /// no row of this router's names -- is kept, reported for an operator,
     /// and the call fails.
+    ///
+    /// A node that says to come back -- an install of the name under way
+    /// there, which may be the very file noted, its answer lost -- is asked
+    /// again after its wait ([`ComeBack`]), the note kept meanwhile.
     pub(crate) fn clear_target(&self, tenant: &str, to: &str, by: &str) -> Outcome<()> {
-        match self.reclaim_noted(tenant, to) {
+        let mut asks = ComeBack::new();
+        let mut judged = self.reclaim_noted(tenant, to);
+        while let Reclaimed::Later(wait, _) = &judged {
+            if !self.come_back(&mut asks, Some(*wait)) {
+                break;
+            }
+            judged = self.reclaim_noted(tenant, to);
+        }
+        match judged {
             Reclaimed::Gone => Ok(()),
             Reclaimed::Unnoted => {
                 self.left_on(
@@ -4314,6 +4815,27 @@ impl Router {
                 409,
                 format!("`{to}` holds a file of `{tenant}` noted as left there, kept: {why}"),
             )),
+            Reclaimed::Later(_, why) => Err(Fail(
+                409,
+                format!(
+                    "`{to}` did not judge the file of `{tenant}` noted as left there within \
+                     --upstream-timeout, kept: {why}"
+                ),
+            )),
+        }
+    }
+
+    /// Waits out a node's 503 naming its wait, `named`, within
+    /// [`ComeBack`]'s bounds: whether to ask again. Under the operation's
+    /// claim of its tenant, never a lock.
+    fn come_back(&self, asks: &mut ComeBack, named: Option<Duration>) -> bool {
+        let now = Instant::now();
+        match named.and_then(|n| asks.after(n, now, self.cfg.upstream_timeout)) {
+            Some(wait) => {
+                std::thread::sleep(wait);
+                true
+            }
+            None => false,
         }
     }
 
@@ -4361,7 +4883,7 @@ impl Router {
                     &[],
                 );
             }
-            Reclaimed::Kept(_) | Reclaimed::Unnoted => {}
+            Reclaimed::Kept(_) | Reclaimed::Later(..) | Reclaimed::Unnoted => {}
         }
         got
     }
@@ -4667,12 +5189,16 @@ impl Router {
     /// Forgets each file of `leftovers` -- read before the look `holding`
     /// is what each node answered -- that the directory gives its tenant now
     /// ([`Self::records_file`]), that the look found gone, or whose node is
-    /// no more; has its node take back each the node still lists that was
-    /// noted under an identity, under the tenant's claim, the node judging
-    /// ([`Self::reclaim_noted`]); and answers every file still noted as
-    /// `{tenant, node, why}`, for an operator. A file noted again since it
-    /// was read is not forgotten by this look, which may have missed it
-    /// ([`directory::Directory::forget_leftover`]).
+    /// no more; has its node take back each noted under an identity, under
+    /// the tenant's claim, the node judging ([`Self::reclaim_noted`]); and
+    /// answers every file still noted as `{tenant, node, why}`, for an
+    /// operator. A file noted again since it was read is not forgotten by
+    /// this look, which may have missed it
+    /// ([`directory::Directory::forget_leftover`]). One noted under an
+    /// identity that its node did not list is forgotten only once the node
+    /// says it is gone, or cannot judge it: an install of the name under
+    /// way there -- the noted one, its answer lost -- lists nothing yet, and
+    /// forgotten by the look, its file then landed no router's to take back.
     fn look_at_leftovers(
         &self,
         leftovers: Vec<directory::Leftover>,
@@ -4681,19 +5207,23 @@ impl Router {
         let mut kept: Vec<(String, String, String)> = Vec::new();
         for left in leftovers {
             let (tenant, node) = (left.tenant.as_str(), left.node.as_str());
+            let unlisted = holding
+                .iter()
+                .any(|(n, names)| n == node && !names.iter().any(|t| t == tenant));
             let gone = {
                 let dir = self.read_dir();
                 dir.node(node).is_none() || Self::records_file(&dir, tenant, node)
-            } || holding
-                .iter()
-                .any(|(n, names)| n == node && !names.iter().any(|t| t == tenant));
-            if gone {
+            } || (unlisted && left.instances.is_empty());
+            let forget = |left: &directory::Leftover| {
                 if let Err(e) = self
                     .write_dir()
                     .forget_leftover(tenant, node, Some(left.noted))
                 {
                     fennec_http::log!("tenant `{tenant}`'s file on `{node}` stays noted: {e}");
                 }
+            };
+            if gone {
+                forget(&left);
                 continue;
             }
             // Its node silent at the look, or nothing to name it by: an
@@ -4714,8 +5244,14 @@ impl Router {
             if Self::records_file(&self.read_dir(), tenant, node) {
                 continue;
             }
-            if let Reclaimed::Kept(why) = self.reclaim_noted(tenant, node) {
-                kept.push((tenant.into(), node.into(), format!("not taken back: {why}")));
+            match self.reclaim_noted(tenant, node) {
+                // Not listed, and a node that cannot judge it -- one from
+                // before identities -- says no more: gone, as the look said.
+                Reclaimed::Kept(_) if unlisted => forget(&left),
+                Reclaimed::Kept(why) | Reclaimed::Later(_, why) => {
+                    kept.push((tenant.into(), node.into(), format!("not taken back: {why}")));
+                }
+                Reclaimed::Gone | Reclaimed::Other(_) | Reclaimed::Unnoted => {}
             }
         }
         let still = match self.read_dir().leftovers() {
@@ -4945,6 +5481,17 @@ impl Router {
             body.as_bytes(),
         ) {
             Ok((200, body)) => {
+                // What the copy knew of its primary as it was promoted: a
+                // failover promotes it where it stands, and what it was not
+                // sent is lost -- logged for the tenant, and a copy promoted
+                // not connected counted.
+                let heard = copy_heard(&body);
+                metrics::promoted(heard.0);
+                let of = from.as_ref().map_or("", |(name, _)| name.as_str());
+                fennec_http::log!(
+                    "failover of `{of}`: `{tenant}` promoted on `{to}`, {}",
+                    heard_words(heard)
+                );
                 self.quota_after_failover(tenant, to);
                 self.hooks_after_failover(tenant, to);
                 let left = from.as_ref().map(|(name, _)| name.as_str());
@@ -4964,10 +5511,7 @@ impl Router {
                 }
                 .map_err(|e| message(&e))
             }
-            Ok((status, body)) => Err(format!(
-                "{status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Err(format!("{status}: {}", words(&body))),
             Err(e) => Err(format!("`{to}` did not answer: {e}")),
         }
     }
@@ -5135,10 +5679,7 @@ impl Router {
         };
         match self.pool.call(&n.addr, "PUT", target, &n.token, body) {
             Ok((200, _)) => None,
-            Ok((status, body)) => Some(format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Some(format!("`{node}` answered {status}: {}", words(&body))),
             Err(e) => Some(format!("`{node}` did not answer: {e}")),
         }
     }
@@ -5350,10 +5891,7 @@ impl Router {
         match self.pool.call(&n.addr, "GET", &target, &n.token, b"") {
             Ok((200, body)) => Ok((!names_and_version(&body).1.is_empty()).then_some(body)),
             Ok((404, _)) => Ok(None),
-            Ok((status, body)) => Err(format!(
-                "`{node}` answered {status}: {}",
-                String::from_utf8_lossy(&body).trim()
-            )),
+            Ok((status, body)) => Err(format!("`{node}` answered {status}: {}", words(&body))),
             Err(e) => Err(format!("`{node}` did not answer: {e}")),
         }
     }
@@ -5766,9 +6304,7 @@ impl Router {
                         }
                         self.lease_now(&name);
                         return Err(match other {
-                            Ok((status, body)) => {
-                                Fail(status, String::from_utf8_lossy(&body).into_owned())
-                            }
+                            Ok((status, body)) => Fail(status, words(&body)),
                             Err(e) => Fail(502, format!("node `{name}` did not answer: {e}")),
                         });
                     }
@@ -5843,7 +6379,7 @@ impl Router {
             })?;
         // 404 from the node: already gone there, which is what was asked.
         if status != 204 && status != 404 {
-            return Err(Fail(status, String::from_utf8_lossy(&body).into_owned()));
+            return Err(Fail(status, words(&body)));
         }
         let standby = self.read_dir().standby(&placement.node).map(str::to_string);
         self.write_dir().remove_tenant(tenant).map_err(internal)?;
@@ -6002,21 +6538,51 @@ impl Router {
         // will not go once the move is done.
         let frozen = expect(freeze, 200, &from).map_err(thaw)?;
         let source = instances_at(&fields_of(&frozen));
-        let image = expect(
-            self.pool
-                .call(&src.addr, "GET", &format!("{base}/file"), &src.token, b""),
-            200,
-            &from,
-        )
-        .map_err(thaw)?;
 
         let proposed = fennec_http::replication::fresh_id();
         let file = format!("{base}/file");
-        let put = || self.as_holder(&dst, "PUT", &file, Some(proposed), &image);
-        let mut installed = put();
+        // The image relayed as it comes, the source's answer into the
+        // target's install, never in the router's memory: read whole, a
+        // move held the tenant there, and one larger than what was left of
+        // it killed the router. Asked of the frozen source again where the
+        // target refused it as holding a file of the tenant (409), the
+        // image the same.
+        let mut bytes = 0;
+        let mut put = || -> Outcome<std::io::Result<(u16, Vec<u8>)>> {
+            let bearer = format!("Bearer {}", src.token);
+            let asked = [("Authorization", bearer.as_str())];
+            let image = match self.pool.send(&src.addr, "GET", &file, &asked, b"") {
+                Ok(a) if a.status == 200 => a.body_reader(),
+                Ok(a) => {
+                    let status = a.status;
+                    let body = a.read_body(&self.pool, false);
+                    let refused = expect(body.map(|b| (status, b)), 200, &from);
+                    return refused
+                        .and_then(|_| Err(Fail(502, format!("node `{from}`: no image"))));
+                }
+                Err(e) => Err(e),
+            };
+            let (len, mut image) =
+                image.map_err(|e| Fail(502, format!("node `{from}` did not answer: {e}")))?;
+            bytes = len;
+            Ok(self.as_holder_streamed(&dst, &file, proposed, len, &mut image))
+        };
+        // A target that says to come back -- an install of the name under
+        // way there, the node going down -- is asked again after its wait
+        // ([`ComeBack`]), the source frozen meanwhile.
+        let mut asks = ComeBack::new();
+        let mut install = || -> Outcome<std::io::Result<(u16, Vec<u8>)>> {
+            loop {
+                let installed = put()?;
+                if !self.come_back(&mut asks, named_wait(&installed)) {
+                    return Ok(installed);
+                }
+            }
+        };
+        let mut installed = install().map_err(thaw)?;
         if matches!(installed, Ok((409, _))) {
             self.clear_target(tenant, to, "a move").map_err(thaw)?;
-            installed = put();
+            installed = install().map_err(thaw)?;
         }
         // Unanswered, the image may be there all the same, under the
         // identity proposed.
@@ -6179,7 +6745,7 @@ impl Router {
                 quote(&from),
                 quote(to),
                 region_field(&dst.region),
-                image.len(),
+                bytes,
                 started.elapsed().as_millis(),
                 !left,
                 replica_field(&own)
@@ -6251,7 +6817,7 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
         Ok((status, body)) if status == want => Ok(body),
         Ok((status, body)) => Err(Fail(
             if status >= 500 { 502 } else { status },
-            format!("node `{node}`: {}", String::from_utf8_lossy(&body)),
+            format!("node `{node}`: {}", words(&body)),
         )),
         Err(e) => Err(Fail(502, format!("node `{node}` did not answer: {e}"))),
     }
@@ -6293,6 +6859,66 @@ impl Router {
     }
 }
 
+/// What a promoted copy knew of its primary, as its node's answer says it
+/// (`fennec_http::replication::Heard`): whether it was connected, how many
+/// writes behind its primary's disk and how long before it last heard from
+/// it, -1 for never. `None` each where the node does not say: one older
+/// than the fields.
+type Heard = (Option<bool>, Option<i64>, Option<i64>);
+
+fn copy_heard(answer: &[u8]) -> Heard {
+    let fields = fields_of(answer);
+    let at = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let int = |key: &str| match at(key) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let connected = match at("connected") {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    (connected, int("behind"), int("last_contact_ms"))
+}
+
+/// A promoted copy's [`Heard`] in a log line's words, saying what it was
+/// not sent is lost unless it was connected, nothing behind, and heard from
+/// within two keep-alives ([`STALE_MS`]) -- a node too old to say any of it
+/// included.
+fn heard_words((connected, behind, contact): Heard) -> String {
+    let Some(connected) = connected else {
+        return "its node too old to say what the copy knew of its primary: \
+                what it was not sent is lost"
+            .into();
+    };
+    let heard = match contact {
+        Some(ms) if ms >= 0 => format!("last heard from it {ms} ms before"),
+        _ => "never heard from it since it opened".into(),
+    };
+    let recent = contact.is_some_and(|ms| (0..=STALE_MS).contains(&ms));
+    format!(
+        "its copy {} its primary, {} writes behind it as it last said, {heard}{}",
+        if connected {
+            "connected to"
+        } else {
+            "not connected to"
+        },
+        behind.unwrap_or(0),
+        if connected && behind == Some(0) && recent {
+            ""
+        } else {
+            ": what it was not sent is lost"
+        }
+    )
+}
+
+/// How long a copy may have gone unheard from and still be counted on to
+/// hold what its primary sent: twice a keep-alive's `ALIVE`. A copy stays
+/// `connected` until a read of its stream fails -- at once where its
+/// primary's process was killed, `SILENCE` (10 s) on where its machine was
+/// lost or cut off, past a 5 s lease's lapse -- so one heard from longer
+/// ago may have been sent nothing for that long.
+const STALE_MS: i64 = 2 * fennec_http::replication::ALIVE.as_millis() as i64;
+
 /// The lineage a node's answer names (`"lineage": "<8 hex>"`): the one it
 /// made a tenant of, or took one's image in at.
 pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
@@ -6304,13 +6930,26 @@ pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
 #[cold]
 fn said(node: &str, answer: &std::io::Result<(u16, Vec<u8>)>) -> String {
     match answer {
-        Ok((status, body)) => format!(
-            "`{node}` answered {status}: {}",
-            String::from_utf8_lossy(body).trim()
-        ),
+        Ok((status, body)) => format!("`{node}` answered {status}: {}", words(body)),
         Err(e) => format!("`{node}` did not answer: {e}"),
     }
 }
+
+/// A node's answer as a log line or an error shows it, cut and escaped
+/// (`replication::peer_words_within`): whoever answers at a node's address,
+/// or stands on a plain-HTTP hop before it, wrote lines of its own -- a
+/// newline and the next line's prefix, a terminal's escapes -- into the
+/// router's log and its answers, as long as the node's answer ran.
+#[cold]
+fn words(body: &[u8]) -> String {
+    fennec_http::replication::peer_words_within(body.trim_ascii(), NODE_SHOWN)
+}
+
+/// The most of a node's answer [`words`] shows: a node's refusal whole, its
+/// JSON's braces and all -- the lineage refusal a failover meets is 313
+/// bytes, and a stream's 200 cut it before the `force` it names -- and a
+/// line no longer than a few of them.
+const NODE_SHOWN: usize = 2_000;
 
 /// `{tenant, why}`, a failure's entry in a list of them.
 fn why(tenant: &str, why: &str) -> String {
@@ -6798,6 +7437,93 @@ fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
 mod tests {
     use super::*;
 
+    /// A promoted copy that says it was connected and nothing behind, but
+    /// last heard from its primary longer ago than two keep-alives, is
+    /// logged as losing what it was not sent: connected stays true until a
+    /// read fails, 10 s after a primary's machine was lost or cut off. The
+    /// answers are a stub node's, as `promote_on` reads them.
+    #[test]
+    fn a_copy_long_unheard_from_is_logged_as_losing_what_it_was_not_sent() {
+        let answer = |ms: i64| {
+            let body = format!(
+                r#"{{"promoted":"acme","seq":7,"history":"0000000700000001","connected":true,"behind":0,"last_contact_ms":{ms}}}"#
+            );
+            heard_words(copy_heard(body.as_bytes()))
+        };
+        let lost = ": what it was not sent is lost";
+        let fresh = answer(812);
+        assert!(!fresh.ends_with(lost), "{fresh}");
+        let edge = answer(STALE_MS);
+        assert!(!edge.ends_with(lost), "{edge}");
+        for ms in [STALE_MS + 1, 9_000, -1] {
+            let stale = answer(ms);
+            assert!(
+                stale.starts_with("its copy connected to its primary, 0 writes behind")
+                    && stale.ends_with(lost),
+                "{ms}: {stale}"
+            );
+        }
+        assert_eq!(STALE_MS, 4_000);
+    }
+
+    /// A node too old to say what its copy knew -- 0.2.0's promotion answers
+    /// `promoted`, `seq` and `history`, none of `connected`, `behind` and
+    /// `last_contact_ms` -- is logged as
+    /// losing what the copy was not sent, as one that said it was not
+    /// connected: it may have been anything. The answer is a stub node's,
+    /// as `promote_on` reads it.
+    #[test]
+    fn an_old_nodes_copy_is_logged_as_losing_what_it_was_not_sent() {
+        let body = r#"{"promoted":true,"seq":7,"history":"0000000700000001"}"#;
+        let heard = copy_heard(body.as_bytes());
+        assert_eq!(heard, (None, None, None));
+        assert_eq!(
+            heard_words(heard),
+            "its node too old to say what the copy knew of its primary: \
+             what it was not sent is lost"
+        );
+    }
+
+    /// A node's words reach the router's log and its errors cut and
+    /// escaped (`replication::peer_words_within`): a newline and the line
+    /// after it, a terminal's escape and quotes as Rust writes them, never as
+    /// they came -- in `said`, a promotion's refusal and the `{status}:
+    /// {body}` errors alike, which `words` writes. A node's refusal is shown
+    /// whole: the lineage one a failover meets, cut at a stream's 200
+    /// characters, lost the `force` it names.
+    #[test]
+    fn a_nodes_words_are_cut_and_escaped() {
+        let mut body =
+            b"refused\nfennec-shard: failover of `n1`: forged \x1b[2J \"quoted\"\n".to_vec();
+        body.resize(64 << 10, b'x');
+        let shown = [
+            said("n1", &Ok((500, body.clone()))),
+            words(&body),
+            match expect(Ok((409, body.clone())), 200, "n1") {
+                Err(Fail(409, why)) => why,
+                _ => panic!("a 409 is the node's refusal, its status kept"),
+            },
+        ];
+        for w in shown {
+            assert!(!w.contains('\n') && !w.contains('\x1b'), "{w:?}");
+            assert!(
+                w.contains(r"refused\nfennec-shard")
+                    && w.contains(r"\u{1b}[2J")
+                    && w.contains(r#"\"quoted\""#),
+                "{w}"
+            );
+            assert!(w.len() < NODE_SHOWN + 200, "{} bytes shown", w.len());
+            assert!(w.contains(&format!("{} bytes", 64 << 10)), "{w}");
+        }
+        let refusal = br#"{"error":"tenant `unsynced` here is of lineage none, not 953c5a6d, the tenant's: it has not taken its primary's image -- a copy made to follow a primary it never reached, or another file put in its place -- and promoted it would be an empty primary, or another file's. {\"force\": true} promotes it all the same"}"#;
+        assert_eq!(refusal.len(), 313);
+        let shown = words(refusal);
+        assert!(
+            shown.ends_with(r#"promotes it all the same\"}""#) && !shown.contains("the first"),
+            "{shown}"
+        );
+    }
+
     /// What the directory records of a set: its hooks' names and version,
     /// never a secret; a set of no hook, or one that does not read, none.
     #[test]
@@ -7120,7 +7846,6 @@ mod tests {
         assert!(forwarded(&bare, false).is_empty());
     }
 
-    /// An address nothing listens on: its connect is refused.
     /// A repair with no node to give a tenant's replica -- the only other
     /// node silent -- takes no claim on it, so a delete, a move, a quota or
     /// a failover of the tenant meanwhile is not refused 409, another
@@ -7182,11 +7907,18 @@ mod tests {
         addr
     }
 
+    /// An address nothing listens on, its connect refused: port 1, which
+    /// no test's server takes, as `tests/unsent.rs`'s `refusing`. A port
+    /// the system picked and let go of, as this was, is the next `bind` to
+    /// port 0's in this binary's tests run side by side: there a listener
+    /// took the router's dial and never answered -- the request gone out
+    /// whole, the router rightly answered the 502 saying it may have run,
+    /// after the upstream timeout -- or another test's router answered it,
+    /// where [`a_cut_write_that_went_whole_is_never_told_unsent`] wants the
+    /// router's own answer to a refused dial (`docs/design/conventions.md`,
+    /// *Ports*).
     fn refusing() -> String {
-        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = gone.local_addr().unwrap().to_string();
-        drop(gone);
-        addr
+        "127.0.0.1:1".into()
     }
 
     fn router(d: Directory) -> Arc<Router> {
@@ -7196,7 +7928,13 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             ..Config::default()
         };
-        Router::new(d, cfg)
+        let r = Router::new(d, cfg);
+        // As it serves on its address, loopback alone: a router that has
+        // not served is taken for one past it, which forwards to no node
+        // before the node says it asks a token.
+        r.listens
+            .fetch_or(LISTENS_LOOPBACK, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     /// A router placing `acme` on node `n2`, at `addr`.

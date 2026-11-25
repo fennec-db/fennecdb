@@ -520,7 +520,13 @@ changes to the others and sends every tab's writes, one queue for all.</p>
 
 <ul>
   <li><b>Turn it off</b> with <code>leader: false</code>; without
-    <code>navigator.locks</code>, as in Node, it is off already.</li>
+    <code>navigator.locks</code> -- outside a secure context, in Safari
+    before 15.4 or Firefox before 96, in a Node without it -- it is off
+    already. Each tab then sends its own writes. With
+    <code>navigator.locks</code> one at a time stores the
+    <code>persist</code> key; without it the last tab started stores it,
+    and those before it nothing from then on (<a href="#one-writer">One
+    replica stores a key at a time</a>).</li>
 </ul>
 
 <details class="deep"><summary>How tabs elect a leader</summary>
@@ -582,6 +588,36 @@ the primary keeps, reseeds every stream open on it, a seed being read
 included, even where the image stands at the stream's own change.</p>
 </details>
 
+<h3 id="seeds-in-parts">A seed in parts</h3>
+
+<p>A seed whose rows pass 1 MiB of JSON comes in parts, each an
+<code>event: seed</code> of the same <code>seq</code>
+(<a href="http-reference.html#subscriptions">the wire format</a>). The server
+reads the rows a page at a time beside the writers and never holds the seed
+whole.</p>
+
+<p>The replica holds the parts aside and lands the seed once its last part
+came. Until then every read, live query and read of the app's own answers the
+rows as they were, or none for a shape never seeded. A stream that drops
+mid-seed leaves the replica as it was, and the next stream seeds again from the
+start: a seed is not resumed. A write the app makes while parts arrive is
+applied at once and kept by the seed until the server's copy arrives, as with
+any seed.</p>
+
+<details class="deep"><summary>Where the parts wait</summary>
+<p>Natively the parts wait in the replica's own file, in a collection of the
+sync's own, <code>_sync_seed</code>, and land in one block. They are deleted
+when the stream drops and when the replica opens again. In the browser they
+wait in the page as the text they came as, not in the module, whose memory
+never shrinks, and land in one task, part by part, so nothing in the page runs
+between the first write and the last.</p>
+
+<p>A page that ended in the middle of a landing, a replica kept in a file with
+<code>openFile</code>, finds that on its next open. Before anything reads the
+shape it empties its rows, keeping those of writes not yet answered, and seeds
+it again whole.</p>
+</details>
+
 <h2>Cost</h2>
 
 <p>The server's change ring is about 96 KB at the default size,
@@ -614,7 +650,8 @@ single writes at 1 000 a second took 0.8 ms at p99, where they took 212 to
 </details>
 
 <details class="deep"><summary>What a seed costs in the page</summary>
-<p>The replica writes a seed's rows, and a change's, 500 at a time, each
+<p>The replica writes a seed's rows, and a change's, 500 at a time (a seed in
+parts lands in one task, still 500 rows a statement), each
 chunk one parameter (<code>put &lt;collection&gt; $1</code>) whose values
 are made their fields' types as a statement's would be. From the seed's
 event to <code>ready()</code>, 100 000 rows of a text, a float and a json
@@ -624,6 +661,12 @@ twice as fast. A collection with a vector or a bytes field still goes as
 statement text, which hands its vectors to the module as <code>f32</code>s:
 as one parameter they are digits read one at a time, and rows of a 32-dim
 vector took 1.7 times as long.</p>
+
+<p>A seed in parts is parsed a part at a time as it lands. A seed of 300 000
+rows of 155 bytes took Node's process to a peak of 260 MB, against 367 MB
+when it came as one event, and landed in 856 ms against 882; the module held
+68.7 MB either way. Natively the same seed took the process to 182 MB
+against 542.</p>
 </details>
 
 <h2>Limits</h2>
@@ -702,3 +745,53 @@ await db.ready();
 db.live(db.from('tasks').order('priority', 'desc'), draw);
 await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
+
+<p>With <code>cryptoKey</code> the replica is sealed as <code>persist</code>
+seals a database (<a href="javascript.html#sealed">Sealed in IndexedDB</a>).
+Only a key that holds nothing is seeded: a replica whose store is there and
+does not restore -- sealed with another key or none, changed, written by a
+later client -- refuses to start, <code>sync</code> rejecting with the
+reason, and the store stays as it was, with the writes it had not sent.
+Started again with the key it was sealed with, it sends them; or
+<code>unpersist(key)</code> deletes that key's store, the writes in it
+with it, and the next <code>sync</code> seeds anew. A tab that takes the
+lead from such a store stores nothing in it, tells <code>onError</code>,
+and <code>status()</code>'s <code>unkept</code> says why; where IndexedDB
+itself failed the read, the next write reads the store again.</p>
+
+<pre data-lang="ts">import { unpersist } from './fennec.js';
+
+await unpersist(`tasks:${userId}`);   // refused while a replica keeps it in this browser
+</pre>
+
+<p><code>unpersist</code> asks <code>navigator.locks</code> whether a
+replica keeps the key, or the lock manager it is given
+(<code>unpersist(key, { locks })</code>, the one the replicas were given).
+It deletes that key's records alone; its chunks are stored under the key,
+<code>#</code> and nine digits, so another key whose name is
+<code>&lt;key&gt;#</code> followed by nine digits is read as this key's
+chunk -- avoid such names. Every database's next
+<code>persist</code> in this page stores its image whole; another page's
+plain <code>persist</code> of the key is not reached, and goes on in chunks
+that a <code>restore</code> does not find, so a key one page persists is
+deleted by that page.</p>
+
+<p id="one-writer"><b>One replica stores a key at a time.</b> It holds the
+key's lock (<code>navigator.locks</code>) while it stores there, whatever
+its url and shapes, so two replicas under one key -- other shapes, or tabs
+with <code>leader: false</code> -- never store over each other: the second
+stores nothing there, <code>status()</code>'s <code>unkept</code> saying
+so, and takes the store over, the first's unsent writes with it, once the
+first lets go. A tab with <code>leader: false</code> leads itself
+meanwhile; an elected one waits to lead, and its tabs' <code>unkept</code>
+says so too. Each replica also claims the store as it takes it over, and
+each of its writes finds that claim in its own IndexedDB transaction or
+stores nothing, so the store restores whatever the locks did. Without
+<code>navigator.locks</code> nothing holds a second tab back: the last
+replica started on a key stores it, and one started before stores nothing
+there from then on, <code>unkept</code> and <code>onError</code> saying so,
+its writes still sent. <code>close()</code> stores what was written before
+it, then lets go of the store; past 5 s it lets go all the same, its
+persist still out stores nothing once the next replica claimed the store,
+and <code>onError</code> is told what was not stored: the next tab never
+reads a store a closed one is still writing.</p>

@@ -115,6 +115,16 @@
   "labels": [],
   "type": "gauge"
  },
+ "fennec_router_open_node_refusals_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_router_promotions_total": {
+  "labels": [
+   "copy"
+  ],
+  "type": "counter"
+ },
  "fennec_router_read_replicas_given_up": {
   "labels": [],
   "type": "gauge"

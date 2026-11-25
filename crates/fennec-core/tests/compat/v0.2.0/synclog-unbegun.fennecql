@@ -1,0 +1,6 @@
+-- The rows synced, and the one written behind past the sync log, which
+-- holds nothing: no generation was begun.
+get kept order n select n
+get kept where n = 1
+get kept count
+collections

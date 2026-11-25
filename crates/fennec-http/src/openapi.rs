@@ -685,7 +685,7 @@ const OPS: &[Op] = &[
     Op {
         method: "post",
         path: "/_replication/promote",
-        at: FILE | TENANT | ROUTER,
+        at: FILE | ROUTER,
         id: "promote",
         tag: "Replication",
         summary: "Promote this replica: it takes writes from now on",
@@ -1099,6 +1099,11 @@ const OPS: &[Op] = &[
         flag: "--admin-token",
         auth: Auth::Admin,
         body: Body::Optional(r##"{"$ref":"#/components/schemas/Promote"}"##),
+        answer: Answer::Json(
+            200,
+            r##"{"$ref":"#/components/schemas/Promoted"}"##,
+            "Promoted where it stood",
+        ),
         ..DEFAULT
     },
     Op {
@@ -1308,7 +1313,7 @@ fn build_of(kind: Kind, table: &'static [Op]) -> String {
 /// `info.version`: the document's, not the binary's (see [`build`]). A
 /// break made on purpose moves it, its `BREAKS` entry in
 /// `tools/openapi_compat.py` naming the version it went out in.
-const DOCUMENT_VERSION: &str = "2";
+const DOCUMENT_VERSION: &str = "3";
 
 const ABOUT: &str = " A request takes `Authorization: Bearer` with the server's token \
 (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy \
@@ -1693,6 +1698,7 @@ const COMPONENTS: &str = r##"{
 "Lineage":{"type":"string","pattern":"^[0-9a-fA-F]{8}$","description":"The lineage a tenant's history is of, 8 hex digits."},
 "Reclaim":{"type":"object","required":["instances"],"properties":{"instances":{"$ref":"#/components/schemas/Instances"}}},
 "Promote":{"type":"object","description":"What the router knows of the tenant, which the copy is held to (409 where it differs); left out, nothing is said.","properties":{"lineage":{"$ref":"#/components/schemas/Lineage"},"history":{"type":"string","pattern":"^[0-9a-fA-F]{16}$","description":"The history its primary forked at its last failover."},"force":{"type":"boolean","description":"Promote it whatever it holds."}}},
+"Promoted":{"type":"object","description":"The copy promoted, and what it knew of its primary as it was: a failover promotes it where it stands, and what it was not sent -- a write its primary answered among it -- is lost. lineage and instance besides, each null where it has none.","properties":{"promoted":{"type":"string","description":"The tenant."},"seq":{"type":"integer","description":"The change its history forked at."},"history":{"type":"string","pattern":"^[0-9a-f]{16}$","description":"The history it took writes on."},"connected":{"type":"boolean","description":"Connected to its primary as the promotion began: true until a read of its stream fails, at once where its primary's process was killed, 10 s on where its machine was lost or cut off. last_contact_ms past two keep-alives says it was hearing nothing."},"behind":{"type":"integer","minimum":0,"description":"Writes on its primary's disk, as its primary last said -- every 2 s, behind or caught up -- it had not applied."},"last_contact_ms":{"type":"integer","minimum":-1,"description":"How long before the promotion its primary was last heard from, a keep-alive every 2 s included; -1, not since the copy was opened."}}},
 "Follow":{"type":"object","description":"Whom the tenant follows; left out, this node's upstream.","properties":{"from":{"type":"string","description":"The node to follow, its address."},"lineage":{"$ref":"#/components/schemas/Lineage"},"instances":{"$ref":"#/components/schemas/Instances"},"reader":{"type":"boolean","description":"A read replica's copy, which no hook's answer waits for."}}},
 "LeaseGrant":{"type":"object","required":["ms","epoch"],"properties":{"ms":{"type":"integer","minimum":1,"description":"How long it runs, from when the node answered the grant acked names."},"epoch":{"type":"string","description":"The list's: a node holding another answers 412, to be sent primaries."},"primaries":{"type":"array","items":{"type":"string"},"description":"The tenants the node is primary of."},"authority":{"type":"string","description":"Who grants it."},"term":{"type":"integer","minimum":0},"history":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$"},"grant":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"This grant's number."},"acked":{"type":"string","pattern":"^[0-9a-fA-F]{1,16}$","description":"The grant it acknowledges, sent beside grant."}}},
 "Hook":{"type":"object","required":["scheme","secrets"],"additionalProperties":false,"description":"A hook's scheme and secrets, refused (400) as a hooks file's line is.","properties":{"scheme":{"type":"string","enum":["stripe","github","standard"]},"secrets":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string"},"description":"Its secret as its sender shows it, or two while one rolls."},"keep":{"type":["string","null"],"pattern":"^\\S+$","description":"How long an event's key is kept: 30d."},"tolerance":{"type":["string","null"],"pattern":"^\\S+$","description":"How far an event's time may be from the server's, 1s to 1h: 5m."},"key":{"type":["string","null"],"enum":["body",null],"description":"A github hook's: its events keyed by their body, which its signature covers (delivery, which it does not, is refused)."},"max_body":{"type":["string","null"],"pattern":"^\\S+$","description":"The most bytes an event takes: 64k."}}},
@@ -2175,6 +2181,15 @@ mod tests {
             func: "",
             after: "",
             at: FILE | TENANT | ROUTER,
+            below: &[],
+        },
+        // Its promotion: a file's and a router's directory's, never a
+        // tenant's, whose copy the node's admin promotes.
+        Region {
+            file: "fennec-http/src/replication.rs",
+            func: "promoting",
+            after: "",
+            at: FILE | ROUTER,
             below: &[],
         },
         Region {

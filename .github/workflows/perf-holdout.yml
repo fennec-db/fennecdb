@@ -32,8 +32,8 @@
 # failed five: the expectations below are what their profiles showed
 # (docs/design/benchmarks.md, *The holdout*). The second (43686447758,
 # this workflow on its branch) held every pair and the control as
-# expected. The gate stays a check no merge requires until this workflow,
-# on main, has a green run.
+# expected. The gate was a check no merge required until this workflow
+# had a green run on main (43709604383); it is required since 2026-11-21.
 #
 # Run by hand at a quiet hour, never on a push: by dispatch once this file
 # is on main, or before by the `perf-holdout` label on the pull request
@@ -55,7 +55,7 @@ permissions:
 # at once and fail renaming a component file. It is installed once, below,
 # before any build starts.
 env:
-  RUSTUP_TOOLCHAIN: 1.99.1
+  RUSTUP_TOOLCHAIN: 1.100.0
 
 jobs:
   pair:
@@ -159,7 +159,7 @@ jobs:
 
       - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
         run: |
-          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          rustup toolchain install 1.100.0 --profile minimal --target x86_64-unknown-linux-musl
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
@@ -229,7 +229,7 @@ jobs:
 
       - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
         run: |
-          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          rustup toolchain install 1.100.0 --profile minimal --target x86_64-unknown-linux-musl
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 

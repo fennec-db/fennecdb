@@ -28,6 +28,16 @@
 #            the same. A lost cut checks the rebuilt disk alone: the disk
 #            QEMU left, served first, would send the standby writes the
 #            rebuilt one never had.
+#   dir250   that node and its standby under `--sync 250`: its tenants
+#            synced each on a thread of the node's (`Tenants::sync_each`),
+#            not by a file's syncer, each held to sync250's check, and the
+#            standby to dir's -- the node sends a write once a sync covered
+#            it.
+#
+# $MOUNT_OPTIONS, when given, are the data disk's mount options, at every
+# mount: ext4's `data=writeback` or `data=journal` in place of the
+# `data=ordered` it mounts with otherwise. A mount that does not show them
+# fails as the rig's: it would test another mode under the asked one's name.
 #
 #   vm.sh boot           the cloud image's first boot, set up by cloud-init,
 #                        then a clean restart
@@ -51,23 +61,55 @@ SHARED=$(cd "$HERE/../power-cut" && pwd)
 SEED=${SEED:-0}
 FS=${FS:-ext4}
 MODE=${MODE:-always}
+MOUNT_OPTIONS=${MOUNT_OPTIONS:-}
 WINDOW_LO=${WINDOW_LO:-2}
 WINDOW_HI=${WINDOW_HI:-30}
+# IS_NODE: a `--dir` node and its standby; SYNC_MS: the server's `--sync
+# <ms>`, empty for `always`.
+IS_NODE=
+SYNC_MS=
 case $MODE in
-    always | sync250 | dir) ;;
-    *) echo "MODE is always, sync250 or dir, not $MODE" >&2; exit 2 ;;
+    always) ;;
+    sync250) SYNC_MS=250 ;;
+    dir) IS_NODE=1 ;;
+    dir250) IS_NODE=1; SYNC_MS=250 ;;
+    *) echo "MODE is always, sync250, dir or dir250, not $MODE" >&2; exit 2 ;;
 esac
+# ext4's data=journal: a write()'s bytes join the journal's running
+# transaction as it returns, and the sync log's fdatasync commits that
+# transaction, so a cut finds the file holding every entry the log does and
+# the open puts none back -- run 43696612848's guest, all five cuts and both
+# rebuilt disks, its checks passing. `summary` holds that guest to the log
+# having been written instead (`JOURNALED`).
+JOURNALED=
+case ",$MOUNT_OPTIONS," in *,data=journal,*) JOURNALED=1 ;; esac
 # What the checks are run for: the file (""), or a node's tenants by name.
 # The second tenant takes single puts, batches and rewrites beside the
 # first's whole load -- no spill nor compact, so none holds its writes up,
 # and it makes about half as many again as the first -- so that the node's
-# syncs and the standby's streams carry two files' writes at once.
+# syncs and the standby's streams carry two files' writes at once. Under
+# `--sync <ms>` the first's load is those three too (client.py's
+# OPS_SYNCED), and the node syncs tenants of a like load. $NODE_TENANTS is
+# how many, 2 to 8, two unless named: every one past the first takes the
+# second's load. The dir250 guest runs four, where a pass syncing each in
+# turn grew a tenant's window with the count (docs/design/durability.md,
+# *A node's syncs*).
+NODE_TENANTS=${NODE_TENANTS:-2}
+case $NODE_TENANTS in
+    [2-8]) ;;
+    *) echo "NODE_TENANTS is 2 to 8, not $NODE_TENANTS" >&2; exit 2 ;;
+esac
 TENANTS=("")
-[ "$MODE" = dir ] && TENANTS=(a b)
+if [ -n "$IS_NODE" ]; then
+    TENANTS=()
+    for t in a b c d e f g h; do
+        [ "${#TENANTS[@]}" -lt "$NODE_TENANTS" ] && TENANTS+=("$t")
+    done
+fi
 NODE=/d/n
 # The client's arguments for the mode: `--sync 250`'s window, held.
 MODE_ARGS=()
-[ "$MODE" = sync250 ] && MODE_ARGS=(--sync-ms 250)
+[ -n "$SYNC_MS" ] && MODE_ARGS=(--sync-ms "$SYNC_MS")
 # The data disk, by the serial QEMU gives it: /dev/vdb as long as the root
 # disk comes first, but named so it is never taken for another.
 DATA=/dev/disk/by-id/virtio-fennecd
@@ -93,7 +135,7 @@ client() {
 # copy them after a cut.
 served() {
     local t
-    if [ "$MODE" = dir ]; then
+    if [ -n "$IS_NODE" ]; then
         for t in "${TENANTS[@]}"; do echo "$NODE/$t.fennec"; done
     else
         echo /d/t.fennec
@@ -240,13 +282,23 @@ boot() {
 
 # The data disk at /d, as no boot mounts it itself: the file system's own
 # recovery after a cut (ext4's journal replayed) is this mount's, its
-# kernel lines kept in the summary.
+# kernel lines kept in the summary. $MOUNT_OPTIONS at every mount, each held
+# to what the mount shows.
 mount_data() {
-    local what=$1 dev
-    if ! gssh "sudo mkdir -p /d && sudo mount -t $FS $DATA /d"; then
+    local what=$1 dev opts o
+    if ! gssh "sudo mkdir -p /d && sudo mount -t $FS ${MOUNT_OPTIONS:+-o $MOUNT_OPTIONS} $DATA /d"; then
         echo "MOUNT $what: the data disk did not mount"
         gssh 'sudo dmesg | tail -n 60' || true
         return 1
+    fi
+    if [ -n "$MOUNT_OPTIONS" ]; then
+        opts=$(gssh 'findmnt -no OPTIONS /d')
+        for o in ${MOUNT_OPTIONS//,/ }; do
+            if ! grep -q -E "(^|,)$o(,|$)" <<< "$opts"; then
+                say "RIG the data disk mounted without $o at $what: $opts"
+                return 1
+            fi
+        done
     fi
     dev=$(gssh "basename \"\$(readlink -f $DATA)\"")
     gssh 'sudo dmesg' | grep -E "(EXT4-fs|XFS) \($dev\)" | sed "s/^/MOUNT $what: /" |
@@ -288,7 +340,9 @@ serve() {
     case $MODE in
         always) run='exec ci/fennec-server --file /d/t.fennec --http 0.0.0.0:8080 --sync always' ;;
         sync250) run='exec ci/fennec-server --file /d/t.fennec --http 0.0.0.0:8080 --sync 250 --cdc' ;;
-        dir) run="FENNEC_ADMIN_TOKEN=\$(cat ci/admin) FENNEC_REPLICATION_TOKEN=\$(cat ci/repl); export FENNEC_ADMIN_TOKEN FENNEC_REPLICATION_TOKEN; exec ci/fennec-server --dir $NODE --http 0.0.0.0:8080 --sync always" ;;
+        # A node's tenants keep the feed `/_changes` reads with the
+        # replication token: no `--cdc`, which a node refuses.
+        dir | dir250) run="FENNEC_ADMIN_TOKEN=\$(cat ci/admin) FENNEC_REPLICATION_TOKEN=\$(cat ci/repl); export FENNEC_ADMIN_TOKEN FENNEC_REPLICATION_TOKEN; exec ci/fennec-server --dir $NODE --http 0.0.0.0:8080 --sync ${SYNC_MS:-always}" ;;
     esac
     t0=$(now)
     setsid ssh "${SSHO[@]}" -p 2222 fennec@127.0.0.1 \
@@ -387,7 +441,7 @@ fennec() {
     gssh 'mkdir -p -m 700 ci'
     gscp "$VM/bin/fennec-server" "$VM/token" fennec@127.0.0.1:ci/
     gssh 'chmod 755 ci/fennec-server && chmod 600 ci/token'
-    if [ "$MODE" = dir ]; then
+    if [ -n "$IS_NODE" ]; then
         secret admin
         secret repl
         secret standby-admin
@@ -410,7 +464,7 @@ fennec() {
     gssh sync
     serve 0
     local t
-    if [ "$MODE" = dir ]; then
+    if [ -n "$IS_NODE" ]; then
         # The tenants on the node, then on the standby, which makes each
         # follow its namesake as the router would.
         for t in "${TENANTS[@]}"; do make_tenant 127.0.0.1:8080 admin "$t"; done
@@ -438,13 +492,17 @@ lock_held() {
 # The names a cut may leave on the data disk, as `boot_check` lists it:
 # the file, its lock, the sync log, and the image a compact it stopped was
 # writing (`.beside` for a compact beside the database, `.compacting` for
-# one under the lock), which the next compact writes anew; ext4's own
+# one under the lock), which the server's open after removes; ext4's own
 # lost+found (XFS keeps none). A node's directory holds each tenant's, its
 # identity (`<t>.instance`) and `schedules.hint`, written again by rename
 # from `schedules.hint.writing`.
 kept_names() {
-    if [ "$MODE" = dir ]; then
-        echo 'lost\+found|n|n/schedules\.hint(\.writing)?|n/(a|b)\.instance|n/(a|b)\.fennec|n/(a|b)\.fennec\.(lock|sync|beside|compacting)'
+    local t
+    if [ -n "$IS_NODE" ]; then
+        # Every tenant's, by name: run 43702806628's first cut of four
+        # tenants failed as the rig's on `c`'s and `d`'s files.
+        t=$(IFS='|'; echo "${TENANTS[*]}")
+        echo "lost\\+found|n|n/schedules\\.hint(\\.writing)?|n/($t)\\.instance|n/($t)\\.fennec|n/($t)\\.fennec\\.(lock|sync|beside|compacting)"
     else
         echo 'lost\+found|t\.fennec|t\.fennec\.(lock|sync|beside|compacting)'
     fi
@@ -489,14 +547,14 @@ boot_check() {
         return 1
     fi
     need='test -s ci/token && test -x ci/fennec-server'
-    [ "$MODE" = dir ] && need="$need && test -s ci/admin && test -s ci/repl"
+    [ -n "$IS_NODE" ] && need="$need && test -s ci/admin && test -s ci/repl"
     if ! gssh "$need"; then
         echo "the rig's own files did not survive the cut: a token or fennec-server in ~/ci"
         return 1
     fi
     # The files as the cut left them, before the server's open applies the
     # sync log or cuts a torn tail: kept if anything after fails.
-    if [ "$MODE" = dir ]; then
+    if [ -n "$IS_NODE" ]; then
         gssh "rm -rf pre && mkdir -m 700 pre && cp -a $NODE/. pre/"
     else
         gssh 'rm -rf pre && mkdir -m 700 pre && cp -a /d/t.fennec* pre/'
@@ -514,14 +572,14 @@ boot_check() {
             return 1
         fi
         echo "$putback" >> "$VM/putback.txt"
-        say "SYNCLOG cut $n $label$([ "$MODE" = dir ] && echo " $(basename "$f")"): $(grep -v '^PUTBACK ' <<< "$sl")"
+        say "SYNCLOG cut $n $label$([ -n "$IS_NODE" ] && echo " $(basename "$f")"): $(grep -v '^PUTBACK ' <<< "$sl")"
     done
     if ! serve "$n-$label"; then
         keep "$n-$label"
         return 1
     fi
-    [ "$MODE" = dir ] || lock_held "$n-$label" /d/t.fennec
-    [ "$MODE" = dir ] && rep=(--replica-url "http://$(cat "$VM/standby.addr")")
+    [ -n "$IS_NODE" ] || lock_held "$n-$label" /d/t.fennec
+    [ -n "$IS_NODE" ] && rep=(--replica-url "http://$(cat "$VM/standby.addr")")
     t0=$(now)
     for t in "${TENANTS[@]}"; do
         checked=$VM/check-$n-$label${t:+-$t}.log
@@ -535,7 +593,7 @@ boot_check() {
         cat "$checked"
         grep -E '^(VERDICT|DOCS|CHURN|SPILL|IDEM|LOAD|BATCH|INFLIGHT|PROBE|WARM|SYNCS|WINDOW|LOST|REPLICA|STANDBY)' "$checked" >> "$VM/summary.txt"
     done
-    [ "$MODE" = dir ] && lock_held "$n-$label" "$NODE/${TENANTS[0]}.fennec"
+    [ -n "$IS_NODE" ] && lock_held "$n-$label" "$NODE/${TENANTS[0]}.fennec"
     say "TIMING cut${n}_${label}_check=$(( $(now) - t0 ))s"
 }
 
@@ -591,7 +649,7 @@ power_cut() {
     fi
     # The standby as the cut left it, read before the node comes back and
     # it follows again.
-    if [ "$MODE" = dir ]; then
+    if [ -n "$IS_NODE" ]; then
         for t in "${TENANTS[@]}"; do
             if ! client "$t" replica --cut "$n" --replica-url "http://$(cat "$VM/standby.addr")" > "$VM/replica-$n-$t.log" 2>&1; then
                 cat "$VM/replica-$n-$t.log"
@@ -605,7 +663,7 @@ power_cut() {
         lost_disk "$n"
         # A node's disk as QEMU left it is not served: its standby would
         # follow it, and then hold writes the rebuilt disk never had.
-        if [ "$MODE" != dir ]; then
+        if [ -z "$IS_NODE" ]; then
             boot_check "$n" plain "$cur" ""
             qemu_kill
         fi
@@ -633,14 +691,21 @@ summary() {
     fi
     # Under `--sync 250` a sync holds a quarter of a second's writes, past
     # the 64 KiB the sync log takes, and the file is fsynced itself: the
-    # log is exercised under `--sync always`, a file's or a node's.
-    if [ "$MODE" != sync250 ] && [ "$total" -eq 0 ] && [ -n "$whole" ]; then
-        say "RIG the sync log was never exercised: no cut in the run left an entry for the open to put back"
-        rc=1
+    # log is exercised under `--sync always`, a file's or a node's. Under
+    # data=journal the file holds what the log does (`JOURNALED`): there a
+    # cut must have found a live log naming the file with entries in it,
+    # the durable writes having gone through it, and the file holding them.
+    if [ -z "$SYNC_MS" ] && [ "$total" -eq 0 ] && [ -n "$whole" ]; then
+        if [ -n "$JOURNALED" ] && grep -q -E '^SYNCLOG .*: a live log of generation [0-9]+ naming the file, from byte [0-9]+: [1-9][0-9]* entries whole' "$VM/summary.txt"; then
+            say "SYNCLOG under data=journal: no cut left an entry for the open to put back, the file holding every one the log held, committed with it by the journal"
+        else
+            say "RIG the sync log was never exercised: no cut in the run left an entry for the open to put back"
+            rc=1
+        fi
     fi
     # And `--sync 250`'s window, by a cut that took an acknowledged write:
     # one that took none held nothing to it.
-    if [ "$MODE" = sync250 ] && [ -n "$whole" ] && ! grep -q -E '^WINDOW .*: [0-9]+ acknowledged writes gone with the cut' "$VM/summary.txt"; then
+    if [ -n "$SYNC_MS" ] && [ -n "$whole" ] && ! grep -q -E '^WINDOW .*: [0-9]+ acknowledged writes gone with the cut' "$VM/summary.txt"; then
         say "RIG --sync 250's window was never exercised: no cut took an acknowledged write"
         rc=1
     fi

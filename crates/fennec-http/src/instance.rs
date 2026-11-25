@@ -25,8 +25,9 @@
 //! sidecar where it deletes the file; put in place by an install's rename
 //! or a hand -- is another file under an old identity, so the sidecar
 //! names the file it was written for: its device, inode and birth time, 0
-//! where its file system keeps none. An inode is given another file only
-//! once the file holding it goes, and every way of fennec's that removes
+//! where none was read, the birth time held only where both the sidecar
+//! and the node reading it name one ([`same`]). An inode is given another
+//! file only once the file holding it goes, and every way of fennec's that removes
 //! or replaces a tenant's file puts the sidecar away first -- a create, an
 //! install, a follow, a delete or a reclaim, `fennec restore` and `backup
 //! --force` ([`put_away_beside`]) -- so a later file at the place never
@@ -150,6 +151,27 @@ pub(crate) fn binding(file: &Path) -> io::Result<Binding> {
     Ok((dev, ino, born))
 }
 
+/// Whether a sidecar's binding `a` names the file bound as `b`: the same
+/// device and inode, and the same birth time where both name one. A birth
+/// time is 0 where none was read -- a file system keeping none, and on
+/// Linux every musl binary, every release's ([`birth`]) -- so a node moved
+/// between a release's Linux binary and a build reading one, either way,
+/// meets its files under bindings naming none. Compared as written, 0
+/// against a birth time was another file: `compat.yml`'s f2, a 0.2.0 musl
+/// node's tenant opened by a glibc build, its hook secrets put away -- the
+/// only copy: no router keeps one -- and its identity lost. Held there to
+/// the device and inode, the inode not 0, as each of those binaries holds
+/// every sidecar it reads; where both name a birth time, to it as before
+/// (docs/design/tenants.md, *A birth time is held where both sides name
+/// one*).
+pub(crate) fn same(a: Binding, b: Binding) -> bool {
+    let born = match (a.2, b.2) {
+        (0, _) | (_, 0) => a.1 != 0,
+        (x, y) => x == y,
+    };
+    a.0 == b.0 && a.1 == b.1 && born
+}
+
 /// Whether the tenant was told to follow: its `.follows` is there.
 fn follows(dir: &Path, name: &str) -> bool {
     dir.join(format!("{name}.follows")).exists()
@@ -190,14 +212,25 @@ fn write(dir: &Path, name: &str, id: u64, bound: Binding, following: bool) -> io
         bound.2,
         if following { "f" } else { "n" }
     );
-    std::fs::write(path(dir, name), line)
+    // Made its owner's alone, as its tenant's file is; one there keeps its
+    // mode. Opened only where it is no link (`private_beside`): truncated
+    // and written through one, the line went into whatever file a writer
+    // of the directory had it name.
+    let mut file = fennec_core::fs::private_beside(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .open(path(dir, name))?;
+    std::io::Write::write_all(&mut file, line.as_bytes())
 }
 
 /// The identity `file` carries: the sidecar's, where it names this file in
 /// the role it has.
 pub(crate) fn carried(dir: &Path, name: &str, file: &Path) -> Option<u64> {
     let (id, bound, following) = read(dir, name)?;
-    (binding(file).ok()? == bound && follows(dir, name) == following).then_some(id)
+    (same(bound, binding(file).ok()?) && follows(dir, name) == following).then_some(id)
 }
 
 /// The identity of a file this process holds open: the sidecar's, where it
@@ -207,7 +240,7 @@ pub(crate) fn carried(dir: &Path, name: &str, file: &Path) -> Option<u64> {
 /// ([`closing`]).
 pub(crate) fn held(dir: &Path, name: &str, held: Option<Binding>) -> Option<u64> {
     let (id, bound, following) = read(dir, name)?;
-    (Some(bound) == held && follows(dir, name) == following).then_some(id)
+    (held.is_some_and(|h| same(bound, h)) && follows(dir, name) == following).then_some(id)
 }
 
 /// Gives `file` the identity `id`, bound to it and its role as they stand:
@@ -264,14 +297,14 @@ pub(crate) fn closing(dir: &Path, name: &str, held: Option<Binding>, file: &Path
         }
         return;
     };
-    if Some(bound) != held {
+    if !held.is_some_and(|h| same(bound, h)) {
         if let Err(e) = std::fs::remove_file(&p) {
             crate::log!("tenant `{name}`'s identity names another file, and stays: {e}");
         }
         return;
     }
     match binding(file) {
-        Ok(now) if now != bound => {
+        Ok(now) if !same(bound, now) => {
             if let Err(e) = write(dir, name, id, now, following) {
                 crate::log!("tenant `{name}`'s identity was not bound to its file again: {e}");
             }
@@ -326,6 +359,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A link put at a tenant's `.instance` is never written through: the
+    /// write is refused, and the file the link names keeps its bytes and
+    /// its mode. Up to this fix the sidecar was opened through it,
+    /// truncated and given the identity's line (fennec-core's
+    /// `a_link_at_a_side_files_name_is_never_followed` holds the
+    /// database's side files alike).
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_sidecars_name_is_never_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("link");
+        let file = dir.join("acme.fennec");
+        std::fs::write(&file, b"one").unwrap();
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, b"another file").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, path(&dir, "acme")).unwrap();
+        assert!(
+            stamp(&dir, "acme", &file, 5).is_err(),
+            "a sidecar written through a link"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"another file");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the linked file's mode");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -498,6 +558,55 @@ mod tests {
         // Neither an inode nor a birth time names no file.
         write(&dir, "acme", 5, (now.0, 0, 0), false).unwrap();
         assert_eq!(held(&dir, "acme", Some((now.0, 0, 0))), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar naming no birth time -- written by 0.2.0's Linux binary,
+    /// musl, whose std reads none -- names its file to a node that reads
+    /// one, by its device and inode, and one naming a birth time to a node
+    /// that reads none: compared as written, 0 against a birth time was
+    /// another file, and `compat.yml`'s f2 lost a tenant's hook secrets so.
+    /// Where both name a birth time it is held as before, and a close
+    /// leaves the sidecar as it was written, which 0.2.0 reads.
+    #[test]
+    fn a_binding_naming_no_birth_time_names_its_file_to_a_node_reading_one() {
+        let (d, i) = (7, 11);
+        assert!(same((d, i, 0), (d, i, 123)) && same((d, i, 123), (d, i, 0)));
+        assert!(same((d, i, 0), (d, i, 0)) && same((d, i, 123), (d, i, 123)));
+        assert!(!same((d, i, 123), (d, i, 124)), "a birth time each, two");
+        assert!(!same((d, i, 0), (d, i + 1, 123)) && !same((d, i, 0), (d + 1, i, 123)));
+        assert!(!same((d, 0, 0), (d, 0, 123)) && !same((d, 0, 0), (d, 0, 0)));
+        assert!(
+            same((d, 0, 123), (d, 0, 123)),
+            "a birth time alone, as before"
+        );
+
+        let dir = scratch("musl");
+        let file = dir.join("acme.fennec");
+        std::fs::write(&file, b"one").unwrap();
+        let now = binding(&file).unwrap();
+        if now.2 == 0 {
+            println!("this file system keeps no birth time: both sides name none here");
+        }
+        // As 0.2.0's musl node wrote it: the file's device and inode, no
+        // birth time.
+        let line = format!("1 {} {} {} 0 n\n", text(5), now.0, now.1);
+        std::fs::write(path(&dir, "acme"), &line).unwrap();
+        assert_eq!(carried(&dir, "acme", &file), Some(5));
+        assert_eq!(held(&dir, "acme", Some(now)), Some(5));
+        closing(&dir, "acme", Some(now), &file);
+        assert_eq!(std::fs::read_to_string(path(&dir, "acme")).unwrap(), line);
+        // Its inode another file's: none, a birth time or not.
+        let other = dir.join("other");
+        std::fs::write(&other, b"one").unwrap();
+        std::fs::rename(&other, &file).unwrap();
+        assert_eq!(carried(&dir, "acme", &file), None);
+        // Written by a node reading birth times, read by one reading none.
+        let made = stamp(&dir, "acme", &file, 6).unwrap();
+        NO_BIRTH.with(|c| c.set(true));
+        assert_eq!(carried(&dir, "acme", &file), Some(6));
+        assert_eq!(held(&dir, "acme", Some((made.0, made.1, 0))), Some(6));
+        NO_BIRTH.with(|c| c.set(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

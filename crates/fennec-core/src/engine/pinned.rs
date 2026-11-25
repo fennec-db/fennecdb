@@ -30,6 +30,10 @@
 //! So a pinned read answers what the read under the lock at the pin would
 //! have, or nothing.
 //!
+//! An image a server sends is pinned so too ([`PinnedImage`]): what it
+//! copies and the id indexes under the read lock, its documents read as it
+//! is written out.
+//!
 //! Native only: the browser module has one thread, and nothing to pin
 //! beside.
 
@@ -251,6 +255,16 @@ impl Database {
             return None;
         }
         self.pinned_within(&names, Some((collection, &written.ids)))
+    }
+
+    /// The rows `ids` names of `collection`, pinned as they stand: a seed
+    /// the lock answered -- an index's answer, a pin the ring passed --
+    /// read beside the writers a page at a time rather than whole under the
+    /// lock (`sse::seed`). It holds 12 bytes a row of the id index, as a
+    /// pin of the collection does, but of those rows alone; `None` past the
+    /// pins' budget.
+    pub fn pin_rows(&self, collection: &str, ids: &[DocId]) -> Option<Pinned> {
+        self.pinned_within(&[], Some((collection, ids)))
     }
 
     /// `names` pinned where the budget holds their id indexes, and the rows
@@ -549,4 +563,246 @@ fn inner_gets<'e>(e: &'e Expr, out: &mut Vec<(Option<&'e str>, &'e Select)>) {
         out.push((field, inner));
     }
     e.each_child(&mut |c| inner_gets(c, out));
+}
+
+// --------------------------------------------------------------- an image
+
+/// An image of the database ([`Database::snapshot`]) taken as a pin:
+/// under the read lock, and written out with no lock held
+/// ([`Database::pin_image`]) -- the bytes the snapshot taken then is, to the
+/// last one.
+///
+/// What a replica, an archiver, a backup and a moved tenant's node are
+/// sent. Built whole, such an image was a second copy of every document in
+/// the server's memory: a database larger than that memory killed its
+/// primary at the first follow (250 000 rows, 259 MB, in a container of
+/// 256 MiB: out of memory 0.7 s after the replica began). Here a
+/// collection's documents are its store as [`Store::pinned`] takes it --
+/// the mapped file and the segments shared, the id index copied, 12 bytes a
+/// row, as every pinned read holds it -- read as the image is written out;
+/// what else an image holds is copied as it is taken: the schemas, each
+/// collection's index of its frames (a few bytes a row), the graphs, the
+/// statements. A record's sum is made as it is written out: made as it was
+/// taken, it read every document under the lock.
+pub struct PinnedImage {
+    /// The bytes copied, laid end to end: the pieces [`Piece::Copied`].
+    copied: Vec<u8>,
+    pieces: Vec<Piece>,
+    len: u64,
+    seq: u64,
+    framing: Framing,
+}
+
+/// A stretch of a [`PinnedImage`], in its order.
+enum Piece {
+    /// Bytes copied: `copied` up to here, from where the copied piece
+    /// before it ended.
+    Copied(usize),
+    /// A collection's live records, this many bytes, read from its store
+    /// as the image is written out. Boxed: a store is a few hundred bytes,
+    /// every other piece a word or two.
+    Live(Box<Store>, usize),
+    /// A record begins: its sum is of the bytes from here.
+    Record,
+    /// The record's sum.
+    Sum,
+}
+
+impl Database {
+    /// The image [`Self::snapshot`] would be, taken as a pin
+    /// ([`PinnedImage`]): what it copies and the id indexes under the read
+    /// lock, no document; [`PinnedImage::write_to`] writes it out once the
+    /// lock is let go. `plain`, it is the image [`plain_image`] makes of
+    /// the snapshot, for a follower that reads no sums. Never declined, nor
+    /// held to [`PIN_BUDGET`]: what it would decline to is the image taken
+    /// under the lock, every document copied.
+    pub fn pin_image(&self, plain: bool) -> Result<PinnedImage> {
+        let mut image = PinnedImage {
+            copied: Vec::new(),
+            pieces: Vec::new(),
+            len: 0,
+            seq: self.change_seq(),
+            framing: match plain {
+                true => Framing::Plain,
+                false => Framing::Later,
+            },
+        };
+        self.snapshot_into(&mut image)?;
+        Ok(image)
+    }
+}
+
+impl PinnedImage {
+    /// The bytes [`Self::write_to`] writes.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The change the database stood at when the image was taken.
+    pub fn change_seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The image written into `w` as it is read: the bytes copied as they
+    /// are, each collection's documents from its pinned store, a record's
+    /// sum once its last byte has gone. `w`'s error comes back as it came;
+    /// a store's records that do not read, or not the length taken, are
+    /// `InvalidData`. What went into `w` before an error is no image.
+    pub fn write_to(&self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+        let mut out = Out {
+            w,
+            sum: None,
+            wrote: 0,
+            failed: None,
+        };
+        let mut from = 0;
+        for piece in &self.pieces {
+            let r = match piece {
+                Piece::Copied(to) => {
+                    let r = out.write(&self.copied[from..*to]);
+                    from = *to;
+                    r
+                }
+                Piece::Live(store, len) => {
+                    let began = out.wrote;
+                    store.write_live(&mut out).and_then(|_| {
+                        match out.wrote - began == *len as u64 {
+                            true => Ok(()),
+                            false => Err(Error::Corrupt(format!(
+                                "a collection's records wrote {} bytes of an image, not the {len} \
+                                 taken",
+                                out.wrote - began
+                            ))),
+                        }
+                    })
+                }
+                Piece::Record => {
+                    out.sum = Some(0);
+                    Ok(())
+                }
+                Piece::Sum => {
+                    let sum = out.sum.take().unwrap_or(0);
+                    out.write(&sum.to_le_bytes())
+                }
+            };
+            if let Err(e) = r {
+                return Err(out.failed.take().unwrap_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// The image whole, as [`Database::snapshot`] gives it: what a test
+    /// compares, never what is sent.
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.len as usize);
+        // A `Vec` takes every write; a store that does not read leaves the
+        // image short, as `snapshot` leaves it.
+        let _ = self.write_to(&mut bytes);
+        bytes
+    }
+}
+
+impl ImageOut for PinnedImage {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.copied.extend_from_slice(bytes);
+        match self.pieces.last_mut() {
+            Some(Piece::Copied(to)) => *to = self.copied.len(),
+            _ => self.pieces.push(Piece::Copied(self.copied.len())),
+        }
+        self.len += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn at(&self) -> u64 {
+        self.len
+    }
+
+    /// The counter's length, the one patch an image takes, is among the
+    /// bytes it copied first.
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        let (mut pos, mut from) = (0u64, 0usize);
+        for piece in &self.pieces {
+            match *piece {
+                Piece::Copied(to) => {
+                    let n = (to - from) as u64;
+                    if at >= pos && at + bytes.len() as u64 <= pos + n {
+                        let i = from + (at - pos) as usize;
+                        self.copied[i..i + bytes.len()].copy_from_slice(bytes);
+                        return Ok(());
+                    }
+                    pos += n;
+                    from = to;
+                }
+                Piece::Live(_, len) => pos += len as u64,
+                Piece::Record => {}
+                Piece::Sum => pos += SUM as u64,
+            }
+        }
+        Err(Error::Io(
+            "an image patched past the bytes it copied".into(),
+        ))
+    }
+
+    fn framing(&self) -> Framing {
+        self.framing
+    }
+
+    fn later(&mut self, what: Later<'_>) -> Result<()> {
+        match what {
+            Later::Record => self.pieces.push(Piece::Record),
+            Later::Sum => {
+                self.pieces.push(Piece::Sum);
+                self.len += SUM as u64;
+            }
+            Later::Live(store, len) => {
+                self.pieces.push(Piece::Live(Box::new(store.pinned()), len));
+                self.len += len as u64;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a [`PinnedImage`] is written out: into `w`, the sum of the record
+/// being written carried over its bytes.
+struct Out<'a> {
+    w: &'a mut dyn std::io::Write,
+    sum: Option<u32>,
+    wrote: u64,
+    /// `w`'s error, handed back as it came.
+    failed: Option<std::io::Error>,
+}
+
+impl ImageOut for Out<'_> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        if let Some(sum) = &mut self.sum {
+            *sum = crc32c(*sum, bytes);
+        }
+        match self.w.write_all(bytes) {
+            Ok(()) => {
+                self.wrote += bytes.len() as u64;
+                Ok(())
+            }
+            Err(e) => {
+                let said = Error::Io(e.to_string());
+                self.failed = Some(e);
+                Err(said)
+            }
+        }
+    }
+
+    fn at(&self) -> u64 {
+        self.wrote
+    }
+
+    fn patch(&mut self, _: u64, _: &[u8]) -> Result<()> {
+        Err(Error::Io("an image written out takes no patch".into()))
+    }
 }

@@ -70,6 +70,55 @@ extern "system" {
         info: *mut c_void,
         len: u32,
     ) -> i32;
+    fn GetFileInformationByHandle(file: *mut c_void, info: *mut ByHandleInfo) -> i32;
+}
+
+/// `BY_HANDLE_FILE_INFORMATION`: a `FILETIME` is two `DWORD`s, aligned to
+/// four as each, so the struct is thirteen of them, 52 bytes.
+#[repr(C)]
+#[derive(Default)]
+struct ByHandleInfo {
+    attributes: u32,
+    times: [u32; 6],
+    volume_serial: u32,
+    size: [u32; 2],
+    links: u32,
+    index_high: u32,
+    index_low: u32,
+}
+
+/// Opens a link itself, not the file it leads to, as `lstat` reads one.
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`: std's, refusing
+/// no other opener anything.
+const SHARE_ALL: u32 = 0x7;
+
+/// The file `f` is open on: its volume's serial number and its index on
+/// that volume (`GetFileInformationByHandle`), one file whatever names it --
+/// what `same-file` and the `fstat`'s device and inode compare.
+fn file_id(f: &File) -> io::Result<(u32, u64)> {
+    let mut info = ByHandleInfo::default();
+    // SAFETY: the handle is the file's, open across the call, and `info` is
+    // the struct the call fills, of the size it writes.
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let index = (u64::from(info.index_high) << 32) | u64::from(info.index_low);
+    Ok((info.volume_serial, index))
+}
+
+/// Whether `path` names, as no link, the file `f` is open on: the name
+/// opened for no access, sharing everything -- no writer refused for it --
+/// and as no link (`FILE_FLAG_OPEN_REPARSE_POINT`), so a link put at the
+/// name is a file of its own, as `lstat` reads one; then the two
+/// [`file_id`]s compared. `fs::still_named`, before a rename by the name.
+pub(super) fn named(f: &File, path: &Path) -> io::Result<bool> {
+    let there = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(SHARE_ALL)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    Ok(file_id(f)? == file_id(&there)?)
 }
 
 /// Refused by another handle's share mode, or by a delete pending on the
@@ -402,6 +451,36 @@ fn remote_device(f: &File) -> bool {
     done >= 0 && info[1] & FILE_REMOTE_DEVICE != 0
 }
 
+/// `NtQueryVolumeInformationFile`'s class for `FILE_FS_FULL_SIZE_INFORMATION`.
+#[cfg(target_pointer_width = "64")]
+const FILE_FS_FULL_SIZE_INFORMATION: i32 = 7;
+
+/// The bytes the volume `f` is on gives its caller, its quota counted
+/// (`FILE_FS_FULL_SIZE_INFORMATION`: the units in all, those the caller may
+/// take and those free, eight bytes each, then the sectors a unit and the
+/// bytes a sector, four each): what a compact asks before it sorts a
+/// collection's records through a scratch file beside the database
+/// (`fs::Scratch`). `None` where the volume does not answer.
+#[cfg(target_pointer_width = "64")]
+pub(super) fn free_bytes(f: &File) -> Option<u64> {
+    let mut status = [0usize; 2];
+    let mut info = [0u64; 4];
+    // SAFETY: the handle is open across the call; `status` is an
+    // `IO_STATUS_BLOCK`, two pointers wide, and `info` the class's 32
+    // bytes, 8-aligned as its counts are.
+    let done = unsafe {
+        NtQueryVolumeInformationFile(
+            f.as_raw_handle(),
+            &mut status,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            FILE_FS_FULL_SIZE_INFORMATION,
+        )
+    };
+    let unit = (info[3] & 0xffff_ffff).saturating_mul(info[3] >> 32);
+    (done >= 0).then(|| info[1].saturating_mul(unit))
+}
+
 /// `FILE_REMOTE_PROTOCOL_INFO`, 116 bytes, where the redirector answers it.
 fn remote_protocol(f: &File) -> io::Result<[u32; 29]> {
     let mut info = [0u32; 29];
@@ -457,6 +536,9 @@ pub(super) fn cut_and_open(
     // cut finds nothing to cut, and the server's log and a test's
     // `cut_on_open` read None on Windows alone.
     let said = db.cut_on_open().cloned();
+    // And what it removed beside the file, which the open after finds gone.
+    let swept = db.swept_on_open().to_vec();
+    let marked = db.marks_cut();
     drop(db);
     sink.mapping = None;
     if CUTTING.with(|c| c.get()) {
@@ -467,20 +549,16 @@ pub(super) fn cut_and_open(
     // The mappings this process let go of before, whose views a thread
     // may still be letting go ([`map::unmapped`]).
     map::unmapped();
-    // Through the sink's handle, as its `cut` does after, for the error's
-    // number: the system's words for it name no view.
-    let cut = super::lock(&sink.disk).file.set_len(whole as u64);
-    if let Err(e) = cut {
-        return Err(match e.raw_os_error() {
-            Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
-                "the file's last record was cut short, and Windows cuts no file a view \
-                 maps: another process maps it, or a stream or a pinned read of this one \
-                 still reads it, and it opens once they let it go ({e})"
-            )),
-            _ => e.into(),
-        });
-    }
-    sink.cut(whole)?;
+    // Marked, the open after the cut finds nothing to cut. Unmarked, the
+    // records claiming how far the file was durable gone with the tail, it
+    // found a synced record this open read unchecked a tail to cut again,
+    // and failed (`CUTTING`; `FileSink::cut`). A view refuses the cut
+    // itself, the last step but its fsync ([`cut_refused`]): marked, the
+    // mark and the head past the end after it are on the disk by then, over
+    // the torn record's first bytes, and the open once the views go reads
+    // the file as this one did, cutting right after the mark, which it does
+    // not mark again.
+    sink.cut(whole, marked)?;
     let path = sink.path().to_path_buf();
     drop(sink);
     let mut db = crate::engine::Database::new();
@@ -498,12 +576,25 @@ pub(super) fn cut_and_open(
     let _cutting = Cutting;
     let mut db = super::open_mapped_into(db, path, wrap)?;
     db.said_cut(said);
+    db.said_swept(swept);
     Ok(db)
 }
 
 /// `SetEndOfFile`'s refusal of a file a view maps.
-#[cfg(target_pointer_width = "64")]
 const ERROR_USER_MAPPED_FILE: i32 = 1224;
+
+/// A cut's refusal (`fs::cut_file`), said by name where a view refused it:
+/// the system's words for it name no view.
+pub(super) fn cut_refused(e: io::Error) -> crate::error::Error {
+    match e.raw_os_error() {
+        Some(ERROR_USER_MAPPED_FILE) => crate::error::Error::Io(format!(
+            "the file's last record was cut short, and Windows cuts no file a view \
+             maps: another process maps it, or a stream or a pinned read of this one \
+             still reads it, and it opens once they let it go ({e})"
+        )),
+        _ => e.into(),
+    }
+}
 
 #[cfg(target_pointer_width = "64")]
 thread_local! {
@@ -568,8 +659,6 @@ pub(super) mod tests {
     const FILE_DISPOSITION_FLAG_DELETE: u32 = 0x1;
     const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS: u32 = 0x2;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    /// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`: std's.
-    const SHARE_ALL: u32 = 0x7;
     /// `FILE_SHARE_READ | FILE_SHARE_WRITE`: an opener that refuses others
     /// a delete or a rename.
     const SHARE_NO_DELETE: u32 = 0x3;
@@ -1300,12 +1389,19 @@ pub(super) mod tests {
         let mut db = super::super::open(&path).unwrap();
         db.fork(7).unwrap();
         drop(db);
-        let whole = std::fs::metadata(&path).unwrap().len();
+        let kept = std::fs::read(&path).unwrap();
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(&[3, 1, 100, 0, 1, 2, 3]).unwrap();
         drop(f);
         let db = super::super::open_serving(&path, true, Box::new(Ok)).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+        // Cut, and a close's mark after the cut unless one ends what it
+        // keeps (`FileSink::cut`).
+        let mark = crate::engine::synced_mark();
+        let want = match kept.ends_with(&mark) {
+            true => kept,
+            false => [&kept[..], &mark[..]].concat(),
+        };
+        assert!(std::fs::read(&path).unwrap() == want, "not cut, marked");
         assert!(db.history().lineage.iter().any(|&(id, _)| id == 7));
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-http's invariants -- replication and archives, quotas, the HTTP server, held writes and a node's syncs -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. A connection's rules -- the thread it gets or its 503, the HTTPS listener, the time a request and an answer have, a body's ceiling and chunked bodies -- are in [src/conn/AGENTS.md](src/conn/AGENTS.md), beside `src/conn.rs` and `src/conn/`: read it before changing how a connection is accepted, read or written. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -15,12 +15,32 @@ promotion halts the follower before it forks, and a following database
 refuses writes (`Error::ReadOnly`). The follower's session looks at a halt
 before each message it reads, as an archiver's does, never at the
 socket's cut alone: on Windows a cut ends only a read already waiting. A
-panic applying the primary's records is a write the follower could not
-apply, caught with the lock held (`Follower::session`): never a thread
-gone, which a halt waits for. A restart reads a copy's role from its file:
-one made to follow says so on disk before the follow is answered
-(`Tenants::open_as` syncs it), and an image is taken with the record saying
-it inside its rename.
+panic in a session is its failure (`Follower::session_caught`), one
+applying the primary's records caught with the lock held, one past them
+failing the copy (`Changing`); the thread says its end however it comes
+(`Ends`), which a halt waits on. A message is held to its kind's bound
+before a byte of it is read, and grown as it comes (`read_kind`). The
+session looks at a halt as an image has arrived and once it is loaded,
+before `Changing` (`Follower::halted`); a message's growth is asked with
+`try_reserve_exact`, refused in words (`read_kind`); a peer's words reach
+a log line or the status cut and escaped (`peer_words`). A stream says
+where its disk
+stands every `ALIVE`, behind as caught up (`stream`'s `told`), which a
+copy's `behind` counts from. A
+restart reads a copy's role from its file: one made to follow says so on
+disk before the follow is answered (`Tenants::open_as` syncs it), and an
+image is taken with the record saying it inside its rename. [An image goes
+out as a pin takes it](../../docs/design/replication.md#an-image-sent-as-it-is-read)
+(`Database::pin_image`: a follow's, a backup's, an archive's, a move's),
+written as it is read, no lock held (`image_message`), its bytes
+`snapshot()`'s at its change (fennec-core's `tests/pinned.rs`), ended
+below 64 KiB/s past `SILENCE` (`Pace`), [and is taken as it
+arrives](../../docs/design/replication.md#an-image-taken-as-it-arrives),
+written to disk and checked as it streams (`take_image`) -- a copy's
+beside its file, renamed in by its sink (`Database::adopt_side`), one torn
+or refused leaving the file as it was (`tests/images_taken.rs`): never held
+whole, each side's heap a constant beside its indexes
+(`tests/message_peak.rs`, fennec-shard's `move_peak.rs`).
 
 **[A copy keeps the time its primary appended each write at, and an
 archive's times run in order.](../../docs/design/replication.md#a-writes-time)**
@@ -64,15 +84,26 @@ its token (`admitted`), a stream's before its head.
 (`seal.rs`, `--key-file`), never the live file. A frame's nonce, as every
 key and nonce, is the system's randomness (`crypto::system_random`, read
 with no descriptor), the seal refused without it: never the clock, which
-only an id may fall back to (`crypto::id_u64`). A frame is bound to its
-file: its tag covers the file's id -- 16 bytes of that randomness after
-the magic (`FENECSL\x02`, `seal::FileId`) -- its place and whether it is
-the last, so no frame of another file under the key opens in it. A
-version 1 file (no id: 0.1.7 to 0.2.0) still opens and a segment of one
-goes on as one; nothing new is begun so. Only a key that sealed none is
-free of a version 1 file spliced from others' frames: the docs say to
-change keys. A later version is refused by its
-number, and what a tag covers changes only with the magic's version byte.
+only an id may fall back to (`crypto::id_u64`). A file (`FENECSL\x03`) is
+sealed under HChaCha20 of its random id under HKDF-Expand of the key
+(`seal::FILE_KEYS`), never under the key, whose ChaCha20 keystream in
+versions 1 and 2 gives HChaCha20 of it away; each frame's tag over
+the tag before it (the first's, the head) and its place; its head names
+what it is (`seal::Binding`: role, archive, tenant, its name's numbers),
+which every read holds it to (`Archive::held`), one read unopened
+vouched for by its first frame (`seal::vouched_in`), `began` held and
+`presence` sealed. A frame holds a mebibyte at most (`seal::FRAME`), its
+length checked, never cast, a longer batch going out in frames of whole
+records; a key file others can read is warned of (`seal::open_key`), never
+refused. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
+older segment gone on in by none, an older image or segment read only
+before a line's first of version 3, an image of its end an upgraded
+archiver seals before writing on -- a node's, each tenant's as it starts,
+beside the stream -- where it stands noted once the file is in place
+(`Archive::older`, `seal_before_version`, `landed`); only a key that
+sealed none is free of their splices: the docs say to change keys. A
+later version is refused by its number, and what a tag covers changes
+only with the magic's version byte.
 
 ### Quotas and retries
 
@@ -105,9 +136,12 @@ which a client sends again whole.
 
 **[An `Idempotency-Key` makes a write
 once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
-`_idempotency` row are one block, the key the subject's for a scoped token
-and the key with another request 422; a failed write or a `compact` keeps
-none. A replay answers only once the first try's record is as durable and
+`_idempotency` row are one block, the key its caller's for a scoped
+token (`Scope::authority`) and the key with another request 422; a failed
+write or a `compact` keeps none. Every path asks `idempotent::replay` under
+the write lock it then keeps the key in: `keep` deletes no row where that
+look found none (`Key::absent`) under the expiry it keeps (`ensure` moving
+none). A replay answers only once the first try's record is as durable and
 sent as its answer was to be: under `--sync always` every path that finds
 a key runs `Database::durability` after its lock (`idempotent::replay`),
 and a failed fsync is its answer, never the kept success; after a storage
@@ -116,9 +150,13 @@ A replay is a write's answer on every path, a call made to read's too
 (`metrics::wrote`), asked of a tenant's lease (`answered_under_lease`).
 
 **[Refusals and schema changes are logged; a refusal
-waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
-checks out, clears the wait; a new check must call it, and nothing infers
-it from an answer. A node believes `Fennec-Router` from the router alone.
+waits.](../../docs/design/http.md#audit)** Only `audit::verified_as`,
+where a token checks out, clears its kind's wait (`audit::Kind`); a new
+check must call it, and nothing infers it from an answer. A node believes `Fennec-Router` from the router alone.
+A tenant named past `~`, a router's stand-in for one it does not place
+([router.md](../../docs/design/router.md#tenants-it-does-not-place)), is
+asked every credential as one held, then answered 404 before
+`Tenants::get` (`route_tenant`): no file of its name opens.
 A refusal is counted by its address, an IPv6 one's /64
 (`audit::counted_ip`, the hooks' count's key too), in a table that, full,
 lets the count refused longest ago go (`audit::ADDRESSES`): never every
@@ -208,19 +246,14 @@ tenant left it. A hint keeps at most 4 096 places, a shard of long texts'
 16 384 (`HINT_PLACES`, `HINT_BUDGET`); a page's documents' lists are read
 again alone (`fennec_ql::read_listed`).
 
-**[A body is held to the ceiling its head
-earns.](../../docs/design/http.md#a-bodys-ceiling)** `max_body`, judged
-from the head before a byte of the body is read (`body_ceiling`,
-`http::read_head`): a tenant node reads an image's import, `PUT
-/_admin/tenants/<t>/file`, to `max_import` where it carries the admin token
-alone (`admin::carries`), and refuses one carrying another or none with its
-route's 401, waited out as every refusal is, its body unread. A route
-reading past `max_body` is judged so there, from its head, never by a
-ceiling raised for every request and refused after the read.
-
-**[A chunked body grows as it comes, held to the
-ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
-read two ways is refused (`chunked_framing`, `end_refused`).
+**[A seed goes in parts, read a page at a time.](../../docs/design/http.md#seeds-in-parts)**
+Past `SEED_PART` bytes of rows a seed is several `seed` events of one
+`seq` (`part` past the first, `more` before the last), each page read on
+a pin with no lock held (`sse::send_seed`) -- the shape's own, or the rows
+the lock's answer names (`Database::pin_rows`) -- so no stream holds a
+seed whole; one read again after parts of it went out is sent from its
+start, its first part without `part`, which a client takes as the seed
+begun anew.
 
 **[A plain `get` is written as JSON from the stored
 documents.](../../docs/design/http.md#json-from-stored-rows)**
@@ -253,53 +286,6 @@ JSON, NDJSON or text that long says `Vary: Accept-Encoding`, gzipped where
 `writev`; never with an `ETag` or `no-transform`, nor a `HEAD`. A stream is
 one member, each event deflated alone and sync-flushed (`gzip::Stream`):
 nothing kept between events. The deflate is ours, no crate.
-
-**[A connection no thread can be made for is answered
-503.](../../docs/design/http.md#connections-without-a-thread)** Both accept loops
-spawn through `accept::spawn`, which hands back a refused thread's stream
-for `accept::refuse` to answer on the accepting thread, non-blocking,
-counted by `reason` and marked `Fennec-Unserved`: unrun to the entry and
-relays, as a standby's 409 marked `Fennec-Follows` is. Its writing then
-shut, the one lingering thread (`accept::linger`) reads it off till the
-client ends it; only no such thread, no room (`most_held`) or an answer not
-sent whole closes it at once. A new accept loop calls
-`accept::ready()` and `accept::widen` before its first accept. A TLS
-listener's is told `fennec_tls::REFUSAL`, an alert (`accept::refuse_tls`):
-no handshake runs on the accepting thread. A connection's place under
-`--max-connections` is an `accept::Slot`, given back by its drop before
-its socket closes, on every way out, a panic's unwinding too -- never by a
-line after the connection's work, which a panic skips; so is every count
-taken around a connection or a held request (`waits::Answering`, a
-`waits::Ticket` leaving its group).
-
-**[A request is read in time, and an answer written in
-time.](../../docs/design/http.md#slow-clients)** A served connection's
-requests, the router's too, are read through `conn::Paced`, told each
-(`waiting`): the wait for a request's first byte is the idle timeout's;
-from that byte -- over TLS its first record's first part -- the request,
-head and body alike, has `--header-timeout` and a second more for every
-`conn::MIN_RATE` bytes that came, else 408 and `end_refused`; a record in
-parts is held to the same bound, its bytes earning as they come
-(`fennec_tls::TlsStream::read_by`). The clock is read and a timeout set by
-a read past a request's first alone: a request one read takes whole (the
-`BufReader`'s 8 KiB), or in the buffer already, pays nothing; a bound past
-what `Instant` can name is none, never a panic. `--write-timeout` is set
-once a connection; a stream setting its own ends the connection after,
-and a handler that sets the read timeout and serves on puts the idle
-timeout back first (`node_stream`): `Paced` takes it to stand. A cut and a
-write timed out are counted by their bound (`conn::Timeout`) in the
-thread's shard, before a 408 is written. A new reader of a served
-connection goes through `Paced`, never a bare `BufReader` over the `Conn`.
-
-**[`--tls-cert` and `--tls-key` make a listener HTTPS
-alone](../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its
-connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request
-a 400; without the flags the `&Conn` is the `TcpStream` it was, nothing
-added. A failed handshake is counted by reason, logged a minute apart at
-most; an end on purpose sends `close_notify` (`conn::end_all`), never after
-a failed write or `Conn::cut`. A timeout set where the peer may have reset,
-bytes of its still to read, goes through `conn::unless_gone` (fennec-tls's
-own in a handshake): macOS's EINVAL there never fails a handshake done.
 
 **[Every HTTP dial takes HTTPS by its URL.](../../docs/design/http.md#dialing-https)**
 `https://host:port` -- a primary, a node, a region's router, the OTLP
@@ -345,8 +331,9 @@ name, and a page only of its own origin or
 `--http-token` and JWTs (`open_refusal`), `cors::foreign` refuses (403),
 before routing but for `/_health` and an allowed preflight, a `Host` or
 `X-Forwarded-Host` (only refusing) not localhost's nor an IP, and an
-`Origin` not its own, scheme and all, nor `--http-cors`'s; the router's is
-fennec-shard's.
+`Origin` not its own, scheme and all, nor `--http-cors`'s, and, unless
+`--insecure`, a router's forward past loopback
+(`audit::routed_past_loopback`); the router's is fennec-shard's.
 
 ### Held writes
 
@@ -372,3 +359,21 @@ looks among the rows written since](../../docs/design/waits.md#the-leaders-looks
 (`waits::look_all`): a look among the rows written must pick as the whole
 pick does, which runs wherever that is not shown -- a load, a compact, a
 maintenance or a schema mark moves `epoch` (`wrote(None)`).
+
+### Durability
+
+**[A node syncs each tenant on a thread of its own.](../../docs/design/durability.md#a-nodes-syncs)**
+Under `--sync <ms>` a clock hands every dirty tenant to the node's sync
+threads each interval and waits for none (`Tenants::sync_every`,
+`sync_each`), each sync a file's syncer's -- the flush under the tenant's
+write lock, the fsync after it, no stream waited for (`sync_now`) -- so a
+tenant's window is a file's whatever the others' syncs or locks take.
+Never sync them in turn on one thread, nor look at one under a lock a
+writer may hold (`try_read`); one still syncing is passed over, and a
+sync's panic stops the node through its one shutdown. The pass in turn
+(`sync_dirty`) is for a caller that must see the writes down first:
+Windows' shutdown. Nothing waits on a lock the shutdown keeps: it ends the
+syncs first (`Syncs::close`, one under way waited for) and marks each
+database before its lock, which the threads beside the queries pass over
+(`held::beside`); a tenant dropped after it syncs nothing
+(`kept_to_exit`), its registry's drop saying so once.

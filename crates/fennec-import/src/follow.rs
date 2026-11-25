@@ -26,7 +26,7 @@
 use crate::load;
 use crate::map::{self, Plan, Target};
 use crate::pg::{self, Kind, Query, Reader, Url, VectorOids};
-use crate::{Column, Options, Summary};
+use crate::{Column, Options, Summary, BATCH_BYTES};
 use fennec_core::error::{Error, Result};
 use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
@@ -166,7 +166,9 @@ pub fn run(
         publication_created: source.publication_created,
         slot_created: source.slot_created,
     });
-    ensure_copy(&source, db, opts, follow, report)?;
+    if !ensure_copy(&source, db, opts, follow, stop, report)? {
+        return Ok(());
+    }
 
     let mut backoff = FIRST_BACKOFF;
     loop {
@@ -442,67 +444,96 @@ fn write_marker(
     Ok(marker.map_or(0, |m| m.id))
 }
 
-/// Makes the copy unless a whole one of this slot is already in the file.
+/// Makes the copy unless a whole one of this slot is already in the file:
+/// `false` where `stop` came first.
 ///
 /// A collection with no `_follow` entry is not the follower's to replace; one
 /// whose copy never finished, or whose slot is new -- the changes made while
 /// nothing held a slot are lost to it -- is made again.
+///
+/// What it decides and clears it does under the write lock, at once; the
+/// copy is dialed and read with no lock held and lands a batch at a time,
+/// each its own block (`load::run_locked`). It held the write lock from the
+/// dial to the last row: every request of `fennec-server --follow`, of any
+/// collection, waited on the source for as long as it took to send the
+/// table, a large one honestly and a hostile one for good, a byte a little
+/// under every 30 s; and the shutdown, which takes the lock, never ended.
+/// Readers see the collection fill as the batches land, its `_follow`
+/// entry saying the copy is unfinished until its last. `stop` is looked at
+/// between rows and wakes a read the source holds up: the copy is then left
+/// as it stands, unfinished, and made again from the start at the next
+/// start, as a copy cut short by a kill is.
 fn ensure_copy(
     source: &Source,
     db: &RwLock<Database>,
     opts: &Options,
     follow: &Follow,
+    stop: &AtomicBool,
     report: &mut dyn FnMut(Event),
-) -> Result<()> {
-    let mut g = write(db);
-    let exists = g.collection(&opts.into).is_ok();
-    let marker = read_marker(&g, &opts.into)?;
-    if let Some(m) = &marker {
-        if m.slot != follow.slot {
-            return Err(Error::Query(format!(
-                "`{}` follows slot `{}`; this run names `{}`",
-                opts.into, m.slot, follow.slot
-            )));
+) -> Result<bool> {
+    let id = {
+        let mut g = write(db);
+        let exists = g.collection(&opts.into).is_ok();
+        let marker = read_marker(&g, &opts.into)?;
+        if let Some(m) = &marker {
+            if m.slot != follow.slot {
+                return Err(Error::Query(format!(
+                    "`{}` follows slot `{}`; this run names `{}`",
+                    opts.into, m.slot, follow.slot
+                )));
+            }
         }
-    }
-    let why = match (&marker, exists) {
-        (None, true) => {
-            return Err(Error::Exists(format!(
-                "`{}` is already in the file and was not copied by a follower: \
-                 import into another collection or another file",
-                opts.into
-            )))
+        let why = match (&marker, exists) {
+            (None, true) => {
+                return Err(Error::Exists(format!(
+                    "`{}` is already in the file and was not copied by a follower: \
+                     import into another collection or another file",
+                    opts.into
+                )))
+            }
+            (Some(m), true) if m.copied && !source.slot_created => {
+                return resume(source, &mut g, opts).map(|()| true);
+            }
+            (Some(m), true) if m.copied => {
+                "the slot is new, and what changed without one is unknown"
+            }
+            (Some(_), true) => "the last copy did not finish",
+            (_, false) => "there is none yet",
+        };
+        report(Event::Copying(why));
+        // A writer that cannot refuse: a named statement reading the
+        // collection is marked broken, never a follower stopped
+        // (`Database::internally`).
+        if exists {
+            g.internally(|db| {
+                db.execute(&Statement::DropCollection {
+                    name: opts.into.clone(),
+                    if_exists: true,
+                })
+            })?;
         }
-        (Some(m), true) if m.copied && !source.slot_created => {
-            return resume(source, &mut g, opts);
-        }
-        (Some(m), true) if m.copied => "the slot is new, and what changed without one is unknown",
-        (Some(_), true) => "the last copy did not finish",
-        (_, false) => "there is none yet",
+        write_marker(&mut g, marker.map(|m| m.id), &opts.into, follow, false)?
     };
-    report(Event::Copying(why));
-    // A writer that cannot refuse: a named statement reading the
-    // collection is marked broken, never a follower stopped
-    // (`Database::internally`).
-    if exists {
-        g.internally(|db| {
-            db.execute(&Statement::DropCollection {
-                name: opts.into.clone(),
-                if_exists: true,
-            })
-        })?;
-    }
-    let id = write_marker(&mut g, marker.map(|m| m.id), &opts.into, follow, false)?;
 
-    let mut reader = Reader::open(&source.url, &Query::table(source.table.clone()))?;
-    let copied = load::run_with_progress(&mut reader, &mut g, opts, &mut |n| {
-        report(Event::CopyProgress(n))
-    });
+    // No lock from here to the last row: the dial, the sign-in and the
+    // stream wait on the source alone. The dial looks at no flag (it is
+    // held to `connect_timeout`), so a stop that came first is taken here.
+    if stop.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let copied =
+        Reader::open(&source.url, &Query::table(source.table.clone())).and_then(|reader| {
+            let mut src = Stoppable { reader, stop };
+            load::run_locked(&mut src, db, opts, &mut |n| report(Event::CopyProgress(n)))
+        });
     let summary = match copied {
         Ok(s) => s,
+        // Stopped: left unfinished, as `_follow` says, for the next start.
+        Err(_) if stop.load(Ordering::SeqCst) => return Ok(false),
         Err(e) => {
             // Half a collection is worth nothing to a follower: the next run
             // copies again, and a rerun of this one should not find it.
+            let mut g = write(db);
             let _ = g.internally(|db| {
                 db.execute(&Statement::DropCollection {
                     name: opts.into.clone(),
@@ -513,9 +544,27 @@ fn ensure_copy(
             return Err(e);
         }
     };
-    write_marker(&mut g, Some(id), &opts.into, follow, true)?;
+    write_marker(&mut write(db), Some(id), &opts.into, follow, true)?;
     report(Event::Copied(summary));
-    Ok(())
+    Ok(true)
+}
+
+/// The copy's source, given up once `stop` is set: its COPY's reads wait
+/// on the server a moment at a time and look at `stop` between
+/// (`Reader::next_row_until`).
+struct Stoppable<'a> {
+    reader: Reader,
+    stop: &'a AtomicBool,
+}
+
+impl crate::Source for Stoppable<'_> {
+    fn columns(&mut self) -> Result<Vec<Column>> {
+        crate::Source::columns(&mut self.reader)
+    }
+
+    fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
+        self.reader.next_row_until(self.stop)
+    }
 }
 
 /// A whole copy is in the file: it must have the fields this run's plan
@@ -716,10 +765,23 @@ fn apply(
             }
             Some(Wal::Keepalive { end, reply }) => {
                 // Nothing of ours is in flight: every change up to the
-                // server's end has been sent and applied. Confirming it lets
-                // the slot move on while the table is quiet, or it would hold
-                // the server's log for every other table's writes.
-                if !in_transaction && p.unsynced.is_none() && end > p.confirmed {
+                // server's end has been sent and applied -- where the end is
+                // the server's. On a proven stream (`WalStream::proven`:
+                // TLS checked against a CA, a sign-in bound to it, or this
+                // machine) it is the walsender's word, and confirming it
+                // lets the slot move on while the table is quiet, as
+                // PostgreSQL's own subscriber does (its `send_feedback`
+                // reports the position received where nothing is pending),
+                // or the slot holds the server's log for every other
+                // table's writes. On any other, a keepalive may be anyone's
+                // on the path, naming a position the stream never reached,
+                // which confirmed has the server skip every change before
+                // it, for good: there the follower confirms only what it
+                // received and put on disk, `pg_recvlogical`'s rule -- its
+                // written and flushed positions are XLogData's, a
+                // keepalive's never -- and the slot keeps the server's log
+                // while the table is quiet.
+                if wal.proven() && !in_transaction && p.unsynced.is_none() && end > p.confirmed {
                     wal.confirm(end).map_err(Failure::Stream)?;
                     p.confirmed = end;
                 } else if reply {
@@ -865,7 +927,7 @@ impl Cursor<'_> {
                 other => {
                     return Err(Error::Corrupt(format!(
                         "pgoutput: a column sent as `{}`, protocol 1 has only text",
-                        other as char
+                        other.escape_ascii()
                     )))
                 }
             });
@@ -931,7 +993,7 @@ fn decode(body: &[u8]) -> Result<Message> {
             if tag != b'N' {
                 return Err(Error::Corrupt(format!(
                     "pgoutput: an update without its new row (`{}`)",
-                    tag as char
+                    tag.escape_ascii()
                 )));
             }
             Message::Update {
@@ -946,7 +1008,7 @@ fn decode(body: &[u8]) -> Result<Message> {
             if tag != b'K' && tag != b'O' {
                 return Err(Error::Corrupt(format!(
                     "pgoutput: a delete without its key (`{}`)",
-                    tag as char
+                    tag.escape_ascii()
                 )));
             }
             Message::Delete {
@@ -972,7 +1034,7 @@ fn decode(body: &[u8]) -> Result<Message> {
         other => {
             return Err(Error::Corrupt(format!(
                 "pgoutput: unknown message `{}`",
-                other as char
+                other.escape_ascii()
             )))
         }
     })
@@ -983,7 +1045,8 @@ fn expect(c: &mut Cursor, tag: u8) -> Result<()> {
     if got != tag {
         return Err(Error::Corrupt(format!(
             "pgoutput: expected `{}`, found `{}`",
-            tag as char, got as char
+            tag.escape_ascii(),
+            got.escape_ascii()
         )));
     }
     Ok(())
@@ -1019,6 +1082,14 @@ struct Mirror<'a> {
     /// Columns already reported as ignored, so each is reported once.
     ignored: Vec<String>,
     ops: Vec<Op>,
+    /// What the puts among `ops` hold, counted as the copy counts a batch
+    /// (`load::run`): written at `--batch` changes or at [`BATCH_BYTES`],
+    /// whichever comes first, where a transaction of large rows was held
+    /// whole up to `--batch` of them, and twice over as it was written.
+    held: usize,
+    /// A put's pairs and names, the same for every row of the plan
+    /// (`load::fields_bytes`).
+    fields: usize,
     registry: Registry,
     /// A connection for reading back a row whose unchanged values the
     /// collection does not hold; opened on first need.
@@ -1045,6 +1116,8 @@ impl<'a> Mirror<'a> {
             layout: None,
             ignored: Vec::new(),
             ops: Vec::new(),
+            held: 0,
+            fields: load::fields_bytes(&source.plan),
             registry: Registry::with_builtins(),
             reader: None,
             rows: 0,
@@ -1093,7 +1166,9 @@ impl<'a> Mirror<'a> {
             let known = self.source.columns.iter().any(|s| s.name == c.name);
             if !known && !self.ignored.contains(&c.name) {
                 self.ignored.push(c.name.clone());
-                report(Event::Ignored(c.name.clone()));
+                // The name is the server's, as it reaches a log line or the
+                // terminal: escaped and cut.
+                report(Event::Ignored(pg::peer_text(c.name.as_bytes(), pg::SHOWN)));
             }
         }
         self.layout = Some(Layout {
@@ -1135,7 +1210,7 @@ impl<'a> Mirror<'a> {
             }
             _ => return Ok(0),
         }
-        if self.ops.len() >= self.opts.batch {
+        if self.ops.len() >= self.opts.batch || self.held >= BATCH_BYTES {
             self.flush(db)?;
         }
         Ok(1)
@@ -1181,7 +1256,17 @@ impl<'a> Mirror<'a> {
             return Ok(()); // gone from the source too; its delete follows
         };
         self.rows += 1;
-        let doc = load::document(&self.source.plan, &self.types, values, self.rows)?;
+        // A change's cells are text a `jsonb`, an array or a vector may
+        // make more of: its values are counted one by one, as a PostgreSQL
+        // copy's are.
+        let mut bytes = self.fields + load::values_bytes(&values);
+        let doc = load::built(
+            &self.source.plan,
+            &self.types,
+            values,
+            self.rows,
+            &mut bytes,
+        )?;
         let keep = match &self.opts.filter {
             None => true,
             Some(f) => {
@@ -1193,8 +1278,12 @@ impl<'a> Mirror<'a> {
                 load::keep(f, &doc, &ctx, self.rows)?
             }
         };
-        self.ops
-            .push(if keep { Op::Put(doc) } else { Op::Delete(id) });
+        if keep {
+            self.held += bytes;
+            self.ops.push(Op::Put(doc));
+        } else {
+            self.ops.push(Op::Delete(id));
+        }
         Ok(())
     }
 
@@ -1282,8 +1371,10 @@ impl<'a> Mirror<'a> {
         }
         let reader = self.reader.as_mut().ok_or_else(no_layout)?;
         let key = pg::quote_ident(&self.source.columns[self.id_column].name)?;
+        // One row is read, the first; a key the table does not hold unique
+        // is no reason to keep the rest.
         let r = reader.query(&format!(
-            "select * from {} where {key} = {id}",
+            "select * from {} where {key} = {id} limit 1",
             self.source.sql
         ))?;
         let Some(row) = r.rows.first() else {
@@ -1318,22 +1409,23 @@ impl<'a> Mirror<'a> {
     }
 
     /// Applies the pending writes in their order: runs of puts as one `put`,
-    /// runs of deletes as one `del ... where id in [...]`.
+    /// runs of deletes as one `del ... where id in [...]`. Each document is
+    /// moved into its statement, where a copy of each was made and the
+    /// pending ones held beside the copies until every statement had run.
     fn flush(&mut self, db: &RwLock<Database>) -> Result<()> {
         if self.ops.is_empty() {
             return Ok(());
         }
-        let ops = std::mem::take(&mut self.ops);
+        self.held = 0;
+        let mut ops = std::mem::take(&mut self.ops).into_iter().peekable();
         let collection = &self.opts.into;
         let mut g = write(db);
-        let mut i = 0;
-        while i < ops.len() {
-            let stmt = match &ops[i] {
-                Op::Put(_) => {
-                    let mut docs = Vec::new();
-                    while let Some(Op::Put(doc)) = ops.get(i) {
-                        docs.push(doc.clone());
-                        i += 1;
+        while let Some(op) = ops.next() {
+            let stmt = match op {
+                Op::Put(doc) => {
+                    let mut docs = vec![doc];
+                    while let Some(Op::Put(doc)) = ops.next_if(|o| matches!(o, Op::Put(_))) {
+                        docs.push(doc);
                     }
                     Statement::Put {
                         collection: collection.clone(),
@@ -1346,11 +1438,10 @@ impl<'a> Mirror<'a> {
                         pick: None,
                     }
                 }
-                Op::Delete(_) => {
-                    let mut ids = Vec::new();
-                    while let Some(Op::Delete(id)) = ops.get(i) {
-                        ids.push(Expr::Lit(Value::Int(*id as i64)));
-                        i += 1;
+                Op::Delete(id) => {
+                    let mut ids = vec![Expr::Lit(Value::Int(id as i64))];
+                    while let Some(Op::Delete(id)) = ops.next_if(|o| matches!(o, Op::Delete(_))) {
+                        ids.push(Expr::Lit(Value::Int(id as i64)));
                     }
                     Statement::Delete {
                         collection: collection.clone(),
@@ -1359,15 +1450,12 @@ impl<'a> Mirror<'a> {
                         pick: None,
                     }
                 }
-                Op::Truncate => {
-                    i += 1;
-                    Statement::Delete {
-                        collection: collection.clone(),
-                        filter: None,
-                        require: None,
-                        pick: None,
-                    }
-                }
+                Op::Truncate => Statement::Delete {
+                    collection: collection.clone(),
+                    filter: None,
+                    require: None,
+                    pick: None,
+                },
             };
             // A mirror's rows are its source's, derived ones among them:
             // a statement bound to the collection's writes would make them
@@ -1389,6 +1477,13 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Arc};
+
+    /// A stand-in's URL, read with no variable of libpq's: a `PGPASSWORD`
+    /// this process inherited had the client hold a password and refuse
+    /// the stand-in's `AuthenticationOk`.
+    fn stand_in_url(s: &str) -> Result<Url> {
+        Url::parse_in(s, |_| None)
+    }
 
     // ------------------------------------------------ building messages
 
@@ -1552,7 +1647,7 @@ mod tests {
         })
         .unwrap();
         let source = Source {
-            url: Url::parse("postgres://u@127.0.0.1:1/d").unwrap(),
+            url: stand_in_url("postgres://u@127.0.0.1:1/d").unwrap(),
             table: "docs".into(),
             sql: "\"docs\"".into(),
             namespace: "public".into(),
@@ -1872,7 +1967,7 @@ mod tests {
             // Up to the client's close.
             while read_msg(&mut s).is_some() {}
         });
-        Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap()
+        stand_in_url(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap()
     }
 
     /// A row read back -- an update leaving a TOASTed value untouched, of a
@@ -2048,7 +2143,7 @@ mod tests {
             let _ = tell.send(tags);
         });
         Walsender {
-            url: Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap(),
+            url: stand_in_url(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap(),
             released,
             asked,
             sent,
@@ -2132,6 +2227,71 @@ mod tests {
         );
     }
 
+    /// A follower holds the writes it has not made to `BATCH_BYTES`, as a
+    /// copy holds a batch, whatever `--batch` says: one transaction of a
+    /// row of 4 MiB and 2 000 of 28 KiB, some 60 MiB, streamed by the
+    /// stand-in into a file, is written a batch at a time, the follower's
+    /// thread holding under five times `BATCH_BYTES` and its largest row
+    /// -- counted by the test binary's allocator (`tests/held.rs`), never
+    /// timed: 97 MB, where the bound is 105. Written at 2 000 changes
+    /// alone, each document copied into its statement beside the pending
+    /// ones, the follower held 377 MB.
+    #[test]
+    fn a_follower_holds_its_writes_by_their_bytes_not_their_count() {
+        let large = 4 << 20;
+        let mut changes = vec![vec![b'B'], relation(b'd', &COLS)];
+        changes.push(insert(&[Some("1"), Some(&"l".repeat(large)), None, None]));
+        let small = "s".repeat(28 << 10);
+        for id in 2..=2_001 {
+            changes.push(insert(&[Some(&id.to_string()), Some(&small), None, None]));
+        }
+        let mut commit = vec![b'C', 0];
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&0i64.to_be_bytes());
+        changes.push(commit);
+        drop(small);
+        let w = walsender(changes, Answer::Releases);
+        let dir = std::env::temp_dir().join(format!("fennec-follow-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut source, opts, _) = fixture(None);
+        source.url = w.url.clone();
+        let mut file = fennec_core::fs::open(dir.join("f.fennec")).unwrap();
+        file.execute(&Statement::CreateCollection {
+            schema: source.plan.schema.clone(),
+            if_not_exists: false,
+        })
+        .unwrap();
+        let db = RwLock::new(file);
+        let stop = AtomicBool::new(false);
+        let mut backoff = FIRST_BACKOFF;
+        let follow = Follow::named_after("docs");
+        let (ended, held) = crate::held::peak(|| {
+            stream(
+                &source,
+                &db,
+                &opts,
+                &follow,
+                &stop,
+                &AtomicBool::new(false),
+                &mut backoff,
+                &mut |e| {
+                    if matches!(e, Event::Confirmed { .. }) {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                },
+            )
+        });
+        assert!(ended.is_ok());
+        assert_eq!(count(&db), 2_001);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!("a follower's large transaction: held {held} bytes at once");
+        let bound = 5 * (BATCH_BYTES + large);
+        assert!(held < bound, "the follower held {held} bytes at once");
+    }
+
     /// A follower that fails at what it read returns its error before it
     /// waits for anything: it never asks the server to end the stream, so
     /// never waits for an answer -- here one that never comes -- but closes
@@ -2213,6 +2373,113 @@ mod tests {
         assert_eq!(w.sent.recv().unwrap(), b"c");
     }
 
+    /// A keepalive naming a position far past anything the stream sent:
+    /// what someone on the path of a connection that is not proven can
+    /// write. `FAR` is a terabyte past the commit.
+    const FAR: u64 = 16 + (1 << 40);
+
+    /// A stand-in walsender at `host` -- a name of the test's resolved to
+    /// it, or `127.0.0.1` -- that sends one transaction, ending at 16;
+    /// once the follower confirmed it, a keepalive at [`FAR`] asking no
+    /// reply and one at 16 asking one; and once answered, sets `stop`. The
+    /// flushed position of every status update the follower sent.
+    fn keepalives(host: &str, stop: Arc<AtomicBool>) -> (Url, mpsc::Receiver<Vec<u64>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tell, statuses) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = started(&listener);
+            let Some((b'Q', _)) = read_msg(&mut s) else {
+                panic!("no START_REPLICATION");
+            };
+            let mut commit = vec![b'C', 0];
+            commit.extend_from_slice(&16u64.to_be_bytes());
+            commit.extend_from_slice(&16u64.to_be_bytes());
+            commit.extend_from_slice(&0i64.to_be_bytes());
+            let mut out = framed(b'W', &[0, 0, 0]);
+            for c in [
+                vec![b'B'],
+                relation(b'd', &COLS),
+                insert(&[Some("1"), Some("one"), None, None]),
+                commit,
+            ] {
+                out.extend_from_slice(&xlog(&c));
+            }
+            s.write_all(&out).unwrap();
+            let keepalive = |end: u64, reply: u8| {
+                let mut k = vec![b'k'];
+                k.extend_from_slice(&end.to_be_bytes());
+                k.extend_from_slice(&0i64.to_be_bytes());
+                k.push(reply);
+                framed(b'd', &k)
+            };
+            let (mut seen, mut asked) = (Vec::new(), false);
+            while let Some((tag, body)) = read_msg(&mut s) {
+                match tag {
+                    b'd' if body.first() == Some(&b'r') => {
+                        let flushed = u64::from_be_bytes(body[9..17].try_into().unwrap());
+                        seen.push(flushed);
+                        if asked {
+                            stop.store(true, Ordering::SeqCst);
+                        } else if flushed == 16 {
+                            asked = true;
+                            let mut out = keepalive(FAR, 0);
+                            out.extend_from_slice(&keepalive(16, 1));
+                            s.write_all(&out).unwrap();
+                        }
+                    }
+                    b'c' => {
+                        let mut out = framed(b'c', b"");
+                        out.extend_from_slice(&framed(b'C', b"COPY 0\0"));
+                        out.extend_from_slice(&framed(b'Z', b"I"));
+                        s.write_all(&out).unwrap();
+                    }
+                    b'X' => break,
+                    _ => {}
+                }
+            }
+            let _ = tell.send(seen);
+        });
+        let port = addr.port();
+        if host != "127.0.0.1" {
+            fennec_http::dial::stand_in(&format!("{host}:{port}"), move || Ok(vec![addr]));
+        }
+        let url = stand_in_url(&format!("postgres://u@{host}:{port}/d?sslmode=disable")).unwrap();
+        (url, statuses)
+    }
+
+    /// A follower confirms only what it received and put on disk: a
+    /// keepalive naming a position the stream never reached is not echoed
+    /// in its next status update, where a stream is not proven -- here a
+    /// host off this machine over plain text, where anyone on the path
+    /// writes what the follower reads. It confirmed any keepalive's end
+    /// with nothing pending, and PostgreSQL, told the slot was confirmed a
+    /// terabyte ahead, would skip every change before it, for good. A
+    /// proven stream -- this machine, or TLS checked, or a sign-in bound to
+    /// it -- takes the walsender's keepalive as PostgreSQL's own subscriber
+    /// does, so a quiet table's slot lets the server's log go.
+    #[test]
+    fn a_keepalive_moves_no_confirmed_position_on_a_stream_not_proven() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = format!("walsender-{}.test", std::process::id());
+        let (url, statuses) = keepalives(&host, Arc::clone(&stop));
+        let (ended, events, db) = follow_from(&url, &stop, &AtomicBool::new(false), |_| {});
+        assert!(ended.is_ok(), "{events:?}");
+        assert!(doc(&db, 1).is_some());
+        let seen = statuses.recv().unwrap();
+        assert!(seen.contains(&16), "{seen:?}");
+        assert!(
+            !seen.contains(&FAR),
+            "a keepalive's far end was confirmed: {seen:?}"
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (url, statuses) = keepalives("127.0.0.1", Arc::clone(&stop));
+        let (ended, events, _) = follow_from(&url, &stop, &AtomicBool::new(false), |_| {});
+        assert!(ended.is_ok(), "{events:?}");
+        assert!(statuses.recv().unwrap().contains(&FAR), "{events:?}");
+    }
+
     /// SIGUSR1 sent to one thread, its handler doing nothing, installed as
     /// the shell installs its own (`signal`, `SA_RESTART`): Linux restarts
     /// no `recv` on a socket with a timeout all the same (signal(7)) -- and
@@ -2224,7 +2491,7 @@ mod tests {
     /// it, to add no dependency.
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     mod interrupt {
-        use std::os::unix::thread::RawPthread;
+        use std::os::unix::thread::{JoinHandleExt, RawPthread};
 
         #[cfg(target_os = "linux")]
         const SIGUSR1: i32 = 10;
@@ -2244,6 +2511,10 @@ mod tests {
         /// cuts.
         pub fn arm() {
             static ARMED: std::sync::Once = std::sync::Once::new();
+            // SAFETY: `nothing` is a handler of the C signature, which touches
+            // nothing, installed once; `siginterrupt` is handed two integers, as
+            // declared, reads no memory of ours, and changes only whether a call
+            // SIGUSR1 cuts -- this test's signal alone -- is restarted.
             ARMED.call_once(|| unsafe {
                 signal(SIGUSR1, nothing as *const () as usize);
                 #[cfg(target_vendor = "apple")]
@@ -2251,9 +2522,13 @@ mod tests {
             });
         }
 
-        /// SIGUSR1 to `thread`, a thread not yet joined.
-        pub fn send(thread: RawPthread) {
-            unsafe { pthread_kill(thread, SIGUSR1) };
+        /// SIGUSR1 to `thread`'s thread.
+        pub fn send<T>(thread: &std::thread::JoinHandle<T>) {
+            // SAFETY: the handle is borrowed, so it is neither joined nor
+            // dropped (detached) while this runs: its thread's `pthread_t`,
+            // which only a join or a detach frees, names that thread still,
+            // running or ended. SIGUSR1 is handled (`arm`).
+            unsafe { pthread_kill(thread.as_pthread_t(), SIGUSR1) };
         }
     }
 
@@ -2269,7 +2544,6 @@ mod tests {
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     #[test]
     fn a_signal_is_no_failure_of_the_stream() {
-        use std::os::unix::thread::JoinHandleExt;
         interrupt::arm();
         let mut commit = vec![b'C', 0];
         commit.extend_from_slice(&16u64.to_be_bytes());
@@ -2307,7 +2581,7 @@ mod tests {
             if sent == 20 {
                 stop.store(true, Ordering::SeqCst);
             }
-            interrupt::send(follower.as_pthread_t());
+            interrupt::send(&follower);
             sent += 1;
             std::thread::sleep(Duration::from_millis(5));
         }

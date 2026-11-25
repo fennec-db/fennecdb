@@ -25,7 +25,7 @@ Acknowledged within 3 working days.
 
 Today none. Flags `--http-token` and --tls-ca. See `tools/a.py`,
 [the design](docs/design/x.md#a-heading) and [here](#supported-versions).
-Own SHA-256 and HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 and ChaCha20-Poly1305
+Own SHA-256 and HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 and ChaCha20-Poly1305 and HChaCha20
 and RSA PKCS#1 v1.5 verification and ECDSA P-256 verification and
 SCRAM-SHA-256.
 
@@ -77,7 +77,7 @@ fn an_ignored_one() {}
 """
 
 CRYPTO = ("pub fn sha256(a) pub fn hmac_sha256(a) pub fn pbkdf2_sha256(a) "
-          "pub fn seal_in_place(a) pub struct RsaKey\n")
+          "pub fn seal_in_place(a) pub fn hchacha20(a) pub struct RsaKey\n")
 
 FILES = {
     "SECURITY.md": GOOD,

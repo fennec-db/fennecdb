@@ -1,0 +1,9 @@
+-- A collection of 4 097 fields, more places than 4 096: every later build
+-- opens it as it is and reads each row at every place, through the index
+-- on its last field, as the release did (its schema, field by field, is
+-- the walk's and the schema test's).
+get many count
+get many where f4096 = 4096
+get many where f4096 = -1 select f0, f1, f2047, f2048, f2049, f4095, f4096
+get many order f4096 select f0, f1, f2047, f2048, f2049, f4095, f4096
+get many where f2048 = 2048 select f0, f4096

@@ -1,0 +1,155 @@
+{
+ "prune": [
+  "a: let go of 2 images and 2 segments",
+  "b: let go of 1 images and 0 segments",
+  "b.9c37cf035022724f: let go of 1 images and 0 segments",
+  "c: let go of 3 images and 1 segments",
+  "<root>: 3 tenants in 4 archives, 0 failed"
+ ],
+ "verify": [
+  "a: changes 4 to 5, from 2026-11-21T21:10:30.935Z to 2026-11-21T21:10:35.275Z",
+  "b: changes 3 to 3, from 2026-11-21T21:10:34.330Z to 2026-11-21T21:10:34.330Z",
+  "b.9c37cf035022724f: changes 2 to 2, from 2026-11-21T21:10:30.035Z to 2026-11-21T21:10:30.035Z, gone from the node 2026-11-21T21:10:31.692Z",
+  "c: changes 3 to 3, from 2026-11-21T21:10:33.510Z to 2026-11-21T21:10:33.510Z",
+  "<root>: 3 tenants in 4 archives, 0 failed"
+ ],
+ "restores": [
+  {
+   "to": null,
+   "label": "end",
+   "status": 0,
+   "said": [
+    "a: change 5",
+    "b: change 3",
+    "c: change 3",
+    "<out>: 3 tenants restored, 0 passed over, 0 failed"
+   ],
+   "answers": {
+    "a": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"},{\"id\":4,\"n\":4,\"s\":\"a four\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":4}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ],
+    "b": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, made again\"},{\"id\":2,\"n\":2,\"s\":\"b, its second life\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, made again\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":2}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ],
+    "c": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"c, before it moved\"},{\"id\":2,\"n\":2,\"s\":\"c, back where it was\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"c, before it moved\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":2}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ]
+   }
+  },
+  {
+   "to": "2026-11-21T21:10:29.955Z",
+   "label": "before",
+   "status": 0,
+   "said": [
+    "a: archived only from after then, passed over",
+    "b: archived only from after then, passed over",
+    "c: archived only from after then, passed over",
+    "<out>: 0 tenants restored, 3 passed over, 0 failed"
+   ],
+   "answers": {}
+  },
+  {
+   "to": "2026-11-21T21:10:31.636Z",
+   "label": "all three",
+   "status": 1,
+   "said": [
+    "a: change 4",
+    "b: change 2, from b.9c37cf035022724f",
+    "<out>: 2 tenants restored, 0 passed over, 1 failed",
+    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-21T21:10:33.510Z"
+   ],
+   "answers": {
+    "a": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ],
+    "b": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, its first life\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, its first life\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":1}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ]
+   }
+  },
+  {
+   "to": "2026-11-21T21:10:32.250Z",
+   "label": "b gone",
+   "status": 1,
+   "said": [
+    "a: change 4",
+    "b: gone from the node 2026-11-21T21:10:31.692Z, passed over",
+    "<out>: 1 tenants restored, 1 passed over, 1 failed",
+    "c: that moment was let go of (--keep): its archive holds nothing from before 2026-11-21T21:10:33.510Z"
+   ],
+   "answers": {
+    "a": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ]
+   }
+  },
+  {
+   "to": "2026-11-21T21:10:32.867Z",
+   "label": "c away",
+   "status": 0,
+   "said": [
+    "a: change 4",
+    "b: gone from the node 2026-11-21T21:10:31.692Z, passed over",
+    "c: gone from the node 2026-11-21T21:10:32.306Z, passed over",
+    "<out>: 1 tenants restored, 2 passed over, 0 failed"
+   ],
+   "answers": {
+    "a": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":3}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ]
+   }
+  },
+  {
+   "to": "2026-11-21T21:10:36.007Z",
+   "label": "b back",
+   "status": 0,
+   "said": [
+    "a: change 5",
+    "b: change 3",
+    "c: change 3",
+    "<out>: 3 tenants restored, 0 passed over, 0 failed"
+   ],
+   "answers": {
+    "a": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"},{\"id\":2,\"n\":2,\"s\":\"a two\"},{\"id\":3,\"n\":3,\"s\":\"a three\"},{\"id\":4,\"n\":4,\"s\":\"a four\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"a one\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":4}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ],
+    "b": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, made again\"},{\"id\":2,\"n\":2,\"s\":\"b, its second life\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"b, made again\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":2}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ],
+    "c": [
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"c, before it moved\"},{\"id\":2,\"n\":2,\"s\":\"c, back where it was\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"id\",\"n\",\"s\"],\"rows\":[{\"id\":1,\"n\":1,\"s\":\"c, before it moved\"}]}}",
+     "{\"kind\":\"rows\",\"result\":{\"columns\":[\"count\"],\"rows\":[{\"count\":2}]}}",
+     "{\"kind\":\"schemas\",\"collections\":[{\"name\":\"notes\",\"fields\":[{\"name\":\"n\",\"type\":\"int\",\"index\":\"hash\"},{\"name\":\"s\",\"type\":\"text\",\"index\":\"none\"}]}]}"
+    ]
+   }
+  }
+ ]
+}

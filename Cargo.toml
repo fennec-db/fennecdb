@@ -26,6 +26,26 @@ readme = "README.md"
 keywords = ["database", "vector", "embedded", "wasm", "http"]
 categories = ["database", "database-implementations", "wasm"]
 
+# Every `unsafe` block and `unsafe impl` says why it is sound, in a `//
+# SAFETY:` comment above it: what the caller or the code around it
+# guarantees, by name -- for the C ABIs the contract fennec.h and their
+# `# Safety` sections write (docs/design/conventions.md#unsafe-code). Each
+# crate takes these tables by `[lints] workspace = true`, which
+# tools/lints_check.py holds every member of the workspace to. Clippy's
+# deny refuses a block without its comment in the code a clippy run
+# compiles: CI's are x86_64 Linux's, wasm32's and part of Windows'.
+# tools/lints_check.py (CI's fmt job) reads every `.rs` file whatever its
+# `cfg` -- aarch64's kernels, Apple's and Windows' system calls -- and
+# refuses the same, by clippy's reading of where the comment goes.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+# An unsafe operation in an `unsafe fn` goes in a block of its own, which
+# then says why it is sound like any other: rustc's lint, so every build for
+# every target refuses one outside, clippy's run or not.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 # The internal crates carry a version as well as a path: cargo refuses to
 # publish a dependency that has only a path, and keeping them here means a
 # release bumps one number instead of seven.
@@ -40,7 +60,6 @@ fennec-core = { version = "0.2.0", path = "crates/fennec-core", default-features
 fennec-ql = { version = "0.2.0", path = "crates/fennec-ql", default-features = false }
 fennec-abi = { version = "0.2.0", path = "crates/fennec-abi", default-features = false }
 fennec-http = { version = "0.2.0", path = "crates/fennec-http" }
-fennec-server = { version = "0.2.0", path = "crates/fennec-server" }
 # Without TLS (`tls`), which the binaries name: a crate taking either has no
 # dependency from outside the workspace unless it asks for one.
 fennec-wire = { version = "0.2.0", path = "crates/fennec-wire", default-features = false }
@@ -123,6 +142,14 @@ strip = false
 debug-assertions = true
 overflow-checks = true
 panic = "unwind"
+
+# The tests under AddressSanitizer (`make sanitize`, ci.yml's `sanitize`):
+# the test profile's every check -- debug assertions, overflow checks, the
+# standard library's precondition checks -- at opt-level 1, which ASan's
+# own documentation advises for a sanitized build's speed.
+[profile.sanitize]
+inherits = "test"
+opt-level = 1
 
 # For profiling: release speed plus symbols
 [profile.profiling]

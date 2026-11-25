@@ -33,15 +33,21 @@
 //! <root>/<tenant>/presence       `gone <ms>` and `back <ms>`, by the node's clock
 //! <root>/<tenant>.<hex>/         a line moved aside, its history's id
 //! ```
+//!
+//! Sealed, every file of a line names its tenant, `began` is held to what
+//! its images say and `presence` is sealed too: a line copied over
+//! another's, or either file edited, is refused by name ([`Line::archive`],
+//! `Archive::held`), never read as another tenant's or a choice it did not
+//! make.
 
-use crate::archive::{Archive, Parent, Took, Writer};
-use crate::replication::{self, read_head, read_message, u64_at, Upstream, MESSAGE};
+use crate::archive::{Archive, Incoming, Parent, Took, Writer};
+use crate::replication::{self, kind_head, read_head, read_kind, u64_at, Upstream, MESSAGE};
 use crate::seal::Key;
 use crate::tenants::{a_device, shaped};
 use fennec_core::history::History;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -104,51 +110,35 @@ pub fn tenant_dirs(root: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         .collect())
 }
 
-/// What the node said of the tenant archived in `dir`, oldest first: gone
-/// (`true`) or back, and when, ms since the epoch.
-fn presence(dir: &Path) -> Vec<(bool, u64)> {
-    let Ok(text) = fs::read_to_string(dir.join("presence")) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|l| {
-            let (what, at) = l.trim().split_once(' ')?;
-            Some((what == "gone", at.parse().ok()?))
-        })
-        .collect()
+impl Line {
+    /// Its archive, every sealed file of which must name its tenant: a
+    /// tenant's directory, or a line moved aside, copied over another's is
+    /// refused by name, never restored as that tenant's or passed over as
+    /// gone.
+    pub fn archive(&self, key: Option<&Key>) -> io::Result<Archive> {
+        Archive::of_tenant(&self.dir, key.cloned(), &self.tenant)
+    }
 }
 
-/// When the node said the tenant archived in `dir` was gone from it -- ms
-/// since the epoch -- if it did and has not held it again since.
-pub fn gone_at(dir: &Path) -> Option<u64> {
-    presence(dir).last().filter(|e| e.0).map(|e| e.1)
+/// When the node said the tenant `a` is the line of was gone from it -- ms
+/// since the epoch -- if it did and has not held it again since
+/// ([`Archive::presence`]).
+pub fn gone_at(a: &Archive) -> io::Result<Option<u64>> {
+    Ok(a.presence()?.last().filter(|e| e.0).map(|e| e.1))
 }
 
-/// Whether the node held the tenant archived in `dir` at `at`: `None` where
-/// it did, the time it was gone from where it did not -- by the last line
-/// noted by then. The lines are in the order the node said them; their
-/// times are its clock's, which a clock set back leaves out of order, so a
-/// line later than `at` stops nothing: read up to the first, a tenant gone,
-/// back, gone and back again across a clock set back read as gone.
-pub fn away_at(dir: &Path, at: u64) -> Option<u64> {
-    presence(dir)
+/// Whether the node held the tenant `a` is the line of at `at`: `None`
+/// where it did, the time it was gone from where it did not -- by the last
+/// line noted by then. The lines are in the order the node said them;
+/// their times are its clock's, which a clock set back leaves out of order,
+/// so a line later than `at` stops nothing: read up to the first, a tenant
+/// gone, back, gone and back again across a clock set back read as gone.
+pub fn away_at(a: &Archive, at: u64) -> io::Result<Option<u64>> {
+    Ok(a.presence()?
         .into_iter()
         .rfind(|e| e.1 <= at)
         .filter(|e| e.0)
-        .map(|e| e.1)
-}
-
-/// Notes the node said the tenant archived in `dir` was gone, or back, at
-/// `at` -- the node's time, as its writes' are.
-fn note(dir: &Path, gone: bool, at: u64) -> io::Result<()> {
-    let mut text = fs::read_to_string(dir.join("presence")).unwrap_or_default();
-    text.push_str(&format!("{} {at}\n", if gone { "gone" } else { "back" }));
-    put(&dir.join("presence"), text.as_bytes())?;
-    // The rename durable too: lost in a crash, a deleted tenant came back
-    // at a restore. On Windows the renamed file is flushed as well as the
-    // directory (`renamed_in`).
-    renamed_in(dir, "presence")?;
-    Ok(())
+        .map(|e| e.1))
 }
 
 /// A tenant's archive, and the lock the images taken beside the stream hold
@@ -182,7 +172,10 @@ enum NodeMessage {
         /// The node's time as it said hello.
         at: u64,
         lineage: Vec<(u64, u64)>,
-        image: Option<Vec<u8>>,
+        /// The length of the image that follows on the stream unread,
+        /// taken as it comes ([`Receiver::take_image`]) or passed over at
+        /// the next message.
+        image: Option<u64>,
     },
     Writes {
         name: String,
@@ -207,7 +200,7 @@ impl NodeArchive {
     pub fn new(root: impl AsRef<Path>, key: Option<Key>) -> io::Result<NodeArchive> {
         let root = root.as_ref().to_path_buf();
         let made = !root.is_dir();
-        fs::create_dir_all(&root)?;
+        fennec_core::fs::create_dir_private(&root)?;
         // Its name durable once, at the start: lost to a crash, every
         // tenant's archive went with it. A tenant's own directory is synced
         // into it before the tenant's first segment is written, once for
@@ -220,7 +213,21 @@ impl NodeArchive {
         let parent = Arc::default();
         let mut tenants = BTreeMap::new();
         for (name, dir) in tenant_dirs(&root)? {
-            tenants.insert(name, Arc::new(Kept::new(&dir, key.clone(), &parent)?));
+            let kept = Kept::new(&dir, key.clone(), &name, &parent)?;
+            tenants.insert(name, Arc::new(kept));
+        }
+        // A `presence` an archiver before this version left plain, sealed
+        // before anything else is: once a line holds a file sealed in this
+        // version, a plain one is refused (`Archive::seal_presence`). A
+        // line that does not read is left for an operator, as the session
+        // leaves its tenant, and says why where it is read.
+        if key.is_some() {
+            for line in lines(&root)? {
+                match line.archive(key.as_ref()).and_then(|a| a.seal_presence()) {
+                    Err(e) if e.kind() != io::ErrorKind::InvalidData => return Err(e),
+                    _ => {}
+                }
+            }
         }
         Ok(NodeArchive {
             root,
@@ -244,6 +251,7 @@ impl NodeArchive {
         let k = Arc::new(Kept::new(
             &self.root.join(name),
             self.key.clone(),
+            name,
             &self.parent,
         )?);
         all.insert(name.into(), Arc::clone(&k));
@@ -353,7 +361,9 @@ impl NodeArchive {
                     // a disk that refused a write is tried again, as a
                     // write's failure is, from where the archives stand.
                     let given = (seq, at, lineage);
-                    match self.hello(&mut writers, &name, given, image.as_deref(), report) {
+                    let mut take = |out: &mut dyn io::Write| rx.take_image(out);
+                    let incoming = image.map(|len| (len, &mut take as Incoming<'_>));
+                    match self.hello(&mut writers, &name, given, incoming, report) {
                         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                             report(&format!("tenant `{name}`: {e}; left as it is"));
                             writers.remove(&name);
@@ -408,13 +418,30 @@ impl NodeArchive {
                         w.park()?;
                     }
                     dirty.remove(&name);
-                    let dir = self.root.join(&name);
-                    if dir.is_dir() && gone_at(&dir).is_none() {
-                        note(&dir, true, at.unwrap_or_else(now_ms))?;
-                        report(&format!(
-                            "tenant `{name}` is no longer on the node: its archive is kept, \
-                             and no longer followed"
-                        ));
+                    if self.root.join(&name).is_dir() {
+                        let noted = self.kept(&name).and_then(|k| match gone_at(&k.archive)? {
+                            Some(_) => Ok(false),
+                            None => k
+                                .archive
+                                .note(true, at.unwrap_or_else(now_ms))
+                                .map(|_| true),
+                        });
+                        match noted {
+                            Ok(true) => report(&format!(
+                                "tenant `{name}` is no longer on the node: its archive is kept, \
+                                 and no longer followed"
+                            )),
+                            Ok(false) => {}
+                            // Its presence does not read -- another tenant's,
+                            // or bytes changed -- and is left for an operator,
+                            // as an archive that does not read is: the others
+                            // go on.
+                            Err(e) if e.kind() == io::ErrorKind::InvalidData => report(&format!(
+                                "tenant `{name}` is no longer on the node, which its archive \
+                                 does not note: {e}"
+                            )),
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 NodeMessage::Alive => {
@@ -460,15 +487,22 @@ impl NodeArchive {
         writers: &mut HashMap<String, Writer>,
         name: &str,
         (seq, said, lineage): (u64, u64, Vec<(u64, u64)>),
-        image: Option<&[u8]>,
+        image: Option<(u64, Incoming<'_>)>,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
+        let (len, mut image) = match image {
+            Some((len, take)) => (Some(len), Some(take)),
+            None => (None, None),
+        };
         let kept = self.kept(name)?;
         if !writers.contains_key(name) {
             writers.insert(name.into(), kept.archive.writer()?);
         }
         let w = writers.get_mut(name).expect("inserted above");
-        let took = kept.archive.hello(w, image, seq, lineage.clone())?;
+        // Not taken where the archive diverged: taken below, by the new one.
+        let took = kept
+            .archive
+            .hello_with(w, image.as_deref_mut(), seq, lineage.clone())?;
         let kept = match took {
             Took::Went => kept,
             Took::Diverged => {
@@ -479,8 +513,9 @@ impl NodeArchive {
                 // hears of the new one alone: by the time the node said
                 // hello to it at the latest, so a restore to a moment after
                 // leaves the old one out.
-                if gone_at(&aside).is_none() {
-                    note(&aside, true, said)?;
+                let aside_line = Archive::of_tenant(&aside, self.key.clone(), name)?;
+                if gone_at(&aside_line)?.is_none() {
+                    aside_line.note(true, said)?;
                 }
                 report(&format!(
                     "tenant `{name}`: the node's copy is at change {seq} on a history that \
@@ -491,7 +526,7 @@ impl NodeArchive {
                 ));
                 let fresh = self.kept(name)?;
                 let mut w = fresh.archive.writer()?;
-                if fresh.archive.hello(&mut w, image, seq, lineage)? != Took::Went {
+                if fresh.archive.hello_with(&mut w, image, seq, lineage)? != Took::Went {
                     return Err(io::Error::other("a new archive refused its first image"));
                 }
                 writers.insert(name.into(), w);
@@ -500,14 +535,13 @@ impl NodeArchive {
         };
         // Held again: followed, and back from where it was gone -- the time
         // away kept, so a restore to a moment in it leaves the tenant out.
-        let dir = self.root.join(name);
-        if gone_at(&dir).is_some() {
-            note(&dir, false, said)?;
+        if gone_at(&kept.archive)?.is_some() {
+            kept.archive.note(false, said)?;
         }
-        if let Some(image) = image {
+        if let Some(len) = len {
             report(&format!(
                 "tenant `{name}`: image at change {seq} ({:.1} MB)",
-                image.len() as f64 / 1e6
+                len as f64 / 1e6
             ));
         }
         drop(kept);
@@ -532,7 +566,7 @@ impl NodeArchive {
         // directory made), or finds a sync of it begun since the directory
         // was made (`archive::Parent`), and with it this.
         fs::rename(&dir, &aside)?;
-        let fresh = Arc::new(Kept::new(&dir, self.key.clone(), &self.parent)?);
+        let fresh = Arc::new(Kept::new(&dir, self.key.clone(), name, &self.parent)?);
         lock(&self.tenants).insert(name.into(), fresh);
         Ok(aside)
     }
@@ -540,7 +574,9 @@ impl NodeArchive {
     /// Beside `follow`: an image of each tenant's archive's end every
     /// `every` once a write came after its last, and what a restore within
     /// `keep` does not need let go after it, until `stop` is set -- what
-    /// `fennec archive` does for its one database, a tenant at a time.
+    /// `fennec archive` does for its one database, a tenant at a time --
+    /// each line an upgrade left sealed before version 3 given its image of
+    /// version 3 first ([`Self::seal_ends`]).
     pub fn keep_up(
         &self,
         every: Duration,
@@ -548,6 +584,7 @@ impl NodeArchive {
         stop: &AtomicBool,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
+        self.seal_ends(stop, report);
         let mut last = Instant::now();
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
@@ -558,6 +595,58 @@ impl NodeArchive {
             self.keep_once(keep, stop, report);
         }
         Ok(())
+    }
+
+    /// As [`Self::keep_up`] begins: each followed tenant's line sealed
+    /// before version 3 given the image of its end sealed in version 3
+    /// that it goes on from (`Archive::seal_end`), here beside the stream.
+    /// Sealed at a tenant's first write after the upgrade, as it was, a
+    /// line no write reached held no file of version 3, and an older image
+    /// put in meanwhile -- another tenant's, another database's under the
+    /// key -- under its end's change or a later one, at a later time, was
+    /// what that image was assembled from at last, and read in every
+    /// restore past it (1.0's third review of version 3). Once a line, at
+    /// the upgrade: an assembly of its end each, a tenant at a time, of
+    /// lines no write has since reached too, which the stream would
+    /// otherwise have paid at their first writes; after, a line's identity
+    /// it read anyway. A tenant written before its turn is sealed by its
+    /// first write, on the stream, as before, or waits for this one's
+    /// image of it. A line moved aside is not: it takes no write, and a
+    /// restore to a moment reads it only before the line after it began,
+    /// where an image timed now is never the base. A disk's refusal leaves
+    /// the line to its first write or the next start; an end that does not
+    /// restore, to an operator, as the stream leaves it.
+    fn seal_ends(&self, stop: &AtomicBool, report: &dyn Fn(&str)) {
+        if self.key.is_none() {
+            return;
+        }
+        let all: Vec<(String, Arc<Kept>)> = lock(&self.tenants)
+            .iter()
+            .map(|(n, k)| (n.clone(), Arc::clone(k)))
+            .collect();
+        for (name, kept) in all {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let _held = lock(&kept.keeping);
+            if kept.moved.load(Ordering::SeqCst) {
+                continue;
+            }
+            match kept.archive.seal_end() {
+                Ok(Some(at)) => report(&format!(
+                    "tenant `{name}`: its line, sealed before version 3, goes on from an image \
+                     of its end at change {at}, sealed in version 3 here"
+                )),
+                Ok(None) => {}
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    report(&format!("tenant `{name}`: {e}"))
+                }
+                Err(e) => report(&format!(
+                    "tenant `{name}`: no image of its end sealed in version 3: {e}; sealed at \
+                     its next write, or as the archiver starts again"
+                )),
+            }
+        }
     }
 
     /// One pass of [`Self::keep_up`] over every tenant.
@@ -605,7 +694,8 @@ impl NodeArchive {
             if line.current || stop.load(Ordering::SeqCst) {
                 continue;
             }
-            let pruned = Archive::with_key(&line.dir, self.key.clone())
+            let pruned = line
+                .archive(self.key.as_ref())
                 .and_then(|a| a.prune(keep.as_millis() as u64, now_ms()));
             match pruned {
                 Ok((0, 0)) => {}
@@ -620,22 +710,14 @@ impl NodeArchive {
 }
 
 impl Kept {
-    fn new(dir: &Path, key: Option<Key>, parent: &Arc<Parent>) -> io::Result<Kept> {
+    /// Tenant `name`'s line in `dir`: its sealed files name the tenant.
+    fn new(dir: &Path, key: Option<Key>, name: &str, parent: &Arc<Parent>) -> io::Result<Kept> {
         Ok(Kept {
-            archive: Archive::in_parent(dir, key, parent)?,
+            archive: Archive::in_parent(dir, key, Some(name), parent)?,
             keeping: Mutex::new(()),
             moved: AtomicBool::new(false),
         })
     }
-}
-
-/// Writes `bytes` under `path` whole: a side file, fsynced, renamed over.
-fn put(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = fs::File::create(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    fs::rename(&tmp, path)
 }
 
 /// The node's stream, asked for from where the archives stand.
@@ -654,25 +736,72 @@ fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
     crate::http::write_parts(&mut s, request.as_bytes(), places.as_bytes())?;
     let mut r = BufReader::with_capacity(MESSAGE + 64, s);
     let (status, length) = read_head(&mut r)?;
-    if status != 200 {
-        let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
-        r.read_exact(&mut body)?;
-        return Err(io::Error::other(format!(
-            "the node answered {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+    replication::answered(&mut r, status, length, "node")?;
+    Ok(Receiver { r, unread: 0 })
+}
+
+/// What a node sends of each kind of message on its stream of every
+/// tenant, at the most: a primary's bound for the kind
+/// ([`replication::LONGEST`], [`replication::SHORT`]) and a tenant's name
+/// before it, 256 bytes at the most; `None` for a kind it never sends.
+fn node_sends(tag: u8) -> Option<u64> {
+    let named = 256;
+    match tag {
+        b'I' | b'W' => Some(replication::LONGEST + named),
+        b'N' | b'H' | b'L' | b'G' | b'K' | b'E' => Some(replication::SHORT + named),
+        _ => None,
     }
-    Ok(Receiver { r })
 }
 
-struct Receiver {
-    r: BufReader<crate::dial::Stream>,
+struct Receiver<R = BufReader<crate::dial::Stream>> {
+    r: R,
+    /// The bytes of an image a hello announced that are still on the
+    /// stream: passed over before the next message, where nothing took them
+    /// -- a tenant passed over, or one whose image was refused part way.
+    unread: u64,
 }
 
-impl Receiver {
+/// A node's answer read off `r` as its archiver reads it -- the head, then
+/// each message held to its kind's bound and decoded -- until one is
+/// refused or the bytes end: how many messages it read, and what ended it.
+/// The fuzzer's `stream` target (`crates/fennec-fuzz`) hands it what a
+/// stand-in at a node's address could send.
+#[doc(hidden)]
+pub fn read_answer(r: &mut impl BufRead) -> (usize, io::Error) {
+    let mut n = 0;
+    match read_each(r, &mut n) {
+        Err(e) => (n, e),
+        Ok(never) => match never {},
+    }
+}
+
+fn read_each(r: &mut impl BufRead, n: &mut usize) -> io::Result<std::convert::Infallible> {
+    let (status, length) = read_head(r)?;
+    replication::answered(r, status, length, "node")?;
+    let mut rx = Receiver { r, unread: 0 };
+    loop {
+        rx.receive()?;
+        *n += 1;
+    }
+}
+
+impl<R: BufRead> Receiver<R> {
+    /// The image the last hello announced, copied into `out` as it comes
+    /// and checked as it streams (`replication::take_image`); what it left
+    /// unread, refused part way, is passed over before the next message.
+    fn take_image(&mut self, out: &mut dyn io::Write) -> io::Result<()> {
+        let (taken, left) = replication::taken_of(&mut self.r, self.unread, out);
+        self.unread = left;
+        taken
+    }
+
     fn receive(&mut self) -> io::Result<NodeMessage> {
         let bad = || io::Error::other("the node sent a message it should not");
-        let (tag, body) = read_message(&mut self.r)?;
+        if self.unread > 0 {
+            let n = std::mem::take(&mut self.unread);
+            replication::passed_over(&mut self.r, n)?;
+        }
+        let (tag, body) = read_kind(&mut self.r, node_sends)?;
         let named = |body: &[u8]| -> io::Result<(String, usize)> {
             let n = *body.first().ok_or_else(bad)? as usize;
             let name = body.get(1..1 + n).ok_or_else(bad)?;
@@ -704,15 +833,22 @@ impl Receiver {
                 let seq = u64_at(h, 2);
                 let at = u64_at(h, 18);
                 let image = match h[1] {
+                    // Its name read, its image left on the stream to be
+                    // taken as it comes: read whole, a tenant's image was
+                    // the tenant in the archiver's memory.
                     1 => {
-                        let (tag, body) = read_message(&mut self.r)?;
-                        let (of, at) = named(&body)?;
-                        if tag != b'I' || of != name {
+                        let (tag, len) = kind_head(&mut self.r, node_sends)?;
+                        let mut n = [0u8; 1];
+                        io::Read::read_exact(&mut self.r, &mut n)?;
+                        let mut prefix = vec![n[0]; 1 + n[0] as usize];
+                        io::Read::read_exact(&mut self.r, &mut prefix[1..])?;
+                        let (of, at) = named(&prefix)?;
+                        let left = len.checked_sub(at as u64);
+                        if tag != b'I' || of != name || left.is_none() {
                             return Err(io::Error::other("the node promised an image"));
                         }
-                        let mut body = body;
-                        body.drain(..at);
-                        Some(body)
+                        self.unread = left.unwrap_or(0);
+                        Some(self.unread)
                     }
                     _ => None,
                 };
@@ -756,7 +892,8 @@ impl Receiver {
                 NodeMessage::Gone(name, when)
             }
             b'K' => NodeMessage::Alive,
-            b'E' => NodeMessage::End(String::from_utf8_lossy(&body).into_owned()),
+            // Into a log line: cut and escaped, as a primary's are.
+            b'E' => NodeMessage::End(replication::peer_words(&body)),
             _ => return Err(bad()),
         })
     }
@@ -811,7 +948,7 @@ pub fn restore_all(
         ));
     }
     let made = !out.is_dir();
-    fs::create_dir_all(out)?;
+    fennec_core::fs::create_dir_private(out)?;
     // Its name durable too, as each file restored into it is
     // (`Archive::restore`): lost to a crash, it took them all along.
     if made {
@@ -827,9 +964,10 @@ pub fn restore_all(
         let outcome = match to {
             Target::Time(at) => restore_at(&lines, &file, at, key),
             _ => match lines.iter().find(|l| l.current) {
-                Some(l) => match gone_at(&l.dir) {
-                    Some(t) => Restoring::Gone(t),
-                    None => restore_line(l, &file, to, key),
+                Some(l) => match l.archive(key).and_then(|a| gone_at(&a)) {
+                    Ok(Some(t)) => Restoring::Gone(t),
+                    Ok(None) => restore_line(l, &file, to, key),
+                    Err(e) => Restoring::Failed(format!("{}: {e}", l.label)),
                 },
                 None => {
                     Restoring::Failed("no line of it is followed, only lines moved aside".into())
@@ -841,12 +979,14 @@ pub fn restore_all(
     Ok(done)
 }
 
-/// A tenant at moment `at`: the line that began last by then.
+/// A tenant at moment `at`: the line that began last by then. When each
+/// began and whether it was gone are read from its sealed files where it is
+/// sealed ([`Archive::began`], [`Archive::presence`]): its plain files
+/// edited would choose another line, or none.
 fn restore_at(lines: &[Line], file: &Path, at: u64, key: Option<&Key>) -> Restoring {
     let mut chosen: Option<(u64, &Line)> = None;
     for line in lines {
-        let began = Archive::with_key(&line.dir, key.cloned()).and_then(|a| a.began());
-        match began {
+        match line.archive(key).and_then(|a| a.began()) {
             Ok(Some(b)) if b <= at && chosen.is_none_or(|c| b > c.0) => chosen = Some((b, line)),
             Ok(_) => {}
             Err(e) => return Restoring::Failed(format!("{}: {e}", line.label)),
@@ -855,12 +995,12 @@ fn restore_at(lines: &[Line], file: &Path, at: u64, key: Option<&Key>) -> Restor
     let Some((_, line)) = chosen else {
         return Restoring::NotYet;
     };
-    if let Some(t) = away_at(&line.dir, at) {
-        return Restoring::Gone(t);
-    }
-    let first = Archive::with_key(&line.dir, key.cloned()).and_then(|a| a.first_image_time());
-    match first {
-        Ok(Some(f)) if f > at => Restoring::LetGo(f),
+    let away = line
+        .archive(key)
+        .and_then(|a| Ok((away_at(&a, at)?, a.first_image_time()?)));
+    match away {
+        Ok((Some(t), _)) => Restoring::Gone(t),
+        Ok((None, Some(f))) if f > at => Restoring::LetGo(f),
         Ok(_) => restore_line(line, file, crate::archive::Target::Time(at), key),
         Err(e) => Restoring::Failed(format!("{}: {e}", line.label)),
     }
@@ -885,28 +1025,10 @@ fn restore_line(
             file.display()
         ));
     }
-    match Archive::with_key(&line.dir, key.cloned()).and_then(|a| a.restore(file, to)) {
+    match line.archive(key).and_then(|a| a.restore(file, to)) {
         Ok(r) => Restoring::Restored(r.seq, line.label.clone()),
         Err(e) => Restoring::Failed(format!("{}: {e}", line.label)),
     }
-}
-
-/// `dir` made durable after `name` was renamed into it: its `fsync` on a
-/// Unix; on Windows fennec-core's `sync_dir`, the renamed file flushed and
-/// then the directory, NTFS writing its log lazily (docs/design/windows.md).
-#[cfg(unix)]
-fn renamed_in(dir: &Path, _name: &str) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(windows)]
-fn renamed_in(dir: &Path, name: &str) -> io::Result<()> {
-    fennec_core::fs::sync_dir(&dir.join(name)).map_err(|e| io::Error::other(e.to_string()))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn renamed_in(_: &Path, _: &str) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -914,26 +1036,41 @@ mod tests {
     use super::*;
 
     /// A tenant gone and back twice, the node's clock set back between: the
-    /// times out of order, the last line noted by a moment decides.
+    /// times out of order, the last line noted by a moment decides. Plain,
+    /// and sealed: then nothing of it is in the clear, and it is read only
+    /// as its tenant's.
     #[test]
     fn presence_is_read_past_a_clock_set_back() {
-        let dir = std::env::temp_dir().join(format!(
-            "fennec-presence-{}-{}",
-            std::process::id(),
-            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        for (gone, at) in [(true, 100), (false, 300), (true, 250), (false, 260)] {
-            note(&dir, gone, at).unwrap();
+        let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+        for key in [None, Some(key)] {
+            let dir = std::env::temp_dir().join(format!(
+                "fennec-presence-{}-{}",
+                std::process::id(),
+                std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+            ));
+            let a = Archive::of_tenant(&dir, key.clone(), "acme").unwrap();
+            for (gone, at) in [(true, 100), (false, 300), (true, 250), (false, 260)] {
+                a.note(gone, at).unwrap();
+            }
+            assert_eq!(away_at(&a, 50).unwrap(), None);
+            assert_eq!(away_at(&a, 150).unwrap(), Some(100));
+            assert_eq!(away_at(&a, 255).unwrap(), Some(250));
+            // Back by then: read up to the first line past it, gone.
+            assert_eq!(away_at(&a, 270).unwrap(), None);
+            assert_eq!(away_at(&a, 400).unwrap(), None);
+            assert_eq!(gone_at(&a).unwrap(), None);
+            let stored = fs::read(dir.join("presence")).unwrap();
+            assert_eq!(stored.windows(4).any(|w| w == b"gone"), key.is_none());
+            if key.is_some() {
+                let other = Archive::of_tenant(&dir, key.clone(), "xeno").unwrap();
+                let e = other.presence().unwrap_err().to_string();
+                assert!(
+                    e.contains("tenant `acme`'s file, in the archive of tenant `xeno`"),
+                    "{e}"
+                );
+            }
+            let _ = fs::remove_dir_all(dir);
         }
-        assert_eq!(away_at(&dir, 50), None);
-        assert_eq!(away_at(&dir, 150), Some(100));
-        assert_eq!(away_at(&dir, 255), Some(250));
-        // Back by then: read up to the first line past it, gone.
-        assert_eq!(away_at(&dir, 270), None);
-        assert_eq!(away_at(&dir, 400), None);
-        assert_eq!(gone_at(&dir), None);
-        let _ = fs::remove_dir_all(dir);
     }
 
     /// An archive root holding a tenant named like a device, archived

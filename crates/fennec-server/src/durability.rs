@@ -113,6 +113,10 @@ pub fn install_signal_handlers() {
     extern "C" fn on_signal(_sig: i32) {
         SHUTDOWN.store(true, Ordering::SeqCst);
     }
+    // SAFETY: `on_signal` is an `extern "C" fn(i32)`, the `void (*)(int)`
+    // `signal` takes as its address, and lives as long as the process; it
+    // stores to an atomic and nothing else, which is async-signal-safe.
+    // The numbers are signals every Unix has; no memory is passed.
     unsafe {
         for sig in [1, 2, 15] {
             signal(sig, on_signal as *const () as usize);

@@ -502,6 +502,18 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         "o-1",
     );
     assert_eq!(taken.status, 200, "{}", taken.body);
+    // A mode an operator set on the sidecar is kept when it is written
+    // again, as every file's is: renamed over, the new one took `0600`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let sidecar = n.dir.join("copy.hooks");
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let again = set_secret(n.port, "copy", "whsec_copy_again");
+        assert_eq!(again.status, 200, "{}", again.body);
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "a sidecar written again");
+    }
 
     // Taken away: a hook not held is 404; the last one takes the sidecar.
     let gone = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/nosuch", "");
@@ -733,6 +745,31 @@ fn a_read_replicas_stream_is_no_standby() {
     follow(true);
     let follows = std::fs::read_to_string(copy.dir.join("acme.follows")).unwrap();
     assert!(follows.lines().any(|l| l == "reader"), "{follows}");
+    // `.follows` is its owner's alone, and a mode an operator set on it is
+    // kept through the follow written again below. Looked at once the copy
+    // noted it heard, which writes it too, on the follower's thread.
+    #[cfg(unix)]
+    let follows_mode = || {
+        use std::os::unix::fs::PermissionsExt;
+        let path = copy.dir.join("acme.follows");
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = copy.dir.join("acme.follows");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .any(|l| l == "heard")
+        {
+            assert!(Instant::now() < deadline, "the copy never noted it heard");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(follows_mode(), 0o600, "a tenant's .follows");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
     assert!(
         feed().standby_sent(u64::MAX, Duration::ZERO),
         "a read replica's stream is no standby"
@@ -740,6 +777,8 @@ fn a_read_replicas_stream_is_no_standby() {
     follow(false);
     let follows = std::fs::read_to_string(copy.dir.join("acme.follows")).unwrap();
     assert!(!follows.lines().any(|l| l == "reader"), "{follows}");
+    #[cfg(unix)]
+    assert_eq!(follows_mode(), 0o640, "a .follows written again");
     assert!(
         !feed().standby_sent(u64::MAX, Duration::ZERO),
         "a standby's stream is waited for"
@@ -771,7 +810,7 @@ fn a_file_put_in_place_under_a_running_node_is_armed_by_no_secret_before_it() {
     let plain = std::fs::read(&file).unwrap();
     std::fs::write(
         &sealed,
-        fennec_http::seal::seal_whole(&key, &plain).unwrap(),
+        fennec_http::seal::seal_whole(&key, &fennec_http::seal::Binding::backup(), &plain).unwrap(),
     )
     .unwrap();
     fennec_http::archive::unseal(&sealed, &key, &file).unwrap();
@@ -1039,6 +1078,97 @@ fn a_set_saved_with_key_delivery_survives_a_restart_its_hook_refused_until_set_a
     assert!(count(again.port).contains(r#""count":1"#));
     let text = std::fs::read_to_string(&sidecar).unwrap();
     assert!(!text.contains("delivery") && text.contains("whsec_acme"));
+}
+
+/// A set 0.2.0's Linux binary saved, read by a node that reads birth
+/// times. That binary is musl, whose std asks no `statx`, so its sidecars
+/// name a tenant's file by device and inode, birth time 0: compared as
+/// written against the birth time a glibc, macOS or Windows build reads, it
+/// named "another file than the tenant's", and the node put the set away
+/// -- every secret, which no router keeps -- and the file's identity with
+/// it (`compat.yml`'s f2, the release's binaries upgraded to this tree's).
+/// Laid out here byte for byte as 0.2.0's `Store::text` and `exported` write
+/// it, the device and inode the ones its `instance::binding` reads: the set
+/// and the identity are the tenant's through a start, an open and a close,
+/// left as written, its `key delivery` hook refused as f2 expects and the
+/// other armed; one naming another inode is put away as before.
+#[test]
+fn a_set_a_linux_0_2_0_node_saved_with_no_birth_time_is_read_by_a_node_reading_one() {
+    let n = node("unborn", false);
+    tenant(n.port, "acme");
+    for q in [
+        "create collection pushes (sha text)",
+        "create statement pushed($sha text from event.sha) on hook gh as insert pushes \
+         {sha: $sha}",
+    ] {
+        let r = query(n.port, "acme", q);
+        assert_eq!(r.status, 200, "{q}: {}", r.body);
+    }
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    let id = n.tenants.instance("acme").expect("an identity");
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    n.tenants.shutdown();
+    let sidecar = n.dir.join("acme.hooks");
+    let identity = n.dir.join("acme.instance");
+    let written = std::fs::read_to_string(&sidecar).unwrap();
+    let first: Vec<&str> = written.lines().next().unwrap().split(' ').collect();
+    let [_, dev, ino, born] = first[..] else {
+        panic!("{written}")
+    };
+    if born == "0" {
+        println!("this file system keeps no birth time: both sides name none here");
+    }
+    const GH: &str = "a word its user chose";
+    const V: &str = "00000000000002a0";
+    let saved = |ino: &str| {
+        format!(
+            "1 {dev} {ino} 0\nversion {V}\n{{\"version\":\"{V}\",\"hooks\":{{\"stripe\":{{\
+             \"scheme\":\"stripe\",\"secrets\":[\"whsec_acme\"],\"tolerance\":\"5m\",\"set\":\
+             1762806533000}},\"gh\":{{\"scheme\":\"github\",\"secrets\":[\"{GH}\"],\"key\":\
+             \"delivery\",\"set\":1762806534000}}}}}}\n"
+        )
+    };
+    let own = saved(ino);
+    std::fs::write(&sidecar, &own).unwrap();
+    let instance = format!("1 {id:016x} {dev} {ino} 0 n\n");
+    std::fs::write(&identity, &instance).unwrap();
+
+    let again = serve(n.dir.clone(), false);
+    assert_eq!(
+        again.tenants.hooks().version("acme"),
+        Some(0x2a0),
+        "read, not put away"
+    );
+    assert_eq!(again.tenants.instance("acme"), Some(id));
+    // An event opens the tenant, whose open holds the set to the file.
+    let taken = event(
+        again.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    assert!(status_of(again.port, "acme").contains("paid"));
+    let refused = github(again.port, "/t/acme/_hooks/gh", GH, r#"{"sha":"abc123"}"#);
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(refused.body.contains("key body"), "{}", refused.body);
+    assert_eq!(armed_in(again.port, "acme", "pushed"), [Some(false); 3]);
+    assert_eq!(again.tenants.hooks().version("acme"), Some(0x2a0));
+    assert_eq!(again.tenants.instance("acme"), Some(id));
+    // Closed and stopped: both left as 0.2.0 wrote them, which it reads.
+    assert_eq!(again.tenants.close_idle(Duration::ZERO), 1);
+    again.tenants.shutdown();
+    assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), own);
+    assert_eq!(std::fs::read_to_string(&identity).unwrap(), instance);
+
+    // Naming another inode, no birth time: another file's, put away.
+    let other = (ino.parse::<u128>().unwrap() + 1).to_string();
+    std::fs::write(&sidecar, saved(&other)).unwrap();
+    let third = serve(n.dir.clone(), false);
+    assert_eq!(third.tenants.hooks().version("acme"), None);
+    assert!(!sidecar.exists());
+    assert!(!n.dir.join("acme.hooks.unread").exists());
 }
 
 /// A sidecar that does not read -- cut short by hand, of a later layout --

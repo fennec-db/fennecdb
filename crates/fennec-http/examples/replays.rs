@@ -10,6 +10,14 @@
 //!     lock).
 //!   * `keyed`: the same, each with a key of its own: the key's lookup,
 //!     the block and the `_idempotency` row.
+//!   * `scoped`, `scoped-keyed`: a `set` by id (`set t {n: $2} where id =
+//!     $1`, the 500 rows put first by the server's token) by a JSON Web
+//!     Token (HS256, `t read,write`), verified once and found in the
+//!     server's table after, without a key and with one of its own: what a
+//!     key costs a scoped caller -- its key kept under its caller
+//!     (`Scope::authority`), where the server's token keeps it under none.
+//!     A scoped token puts no document by id. A third argument is the
+//!     token's `sub`, `bench` unless given.
 //!   * `batch`: N writes of 100 documents each (`put t [{id: 1, n: $1},
 //!     ...]`, the same 100 ids written over), no key: a record of 100
 //!     frames, where `put` writes one of one.
@@ -35,6 +43,11 @@ use std::time::Instant;
 const ROUNDS: usize = 9;
 
 fn request(sql: &str, params: &str, key: Option<&str>) -> Request {
+    scoped(sql, params, key, None)
+}
+
+/// [`request`], carrying `bearer` where it is given.
+fn scoped(sql: &str, params: &str, key: Option<&str>, bearer: Option<&str>) -> Request {
     Request {
         method: Method::Post,
         target: "/query".into(),
@@ -43,6 +56,7 @@ fn request(sql: &str, params: &str, key: Option<&str>) -> Request {
         headers: key
             .map(|k| ("Idempotency-Key".to_string(), k.to_string()))
             .into_iter()
+            .chain(bearer.map(|b| ("Authorization".to_string(), format!("Bearer {b}"))))
             .collect(),
         body: format!(r#"{{"query":"{sql}","params":[{params}]}}"#).into_bytes(),
         keep_alive: true,
@@ -65,15 +79,41 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "put".into());
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
+    // The scoped modes' `sub`, `bench` unless given: a key is kept under
+    // its caller, whose length is the subject's and a separator before G14
+    // and 17 bytes after (a byte saying whose, 16 of the caller's digest),
+    // so a short `sub` reads the longer key's bytes as a cost -- an
+    // identity provider's is 28 to 36 characters (`auth0|` and 24 hex
+    // digits, a UUID).
+    let sub = args.next().unwrap_or_else(|| "bench".into());
     let dir = std::env::temp_dir().join(format!("fennec-replays-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.fennec");
     let db = Arc::new(RwLock::new(fennec_core::fs::open(&path).unwrap()));
+    let access = mode.starts_with("scoped").then(|| {
+        let secret = b"a secret of more than thirty-two bytes, as HS256 wants";
+        Arc::new(fennec_http::access::Access::new(secret, "t read,write\n").unwrap())
+    });
+    let jwt = access
+        .as_ref()
+        .map(|a| a.mint(&format!(r#"{{"sub":"{sub}"}}"#)).unwrap());
     let cfg = Config {
         sync_on_write: mode == "replay",
+        // The collection is made by the server's own token, the writes by
+        // the JWT.
+        token: access.as_ref().map(|_| "bench-token".to_string()),
+        access,
+        // One caller writing as fast as it can: held to a thousand a second,
+        // it would be refused.
+        request_rate: 0,
         ..Config::default()
     };
-    send(&db, &cfg, &request("create collection t (n int)", "", None));
+    let root = cfg.token.as_deref();
+    send(
+        &db,
+        &cfg,
+        &scoped("create collection t (n int)", "", None, root),
+    );
     let put = "put t {id: $1, n: $2}";
     let replayed = request(put, "1, 1", Some("replayed"));
     let batch = format!(
@@ -85,6 +125,12 @@ fn main() {
     );
     if mode == "replay" {
         send(&db, &cfg, &replayed);
+    }
+    let set = "set t {n: $2} where id = $1";
+    if jwt.is_some() {
+        let rows: Vec<String> = (1..=500).map(|id| format!("{{id: {id}, n: 0}}")).collect();
+        let all = format!("put t [{}]", rows.join(", "));
+        send(&db, &cfg, &scoped(&all, "", None, root));
     }
     let per = n / ROUNDS;
     let mut rounds = Vec::with_capacity(ROUNDS);
@@ -103,7 +149,18 @@ fn main() {
                 }
                 "replay" => send(&db, &cfg, &replayed),
                 "batch" => send(&db, &cfg, &request(&batch, &i.to_string(), None)),
-                other => panic!("no mode {other}: put, keyed, batch or replay"),
+                "scoped" => send(&db, &cfg, &scoped(set, &params(), None, jwt.as_deref())),
+                "scoped-keyed" => {
+                    let key = format!("k-{i}");
+                    send(
+                        &db,
+                        &cfg,
+                        &scoped(set, &params(), Some(&key), jwt.as_deref()),
+                    )
+                }
+                other => {
+                    panic!("no mode {other}: put, keyed, batch, replay, scoped or scoped-keyed")
+                }
             }
         }
         rounds.push(t.elapsed().as_nanos() as f64 / per as f64);
@@ -136,6 +193,8 @@ fn retired() -> Option<(u64, u64)> {
     // `rusage_info_v4`: a 16-byte uuid, then 35 counters, `ri_instructions`
     // the 30th and `ri_cycles` the 31st.
     let mut info = [0u64; 37];
+    // SAFETY: `info` is the 37 words of `rusage_info_v4` (above), all that
+    // flavor 4 writes; the call keeps no pointer to it.
     let r = unsafe { proc_pid_rusage(std::process::id() as i32, 4, info.as_mut_ptr()) };
     (r == 0).then_some((info[31], info[32]))
 }

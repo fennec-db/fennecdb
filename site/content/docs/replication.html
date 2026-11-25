@@ -66,8 +66,26 @@ its own file. Only writes already on the primary's disk are sent.</p>
   <li><b>A restarted replica</b> asks only for what it missed.</li>
   <li><b>A replica far behind</b> (past 64 MiB of writes) is sent a whole
     copy of the database instead.</li>
+  <li><b>A whole copy is read from the primary's file as it is sent, and
+    written to disk as it arrives</b> — a new replica's, a backup's, an
+    archive's, a moved tenant's — never gathered in memory on either side,
+    and with no lock held while it goes. The replica, <code>fennec
+    backup</code> and an archiver check every record's checksum as the copy
+    streams in; a replica puts it in place of its file only once it is
+    whole, so a copy cut off or damaged on the way leaves the replica as it
+    was. A database larger than the memory of either machine follows and
+    backs up, and a tenant moves between the nodes of a region up to the 1
+    GiB an image installed on a node may be. A copy taken slower than 64
+    KiB a second, past its first 10 seconds, is ended by the primary, which
+    logs it, and the receiver says so as it logs the cut; a copy a crash
+    left half taken beside a file is removed the next time the file is
+    opened to be written.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
+  <li><b>A <code>compact</code></b>, the primary's or the replica's own, is
+    not sent and changes nothing a replica reads: a dropped field's place
+    stays in every document, so the writes after it read alike on both
+    (<a href="#upgrading-from-0-2-0">from 0.2.0</a>).</li>
 </ul>
 
 <details class="deep"><summary>How records are sent and caught up</summary>
@@ -232,8 +250,21 @@ wrote past the fork.</p>
 
 <h2>What a failover loses</h2>
 
-<p>With <code>--sync always</code> on the primary, no acknowledged write was
-lost in ten failovers. With the default <code>--sync 250</code>, a failover
+<p>With <code>--sync always</code> on the primary, a failover loses no write
+the replica was sent, and in ten failovers of a replica keeping up no
+acknowledged write was lost. A replica not connected, or behind, when its
+primary is lost is promoted where it stands, without what it was not sent —
+a write waits a second at most for a stream that keeps up and not at all for
+one behind or reconnecting — so watch <code>connected</code> and
+<code>behind</code> in <code>/_replication/status</code> and
+<code>fennec_replica_connected</code>, <code>fennec_replica_behind</code> in
+<code>/_metrics</code> (<a href="monitoring.html">Monitoring</a>), and over a
+network others can reach follow <code>https://</code>: on a plain-HTTP hop,
+whoever can reach it can cut the stream. A replica taking an image is
+counted as sent each write from the image's flush on, so one promoted
+before it has applied the image loses the writes answered meanwhile,
+<code>connected</code> false. With the default <code>--sync
+250</code>, a failover
 loses up to the last 250 ms of writes.</p>
 
 <p>A power cut was measured on the primary, with no failover after it: no
@@ -251,7 +282,10 @@ That was measured, not promised: a write answered as durable is on the
 primary's disk and in its socket to each replica, and a power cut can take the
 socket before it sends, where a killed process's kernel still delivers it.
 Once the node was back, the standby held the same rows again within 3.4 s of
-being asked.</p>
+being asked. Under <code>--sync 250</code>, where a primary sends a write once a
+sync covered it, the standby held every write the node had on disk at every
+cut of three runs, two of a node of two tenants and one of four: what it
+lacked, the cut took from the node too.</p>
 
 <div class="tbl">
 <table>
@@ -280,7 +314,9 @@ was sent was lost: none of these ten failovers caught one, while a node of
 the SaaS example killed under eight writers lost one in 3 of 60 runs, and
 none in 120 since. A stream that has not sent a write within a second is
 not waited for until it catches up again, so a stalled replica costs the
-writes one wait. A machine that dies takes its sockets with it: this holds
+writes one wait, and a replica reconnecting none: writes answered meanwhile
+are on no replica, and a failover then loses them. The ten failovers above
+promoted a replica that was keeping up. A machine that dies takes its sockets with it: this holds
 for a process killed, not for a power loss. No failover left the replica
 holding a write the client had not been answered for.</p>
 </details>
@@ -350,10 +386,29 @@ fennec restore /backups/archive before.fennec --to-change 41873
     restore within that window needs.</li>
   <li><b><code>fennec verify</code></b> says from when to when the archive can
     restore.</li>
+  <li><b>A restore across a <code>compact</code></b> on the primary reads the
+    writes after it as the primary did, from an image taken before it too: a
+    compact keeps every field's place (<a href="#upgrading-from-0-2-0">from
+    0.2.0</a>).</li>
+  <li><b>A backup is written to its file as it arrives</b>, sealed as it
+    goes, and every record's checksum is checked on the way: a database
+    damaged in transit is refused, its file never put in place, and a
+    database larger than the backing-up machine's memory backs up.</li>
   <li>A <b>backup or a restore into a file</b> holds the file while it is
     written, as the shell does: one a running server has open is refused, its
     holder named, rather than renamed over under it. A file there already is
     refused too (exit 2) unless <code>--force</code> says to replace it.</li>
+  <li>On Linux and macOS a <b>backup, a restore and an archive</b> are their
+    owner's alone: each file mode <code>0600</code>, an archive's directory
+    <code>0700</code>, whatever the umask. A file replaced with
+    <code>--force</code> keeps the mode it had, so a <code>chmod 640</code>
+    for a backup group is set once, in a directory of that group, setgid
+    and searchable by it (<code>chmod g+xs</code>);
+    an archive's new images and segments are
+    its owner's, and read by its user (<a href="/docs/server#file-modes">Files
+    on a shared machine</a>). <code>fennec verify</code> restores the
+    archive's end into a new directory of its own in the temp directory,
+    mode <code>0700</code>, and removes it after.</li>
 </ul>
 
 <details class="deep"><summary>How a restore to a moment works</summary>
@@ -624,7 +679,10 @@ a pass for a second a tenant, 5.06 s over five, and a close under its
 lock for 1.01 s. Against the build before, in turns: with no archiver the
 syncer's pass took 31.0–31.4 ms at the median and a close 3.6–3.9 ms, and
 with a stream each the pass 67–73 ms, as here; the writes with no archiver
-or a stream each as in the table.</p>
+or a stream each as in the table. A pass here is every dirty tenant synced
+in turn, as a node synced them then; a node now syncs each tenant on a
+thread of its own, so the archiver's fsyncs lengthen each tenant's own sync
+rather than a pass every tenant waits for.</p>
 </details>
 
 <h2 id="object-storage">In object storage</h2>
@@ -701,15 +759,60 @@ fennec restore today.sealed today.fennec --key-file /secrets/archive.key</pre>
 <details class="deep"><summary>How archives and backups are sealed</summary>
 <p>A copy in a bucket or on another disk is out of reach of the machine's
 disk encryption. With a key every file of an archive — its images, its
-segments, its history — and a backup file are sealed: encrypted and
-authenticated with ChaCha20-Poly1305 (RFC 8439), a random nonce a frame,
-and under each frame's tag the file's own random id, the frame's place in
-it and whether it is the last. A byte changed, a frame moved or dropped, a
-frame taken from another file sealed with the same key, a file cut short
-where it was sealed whole, or the wrong key, and the file is refused —
-never read as something else. A segment is sealed a frame for each batch of writes the
-primary sends, so a crash cuts off at most the frame being written, as it
-cut a record short before.</p>
+segments, its history, a tenant's presence — and a backup file are sealed:
+encrypted and authenticated with ChaCha20-Poly1305 (RFC 8439), each file
+under a key of its own made from the file's random id (HChaCha20, as
+XChaCha20 makes one) under a key made from yours for that alone
+(HKDF-Expand, RFC 5869), never from yours itself, a random nonce a frame, and under each
+frame's tag the tag of the frame before it, its place in the file and
+whether it is the last. A byte changed, a frame moved or dropped, a frame
+taken from another file sealed with the same key, two runs of a segment's
+frames spliced where it was cut and went on, a file cut short where it was
+sealed whole, or the wrong key, and the file is refused — never read as
+something else. A segment is sealed a frame for each batch of writes the
+primary sends, a mebibyte at most, so a crash cuts off at most the frames
+being written, as it cut a record short before.</p>
+
+<p>Each sealed file also says what it is, under its tags: a segment of
+writes, an image, the history, a tenant's presence or a backup; the
+archive it belongs to, by an id the archive made as it began; the tenant
+whose archive it is; and the change a segment begins at, or an image's
+change and time. Every read holds a file to its name and to the archive's
+other files, and refuses by name, with nothing written:</p>
+<ul>
+  <li>a segment renamed into another's place — one deleted and the next
+  given its name;</li>
+  <li>a file of another archive, or another tenant's, among an archive's —
+  a tenant's directory, or a line moved aside, copied over another's,
+  which <code>restore --tenants</code> refuses rather than restore as that
+  tenant's or pass over as gone;</li>
+  <li>an archive's image given to <code>fennec restore</code> as a backup
+  file, or a backup put where an image is.</li>
+</ul>
+<p>The plain <code>began</code> file is held to what the images say, and a
+tenant's <code>presence</code> is sealed: editing either cannot choose
+another line, or mark a tenant gone, without a refusal. To mark a tenant
+gone by hand in a sealed archive — a node lost before it said so — leave
+its file out of what <code>restore --tenants</code> writes, or move its
+lines out of the root first; in a plain archive a line in its
+<code>presence</code> (<code>gone &lt;ms&gt;</code>) does it as before.</p>
+
+<p>What a seal does not refuse: a file cut at a frame's edge opens as the
+shorter file, as the one a crash leaves does — in the last segment it is
+the archive's end, and <code>fennec verify</code> says where that is and
+how much is torn; anywhere else it leaves changes no segment holds, which
+<code>verify</code> refuses, or names as a gap where an image ends it, as it
+names a segment deleted. A tenant's line copied where one database's
+archive was restores as that database: <code>fennec restore</code> and
+<code>fennec verify</code> of a directory say the tenant its files are
+sealed as (<code>sealed as tenant `acme`'s archive</code>), and one
+database's archive names no database. An older copy of a whole file, or of a whole
+archive or tenant's line, put back opens as what it was, and so does a line
+whose later file was deleted — a tenant's <code>presence</code> gone, the
+tenant restores as never gone: a seal holds a file to its place, not to its
+age. A backup names no database, so one backup file put in another's place
+opens as itself. Keep archives and backups in a bucket that keeps versions
+or locks objects for as long as you keep them.</p>
 
 <p>An archive is sealed or it is not; a file of the other kind in
 it is refused. <code>FENNEC_KEY_FILE</code> names the key file too. Sealing
@@ -719,33 +822,66 @@ it is mapped and read where it lies, which encryption would take away —
 encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 
 <p>Files sealed by 0.2.0 and earlier still open, and an archive they began
-goes on. Their frames are bound to their places alone, so a frame of
-another such file sealed with the same key could be put in one unnoticed;
-files sealed now are bound to themselves. Because the older files still
-open, that stays true of every key that ever sealed one: whoever holds two
-of them can build a third from their frames and put it where a file sealed
-with that key is read, beside an archive or a backup sealed now. Pruning
-the older files does not end it, and neither does restoring a backup and
-sealing it again with the same key: copies of the older files may be
-anywhere. To be rid of it, make a new key (<code>fennec key</code>), seal
-with it from then on, and begin a new archive with it, in a directory or
-bucket path of its own; read the older archive and backups with the old
-key for as long as you keep them.</p>
+goes on: before its next write the upgraded archiver seals an image of the
+archive's end as files are now — read from the archive, as the hourly
+image is, once; a node's archiver seals each tenant's as it starts, beside
+its stream — and the write begins a segment sealed so after the older one.
+That image is a one-time lag: the archiver spends about 9 seconds a
+gigabyte of database on it, one database's archiver before it takes the
+primary's next write — the primary waits for its stream at most a second,
+on one durable write, and answers the writes after without it until it
+catches up. An archive whose end does not restore stops <code>fennec
+archive</code> (a node's archiver passes over that tenant), naming why and
+the ways out: put right what <code>fennec verify</code> refuses in it, or
+begin a new line and keep the old one for restores to earlier moments —
+archive into a new directory, or, for a node's tenant, stop the archiver
+and move the tenant's directory aside as
+<code>&lt;root&gt;/&lt;tenant&gt;.&lt;any name&gt;</code>, and the archiver
+begins the new line with the node's image. The older
+files say nothing of what they are — their frames are bound to their
+places alone — so a frame of another such file sealed with the same key
+could be put in one unnoticed, and an older file of any archive sealed
+with that key reads wherever it is put: in an archive sealed as files are
+now from that image on, an older image or segment after it is refused by
+name, and a restore past the upgrade starts from that image or a later
+one; one before it — read by a restore to a moment before the upgrade —
+or in an archive holding nothing sealed now, as a tenant's line moved
+aside before the upgrade, reads as the archive's own; an older image put
+in before the upgraded archiver seals that image, standing after the
+archive's own last one, is what that image is made from. No archiver puts
+an older file where it is refused, so <code>fennec verify</code> or a
+restore that refuses one (<code>image-…: an image of change 7, sealed
+before version 3, at or past its image of change 7 taken at …, the first
+file this archive holds of version 3: no archiver puts it there, so it is
+not this archive's</code>) names the way out: move that file out of the
+archive's directory, and the archive is read without it. Because the older
+files still open, that stays true of every key that ever sealed one,
+beside an archive or a backup sealed now. Pruning the older files does not
+end it, and neither does restoring a backup and sealing it again with the
+same key: copies of the older files may be anywhere. To be rid of it, make
+a new key (<code>fennec key</code>), seal with it from then on, and begin a
+new archive with it, in a directory or bucket path of its own; read the
+older archive and backups with the old key for as long as you keep
+them.</p>
 
 <p>A binary from 0.2.0 or earlier refuses a file sealed now (<code>not a
 sealed file</code>, <code>not sealed, where the archive is</code>), and an
 upgraded archiver seals its next image and segment so at once: upgrade
 what reads an archive — <code>fennec restore</code>, <code>fennec
 verify</code>, the hosts a restore drill runs on — before what writes
-it.</p>
+it. A key file others can read is warned of as it is read, by name and
+mode; <code>chmod 600</code> it.</p>
 </details>
 
 <h2>Endpoints</h2>
 
-<p>Three endpoints — a <code>--dir</code> node's tenants each have them
-under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the stream of
-every tenant — all on the HTTP listener and all wanting the replication
-token, not the <code>--http-token</code>.</p>
+<p>Three endpoints — a <code>--dir</code> node's tenants each have the
+first two under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the
+stream of every tenant — all on the HTTP listener and all wanting the
+replication token, not the <code>--http-token</code>. A tenant's copy is
+promoted by the node's admin, <code>POST /_admin/tenants/&lt;t&gt;/promote</code>,
+which a router's failover calls (<a href="/docs/sharding-reference">Sharding
+reference</a>); <code>/t/&lt;tenant&gt;/_replication/promote</code> is a 404.</p>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
 GET  /_replication/status                          role, position, replicas, lag
@@ -757,9 +893,13 @@ POST /_replication/tenants                         on a --dir node: every tenant
 <details class="deep"><summary>Which token the endpoints want, and the status</summary>
 <p>All of them want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
-promotes them. The status of a replica names its primary and says whether it
-is connected, how many writes it is <code>behind</code> the primary's disk,
-and how long ago it last heard from it; a primary's lists the replicas it is
+promotes a file's replica. On a node it promotes nothing: a tenant's copy is
+held to the router's lease and to what the router knows of the tenant, which
+only the admin's promotion asks. The status of a replica names its primary and says whether it
+is connected — until a read of the stream fails, 10 s of silence where
+its primary's machine is gone — how many writes it is <code>behind</code>
+the primary's disk, as the primary says every 2 s, and how long ago it
+last heard from it; a primary's lists the replicas it is
 feeding and how far each has been sent.</p>
 </details>
 
@@ -777,6 +917,50 @@ feeding and how far each has been sent.</p>
 </tbody>
 </table>
 </div>
+
+<h2 id="upgrading-from-0-2-0">Upgrading from 0.2.0: a dropped field's place</h2>
+
+<p>Up to 0.2.0, a <code>compact</code> took a dropped field's place out of
+every document and told no replica, archive or standby, which then read
+every later write of that collection one field off. From 1.0 a compact
+keeps the place. While 0.2.0 and 1.0 run beside each other it can still
+happen, both ways round:</p>
+
+<ul>
+  <li><b>A 0.2.0 primary, a newer replica</b> (replicas upgrade first). The
+    replica notices at the primary's first write of that collection after
+    such a compact: it refuses the write, logs <code>the primary's writes
+    moved the fields of</code> and takes a fresh copy of the primary on its
+    own. Where the dropped field was the last one, the writes after the
+    compact read the same on both, and the replica notices at the
+    primary's next <code>alter collection</code> or <code>create
+    index</code> of that collection instead. An archive does not notice: a
+    restore across that compact reads the writes after it one field
+    off.</li>
+  <li><b>A 1.0 primary, a 0.2.0 replica or standby</b>, as a node pair
+    leaves it while one node is upgraded and the other is not. A field
+    dropped on the primary keeps its place, but the 0.2.0 standby's own
+    <code>--auto-compact</code> takes it out of its documents, and it reads
+    every later write of that collection one field late, with nothing to
+    tell it. After a failover those values are the tenant's. The primary
+    cannot tell an older replica from its connection, so nothing refuses
+    the drop.</li>
+</ul>
+
+<ul>
+  <li><b>Drop no field until every node and every replica runs 1.0.</b>
+    If a drop on a 1.0 primary cannot wait, run every 0.2.0 replica and
+    standby with <code>--auto-compact off</code>, and no
+    <code>compact</code> on one, until it is upgraded.</li>
+  <li><b>Before upgrading the first replica</b>, if a field was ever
+    dropped on the primary, the replicas may already hold rows read one
+    field off. Run <code>compact</code> on the primary and seed every
+    replica and standby again from a <code>fennec backup</code> of it taken
+    after; begin an archive again in a directory of its own, keeping the
+    old one for restores to a moment before.</li>
+  <li><b>Promote no replica</b> that logged <code>moved the fields
+    of</code> until it has caught up again.</li>
+</ul>
 
 <h2>What it does not do</h2>
 

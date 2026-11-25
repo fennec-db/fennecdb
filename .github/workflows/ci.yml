@@ -63,6 +63,11 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
+# Every job reads: none writes to the repository, its packages or a
+# registry, and a job that will has to say so for itself.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -78,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: |
@@ -90,17 +95,19 @@ jobs:
       # docs/design/text.md#tokenizer: the accent fold's table is written by
       # its script alone, through rustfmt, from Unicode's UnicodeData.txt --
       # kept by its version, so a run asks unicode.org only on a miss, and
-      # held to the checksum gen.py pins either way.
+      # held to the checksum gen.py pins either way. Every error is retried:
+      # curl's `--retry` alone takes a reset mid-transfer (exit 56) as final,
+      # and one dropped #681's merge group, its cache not yet on main.
       - id: unicode-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/unicode/17.0.0
-          key: unicode-17.0.0-UnicodeData
+          path: ~/.cache/unicode/18.0.0
+          key: unicode-18.0.0-UnicodeData
 
       - name: The accent fold's table is what tools/fold/gen.py writes
         run: |
-          f=~/.cache/unicode/17.0.0/UnicodeData.txt
-          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
+          f=~/.cache/unicode/18.0.0/UnicodeData.txt
+          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$f" https://www.unicode.org/Public/18.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
       # Also a step of the `test` job (see there): on 2026-11-15, before
@@ -115,6 +122,14 @@ jobs:
       # workspace, and the browser module's crates reach none, nor fennec-tls.
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
+
+      # docs/design/conventions.md#unsafe-code: every unsafe block says why
+      # it is sound, clippy's undocumented_unsafe_blocks denied in the root
+      # Cargo.toml's [workspace.lints], which a crate takes only by naming
+      # it: each does, a new one too. The tests' last case is the check
+      # over the repository's files, so it runs once.
+      - name: Every crate takes the workspace's lints, and every unsafe block says why it is sound, whatever its cfg
+        run: python3 tools/test_lints_check.py
 
       # The compiler CI tests with is the one that ships: rust-toolchain.toml
       # names an exact release, and every Dockerfile's rust image is that
@@ -132,6 +147,15 @@ jobs:
         run: |
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
+
+      # docs/design/durability.md#files-modes: a file the crates make is
+      # made 0600 (a directory 0700) by fennec_core::fs's helpers, whatever
+      # the umask; File::create, fs::write, create_dir_all and the like take
+      # the umask's 0644. The reader is held to its own cases first.
+      - name: Every file the crates make is made by fennec_core::fs's helpers
+        run: |
+          python3 tools/file_create_check.py --self-test
+          python3 tools/file_create_check.py
 
       # docs/design/conventions.md#security-policy: SECURITY.md names flags,
       # paths and primitives, and says nothing of TLS or the crates that the
@@ -186,12 +210,53 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/compatibility.md: a release after one with no fixture
+      # set (crates/fennec-core/tests/compat/v<version>/, RELEASING.md's
+      # step 7), or with one its RELEASES line does not pin, is refused
+      # where its version is set.
+      - name: make version refuses a release after one with no fixture set
+        run: python3 tools/test_version.py
+
+      # docs/design/compatibility.md#fixture-sets: a set is written only by
+      # the programs its manifest names, built from its tag.
+      - name: compat_fixtures.py writes a set only with its tag's programs
+        run: python3 tools/test_compat_fixtures.py
+
       # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
       # the metrics only grow. Here only the checker's own tests, a break
       # seeded into each surface for the quick answer; the check over the
       # sources is a step of the `test` job below, beside the REST API's.
       - name: tools/api_compat.py finds every break and passes every addition
         run: python3 tools/test_api_compat.py
+
+      # docs/design/integrations.md#workflows: every action pinned by its
+      # commit, every workflow's permissions said, a job that writes running
+      # only what the check lists, every secret read under an environment,
+      # no value chosen outside the workflow spliced into a script; and the
+      # checker held to a failing workflow of each kind.
+      - name: Every workflow's actions pinned, its jobs' writes kept from its builds and its secrets in environments
+        run: |
+          python3 tools/workflow_check.py
+          python3 tools/test_workflow_check.py
+
+      # The move of the image's `latest` both release workflows run, against
+      # stand-ins for gh and docker: never to a draft, a pre-release or back,
+      # failing where the list it copies is not there yet.
+      - name: tools/image-latest.sh moves latest to the newest published release alone
+        run: python3 tools/test_image_latest.py
+
+      # packages.yml's hold of GitHub's Latest and its npm dist-tag, against
+      # a stand-in for gh: a patch to an older minor moves neither back, and
+      # a release candidate takes neither.
+      - name: tools/release-latest.sh keeps GitHub's Latest and npm's latest on the newest release
+        run: python3 tools/test_release_latest.py
+
+      # RELEASING.md's step 6, against stand-ins for gh, npm and curl: every
+      # asset there and no other, each attested by the workflow and at the
+      # ref that built it, the image by its digest, npm's and PyPI's
+      # provenance; and its list of assets held to the workflows.
+      - name: tools/release-verify.sh fails a release whose files or provenance are not the workflows'
+        run: python3 tools/test_release_verify.py
 
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
@@ -221,11 +286,23 @@ jobs:
       - name: tools/coverage_report.py's tables, and its boundary list's paths
         run: python3 tools/test_coverage_report.py
 
+      # docs/design/compatibility.md#the-compatibility-matrix: the harness
+      # compat.yml runs weekly and on a release's tag, held here on every
+      # change with no binary -- a case dying after its first part, one
+      # printing a part too few, each failing the run; every record kind,
+      # type tag and op of the tree named in its history or said to need
+      # none, so the next one cannot be forgotten; and a release's tarball
+      # with a byte flipped refused by release-bins.sh, nothing installed.
+      - name: The compatibility matrix fails a case dying part way, names every kind, tag and op of the tree, and refuses a tampered tarball
+        run: |
+          bash tools/compat-matrix.sh --self-test
+          bash tools/test_release_bins.sh
+
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/unicode/17.0.0
+          path: ~/.cache/unicode/18.0.0
           key: ${{ steps.unicode-cache.outputs.cache-primary-key }}
 
   clippy:
@@ -233,7 +310,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # rust-toolchain.toml names an exact release: a new one, and the lints
       # it brings, comes in a pull request of its own, and shows here first.
@@ -243,15 +320,15 @@ jobs:
           rustup component add clippy
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-clippy-
+          key: v2-ubuntu-latest-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-clippy-${{ hashFiles('rust-toolchain.toml') }}-
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -313,7 +390,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -333,7 +410,7 @@ jobs:
         # their NEON, CRC and atomics paths run only on an arm host.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The installer's --app path, which only a Mac runs: a stand-in DMG
       # served from localhost as a release's, installed into the Applications
@@ -349,20 +426,20 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-cargo-
+          key: v2-${{ matrix.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The browser bundle comes first: the JS suites skip themselves on a
       # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
@@ -555,7 +632,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -652,21 +729,21 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-windows-latest-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-windows-latest-cargo-
+          key: v2-windows-latest-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-windows-latest-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build fennec-server, fennec and the native library
         run: cargo build -p fennec-server -p fennec-cli -p fennec-ffi
@@ -685,7 +762,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -717,15 +794,15 @@ jobs:
           rustup target add x86_64-apple-darwin
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-macos-x86_64-cargo-
+          key: v2-macos-x86_64-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-macos-x86_64-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # crc.rs falls back to the table silently where detection fails; this
       # makes the test `hardware_path_is_chosen` assert Rosetta runs SSE4.2.
@@ -744,7 +821,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -768,21 +845,21 @@ jobs:
         os: [windows-latest, windows-11-arm]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-core-
+          key: v2-${{ matrix.os }}-core-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-core-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The library's and the integration tests; not the examples, which
       # `cargo test` builds otherwise: measurement programs `make` runs on
@@ -848,7 +925,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -872,21 +949,21 @@ jobs:
         os: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-server-
+          key: v2-${{ matrix.os }}-server-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-server-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build the suites
         run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
@@ -917,7 +994,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -937,21 +1014,21 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-windows-latest-http-
+          key: v2-windows-latest-http-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-windows-latest-http-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build the suites
         run: cargo test -p fennec-http -p fennec-ql -p fennec-import --features fennec-http/tls --lib --tests --no-run
@@ -995,7 +1072,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1029,7 +1106,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Before the build, so a script that does not read fails in seconds:
       # install.ps1 under Windows PowerShell 5.1, which `irm | iex` runs on
@@ -1062,15 +1139,15 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-release-zip-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-release-zip-
+          key: v2-${{ matrix.os }}-release-zip-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-release-zip-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The zip, as release.yml makes it
         run: tools/windows-zip.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -1094,7 +1171,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1132,15 +1209,15 @@ jobs:
           command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-linux-ffi-
+          key: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The tarball, as release.yml makes it
         run: tools/linux-ffi.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -1161,7 +1238,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1184,7 +1261,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
 
@@ -1207,8 +1284,15 @@ jobs:
   # runs cut -- counts nothing until it has landed; judged apart, by
   # `perf`. The base is the merge's first parent, a pull request's base
   # branch or the commit a merge group queues onto, built with its own
-  # toolchain. valgrind and musl-gcc (ring's C, through the examples'
-  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  # toolchain. Then the I/O workloads: each side's fennec-server, built in
+  # the same trees and target directories, sent gate.rs's requests under
+  # strace -f -- its fsyncs, renames and bytes written to files. The
+  # instructions' results are kept before the I/O runs, so a failed I/O
+  # count leaves them to be judged, and the I/O runs whatever became of
+  # them, its results an artifact of their own. valgrind, strace (which
+  # the runner's image lacks) and musl-gcc (ring's C, through the
+  # examples' dev-dependency on fennec-tls) are the runner's packages, no
+  # crate.
   perf-count:
     name: perf (count)
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -1222,15 +1306,54 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # Under tools/, so it reads this checkout as its tree; this tree's
-      # only where the base has none yet.
+      # Under tools/, so it reads this checkout as its tree -- a checker
+      # finds it as the directory above its own -- and chosen by the base
+      # alone: the base's file as git reads it, this tree's only where git
+      # lists the base's tree and the file is not in it (`git ls-tree`:
+      # `git cat-file -e`'s exit 128, "no such path", is also its answer
+      # to a tree it cannot read). Whatever the pull request tracks at the
+      # path is refused, never written into or run, and a git error is no
+      # base without a checker. The base's gate.rs is read here too, before
+      # anything of the change runs.
       - name: The base's checker
         run: |
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "counted by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's counts"
+          fi
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
           fi
 
       # Counted unless every path is the site's, the docs', an
@@ -1243,6 +1366,7 @@ jobs:
 
       # The base's channel beside this tree's: a pull request moving
       # rust-toolchain.toml builds its base with the base's compiler.
+      # strace is the I/O step's own.
       - name: Install both sides' toolchains, the musl target, valgrind and musl-gcc
         if: steps.reach.outputs.built == 'true'
         run: |
@@ -1255,18 +1379,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
+      # `--keep`: the I/O step builds fennec-server in the same trees and
+      # target directories, the crates both reach built once.
       - name: Count each workload's instructions and heap in the base's build and this one's
         if: steps.reach.outputs.built == 'true'
         run: |
           python3 -I tools/perf_gate_base.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
-            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check --keep
 
+      # Kept before the I/O runs: a strace refused, a server's crash or a
+      # hang there leaves the instructions' results for the judge.
       - name: Keep the results for the judgement
         if: steps.reach.outputs.built == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-results
           path: ${{ runner.temp }}/perf/results.json
+          if-no-files-found: error
           retention-days: 14
 
       # Each side's median run of each workload, by function: what
@@ -1279,9 +1408,34 @@ jobs:
           path: ${{ runner.temp }}/perf/profiles/
           retention-days: 14
 
-      # P50, the I/O counts -- fsyncs and bytes written a durable write and
-      # a compact, under strace -f -c -- goes here, over the same two
-      # builds and the same checker: a results file of its own `metric`.
+      # By the base's checker wherever the base's gate.rs mentions
+      # IO_WORKLOADS, however spelt; this tree's only where grep reads it
+      # and finds none -- the pull request that brought them, counted by
+      # its own as the gate's first was. Chosen by a grep, never by Python
+      # of the change's, which the tests hold to the checker's
+      # `io_checker`; a base checker that cannot count them fails the step.
+      # Run whatever became of the instructions' count, which is judged
+      # apart.
+      - name: Count each I/O workload's fsyncs, renames and bytes written against the base's server and this one's
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        run: |
+          sudo apt-get install -y --no-install-recommends strace
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
+          echo "the I/O counted by $checker"
+          python3 -I "$checker" io --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/io.json" --no-check
+
+      # An artifact of its own: the instructions' is never uploaded again,
+      # so a failed upload here loses nothing of theirs.
+      - name: Keep the I/O results beside them
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-io-results
+          path: ${{ runner.temp }}/perf/io.json
+          if-no-files-found: error
+          retention-days: 14
 
   # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
   # base's by the base's copy of the checker, the pull request's
@@ -1289,12 +1443,19 @@ jobs:
   # program's: +1% or more in instructions or in heap bytes an op fails
   # unless the pull request adds an entry naming the workload, and so does
   # a workload the base's program runs that this tree dropped or the base
-  # did not run. A job of its own: the count runs the change's build
-  # scripts and programs, which could put anything on a later step's PATH
-  # ($GITHUB_PATH); here nothing of the change runs, and git and python3
-  # are the runner's. It names every edit of the gate's own files and
-  # every entry added, which the owner approves before the change merges.
-  # This job is the check a merge may require.
+  # did not run; an I/O workload's count that is not the base's, up or
+  # down, fails unless an entry names that count. Each set of results is
+  # judged whatever became of the other, and the job says which it lacks;
+  # a count that did not end well fails it after both. A job of its own:
+  # the count runs the change's build scripts and programs, which could
+  # put anything on a later step's PATH ($GITHUB_PATH); here nothing of the
+  # change runs but these steps, whose every edit it names for the owner --
+  # the checker the base's, but where the base's gate.rs mentions no
+  # IO_WORKLOADS, chosen by a grep, and never what the change put where
+  # the copy is written -- and git and python3 are the runner's. It names
+  # every edit of the gate's own files and every entry added, which the
+  # owner approves before the change merges. This job is the check a
+  # merge may require.
   perf:
     name: perf (instructions)
     needs: perf-count
@@ -1309,19 +1470,53 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # As the count chose it: the base's file as git reads it, this
+      # tree's only where git lists the base's tree without it, whatever
+      # the pull request tracks at the path refused, a git error no base
+      # without a checker. The base's gate.rs beside none of the artifacts,
+      # which are downloaded each into a directory of its own.
       - name: The base's checker and program
         id: base
         run: |
-          mkdir -p "$RUNNER_TEMP/judge"
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "had=true" >> "$GITHUB_OUTPUT"
             echo "judged by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's judges"
           fi
-          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/judge/base_gate.rs" \
-            || : > "$RUNNER_TEMP/judge/base_gate.rs"
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
+          fi
 
       - name: The gate's own files this change edits, for the owner
         run: python3 -I tools/perf_gate_base.py edits --base HEAD^1 --summary "$GITHUB_STEP_SUMMARY"
@@ -1330,38 +1525,80 @@ jobs:
         id: reach
         run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
-      # A count that failed, or never ran, is no pass.
-      - name: The count ran
-        if: steps.reach.outputs.built == 'true'
-        env:
-          COUNT: ${{ needs.perf-count.result }}
-        run: |
-          if [ "$COUNT" != success ]; then
-            echo "::error title=perf gate::perf (count) ended $COUNT: nothing to judge, its log says why"
-            echo "perf (count) ended $COUNT: nothing to judge." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
+      # Whatever the count left, each artifact apart and into a directory
+      # of its own, which holds nothing the judge reads but its results: a
+      # file it lacks is said by the step that judges it.
       - name: The count's results
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-results
-          path: ${{ runner.temp }}/judge
+          path: ${{ runner.temp }}/judge/count
+
+      - name: The I/O count's results
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-io-results
+          path: ${{ runner.temp }}/judge/io
 
       - name: Hold them to the base's, by the base's checker
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         env:
           BASE_HAD: ${{ steps.base.outputs.had }}
         run: |
+          if [ ! -f "$RUNNER_TEMP/judge/count/results.json" ]; then
+            echo "::error title=perf gate::perf (count) left no instruction results (results.json): its count failed or never ran, and its log says why"
+            echo "perf (count) left no instruction results (results.json): the instructions are not judged." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # The entries the base holds already let nothing through.
           held=()
           if [ "$BASE_HAD" = true ]; then
             held=(--accepted-base tools/perf_gate_base.py)
           fi
-          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/count/results.json" \
             --accepted-from tools/perf_gate.py "${held[@]}" \
-            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+      # Judged whether or not the instructions passed, so the summary holds
+      # both tables; by the checker that counted them, chosen as the count
+      # chose it.
+      - name: Hold the I/O counts to the base's, by the base's checker
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        env:
+          BASE_HAD: ${{ steps.base.outputs.had }}
+        run: |
+          if [ ! -f "$RUNNER_TEMP/judge/io/io.json" ]; then
+            echo "::error title=perf gate::perf (count) left no I/O results (io.json): its I/O count failed or never ran, and its log says why"
+            echo "perf (count) left no I/O results (io.json): the I/O is not judged." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
+          echo "the I/O judged by $checker"
+          held=()
+          if [ "$BASE_HAD" = true ]; then
+            held=(--accepted-base tools/perf_gate_base.py)
+          fi
+          python3 -I "$checker" check "$RUNNER_TEMP/judge/io/io.json" \
+            --accepted-from tools/perf_gate.py "${held[@]}" \
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+      # A count that failed, or never ran, is no pass: said after what it
+      # left was judged.
+      - name: The count ran
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        env:
+          COUNT: ${{ needs.perf-count.result }}
+        run: |
+          if [ "$COUNT" != success ]; then
+            echo "::error title=perf gate::perf (count) ended $COUNT: what it left is judged above, and its log says why it ended so"
+            echo "perf (count) ended $COUNT." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   # A page's database kept in real browsers (web/browser/, `make
   # browser-test`): persist and restore against each engine's IndexedDB and
@@ -1464,25 +1701,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-integrations-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-integrations-
+          key: v2-ubuntu-latest-integrations-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-integrations-${{ hashFiles('rust-toolchain.toml') }}-
 
       # LangChain's standard vector store suite and the tests LlamaIndex's
       # own integrations run, from a python:3.13 container, against a
@@ -1566,7 +1803,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1586,25 +1823,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-examples-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-examples-
+          key: v2-ubuntu-latest-examples-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-examples-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The Notes examples
         run: |
@@ -1618,7 +1855,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1637,25 +1874,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-shop-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-shop-
+          key: v2-ubuntu-latest-shop-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-shop-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The shop
         run: |
@@ -1671,7 +1908,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1690,25 +1927,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-ledger-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-ledger-
+          key: v2-ubuntu-latest-ledger-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-ledger-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The ledger
         run: |
@@ -1724,7 +1961,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1743,25 +1980,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-saas-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-saas-
+          key: v2-ubuntu-latest-saas-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-saas-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Trellis
         run: |
@@ -1777,7 +2014,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1798,25 +2035,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-recipes-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-recipes-
+          key: v2-ubuntu-latest-recipes-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-recipes-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The recipes
         run: |
@@ -1830,7 +2067,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1850,25 +2087,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-dispatch-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-dispatch-
+          key: v2-ubuntu-latest-dispatch-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-dispatch-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Plover
         run: |
@@ -1884,7 +2121,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1904,25 +2141,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-analytics-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-analytics-
+          key: v2-ubuntu-latest-analytics-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-analytics-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Kestrel
         run: |
@@ -1938,7 +2175,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -1962,29 +2199,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # setup-node's and setup-go's `cache` save in their post step from any
       # ref, and have no read-only switch, so the two caches are the
       # actions' own paths, restored here and saved by main alone below.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/grafana/go.mod
           cache: false
 
       - id: npm-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
           key: v2-npm-${{ runner.os }}-${{ hashFiles('integrations/grafana/package-lock.json') }}
           restore-keys: v2-npm-${{ runner.os }}-
 
       - id: go-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2010,6 +2247,12 @@ jobs:
       - name: The data dashboards end to end
         run: make grafana-check
 
+      # release.yml's check of each image before it is pushed, on the image
+      # the compose above built from the same Dockerfile: a tag meets no
+      # step there that CI has not run.
+      - name: The image as a release holds it before pushing it
+        run: tools/image-check.sh fennecdb "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+
       # The image's fennec-server is a static binary: the runner runs it.
       - name: The plugin's backend tests
         working-directory: integrations/grafana
@@ -2028,14 +2271,14 @@ jobs:
 
       - name: Save the npm cache (main only)
         if: github.ref == 'refs/heads/main' && steps.npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
           key: ${{ steps.npm-cache.outputs.cache-primary-key }}
 
       - name: Save the Go cache (main only)
         if: github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
@@ -2052,7 +2295,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: The units and the alert rules
         run: make deploy-check
@@ -2070,10 +2313,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh tools/release-latest.sh tools/release-verify.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
@@ -2145,7 +2388,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # musl-tools is the C compiler ring's C and assembly are built with
       # for musl, as release.yml's Linux builds take it.
@@ -2160,15 +2403,15 @@ jobs:
       # the workspace's are compiled every run, their sources newer than
       # any cache.
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-24.04-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-24.04-build-musl-
+          key: v2-ubuntu-24.04-build-musl-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-24.04-build-musl-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The three at once. Each build is a chain of compiles of one unit
       # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
@@ -2215,7 +2458,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2226,23 +2469,26 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
-  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
-  # counters on the Makefile's dated nightly (a nightly only here and in
-  # fuzz.yml). A count, not a time: the same commit hands each target the
-  # same inputs on any runner, so the job passes or fails by the commit,
-  # never by the runner's speed, and anyone makes a finding again with
-  # `make fuzz-smoke` -- which is why it says a panic's message and an
-  # ASan report here, where fuzz.yml's runs, each week's own, say only the
-  # recipe. The test job runs the same targets over their seeds in a plain
-  # build; fuzz.yml gives each half an hour a week. Each target is capped
-  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
-  # ends at a named target's cap before this timeout: six just under it
-  # are 36 minutes, and the build a minute and a half.
+  # replica's apply, a SQLite file, the certificate a PostgreSQL server
+  # shows, walked to its signature's hash, a primary's stream -- fuzzed for a
+  # count of runs each (about 30 s of this runner), built with AddressSanitizer
+  # and LLVM's coverage counters on the Makefile's dated nightly (a nightly
+  # only here, in sanitize and in fuzz.yml). A count, not a time: the same
+  # commit hands each target the same inputs on any runner, so the job passes
+  # or fails by the commit, never by the runner's speed, and anyone makes a
+  # finding again with `make fuzz-smoke` -- which is why it says a panic's
+  # message and an ASan report here, where fuzz.yml's runs, each week's own,
+  # say only the recipe. The test job runs the same targets over their seeds
+  # in a plain build; fuzz.yml gives each half an hour a week. Each target is
+  # capped at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every
+  # run ends at a named target's cap before this timeout: eight just under it
+  # -- these seven and `stream`, a primary's stream, which lands beside them
+  # -- are 48 minutes, and the build a minute and a half, with the seven and a
+  # half minutes to spare six had under 45.
   fuzz-smoke:
     name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 57
     permissions:
       contents: read
     steps:
@@ -2264,6 +2510,104 @@ jobs:
           echo "with target/<host>/fuzz/fennec-fuzz after 'make fuzz ASAN=1', makes the one"
           echo "that ended it (docs/design/conventions.md#fuzzing)."
 
+  # docs/design/conventions.md#sanitizers: the tests of the crates whose
+  # unsafe code an app's or a page's pointers reach -- fennec-ffi's C ABI
+  # (tests/bounds.rs calls each function at its edges), fennec-abi, and
+  # fennec-core's mapping, kernels and arenas -- under AddressSanitizer, on
+  # the Makefile's dated nightly (a nightly only here, in fuzz-smoke and in
+  # fuzz.yml), built for the runner's triple so build scripts run plain. A
+  # report ends the run, failed. Leaks are not looked for: the engine's
+  # tests forget a database on purpose, as a killed process leaves one. Not
+  # a required check (conventions.md, "Reruns", says why), so it does not
+  # run for a merge group, where nothing waits for it: it skips its tests
+  # where a change touches no crate, the schedule runs it whole, and
+  # RELEASING.md asks it green at a release's commit. Bounded as fuzz-smoke
+  # is until it has runs to be bounded by: its tests took 3.5 minutes in the
+  # test job unsanitized (fennec-core's lib 60 s, tests/all.rs 146 s), and
+  # sanitized at opt-level 1 they took on a Mac what unsanitized ones did.
+  sanitize:
+    name: sanitize (fennec-ffi, fennec-abi, fennec-core tests under ASan)
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A pull request's and a push's files, against the commit each starts
+      # from: only the trees of the two are fetched. A scheduled or
+      # dispatched run, and one whose base cannot be fetched, tests whatever
+      # it finds.
+      - name: Whether the change touches what the job tests
+        id: touched
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          run=1
+          case "$EVENT" in
+            pull_request|push)
+              if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+                files=$(git diff --name-only "$BASE" HEAD)
+                if ! printf '%s\n' "$files" | grep -qE '^(crates/|Makefile$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.cargo/|\.github/workflows/ci\.yml$)'; then
+                  run=0
+                  echo "::notice::No crate, Makefile, manifest or ci.yml changed: the sanitized tests are skipped."
+                fi
+              fi
+              ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      # The cargo cache as every job keeps it, keyed by the nightly's date
+      # and this job: a stable toolchain's target/ is never restored under
+      # it, nor one an earlier nightly built. The Makefile, which names the
+      # nightly, is no path a push to main runs for: the entry of a new
+      # nightly is saved by main's next scheduled run, and until then a run
+      # builds cold, as one did before this cache.
+      - name: The nightly's date
+        id: nightly
+        if: steps.touched.outputs.run == '1'
+        run: echo "date=$(sed -n 's/^FUZZ_NIGHTLY ?= //p' Makefile)" >> "$GITHUB_OUTPUT"
+
+      - id: cargo-cache
+        if: steps.touched.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-sanitize-${{ steps.nightly.outputs.date }}-
+
+      - name: Install the fuzzer's nightly, pinned to a date
+        if: steps.touched.outputs.run == '1'
+        run: make fuzz-toolchain
+
+      - name: The tests of fennec-ffi, fennec-abi and fennec-core under AddressSanitizer
+        if: steps.touched.outputs.run == '1'
+        run: make sanitize
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: steps.touched.outputs.run == '1' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
   # JVM tests against the Linux build, the AAR with the library built by
@@ -2277,7 +2621,7 @@ jobs:
     # the runner's six.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain and the Android targets
         run: |
@@ -2285,22 +2629,22 @@ jobs:
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-mobile-
+          key: v2-ubuntu-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: wrapper
 
@@ -2359,15 +2703,25 @@ jobs:
       # package:flutter/material.dart, which `flutter analyze` fails on in the
       # examples (#590). Raised by hand, once the examples take what a new
       # release asks: 3.50.0 after they moved to package:material_ui (#591).
-      # No cache: the action's own saves from any ref and has no read-only
-      # switch, the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB (Linux) and
-      # restoring it saved 28 s and 16 s of a download (docs/design/conventions.md).
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: false
-          pub-cache: false
+      #
+      # Installed from Flutter's own archive by tools/install-flutter.sh,
+      # which holds it to the sum Flutter's list of its releases gives it
+      # and to the one written here (a raise is the version and its sum),
+      # and not by subosito/flutter-action: a composite action whose own
+      # steps run actions/cache@v5 by its tag, which no pin here reaches and
+      # which GitHub's sha_pinning_required refuses under a pinned commit
+      # too. No cache: the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB
+      # (Linux) and restoring it saved 28 s and 16 s of a download
+      # (docs/design/conventions.md).
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          SHA256: 6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       # The Dart package under Flutter's own Dart -- its sync tests against
       # a server run-tests.sh builds -- then the plugin's test.
@@ -2395,7 +2749,7 @@ jobs:
       # from a release): it is for a person to fetch. An upload that fails
       # on GitHub's side (#590/#591 lost a merge-queue run to one) must not
       # fail a job whose tests all passed. A test is never retried.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         continue-on-error: true
         with:
           name: fennecdb-android
@@ -2408,7 +2762,7 @@ jobs:
       # left of "1 failed" when it was not uploaded.
       - name: Test reports of a failing run
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-reports-android
           path: |
@@ -2438,7 +2792,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2459,7 +2813,7 @@ jobs:
     # hours; the steps that run tests are bounded on their own as well.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned toolchain and the Apple targets
         run: |
@@ -2467,15 +2821,15 @@ jobs:
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-darwin
 
       - id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-macos-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-macos-latest-mobile-
+          key: v2-macos-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-macos-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: XCFramework (macOS, iOS, the simulator)
         run: integrations/swift/build-xcframework.sh --zip
@@ -2528,7 +2882,7 @@ jobs:
 
       # Nothing downloads this either (see the Android upload): a failed
       # upload on GitHub's side does not fail a job whose tests passed.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         continue-on-error: true
         with:
           name: fennecdb-xcframework
@@ -2543,7 +2897,7 @@ jobs:
       # each test's output and the crash logs.
       - name: Test results of a failing run
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-apple
           path: integrations/swift/build/ios-tests.xcresult
@@ -2557,7 +2911,7 @@ jobs:
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -2598,14 +2952,17 @@ jobs:
           name: fennecdb-android
           path: assets
 
-      # Flutter 3.50.0, as the Android job pins it, and as there with no
-      # cache: the action's own saves from any ref (see the Android job).
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
-        with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: false
-          pub-cache: false
+      # Flutter 3.50.0 as the Android job installs it, with no cache, from
+      # the archive for macOS on Apple silicon.
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json
+          SHA256: ed2d08a3e3c023e84cbe9316d21bd88fda6ee9552f90c1eb4da41a07c170fb35
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       # packages.yml's "The native libraries, from the release" and its
       # Publish's copy, the archive written where a publish would upload it

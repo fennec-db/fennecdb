@@ -11,13 +11,21 @@ each.](../../docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes fr
 the path, never the query; the router forwards bytes, parsing none; the
 registry opens a file under its lock and closes it on its last `Arc` alone,
 never while its follower or anything beside it holds the database: no two
-`Database`s share a file. A tenant's role is its file's, not the node's
+`Database`s share a file. A copy a failover may promote stays open once
+opened, its follower running or not, and the node's scrape counts it
+(`fennec_copies_disconnected`). A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after
-the export), copy, install, the flip in one statement, the source
+the export), copy (relayed as it comes, never held: `Pool::call_streamed`),
+install, the flip in one statement, the source
 deleted once the standbys were sent it (`standbys_sent`). A create or an
 install answers once the file and its name in the directory are durable
 (`made_durable`, `fs::sync_dir`); either failing is a 500 that takes the
-file back under `<file>.lock` (`take_back_made`). A node
+file back under `<file>.lock` (`take_back_made`). An install's image goes
+beside the tenant's file under that lock and its claim of the name, held
+through the rename: a second install, a create or a reclaim of the name
+is refused at once, a 503 naming its wait (`Tenants::claim`), never the
+409 that says a file is there, and the router asks again after the wait,
+within `--upstream-timeout` (`ComeBack`). A node
 is failed over on its own only under a lease, run on the boot clock
 (`lease::Moment`) from the grant the router acknowledged, never a grant's
 reading (`grant_from`); the router counts a node by the directory's
@@ -27,7 +35,13 @@ last it sent (`Leases::turn`, `lease::round_due`). Every write path meets
 the engine's fence (`Database::set_fence`), every route answering a write
 asks `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
 promotes only a copy of the tenant's lineage and history
-(`tenants::Expected`, 409) unless `force`d.
+(`tenants::Expected`, 409) unless `force`d, and through its admin alone
+(`replication::handle_tenant`: `/t/<t>/_replication/promote` is 404),
+answering what the copy knew of its primary (`replication::Heard`), which
+the router logs and counts (`fennec_router_promotions_total`), its line
+saying what the copy was not sent is lost unless it was connected, nothing
+behind and heard from within two keep-alives (`STALE_MS`). A node's words
+reach the router's log and errors escaped, a refusal whole (`words`).
 
 **[A failed attach is tried again, a file left taken back by
 identity.](../../docs/design/tenants.md#replicas-tried-again)** `try_again`
@@ -36,12 +50,15 @@ repairs a failed attach under the claim;
 `leftovers` row (`fennec_router_files_left`) with its ids
 (`fennec_http::instance`); the node deletes it, or follows over it at an attach's 409, only
 while it holds the id recorded (`Tenants::reclaim`, `files`), under its
-slot; no id, never.
+slot; no id, never. A row noted under an id is forgotten on its node's
+word alone, never on a listing that lacks it (`look_at_leftovers`).
 
 **[A tenant's hook secrets are its file's, relayed by the router and kept
 by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**
 `<t>.hooks` is bound to its file as `.instance` is (`tenant_hooks::Store`,
-`fennec_http::instance`): put away, synced, before every create, install,
+`fennec_http::instance`), its birth time held only where the node that
+wrote it and the one reading it both read one (`instance::same`: a Linux
+release binary reads none): put away, synced, before every create, install,
 follow, delete, reclaim and restore (`Tenants::put_away`,
 `put_away_beside`), never adopted by another file -- an open puts away one
 naming another than it opened, and an event verified against a set no
@@ -97,8 +114,14 @@ client (`CF-Connecting-IP`) in `Fennec-Client`, an HMAC under `ENTRY_TOKEN` a
 router believes only with `--entry-token` and within 60 s (`audit::entry`),
 and drops from all it forwards (`forwarded_headers`); a router refuses an
 entry token empty or equal to another it holds, at the start and as a node
-is added (`set_node`). Every router answer carries `Fennec-Shard: 1`; a request that
-may have reached one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
+is added (`set_node`). A home is named, and a tenant not placed told of,
+to a caller the router vouches for alone (`vouches_for`: the entry's mark,
+a relay, its `--token`), anyone else's request going to a node in the
+tenant's place (`stand_in`), which asks the token first and opens no
+file, the tenant named past `~` (`tenants::STAND_IN`)
+([router.md](../../docs/design/router.md#tenants-it-does-not-place)). Every
+router answer carries `Fennec-Shard: 1`; a request that may have reached
+one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
 -- a tenant's hook event among them (`hooked`) -- or, any request, after a
 guessed region's router's 503 marked
 `Fennec-Unsent`, which ran nowhere.
@@ -137,7 +160,12 @@ client sent -- a relaying router's kept, under its mark alone
 at the router from a client's headers, which a rebound page sets as it
 likes. Without `--token` the router is an open server, held to
 fennec-http's rule, a forward without `--http-cors` to its `Host` alone,
-the node judging its `Origin`.
+the node judging its `Origin`. Listening past loopback, it forwards nothing
+to a node asking no token (`open_node`, 403) but under `--insecure`, nor
+to one not known to ask one (503), a node from before asked its
+`/_whoami`, one ask out a node at a time that no request waits for
+(`ask_now`, 503 meanwhile), and marks every forward by its listener's class (`mark_of`), a relayed or
+entry-named one as past loopback, for the node to hold the same line.
 
 **[The router looks at a pooled connection first, and resends only what
 cannot have run or may run twice.](../../docs/design/router.md#pooled-connections)**

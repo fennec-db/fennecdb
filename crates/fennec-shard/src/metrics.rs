@@ -108,6 +108,9 @@ static UNREACHABLE: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 static MOVES: [AtomicU64; 2] = [ZERO; 2];
 /// Automatic failovers `[every tenant promoted, some not]`.
 static FAILOVERS: [AtomicU64; 2] = [ZERO; 2];
+/// Copies promoted, by whether the copy was connected to its primary as
+/// its promotion began: `[connected, not_connected, unknown]`.
+static PROMOTIONS: [AtomicU64; 3] = [ZERO; 3];
 static MOVE_TIMES: Timings = Timings::new(&MOVE_BUCKETS);
 /// Queries across tenants (`POST /_shard/query`), by [`Fanned`].
 static FANOUTS: [AtomicU64; 4] = [ZERO; 4];
@@ -141,6 +144,16 @@ const CUT: [&str; 3] = ["sent_again", "may_have_run", "stream_ended"];
 pub fn cut(how: Cut, n: u64) {
     CUTS[how as usize].fetch_add(n, Ordering::Relaxed);
 }
+/// Requests refused (403) for going to a node that asks no data token,
+/// this router listening past loopback (`Router::open_node`): one set of
+/// the process's, a misconfiguration's count and no request's path.
+static OPEN_NODE_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// A request refused for going to a node that asks no token.
+pub fn open_node_refused() {
+    OPEN_NODE_REFUSALS.fetch_add(1, Ordering::Relaxed);
+}
+
 static GIVEN_UP: AtomicI64 = AtomicI64::new(0);
 
 /// A read replica given up on (`1`), or let go of (`-1`): see
@@ -286,6 +299,17 @@ pub fn failed_over(done: bool) {
     FAILOVERS[!done as usize].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Counts a copy promoted, by whether its node said it was connected to
+/// its primary as the promotion began (`None`: a node too old to say).
+pub fn promoted(connected: Option<bool>) {
+    let i = match connected {
+        Some(true) => 0,
+        Some(false) => 1,
+        None => 2,
+    };
+    PROMOTIONS[i].fetch_add(1, Ordering::Relaxed);
+}
+
 /// A client connection, counted open for as long as this lives.
 pub struct Connection(());
 
@@ -398,6 +422,18 @@ pub fn counters(out: &mut Text) {
         );
     }
     out.family(
+        "fennec_router_promotions_total",
+        "counter",
+        "Copies of tenants promoted by a failover, by whether the copy was connected to its primary as its promotion began -- connected until a read of its stream fails: a primary's process killed ends the stream with it, its machine lost or cut off only after 10 s of silence -- and unknown a node too old to say. Read the router's line for the tenant, which gives how long before the copy last heard from its primary and how far behind it was, and says what it was not sent is lost unless it was connected, nothing behind and heard from within two keep-alives (4 s). What a copy promoted was not sent is lost.",
+    );
+    for (i, copy) in ["connected", "not_connected", "unknown"].iter().enumerate() {
+        out.sample(
+            "fennec_router_promotions_total",
+            &[("copy", copy)],
+            PROMOTIONS[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
         "fennec_router_move_duration_seconds",
         "histogram",
         "How long a move that was done took, the tenant frozen for all of it.",
@@ -480,6 +516,16 @@ pub fn counters(out: &mut Text) {
         "fennec_router_read_replicas_given_up",
         &[],
         GIVEN_UP.load(Ordering::Relaxed).max(0) as u64,
+    );
+    out.family(
+        "fennec_router_open_node_refusals_total",
+        "counter",
+        "Requests refused (403) because their tenant's node asks no data token (--http-token, --jwt-keys) while this router listens past loopback without --insecure: anyone on the network would read and write that node's tenants through it.",
+    );
+    out.sample(
+        "fennec_router_open_node_refusals_total",
+        &[],
+        OPEN_NODE_REFUSALS.load(Ordering::Relaxed),
     );
     out.family(
         "fennec_router_connections",

@@ -4,7 +4,7 @@ so that `sutlac` finds `Sütlaç`, `kofte` `köfte` and `ελληνικα` `ελ
 
     python3 crates/fennec-core/tools/fold/gen.py [--check] [UnicodeData.txt]
 
-Without a path the script fetches Unicode 17.0.0's UnicodeData.txt, the
+Without a path the script fetches Unicode 18.0.0's UnicodeData.txt, the
 version of the standard library's case mappings (`char::UNICODE_VERSION`),
 which the tokenizer lowercases with before it folds. It writes the file
 through rustfmt, as `cargo fmt --check` wants it; `--check` writes
@@ -58,11 +58,11 @@ import tempfile
 import time
 import urllib.request
 
-UNICODE = "17.0.0"
+UNICODE = "18.0.0"
 URL = "https://www.unicode.org/Public/%s/ucd/UnicodeData.txt" % UNICODE
 # The file the table was written from: a download that differs is refused
 # rather than written or checked against.
-SHA256 = "2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c"
+SHA256 = "0736451de439ae7baf1425136617da495e09ee5afbe6e394374db7009ea08950"
 # The byte of a code point the tokenizer lowercases and folds in turn.
 LOWER = 0x1F
 HERE = os.path.dirname(os.path.abspath(__file__))

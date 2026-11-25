@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 fennec-core = { workspace = true, features = ["std-fs", "full"] }
 fennec-ql = { workspace = true, features = ["statements"] }
@@ -80,6 +83,12 @@ path = "tests/refused_counts.rs"
 name = "tls_failures"
 path = "tests/tls_failures.rs"
 
+# Apart: the one shutdown (`conn::end_all`) is the process's own, never
+# undone, and would end the other tests' connections.
+[[test]]
+name = "tls_ending"
+path = "tests/tls_ending.rs"
+
 # Apart: the scheduler's counts and the statements' shapes are the
 # process's own.
 [[test]]
@@ -90,3 +99,14 @@ path = "tests/scheduled_counts.rs"
 [[test]]
 name = "hook_counts"
 path = "tests/hook_counts.rs"
+
+# Apart: the policy the server's compacter looks with, and its counts, are
+# the process's own.
+[[test]]
+name = "auto_compact_places"
+path = "tests/auto_compact_places.rs"
+
+# Apart: its allocator counts the process's own bytes.
+[[test]]
+name = "message_peak"
+path = "tests/message_peak.rs"

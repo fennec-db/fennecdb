@@ -23,8 +23,6 @@ fn start(ttl: Duration) -> Node {
 }
 
 fn start_over(ttl: Duration, setup: &[&str]) -> Node {
-    let access =
-        Arc::new(Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n").unwrap());
     let mut db = Database::new();
     for sql in [
         "create collection notes (owner text, t text)",
@@ -35,6 +33,13 @@ fn start_over(ttl: Duration, setup: &[&str]) -> Node {
     {
         db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
     }
+    serve_over(Arc::new(RwLock::new(db)), ttl)
+}
+
+/// A server over `db`, keeping keys for `ttl`.
+fn serve_over(db: Arc<RwLock<Database>>, ttl: Duration) -> Node {
+    let access =
+        Arc::new(Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n").unwrap());
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
@@ -42,7 +47,6 @@ fn start_over(ttl: Duration, setup: &[&str]) -> Node {
         idempotency_ttl: ttl,
         ..Config::default()
     };
-    let db = Arc::new(RwLock::new(db));
     let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -200,10 +204,76 @@ fn a_key_is_for_one_request_one_user_and_a_write_that_landed() {
     assert!(matches!(peek, 403 | 404), "{peek}");
 }
 
-/// A key is kept as its owner, `U+001F` and the key, so a key holding that
+/// A key is its caller's, and a caller is everything of its token that
+/// decides what it may do: its issuer, its subject, the claims its rules
+/// read. Found by `sub` alone, a key's answer was replayed to another
+/// issuer's user of the same `sub`, and to the same subject's token of
+/// another team, its `returning` rows those of a team that token cannot
+/// read. Each is another caller, and the key its own: the write runs, and
+/// answers what it may.
+#[test]
+fn a_key_is_replayed_only_to_a_caller_of_the_same_authority() {
+    let access =
+        Arc::new(Access::new(SECRET, "teams  read,write  where team = $jwt.team\n").unwrap());
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        token: Some(ROOT.into()),
+        access: Some(Arc::clone(&access)),
+        ..Config::default()
+    };
+    let db = Arc::new(RwLock::new(Database::new()));
+    let server = Server::new(Arc::clone(&db), cfg);
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let n = Node { port, access, db };
+    n.query(ROOT, None, "create collection teams (team text, t text)");
+    n.query(ROOT, None, "put teams {team: \"red\", t: \"red's plan\"}");
+    n.query(ROOT, None, "put teams {team: \"blue\", t: \"blue's plan\"}");
+    let set = "set teams {t: t} where t != \"\" returning t";
+    let red = n.access.mint(r#"{"sub":"vera","team":"red"}"#).unwrap();
+    let first = n.query(&red, Some("k"), set);
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert!(first.body.contains("red's plan"), "{}", first.body);
+    let again = n.query(&red, Some("k"), set);
+    assert!(
+        again.replayed,
+        "the same caller is replayed: {}",
+        again.body
+    );
+    for (who, claims) in [
+        ("another team", r#"{"sub":"vera","team":"blue"}"#),
+        (
+            "another issuer",
+            r#"{"sub":"vera","team":"red","iss":"https://other.example/"}"#,
+        ),
+        ("a role", r#"{"sub":"vera","team":"red","role":"intern"}"#),
+    ] {
+        let token = n.access.mint(claims).unwrap();
+        let a = n.query(&token, Some("k"), set);
+        assert_eq!(a.status, 200, "{who}: {}", a.body);
+        assert!(
+            !a.replayed,
+            "{who} was replayed the first caller's answer: {}",
+            a.body
+        );
+        if who == "another team" {
+            assert!(
+                !a.body.contains("red's plan") && a.body.contains("blue's plan"),
+                "{who}: {}",
+                a.body
+            );
+        }
+    }
+}
+
+/// A key was kept as its owner, `U+001F` and the key, so a key holding that
 /// character, beside a subject holding it, named another subject's: `sub`
-/// "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c", which was
-/// replayed the other's answer. A key holds no control character.
+/// "a\u{1f}b" with key "c" was `sub` "a" with key "b\u{1f}c", which was
+/// replayed the other's answer. A key holds no control character; its
+/// caller is of one width now, and the two run apart either way.
 #[test]
 fn a_key_holding_a_control_character_is_refused() {
     let n = start(Duration::from_secs(3600));
@@ -330,4 +400,116 @@ fn the_keys_collection_follows_the_ttl_it_is_started_with() {
     assert!(kept.replayed, "a key kept is kept across the move");
     moved.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
     assert_eq!(ttl(&moved), (DataType::Timestamp, Some(3_600_000)));
+}
+
+/// A server started again with a longer `--idempotency-ttl` brings back,
+/// at its first keyed write, the keys past the old expiry the sweeper has
+/// not reached -- and the look that write made, before the expiry moved,
+/// found none of them. Its key brought back so, the write writes over the
+/// row: one row for the key, its retry handed the new answer. Where the
+/// look's finding no row was the end of it, the key was two live rows,
+/// the older answering its retries: its own answer, or a 422 for the write
+/// that landed.
+#[test]
+fn a_key_a_longer_ttl_brings_back_is_written_over() {
+    let dir = std::env::temp_dir().join(format!("fennec-http-idempotency-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("longer.fennec");
+    let _ = std::fs::remove_file(&path);
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    db.execute(&fennec_ql::parse_one("create collection logs (t text)").unwrap())
+        .unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let minute = serve_over(Arc::clone(&db), Duration::from_secs(60));
+    let first = minute.query(ROOT, Some("k"), "put logs {t: \"a\"}");
+    assert_eq!(
+        (first.status, first.replayed),
+        (200, false),
+        "{}",
+        first.body
+    );
+
+    // The file opened again two minutes on, and served keeping keys for an
+    // hour: the key is past the minute it was kept for, and not swept.
+    {
+        let mut g = db.write().unwrap();
+        drop(std::mem::replace(&mut *g, Database::new()));
+        *g = fennec_core::fs::open(&path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        g.set_clock(Some(now + 120_000));
+    }
+    let hour = serve_over(Arc::clone(&db), Duration::from_secs(3600));
+    let again = hour.query(ROOT, Some("k"), "put logs {t: \"b\"}");
+    assert_eq!(
+        (again.status, again.replayed),
+        (200, false),
+        "a key past its time is a new request: {}",
+        again.body
+    );
+    let retried = hour.query(ROOT, Some("k"), "put logs {t: \"b\"}");
+    assert_eq!(
+        (retried.status, retried.replayed, retried.body.as_str()),
+        (200, true, again.body.as_str()),
+        "the retry was not handed the write's answer"
+    );
+    let keys = db
+        .read()
+        .unwrap()
+        .query(
+            &fennec_ql::parse_one("get _idempotency count").unwrap(),
+            &[],
+        )
+        .unwrap()
+        .rows()
+        .unwrap()
+        .rows[0]
+        .values[0]
+        .clone();
+    assert_eq!(keys, Value::Int(1), "the key is more than one live row");
+    assert_eq!(hour.count("logs"), "[{\"count\":2}]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keys kept as text -- the owner, `U+001F` and the key, from before a
+/// caller was the bytes of its digest -- are made again as bytes, the
+/// expiry the server keeps or not: no request names one of them now. The
+/// server token's key and a caller's of the same text never meet.
+#[test]
+fn keys_kept_as_text_are_made_again_as_bytes() {
+    let n = start_over(
+        Duration::from_secs(60),
+        &[
+            "create collection _idempotency (key text @hash, request int, status int, \
+             body text, at timestamp @ttl(1m))",
+            "put _idempotency {key: \"x\", request: 1, status: 200, body: \"{}\", at: 1}",
+        ],
+    );
+    let ty = |n: &Node| {
+        let db = n.db.read().unwrap();
+        let c = db.collection("_idempotency").unwrap();
+        c.schema.field("key").unwrap().ty.clone()
+    };
+    let put = "put notes {owner: \"alice\", t: \"x\"}";
+    let first = n.query(ROOT, Some("k"), put);
+    assert_eq!(
+        (first.status, first.replayed),
+        (200, false),
+        "{}",
+        first.body
+    );
+    assert_eq!(ty(&n), DataType::Bytes);
+    assert!(n.query(ROOT, Some("k"), put).replayed);
+    let alice = n.access.mint("{\"sub\":\"alice\"}").unwrap();
+    let hers = n.query(&alice, Some("k"), put);
+    assert_eq!(
+        (hers.status, hers.replayed),
+        (200, false),
+        "the server's key is no caller's: {}",
+        hers.body
+    );
+    assert!(n.query(&alice, Some("k"), put).replayed);
+    assert_eq!(n.count("notes"), "[{\"count\":2}]");
 }

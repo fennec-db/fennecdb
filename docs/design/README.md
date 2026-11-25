@@ -6,17 +6,17 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 ## Files
 
-- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, the build profiles and the pinned toolchain
+- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate -- how deep a value read off the bytes nests, a SQLite file's lengths -- the build profiles and the pinned toolchain
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
-- [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
+- [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, a block as one record, and the model every write and index is held to
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, a node's tenants each synced on a thread of its own, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
-- [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
+- [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, a token past its `exp`, empty tokens and short ones
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
+- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, seeds in parts, connections no thread is made for, a body's ceiling, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, how two builds' instruction counts are read on macOS, the gate every pull request's instructions and heap bytes are held to, its workloads and the claims they stand for, and how the binaries a release ships are measured and held to their budgets
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
@@ -25,17 +25,17 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [indexes.md](indexes.md) -- `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
-- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, how a replica writes the server's rows, Durable Objects and their alarms, and what the HTTP clients send again
+- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database and chains its sealed chunks, live queries, how a replica writes the server's rows and lands a seed in parts, Durable Objects and their alarms, and what the HTTP clients send again
 - [text.md](text.md) -- collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
-- [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
+- [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core, the scenario file both sync runners are held to and a seed's parts kept in the replica's file
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), and the image's user: a server started as root hands its volume over and drops root before it touches a file
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), the image's user: a server started as root hands its volume over and drops root before it touches a file, the workflows' pinned actions, permissions and secrets, and the Flutter plugin's archive
 
 The conventions hold no invariant of the code, and are listed apart:
 
 - [compatibility.md](compatibility.md) -- what 1.x freezes (the file, FennecQL, the API, `fennec.h`, the JS types, the SDKs, the sync protocol, CLI flags, metrics, release assets), the check that holds each, the upgrade order, the grammar epoch and the support window
-- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, and how a secret is compared and a primitive held to its vectors
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors
 - [security.md](security.md) -- the threat model: every trust boundary the area files keep as rules, ordered in one table -- what it protects, who attacks it, the code that enforces it, the test that proves it and what is not defended -- held to the code by `tools/security_md_check.py`; the scope an outside review of the hand-written cryptography, authentication and parsers would take, its open questions, and the decision on an outside audit
 
 A proposal holds no invariant until it is built, and is listed apart:
@@ -204,6 +204,19 @@ A proposal holds no invariant until it is built, and is listed apart:
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
 157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
-158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+158. [A pull request is held to its base in instructions and heap bytes an op, and in I/O to the call](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+159. [A seed goes in parts, read a page at a time](http.md#seeds-in-parts) (added after the move, under *The HTTP server*)
+160. [A seed's parts wait in the replica's file and land in one block](native-and-sync.md#seeds-in-parts) (added after the move, under *The native library and sync*)
+161. [A seed in parts lands in one task](js-client.md#seeds-in-parts) (added after the move, under *The JS client and Cloudflare*)
 162. [A request is read in time, and an answer written in time](http.md#slow-clients) (added after the move, under *The HTTP server*)
 163. [The compiler CI tests with is the one that ships](crates.md#toolchain) (added after the move, under *The crates*)
+164. [A workflow runs actions pinned by commit, and a job that writes builds nothing](integrations.md#workflows) (added after the move, under *Integrations and deploy*)
+165. [A body is held to the ceiling its head earns](http.md#a-bodys-ceiling) (added after the move, under *The HTTP server*)
+166. [A write form or an index kind the engine gains is drawn in `tests/model.rs`](engine.md#the-model) (added after the move, under *Writes*)
+167. [A token taken past loopback is 32 bytes at least](access.md#short-tokens) (added after the move, under *Access*)
+168. [A token past its `exp` is told so by a code, and no other refusal is](access.md#expired-tokens) (added after the move, under *Access*)
+169. [A value read off the bytes nests no deeper than JSON's limit](crates.md#how-deep-a-value-nests) (added after the move, under *Storage*)
+170. [A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once](crates.md#a-sqlite-files-lengths) (added after the move, under *Imports*)
+171. [The Flutter plugin ships each platform's library once, and no symbolic link](integrations.md#flutter-plugin) (added after the move, under *Integrations and deploy*)
+172. [A node syncs each tenant on a thread of its own](durability.md#a-nodes-syncs) (added after the move, under *Durability*)
+173. [A sealed chunk opens only after its own, and a replica keeps a store it cannot restore](js-client.md#sealed-chunks-in-a-chain) (added after the move, under *The JS client and Cloudflare*)

@@ -519,9 +519,13 @@ pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
             .flatten()
             .any(|t| ct_eq(g.as_bytes(), t.as_bytes()))
     });
-    // Open, a scrape verifies nothing, whatever it carries.
+    // Open, a scrape verifies nothing, whatever it carries. A token held to
+    // one the server keeps and refused is a guess at it, whatever a JWT's
+    // check before it said (`full`): counted as a token's.
     if taken {
         crate::audit::verified();
+    } else if given.is_some() && tokens.iter().any(Option::is_some) {
+        crate::audit::refused_as(crate::audit::Kind::Token);
     }
     open || taken
 }
@@ -635,6 +639,16 @@ fn render(source: Source) -> String {
         &[],
         crate::link::AUTO_COMPACTIONS.load(Ordering::Relaxed),
     );
+    out.family(
+        "fennec_auto_compactions_refused_total",
+        "counter",
+        "Compacts the server tried on its own and was refused, each refusal that stands logged once.",
+    );
+    out.sample(
+        "fennec_auto_compactions_refused_total",
+        &[],
+        crate::link::AUTO_COMPACTIONS_REFUSED.load(Ordering::Relaxed),
+    );
     out.family("fennec_connections", "gauge", "Connections open now.");
     out.sample(
         "fennec_connections",
@@ -681,8 +695,14 @@ fn render(source: Source) -> String {
                 "gauge",
                 "A collection's live records, in bytes.",
             );
+            // The live records alone, as the help says: `c.bytes` holds the
+            // dead ones too, and a dashboard adds `fennec_dead_bytes` to it.
             for c in &stats {
-                out.sample("fennec_data_bytes", &[("collection", &c.name)], c.bytes);
+                out.sample(
+                    "fennec_data_bytes",
+                    &[("collection", &c.name)],
+                    c.live_bytes(),
+                );
             }
             out.family(
                 "fennec_dead_bytes",
@@ -779,6 +799,23 @@ fn render(source: Source) -> String {
                 &[],
                 crate::tenants::copies_refused(),
             );
+            // The copies a failover may promote, never by tenant: one that
+            // is not connected, or behind, is promoted where it stands, and
+            // what it was not sent is lost (`replication::Heard`). What the
+            // kit's alerts read for a node's copies, as fennec_replica_*
+            // for a file's replica.
+            out.family(
+                "fennec_copies_disconnected",
+                "gauge",
+                "Copies of tenants here a failover may promote that are not connected to their primary now, or that no follower runs for -- their database failed, or none follows for them: one promoted so loses what it was not sent.",
+            );
+            out.sample("fennec_copies_disconnected", &[], s.copies.disconnected);
+            out.family(
+                "fennec_copies_behind",
+                "gauge",
+                "The most writes on its primary's disk, as its primary last said every 2 s, any copy here a failover may promote has not applied.",
+            );
+            out.sample("fennec_copies_behind", &[], s.copies.behind);
             unlinked(&mut out, s.unlinked);
             if let Some(n) = s.node_streams {
                 out.family(

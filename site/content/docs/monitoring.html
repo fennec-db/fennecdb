@@ -87,6 +87,7 @@ are reported as gauges.</p>
 <tr><td><code>fennec_data_bytes{collection}</code>, <code>fennec_dead_bytes{collection}</code></td><td>gauge</td><td>live records, and the overwritten and deleted ones <code>compact</code> gives back</td></tr>
 <tr><td><code>fennec_file_bytes</code>, <code>fennec_reclaimable_bytes</code></td><td>gauge</td><td>the file as written, and what a compact would give back of it now: the dead records, a record's head a write, the graph records a server appended in the tail; <code>--auto-compact</code> runs one once it passes its share (<a href="/docs/server#compaction">Compaction</a>)</td></tr>
 <tr><td><code>fennec_auto_compactions_total</code></td><td>counter</td><td>compacts the server ran on its own, every file it serves together</td></tr>
+<tr><td><code>fennec_auto_compactions_refused_total</code></td><td>counter</td><td>compacts the server tried on its own and was refused, each refusal that stands logged once (<a href="/docs/server#compaction">Compaction</a>)</td></tr>
 <tr><td><code>fennec_memory_bytes</code></td><td>gauge</td><td>what the process holds of the database and <code>--max-memory</code> counts: the indexes, and the documents too where the file is not mapped (<code>--no-mmap</code>)</td></tr>
 <tr><td><code>fennec_change_sequence</code></td><td>gauge</td><td>the last write's sequence number; its rate is the writes per second</td></tr>
 <tr><td><code>fennec_storage_failed</code></td><td>gauge</td><td>1 once the disk refused a write: writes stop until the file is reopened, reads go on</td></tr>
@@ -96,6 +97,7 @@ are reported as gauges.</p>
 <tr><td><code>fennec_replica_last_contact_seconds</code></td><td>gauge</td><td>since the primary was last heard from, a keep-alive included</td></tr>
 <tr><td><code>fennec_replica_images_total</code>, <code>fennec_replica_reconnects_total</code></td><td>counter</td><td>whole images taken, and connections made again</td></tr>
 <tr><td><code>fennec_tenants</code>, <code>fennec_tenants_open</code>, <code>fennec_tenants_disk_bytes</code></td><td>gauge</td><td>on a <code>--dir</code> node: tenants on disk, open, and their files together</td></tr>
+<tr><td><code>fennec_copies_disconnected</code>, <code>fennec_copies_behind</code></td><td>gauge</td><td>on a <code>--dir</code> node: of the copies it holds that a failover may promote — a standby's, a tenant's replica of its own, never a read replica's — how many are not connected to their primary now or have no follower running — their database failed, or nothing follows for them; a node keeps such a copy open, and after a restart counts one nothing follows for once something opens it — and the most writes on its primary's disk one has not applied, as its primary says every 2 s. A failover promotes a copy where it stands, so one counted here loses what it was not sent (<a href="sharding-failover.html#watching-a-standby">watching a standby</a>); never by tenant, whose own are at <code>/t/&lt;tenant&gt;/_replication/status</code></td></tr>
 <tr><td><code>fennec_build_info{version}</code>, <code>fennec_start_time_seconds</code></td><td>gauge</td><td>the version running, and when the process started</td></tr>
 </tbody>
 </table>
@@ -165,6 +167,7 @@ histogram_quantile(0.99, sum by (le) (rate(fennec_statement_duration_seconds_buc
 # worth an alert
 fennec_storage_failed == 1
 fennec_replica_behind > 10000
+fennec_copies_disconnected > 0
 fennec_dead_bytes / (fennec_data_bytes + fennec_dead_bytes) > 0.5
 </pre>
 </details>
@@ -324,6 +327,12 @@ not logged.</p>
     address, an IPv6 one's /64 (<code>--auth-delay</code>).</li>
   <li><b>No literal reaches the log:</b> a schema change is logged by its
     shape.</li>
+  <li><b>Readable by the server's user alone:</b> on Linux and macOS the log
+    is made mode <code>0600</code> whatever the umask, and a log there keeps
+    its mode. A shipper running as another user is given it once, by
+    <code>chmod</code> or an ACL on the file itself: a directory's default
+    ACL does not reach it (<a href="/docs/server#file-modes">Files on a
+    shared machine</a>).</li>
 </ul>
 
 <details class="deep"><summary>The audit log's events and the refusal wait</summary>
@@ -468,6 +477,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fennec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fennec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off -- answered <code>503</code> with <code>Fennec-Unsent</code> where the request never went out whole, <code>502</code> where the node may have run it: the one to alert on</td></tr>
 <tr><td><code>fennec_router_refused_total</code></td><td>counter</td><td>requests refused for their token (401): the router's own, and its nodes' it passed on</td></tr>
+<tr><td><code>fennec_router_open_node_refusals_total</code></td><td>counter</td><td>requests refused (403) because their tenant's node asks no data token while the router listens past loopback without <code>--insecure</code> — anyone on the network would have read and written that node's tenants through it (<a href="sharding-reference.html#open-nodes">an open node behind a router</a>). Above zero, give the node <code>--http-token</code> or <code>--jwt-keys</code></td></tr>
 <tr><td><code>fennec_router_entry_clients_total{outcome}</code></td><td>counter</td><td>with <code>--entry-token</code>, what the router made of the <a href="sharding-entry.html#global-entry">global entry</a>'s name for the client (<code>Fennec-Client</code>) of each request no other router relayed: <code>named</code>, the address taken for the request's; <code>bad_mark</code>, not the entry's mark (another token, or a client sending the header itself); <code>stale</code>, the entry's mark made more than a minute from the router's clock; <code>absent</code>, a tenant's request carrying none — a client reaching the router itself, or an entry with no <code>ENTRY_TOKEN</code>, which names nobody. All but <code>named</code> count by the connection's address</td></tr>
 <tr><td><code>fennec_router_moves_total{outcome}</code></td><td>counter</td><td>tenant moves that began, <code>done</code> or <code>failed</code> and thawed; one refused before it began is not one</td></tr>
 <tr><td><code>fennec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
@@ -489,6 +499,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fennec_router_lease_age_seconds{node, region}</code></td><td>gauge</td><td>with <code>--auto-failover</code>, the seconds since each node last took its lease: renewed every third of a lease, and failed over past the lease and a tenth</td></tr>
 <tr><td><code>fennec_router_node_failed_over{node, region}</code></td><td>gauge</td><td>1 for a node the router failed over on its own and that has not answered since; 0 again once it does and a repair has its copies follow</td></tr>
 <tr><td><code>fennec_router_auto_failovers_total{outcome}</code></td><td>counter</td><td>nodes failed over on their own, <code>done</code> when every tenant was promoted, <code>failed</code> when one was not</td></tr>
+<tr><td><code>fennec_router_promotions_total{copy}</code></td><td>counter</td><td>copies of tenants a failover promoted, by whether the copy was connected to its primary as its promotion began: <code>connected</code>, <code>not_connected</code> — every copy of a node whose process was killed among them, its stream ended with it, so the router's line for the tenant, which gives how long before the copy last heard from its primary and how far behind it was, tells one cut off long before from one its node's end cut off — and <code>unknown</code>, a node too old to say. A copy stays connected until a read of its stream fails, 10 s on where its primary's machine was lost or cut off: the line says what it was not sent is lost wherever it was last heard from more than 4 s before. What a copy promoted was not sent is lost</td></tr>
 <tr><td><code>fennec_router_cut_requests_total{outcome}</code></td><td>counter</td><td>requests out to a node as a failover — by hand or on a lease — moved their tenant off it, ended at once rather than left to wait for <code>--upstream-timeout</code> (<a href="sharding-design.html#in-flight">Requests out to a node failed over</a>): <code>sent_again</code> to the tenant's new primary, the node having run nothing or the request being a read or a keyed write; <code>may_have_run</code>, a write sent whole with no key, answered <code>502</code>; <code>stream_ended</code>, a subscription ended for its client to open again. Each is counted in <code>fennec_router_requests_total</code> as well, by the status it was answered with; none is an upstream error</td></tr>
 </tbody>
 </table>

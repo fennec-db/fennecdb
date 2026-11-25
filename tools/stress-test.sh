@@ -41,9 +41,9 @@ CRATE="${CRATE:-}"
 TIMEOUT="${TIMEOUT:-14400}"
 BUSY="${BUSY:-3}"
 CPUS="${CPUS:-3}"
-# rust:1.99.1-bookworm's multi-arch index digest; a bump goes with
+# rust:1.100.0-bookworm's multi-arch index digest; a bump goes with
 # rust-toolchain.toml (docker buildx imagetools inspect rust:X.Y.Z-bookworm).
-IMAGE="${IMAGE:-rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c}"
+IMAGE="${IMAGE:-rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea}"
 # CI's node major, from nodejs.org/dist with the sums of its SHASUMS256.txt.
 NODE_VERSION=22.23.5
 NODE_SHA_X64=cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8

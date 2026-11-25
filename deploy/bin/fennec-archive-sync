@@ -23,7 +23,17 @@
 #    that grows as it reads it, and a busy tenant's newest segment never
 #    reached the bucket. Copied as it stood, a segment cut short is what a
 #    crash leaves, read by a restore to its last whole record, and the next
-#    run copies it again.
+#    run copies it again. Only the files the archiver's group may read:
+#    fennecdb makes every file 0600 whatever the archiver's UMask, and the
+#    unit's chmod (ExecStartPre=, as root) gives the group read of the
+#    archive as it stands. A segment or image made since is the archiver's
+#    alone until the next run's step; listed with the rest, rclone failed
+#    the run on it, which a busy tenant's 64 MB segments made every few
+#    seconds. Each is copied by the next run, as a crash's would be. A
+#    directory older than the run that the group cannot read is one the
+#    unit's step never reached -- it did not run, or stopped -- and fails
+#    the run, where copying around it wrote a success for a copy that left
+#    a tenant out, and the alert never fired.
 # 3. The success written for node_exporter's textfile collector
 #    (FennecArchiveSyncStale), by rename so it never reads half a file, and
 #    readable by node_exporter's own user: under the unit's UMask it was
@@ -39,9 +49,16 @@ rc() { rclone --config "$CREDENTIALS_DIRECTORY/rclone.conf" --cache-dir "$CACHE_
 
 here="$(stat -f -c %i "$src") $(stat -c %i "$src")"
 mark=$STATE_DIRECTORY/copied-from
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# The first step gives the group the archive's directory: without it the
+# list below is empty, and a run copying nothing would be written as a
+# success.
+if ! [ -r "$src" ] || ! [ -x "$src" ]; then
+    echo "fennec-archive-sync: $src is not readable by $(id -un): did the unit's ExecStartPre= run?" >&2
+    exit 1
+fi
 if [ "$(cat "$mark" 2>/dev/null || true)" != "$here" ]; then
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
     # Exit 3 is a remote with no such directory: nothing there yet.
     set +e
     rc lsf -R --fast-list --files-only "$dst" > "$tmp/bucket"
@@ -64,9 +81,33 @@ if [ "$(cat "$mark" 2>/dev/null || true)" != "$here" ]; then
     echo "$here" > "$mark"
 fi
 
+# A directory older than this run that the group cannot read is one the
+# unit's chmod never reached: it did not run (its "-" lets a failure pass),
+# or stopped. Passed by below, a tenant was left out of every copy while
+# each run wrote its success, and FennecArchiveSyncStale never fired; so
+# the run fails. The unit notes when the run began before the chmod
+# (`began`), and a directory changed since -- made after the chmod, or a
+# file made or renamed in it -- is the next run's to judge.
+began=$STATE_DIRECTORY/began
+if ! [ -f "$began" ]; then
+    echo "fennec-archive-sync: $began is missing: the unit's first ExecStartPre= writes it" >&2
+    exit 1
+fi
+(cd "$src" && find . -type d ! -perm -050 -prune ! -cnewer "$began" -print) | sed 's|^\./||' > "$tmp/unread"
+if [ -s "$tmp/unread" ]; then
+    echo "fennec-archive-sync: $(wc -l < "$tmp/unread") directories of $src older than this run are not readable by the group this run reads with, $(head -3 "$tmp/unread" | tr '\n' ' ')among them: did the unit's ExecStartPre= chmod run?" >&2
+    exit 1
+fi
+
+# What the group may read (step 2): a directory the archiver made since
+# the first step is passed by, never opened, and so is a file. rclone
+# takes the list as a filter: a file in it renamed or pruned before rclone
+# looks is no error.
+(cd "$src" && find . \( -type d ! -perm -050 -prune \) -o \( -type f -perm -040 -print \)) \
+    | sed 's|^\./||' > "$tmp/readable"
 # --fast-list: the bucket listed a thousand names a request, rather than a
 # request a directory -- a tenant a run, whether it wrote or not.
-rc copy --fast-list --local-no-check-updated "$src" "$dst"
+rc copy --fast-list --local-no-check-updated --files-from-raw "$tmp/readable" "$src" "$dst"
 
 f=$textfile/fennec-archive-sync-$node.prom
 if [ -d "$textfile" ] && [ -w "$textfile" ]; then

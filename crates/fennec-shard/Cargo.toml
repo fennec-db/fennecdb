@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 fennec-core = { workspace = true, features = ["std-fs", "full"] }
 fennec-ql.workspace = true
@@ -118,3 +121,8 @@ path = "tests/replica_retries.rs"
 [[test]]
 name = "read_replicas"
 path = "tests/read_replicas.rs"
+
+# Counts every thread's heap with an allocator of its own: a binary apart.
+[[test]]
+name = "move_peak"
+path = "tests/move_peak.rs"

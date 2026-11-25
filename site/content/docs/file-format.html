@@ -59,7 +59,11 @@ from before writes each plain record it takes with a checksum of its own,
 so its file, its archive and every restore from it stay checked.</p>
 
 <p>Inside a data record, each document is
-<code>[op][doc-id][length][fields]</code>, each field a tagged value. A
+<code>[op][doc-id][length][fields]</code>, each field a tagged value. The
+op is 1 for a put and 2 for a delete. An open refuses any other it reads,
+naming its byte and where it is (<code>unknown write op 3 at
+4096</code>), and a replica one its primary sends: neither takes it as a
+write that changes nothing. A
 <code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
 indices, each as its distance from the one before, then the weights as
 <code>f32</code>. An object, in a <code>json</code> field, is
@@ -125,7 +129,23 @@ file is cut there, and the server logs how many bytes and records went
 (<code>a torn tail: no whole record after it says a sync covered
 it</code>). A write answered as durable is among them only where the disk
 damaged the last record it had synced, which no record after it can
-vouch for.</p>
+vouch for. The open leaves a mark after what it keeps (kind 14), which
+says everything it kept was durable: the records that said so may have
+gone with the tail, and the next open reads the file as this one did. It
+syncs the file first, then the mark, written where the cut begins with a
+record head after it whose length ends any read there, then the cut, so
+the next open reads the file the same way wherever a power cut stops it,
+given a disk that writes a 512-byte sector whole or not at all, as NVMe
+drives promise. Where the mark would cross a disk sector's end it is
+written in three synced steps, and a power cut between them can have the
+next open refuse the file, naming the damaged record; and where a record
+below the cut was itself damaged on the disk, cut that record and the
+ones after it: where the only record vouching for it was one being
+overwritten — a large write that never finished, or the record right
+after a torn one shorter than the 19 bytes the mark and head take — or a
+record crafted into the torn one's text hides those that vouch.
+v0.2.0 made no mark there, and the open after its cut could cut again,
+synced records the first had kept among them.</p>
 
 <p>What follows is read record by record where it can be: after a record
 that fails its checksum, from that record's end. A record whose length
@@ -263,7 +283,10 @@ type, after the collation's where it has one. A dropped field's place
 (<code>alter collection ... drop field</code>) is written where it stands
 as a field with no name and type tag 12: the documents written before the
 drop hold a value there, which a read passes over, and a document written
-after it a <code>null</code>. A document that ends before a field's place
+after it a <code>null</code>, as every document does once a
+<code>compact</code> has run. The place stays for the collection's life:
+no compact renumbers the places, which a replica applying the writes after
+it reads by. A document that ends before a field's place
 holds <code>null</code> there: it was written before the field was
 added. A <code>json</code> field is type tag 14, and after its index kind
 come the indexes on paths into it: a count, then each one's keys
@@ -385,7 +408,7 @@ it is set; a file that never had a replica holds none. An old binary cannot
 open a file with one and reports <code>unknown record kind 8</code>.</p>
 </details>
 
-<h2>The id counter exists because of compact</h2>
+<h2 id="the-id-counter-exists-because-of-compact">The id counter exists because of compaction</h2>
 
 <p>Kind 7 keeps a collection's next document id, so a <code>compact</code>
 can never hand a deleted id out again. In an image it also carries an index
@@ -412,7 +435,11 @@ than walking the record's frames, whose heads each say where the next one
 starts: a chain of cache misses that was 5.5 ms of a 14.2 ms open at
 100 000 × 128, which opens in 8.4 ms with it. An index that does not fit the
 record — another length, ids out of order, a payload past its end — is
-passed over and the record walked. Every reader of the record, older ones
+passed over and the record walked, and so is one whose first byte, the mark
+of its layout, the binary does not know. The index reads no document's op,
+so a later version that adds an op writes its index under a new mark: an
+older binary walks the record and refuses the op by its byte rather than
+taking the frame for a put. Every reader of the record, older ones
 included, reads the counter and nothing after it.</p>
 </details>
 
@@ -460,6 +487,15 @@ vectors: nothing else takes a tombstone out, and every write that changes a
 document's vector, or deletes it, leaves one. A graph without them is kept
 as it is.</p>
 
+<p><code>compact</code> writes each collection's live documents in id order,
+each a put framed afresh. Where the file is larger than the memory the
+system has for its pages, it reads the file from its start to its end rather
+than a document at a time by id, and sorts the documents through a scratch
+file, <code>&lt;file&gt;.sorting</code> (<code>data.fennec.sorting</code>
+beside <code>data.fennec</code>), gone from its directory as soon as it is
+made: the new file is the same, byte for byte (<a
+href="/docs/server#compaction">how long each takes</a>).</p>
+
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record
 cut short inside it, or an image longer than the file, is refused as a damaged
@@ -468,5 +504,18 @@ file rather than cut off as a crash's torn tail is. A server's
 <code>&lt;file&gt;.fennec.beside</code>, with no lock held; the documents written
 meanwhile go into it as a data record at the end of the image, and its header
 takes the counter as it stands when it is renamed into place. A side file left
-by a crash is written over by the next compact, and can be deleted.</p>
+by a crash — compaction's <code>.beside</code>, a checkpoint's
+<code>.compacting</code>, a replica's <code>.taking</code>, the shell's
+<code>.saving</code>, each as large as the live data, and on Windows the
+<code>.sorting</code> a compact past the page cache sorts through — is removed the next
+time the file is opened to be written (a server's start, the shell, an app),
+and a <code>--dir</code> node removes its tenants' as it starts; a read-only
+open (<code>--read-only</code>, <code>fennec types</code>) leaves it. The
+server, a node and the router log each it removes, with its size, and the
+shell says each on stderr. A file at such a name with a lock file beside it
+(<code>&lt;name&gt;.lock</code>, held or not) is a database of its own, opened
+once as one, and is left, said at every open as <code>kept: a lock file beside
+it</code>; if it is none, delete it and its lock file by hand. Until then a side
+file can be deleted by hand, while nothing has the file open to write it: one a
+running server is writing is a compaction under way.</p>
 </details>

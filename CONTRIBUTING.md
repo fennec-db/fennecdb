@@ -132,14 +132,29 @@ change's. The job's table shows the plain count, the calls and the bytes an
 op beside the figure, and the count uploads each side's profile by function
 (`perf-profiles`) for `callgrind_annotate`. `make perf-gate` runs it on Linux
 with valgrind; on macOS, in Docker. It counts instructions, on one thread, of
-x86_64 musl's code: what it does not see — cycles, threads, system calls such
-as fsyncs, other targets, writes of vectors, a replica applying its primary's
-records — is measured by hand.
+x86_64 musl's code. Beside them, four I/O workloads — 500 durable puts, a
+`/batch` of 1 000, a block that spills past 16 MB and a `compact` — run
+against main's `fennec-server` and the pull request's under `strace`, and
+any change in the server's fsyncs, writebacks, renames, bytes written,
+bytes not yet durable when it answered, failed calls or files made,
+truncated, linked and unlinked — each sync and failure by its call and its
+file, bytes file by file, the database's own apart from its sync log's —
+or in the file the setup leaves fails, fewer as well as more (`make
+perf-gate-io`); a server that opens a file `O_SYNC`, `O_DSYNC` or
+`O_DIRECT` or sets its attributes by `ioctl`, or sets up io_uring or
+Linux AIO, is refused. What neither sees — cycles, threads, the time a
+system call takes, other targets, writes of vectors, a replica applying its
+primary's records — is measured by hand.
 
 A change that costs instructions or bytes on purpose — a feature on a hot
 path — adds an entry to `PERF_ACCEPTED` in `tools/perf_gate.py`: the
 workload, `"metric": "bytes"` where it lets bytes through, the most it lets
-through and why, with what `make instr-compare` measured. The entry lets that
+through and why, with what `make instr-compare` measured; an I/O workload's
+entry names its count (`"metric": "fsyncs"`, say), the file for a sync and
+bytes written (`"file": "io.fennec"`), the call for a sync (`"call":
+"fdatasync"`), and the move it lets through, up or down, exactly — the
+counts are exact, and an entry larger than its move fails
+(`"+1"`, `"+100%"`, `"-50%"`; from none, a number alone). The entry lets that
 workload through in that pull request alone, and stays as the record of it.
 The owner approves every entry, and every edit of the gate's own files
 (`gate.rs`, `tools/perf_gate.py`, the perf jobs of `ci.yml`), which the job

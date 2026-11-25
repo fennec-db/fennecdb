@@ -52,7 +52,9 @@ LimitCORE=0
 
 # Group-readable, so the bucket sync (fennec-sync, in this group) reads the
 # archive and nothing else of this service's: sealed with the key, its
-# files say nothing without it.
+# files say nothing without it. fennec makes each file 0600 and each
+# directory 0700 whatever the UMask; the sync's run gives the group read
+# of them first (fennec-archive-sync@.service's ExecStartPre=).
 StateDirectory=fennecdb/archive/%i
 StateDirectoryMode=0750
 ReadWritePaths=/var/lib/fennecdb/archive/%i

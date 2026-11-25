@@ -170,8 +170,9 @@ million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
 a live record a few to a page among dead ones, and one read in five waited
 for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
 loaded). `Database::garbage` is the file's bytes as written (`appended`)
-against the live records' (`Store::total_bytes - dead_bytes`, which the
-stores counted as writes landed already and an image's index carries) and
+against the live records' (`Store::live_bytes`, `total_bytes - dead_bytes`,
+which the stores counted as writes landed already and an image's index
+carries: [whole frames](#dead-bytes-are-whole-frames)) and
 what the last compact kept besides the documents (`kept`: schemas,
 counters, graphs, the file less every record the stores hold -- the
 versions a compact beside the writes copied and saw written over are dead,
@@ -233,6 +234,330 @@ the CPU alone, nothing moved. A database
 read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
+
+### Dead bytes are whole frames
+
+A version written over or deleted adds its whole frame to `dead_bytes`,
+head and payload, the head's length worked out from the id and the
+payload's length as `put_uvarint` writes them, each the shortest
+(`store::dead_frame`). So `Store::live_bytes`, `total_bytes - dead_bytes`,
+is the live frames to the byte -- what a compact writes of the documents,
+`Garbage::live`, and `fennec_data_bytes` (`CollectionStats::live_bytes`),
+read at a scrape with no walk of the index: through appends, a block put
+back, the walks a load makes in memory and in the file and an image's
+index (`store::tests::the_live_bytes_are_the_live_frames_to_the_byte`),
+and over HTTP against what a compact keeps (fennec-server's
+`the_data_bytes_are_the_live_records`). Through 0.2.0 a version written
+over or deleted left its payload's length alone, its head of 3 bytes or
+more counted live -- that test's 250 rows of 3 409 bytes, 200 of them
+written over three times and 50 deleted, read as 5 628 -- and
+`fennec_data_bytes` (`fenec_data_bytes` from 0.1.5 to 0.1.12) said
+`CollectionStats::bytes`, every record dead or alive, where its help and
+the monitoring page said the live ones: a P6 soak's server said 1 907 MiB
+of a 1 950 MiB file just before it compacted at half dead, and the page's
+alert, `dead / (data + dead) > 0.5`, could not fire.
+`CollectionStats::bytes` keeps its meaning, every record's bytes, which
+the browser module's `stats()` answers as `bytes` and @fennecdb/cloudflare
+reads as what the module holds (`held`); the shell's `.stats` says the
+live and the dead apart, as the studio's sidebar does.
+
+An image an older build wrote carries the payload count in its index,
+which an open takes (`adopt_index`): such a file's live bytes are high by
+its dead versions' heads until its next compact, where a walk of the frames
+counts them whole. `Store::live_len` still walks the index for the length
+`write_live` writes: a file's frame may hold a varint longer than the
+shortest, which no writer here makes and `dead_frame` would count short,
+and a length that is off makes the record after the data one unreadable.
+What it costs: a put over a row runs 14 instructions more of fennec's own
+code, all in `Store::append_onto` (the 530th put of `replays` traced by
+function against main, `make instr-compare TRACE=fennec_http::handle`:
+9 104 -> 9 118 of the request's 17 983). Over eight identities a side,
+`put` read +57 instructions a request (+0.27%) and `batch`, 100 rows
+written over a request, +2 611 (+0.26%), each inside two standard errors.
+A varint's length is protobuf's `(log2 * 9 + 73) / 64`
+(`store::varint_len`), an add and a shift: with `div_ceil(7)`, which
+divides, the put's own code was 29 more, and `after`, which an image's
+index asks once a document as it is written and as an open takes it, is
+cheaper by as much. The browser module grew 91 bytes, `dead_frame` held
+once there (`inline(never)`), where a copy in each of its three callers
+grew it 141; on aarch64 macOS fennec-server's code grew 128 bytes and
+`fennec`'s shrank 128, both files the same size to the byte. CI's perf
+job holds the cost.
+
+### Dropped places
+
+**A compact keeps every place a collection's documents hold.** `alter
+collection x drop field b` leaves `b`'s place in the documents
+([fennecql.md](fennecql.md#alter-collection)), and every write after it
+puts a one-byte `null` there, or nothing where no field follows it. A
+compact makes the value at each dropped place that `null`, and leaves out
+the dropped places a document ends with, as a write does; every other
+value is copied as its bytes stand, at the place it stood
+(`schema::reclaim`). It renumbers nothing: the schema's `dropped` list
+stays for the collection's life, in memory, in the file and on every copy.
+The reclaim rides on the copy every compact makes of the live records: in
+memory into the fresh segments (`Store::compacted`), and over a mapped
+file by writing again, into the store's segments, only the documents
+holding a value at a dropped place, before the rewrite streams the live
+records into the new file and points the store at it (`Store::reclaim`,
+`relocate_live`). It does so under the lock and beside the database alike,
+so a compact over a collection holding a dropped place runs beside the
+database as every other compact does; one used to hold the write lock
+throughout. The store notes the places it reclaimed (`Store::cleared`, in
+memory alone): the compacts after the first walk no document for them, as
+none walked once the places were taken out, until a drop adds a place or
+the process starts again.
+
+*The two bugs.* A compact took the places out (`strip_dropped`) from 0.1.7,
+the release that brought `drop field`, to 0.2.0, and emptied the list.
+That went wrong two ways. *Refused part way:* it stripped one collection
+at a time, in memory as it went, so a document no decoder reads in a later
+collection -- a damaged value the open let through (read unchecked below
+a claim), or, once the depth was bounded after 0.2.0, a value nesting past
+`codec::MAX_DEPTH` that 0.2.0 wrote through a `[[json]]` field
+([crates.md](crates.md#how-deep-a-value-nests)) -- refused it with the
+earlier collections renumbered in memory and the file not rewritten. The
+writes after it were encoded by the renumbered places: a later `put x {a:
+10, c: 30, d: 40}` read `[10, 30, 40]` in the process and `[10, 40, null]`
+after a reopen and on a replica. The server's own compaction (`--auto-compact`,
+from 0.1.10) met the same refusal every five seconds, logging it each
+time. *Succeeded, telling no copy:* a compact
+appends no record. A copy caught up before it kept the places, and read
+every later write of the collection one field early. A copy that
+compacted itself first (`may_write` lets a following database compact, and
+a server's compaction runs on one) read its primary's later writes one
+field late, `[10, null, 30]`. An archive restored from an image taken
+before the compact, with the writes after it, misread them, and so did
+every image the archive took after. A `--dir` node's standby misread them,
+and after a failover the misread values were the tenant's. Nothing was
+loud until the primary's next `create index`, whose record carries the
+whole schema and failed the copy's layout check (`Database::apply`). A
+copy now reads each write as it was made, and refuses one made by other
+places than it holds ([replication.md](replication.md#a-copy-across-a-compact)).
+
+*What a compact meets that it cannot read.* A compact is refused for
+nothing a document holds, and fails only as storage fails:
+
+- The reclaim reads a document as far as its last dropped place, a value
+  at a time (`skip_value`). One it cannot read that far is copied as it
+  is, and is refused where it is read, in the same words, after the compact
+  as before.
+- A graph holding tombstones is built again from every document's vector
+  (`build_graph` under the lock, `begin_graphs` and `finish_graphs` beside
+  the database). A document it cannot read leaves the graph as it stands,
+  tombstones and all, answering as it did; a graph built without the
+  document would not. No file brings such a document to it today: an open
+  reads every vector a graph holds, past every value before it, and
+  refuses the file, as `create index`, a write and a replica's apply do
+  (`compact_places::a_vector_past_a_value_none_reads_is_refused_at_the_open`).
+  So the engine's own test puts one in a store
+  (`maintenance::tests::a_graph_a_compact_cannot_rebuild_stays_as_it_stood`),
+  where each path used to refuse the compact: under the lock part way, the
+  collections before it compacted.
+- Nothing else in a compact decodes a document. The rewrite copies payloads
+  by their locations, whose one refusal is a location outside its segment
+  or the mapped file: a damaged store, which every read of that row meets
+  too, and which fails the database (below).
+
+The browser module's compact is `execute`'s, under the lock. The copy it
+built beside the page, and every index over it built again
+(`begin_compact`, `finish_compact`), refused a compact for a document any
+index could not read. Nothing reached it, since fennec-wasm calls no
+`maintain`, and it is gone.
+
+*Why places are never renumbered.* A copy applies its primary's records by
+the places it holds, and a compact is no record. The ways rejected:
+
+- A record that carries the strip to every copy. It costs nothing a write,
+  but every copy then runs a full rewrite as it applies it, an open must
+  replay it idempotently, and a copy must never strip on its own. It is a
+  new record kind besides, which an older copy refuses.
+- A layout number in every write: bytes on every write, and a new kind of
+  data record.
+- Seeding every copy again after a stripping compact. That sends an image
+  to each copy, and leaves a window while standbys are seeding, which a
+  failover inside it would lose.
+- The first fix (branch `compact-refused-midway`): every stripped store,
+  and every graph, built before any is put in place. It mended the refusal
+  part way and left the copies misreading. It also held the data twice at
+  the peak, every rebuilt graph a second time, and in the browser that
+  peak is never given back.
+
+Kept places mend both bugs with no format change: 0.2.0 reads every file
+this writes.
+
+*What it costs.* A byte a document for each dropped place a field
+follows, for the collection's life, and a value every read of such a field
+passes. Counted (`crates/fennec-core/examples/places.rs`, macOS, the
+instructions an op over 8 identities a build, 7 runs each,
+[benchmarks.md](benchmarks.md#instruction-counts)) against main's build
+over the same rows stripped as its compact left them -- `x (a int, b text,
+c int, d text)`, 100 000 rows read into memory, `b` dropped and the
+collection compacted:
+
+| | stripped (main) | kept (this) | |
+|---|---|---|---|
+| bytes a document, 1 / 4 / 16 text fields dropped | 43.04 | 44.04 / 47.04 / 59.04 | +1 a place |
+| a get by id | 13 419 | 13 446 | inside the draw |
+| a scan by `c` with a limit, every row read | 43.92 M | 45.75 M | +4.17%, 18 a row |
+| a plain `get` of 100 rows as JSON | 234 082 | 238 783 | +2.01%, 47 a row |
+| a put over a row | 11 959 | 12 038 | +79, +0.66% |
+
+A read passing a dropped place as any value calls the skip for it, 34
+instructions of its frame and its match and 10 of the loop's by a trace:
+the scan paid 44 a row (+8.7%). A `null` passed by its byte
+(`codec::skip_passing`) is a compare and an add. A filter over a
+collection holding a dropped place before a field it reads reads its
+fields out of line with its paths (`Store::read_fields_passing`, a second
+copy of the reader), through the branch every filter takes for its paths
+already: 18 a row. `Schema::read_doc` passes only dropped places in its
+skip, so it passes them so at no cost to another collection: a put's read
+of the row it writes over took the put from +119 to +53 and +79 in two
+counts, the rest the
+`null` it writes, each field's place worked out and a byte more framed and
+copied. Asked anywhere every collection's rows go
+through -- in the reader's loop, or in the JSON writer's, where a page of
+another collection paid 150 instructions held as a bool across its rows
+and 518 asked of the collection -- the test cost every other collection's
+reads, so the JSON writer passes a dropped place as any value. With no
+dropped place, the same reads and the put counted inside the draw of
+main's (-81, -403, +33, -12). A compact:
+
+| | stripped (main) | kept (this) | |
+|---|---|---|---|
+| `x` beside the database, a tenth of its rows written over, after a compact in the same process | 81.12 M | 81.49 M | +0.46%: a byte more a row to copy |
+| the same, the first after an open | 82.87 M | 103.82 M | +25.3%: the walk, 209 a row |
+| the perf gate's `file-compact`, no dropped place | 10.50 M | 10.51 M | inside the draw; `p`'s too (+77 of 81.09 M) |
+| two collections a field dropped each, 2 x 500 000 rows mapped, under the lock, peak footprint above the open | 2 480 M, 44.8 MB | 2 053 M, 37.7 MB | the first after the drop |
+| the same, 2 x 200 000 rows read into memory | 729 M, 7.3 MB | 570 M, 7.2 MB | |
+
+The first compact after a drop writes the documents holding a value at the
+place again, where the strip wrote every document again. The first after
+an open walks every document of a collection holding a dropped place, a
+value at a time as far as its last one, copying nothing where it finds
+only `null`s (`schema::reclaims`); building the copy to compare took that
+compact to +47%; walked, +25%. Beside the database the walk holds no
+lock: the server's compaction and the native library's `Compactor`, and a
+`compact` a server or the native library is sent alone
+(`Database::maintain`). The shell's `compact`, and `Database::compact`
+wherever a program calls it, walks under the write lock. The browser
+module has no walk: its compact, under the lock, builds every document of
+such a collection again as the reclaim would leave it (`schema::reclaim`
+in `Store::compacted`), kept where it changed, once after a drop or an
+open.
+The store notes the places it reclaimed, so the compacts
+after it walk nothing; an open forgets them, the note being in no file.
+
+*Aggregates, orders, and what an open reads.* An aggregate's fields and
+its group keys, and an order's keys, passed a dropped place as any value
+too, which this change's review found; counted as above, over
+`x (a int, b text, k int, v int)`, 100 000 rows in 100 groups by `k`, `b`
+dropped and compacted, and over `x`'s rows ordered by `c`:
+
+| | stripped (main) | kept, read as any value | kept, read passing | |
+|---|---|---|---|---|
+| `get x select k, count(*), sum(v) group k` | 90.25 M | 94.66 M | 91.46 M | +1.33%, 12 a row (passed as any value: +4.88%, 44) |
+| the same, no field ever dropped (`p`) | 90.25 M | 90.26 M | 90.26 M | +134, inside 2 SE (±6 055) |
+| `get x order c limit 10` | 60.68 M | 66.28 M | 60.28 M | -0.66%, -4 a row (passed as any value: +9.23%, 56) |
+| the same, `p` | 60.68 M | 60.68 M | 60.68 M | +3, inside 2 SE (±2 399) |
+
+Each now picks its reader once a query, as a filter does. The aggregate's
+(`aggregate::Reader::passing`) calls `Store::read_fields_passing` where a
+dropped place comes before a field it reads: a flag asked a row, which a
+flag in place of the lengths of its paths and computed values pays for
+(`Reader::more`). Out of line in a wrapper of its own, the second reader
+cost 34 instructions a row by a trace, all a passed `null` saves. The rest
+of the aggregate's 12 a row is the compare a passed value of any other
+kind pays, and the payload a byte longer. An order picks at its call
+(`order_ids_of`): `order_ids_passing`, a copy of its own out of line, or
+`order_ids` as it was. Any test or copy beside the loop inside `order_ids`
+-- a second loop, a generic copy, the original inlined beside a call out
+of line -- moved its registers and took 1 to 11 instructions a row from
+every other collection's order. The passing copy inlines its reader
+(`Store::read_field_in`), a call a row fewer than `order_ids` makes of
+`read_field`, and counts below main.
+
+Every other reader of a field past a dropped place passes it as any value,
+about 34 instructions a row a place: a page's columns (as many rows as its
+limit), a facet's field, a `lookup`'s key, and what is read once a process
+-- each vector an open copies into a graph's arena (`Store::field_at`),
+and the field an index is built from at the first read after an open or a
+server's warm-up. Counted once a process, plainly, three runs a side
+(millions against the allocator's hundreds):
+
+| | stripped (main) | kept | |
+|---|---|---|---|
+| a hash index of `c int @hash` built from 100 000 documents (`Database::warm`) | 131.39 M | 134.35 M | +2.26%, 30 a row |
+| the same, `p` | 127.70 M | 127.66 M | -0.03% |
+| the open, read into memory, of 100 000 rows `x (a int, b text, v vector<8> @hnsw(cosine))` checkpointed with its graph | 123.93 M | 130.22 M | +5.07%, 63 a row |
+| the same, `p` | 125.11 M | 125.07 M | -0.03% |
+
+Each is paid once a process, a few per cent of what that build or open
+costs whole, so neither keeps a second copy of its reader: a server warms
+an index once, and opens a file once. A `--dir` node pays it again at each
+open of a tenant it had closed, a collection's index or graph at a time.
+
+*How many places.* A collection holds `schema::MAX_PLACES`, 4 096, over
+its life: its fields and its dropped ones. An `alter ... add field` past
+them is refused, and so is a `create` declaring more fields, a declared
+schema too. The refusal says to make the collection again -- create
+another and copy the rows into it -- which is rid of the places, or,
+where the fields alone fill them, that making it again keeps them.
+PostgreSQL's dropped columns count toward
+its 1 600 the same way; 4 096 is MySQL's column count, past SQLite's
+default 2 000, so a table `fennec import` copies fits. A file holding more
+places -- 0.2.0 had no bound -- opens as it is (`Schema::decode` counts
+none): no read refuses what a write took. Its collection takes every alter
+that adds no place, a rename and a drop: the count is held where
+`Schema::new` asks for it -- a `create`, a declared schema, an import --
+and on an add (`places_full`); an alter's check of the fields it leaves
+counts none (`Schema::checked`). A rename first went through
+`Schema::new`, which refused it on a collection of 4 097 fields ("declares
+4097 fields") though it adds no place
+(`compact_places::a_collection_past_the_bound_takes_every_alter_but_an_add`,
+a schema of 4 097 fields made whole, as 0.2.0's parser made one, and one of
+4 094 and four dropped places). A copy takes its primary's schema as it
+comes.
+
+*The rest of a compact.*
+
+- From the first store a compact changes until every store points at the
+  new file, a panic fails the database (`compact_unwound`), as one landing
+  a block does through `unwound`. A server takes a lock a panic poisoned as
+  it stands, and stores half pointed at the new file would read a
+  handover's records at the old one's places.
+- Beside the database nothing changes before the side file takes the
+  file's place. From there to the last store, a panic fails the database
+  too (`adopted_beside`).
+- A rewritten file the sink cannot map (`Sink::remapped`: the file's length
+  unread, the mapping refused) fails the database as well. `repoint`
+  answered `Ok` there, and the stores read on from the old file's mapping,
+  which they hold. The next handover then read the records appended to the
+  new file at their places in the old one. A checkpoint and an adopted
+  image reach `repoint` too, and fail alike.
+- Under the lock, the stores are compacted one collection at a time before
+  the rewrite (in memory into fresh segments, over a mapped file the
+  reclaimed documents written again), and the only refusal there is a
+  location outside its segment or the file. Met at a later collection, it
+  left the stores before it compacted, their counters and their records'
+  places ahead of the file -- over a mapped file, frames the file never
+  held, which no handover then took in. It fails the database now
+  (`Database::storage`), as the rewrite's own copy of that record already
+  did: writes stop until the file is opened again, which reads back what
+  the file holds, and a server's compaction asks no failed database again
+  (`compact_due`). No write makes such a location, so a test puts one
+  where the store is read (`unwinding`'s `refused`). Beside the database
+  the copies are the maintenance's own: the same refusal leaves the
+  database as it was, and the compact refused.
+- A refusal the server's compaction meets at every look is counted in
+  `fennec_auto_compactions_refused_total` each time, and logged once in its
+  words, until the words change or a compact runs (`link::refusal_is_news`).
+  It was logged every five seconds for as long as it stood. Left after
+  this change: a damaged location met beside the database, which reads of
+  that row meet too; a side file the disk refuses (`Error::Io`, the disk
+  full); and a schema changed or an image adopted during the compact, which
+  the next look gets past. None is what a document holds. The native
+  library's `Compactor` keeps no log, and tries again at its next look.
 
 ## Compaction and the page cache
 
@@ -309,6 +634,214 @@ heat (a uniform workload has none; YCSB's hottest quarter of 16 KB pages
 takes 77% of reads in id order against 96% by heat, which matters only
 once the live records outgrow memory, and E's scans want id order).
 
+### Reading the file in turn
+
+**A compact of a file past the page cache reads it in turn, and writes
+what a compact by id writes** (`store::in_turn`). The new file lays each
+collection's live records in id order, so `Store::write_live` walked the id
+index and copied each record from wherever its last write had put it:
+after updates at keys drawn at random, a page of the mapped file at a time,
+at random. Past the page cache each was a read from the disk -- the P6
+soak's dry run 3, a server in a container of 512 MB over a 2 GB file of
+1.0-1.1 GB live, took 110-344 s a compact at 139-180k major faults a
+minute, the writer at 1 500-2 000 ops/s meanwhile, against 3-6 s where the
+file fitted. Every release that mapped the file compacted so, 0.1.5 to
+0.2.0. Now, where the file is past the room `cache::room` gives it or the
+process waits for the disk (`cache::faulting`) -- the rule the side file
+is written past the cache by -- and the collection holds 4 MiB live or
+more (`in_turn::FROM`), the records are read from the old file's start to
+its end and put in id order on the way, in the same bytes.
+
+Each record's place in the new data record is known before a byte of it
+is read: the frames are laid in id order, each where the one before it
+ends, so a walk of the id index sums them (`Store::buckets`) and cuts them
+into buckets of ids, each at most the budget -- a quarter of the room,
+between 4 and 16 MiB (`in_turn::budget`) -- or one record longer than it.
+Then one pass over the store's frames as they stand, the mapped stretches
+by their place in the file and then the segments in turn, keeps each frame
+the id index points at (`each_standing`) and deals it into its bucket's
+stretch of a scratch file beside the database, through a buffer a bucket:
+the budget shared out between them, 64 KiB to 1 MiB each, 256 buckets at
+the most (`BUCKETS_MOST`, below). The scratch
+file is laid out as the data record is, a bucket's stretch where its frames
+go in the record and as long, its frames in the order they were read.
+Then each bucket in turn is read back into one buffer, each frame put at
+its place by its id (`Places`: a slot of the id index's dense span each,
+and the bucket's run of the sparse ids, sorted once a store and found by
+halving -- a scan of the sparse map a bucket was buckets times sparse ids),
+and the buffer written into the new file. Where
+one bucket holds the collection, no scratch file is made: the frames are
+put in their places in the buffer as they are read (`in_memory`). The new
+file is the one a compact by id writes, byte for byte, so nothing that
+reads it changes: the image's index, `relocate_live`, an open, a scan, a
+replica. The choice is `Store::compact_live`'s, which a compact's data
+record is written through, and it is made by the out (`ImageOut::in_turn`,
+which a rewrite's image under the lock and a compact's side file beside the
+database answer, and nothing else): a snapshot's out asks nothing, and an
+image a pin sends (`pin_image`) is written out by `Store::write_live`, the
+walk by id, which asks nothing. The two are methods apart on purpose:
+with the check inside `write_live`, inlined or not, the walk's loop kept
+one register fewer and reloaded the out from the stack every record --
+19 000 to 25 000 instructions more of 5.67 million for a pinned image of
+10 000 rows (macOS's counts) -- and with it apart the loop is main's,
+instruction for instruction.
+
+*What it holds.* In memory, the buckets' buffers while the records are
+dealt -- the budget shared out between them, each at least 64 KiB, so 16
+MiB together at the most whatever the file: at most 256 buckets
+(`BUCKETS_MOST`, 16 MiB over 64 KiB), past which -- 4 GiB of live records
+in a collection at the most budget, 1 GiB at the least -- the records are
+walked by id, nothing made. The bound is the deal's own: this change's
+second round gave each bucket 64 KiB past 256 of them, which held 1/256 of
+the live bytes -- 400 MiB for 100 GB of documents of 100 KB, a memory the
+room the budget is cut from never weighed -- and a smaller buffer a bucket
+writes the scratch file a smaller piece at a time, at random between the
+buckets; a pass over the file for each 256 buckets is the window rejected
+below. Then one bucket's buffer, 4 bytes a slot of its span of the id
+index and a read buffer of 1 MiB while they are read back. The budget's ceiling is measured (below): buckets
+of 64 MiB took the process's anonymous memory to 76-78 MB, of 32 MiB to
+44-46, of 16 MiB to 28-30, where the walk by id peaks (27-29), and the
+time no further than the runs' spread -- 5.0-8.1, 5.2-7.9 and 4.6-6.6 s.
+The first round's list of the live records by place held 16 bytes a
+document more, 16 MB a million. On the disk, the
+collection's live bytes once, for as long as its record is written, one
+collection at a time: the scratch file is made only where the volume gives
+twice the live bytes and 64 MiB beside what is written so far -- the
+scratch, the data record still to come, the records after it and the
+writes landing meanwhile (`fstatvfs`, `fstatfs`, Windows'
+`FILE_FS_FULL_SIZE_INFORMATION`) -- and the records are walked by id
+otherwise, as they are where it cannot be made or the volume cannot be
+asked. The room is a snapshot, asked as the scratch file is made: a node
+compacting several tenants at once, each on its own thread, can pass it
+for each, as can a volume another program fills meanwhile. Then the
+scratch file's write the disk refuses ends the deal, and the records are
+walked by id (*Its failures*, below), the scratch file's room given back
+as it closes before a record of the walk is written. A scratch file is written and read past the page cache as a side
+file past it is (`F_NOCACHE`; on Linux synced and its pages dropped every
+64 MB, each bucket's dropped once read back): its pages would push out the
+old file's, which the reads need until the swap.
+
+*Its name.* The scratch file is `<file>.sorting` -- `data.fennec.sorting`
+beside `data.fennec` -- made by its open alone (`O_CREAT | O_EXCL`,
+`create_new`) and through no link (`O_NOFOLLOW` on a Unix), then unlinked
+at once on a Unix, and on Windows opened to be deleted as its last handle
+closes (`FILE_FLAG_DELETE_ON_CLOSE`): a crash leaves nothing beside the
+file, the process's end closing the handle. What can leave it is a power
+cut on Windows, or a kill in the instant between a Unix's open and its
+unlink, which leaves it empty: `.sorting` is among `fs::LEFT_BESIDE`, which
+the open that writes the file and a node starting remove
+([durability.md](durability.md#files-modes)). Whatever stands at the name
+as a compact starts is left as it is and the records are walked by id: a
+database a user named so, whose lock `fs::remove_left` keeps it by, held or
+not, a link, on Windows another compact's held open. This change's second
+round made the file by `fs::create_private`, which on a Unix removes what
+stands at its name first, as a side file written whole may -- a user's
+database so named too, its lock held beside it.
+
+*Its failures.* A walk that does not meet every live record as the id index
+has it -- a frame that does not read, a record outside the stretches and
+the segments, as a pinned store's, which keeps no stretch -- leaves the
+records to the walk by id, nothing of the new file written yet. So does a
+scratch file that fails before a byte of the new file is written -- a
+write or a read refused while the records are dealt or the first bucket is
+read back, or that bucket read back otherwise than it was written: nothing
+of the database's own file was touched, so the compact goes on by id,
+said on stderr once a database and failure (`walked_by_id`, a line as a
+server's log writes one), where this change's second round failed the
+compact, and under the lock the database with it. Once the first bucket is
+written into the new file, a write or a read of the scratch file that fails
+fails the compact as a write of its new file does: beside the database,
+the compact alone, the side file removed, the database writing on; under
+the lock (a batch's, the shell's), the database too, as every rewrite
+failing there does (`Database::storage`). A bucket the scratch file gives
+back otherwise than it was written -- each bucket's frames summed as they
+are dealt and again as they are read back (CRC32C), each frame held to its
+id's length and place, the length before it is added to, as a length read
+off a failing disk may be any number and its sum overflowed into a panic
+under the lock (`compact_unwound`) -- is such a failure, `Error::Io`, never
+a record copied wrong. Beside the database the reading and the scratch file
+are the side file's, with no lock held; under the lock, the lock's as the
+walk by id was.
+
+`store::in_turn`'s unit tests hold the copy to the walk by id byte for byte
+over a store reading from two stretches of a mapped file and two segments
+-- ids rewritten within a stretch, from one to the next and into memory,
+deleted, written again, four past the dense array out of their order, one
+longer than a bucket -- in buckets of one record each up to one in memory,
+and over 188 sparse ids, each more than 4 096 past the one before, in three
+buckets of them and more; a store past `BUCKETS_MOST` buckets and a pinned
+store, whose walk misses its mapped records, to the walk by id with nothing
+written; a file and a link at the scratch file's name to the walk by id,
+each left as it was; and a scratch file refusing a write, or handing back
+the first bucket with a flipped byte or a length of `u64::MAX` less one,
+to the walk by id, and the second bucket so to a failed copy, none leaving
+its name. `tests/in_turn.rs` holds a compact in turn to one by id byte for
+byte under the lock and beside the database, over an image, a spilled
+block, a tail taken in from the file and writes in memory, a broken scratch
+file before the new file is written to the file a compact by id writes,
+and one after to the failures above, each test in a directory of its own
+that goes as it ends. Twenty-six mutations each fail at least one: the
+segments left out of the walk, a place one off, a record dealt into the
+next bucket, the sums not compared, a bucket's last buffer never written, a
+head's length one off, the sparse ids' places unsorted, the buckets written
+out last first, a head put one byte on, a payload never put in memory, the
+rule's `or` an `and`, the 4 MiB floor dropped, `compact_live` never asking,
+a compact under the lock or beside the database calling `write_live`
+instead, the side file never asked or never asking, the image under the
+lock never asking, the scratch file left at its name, a walk that missed a
+record copied all the same, the bound on the buckets dropped, a scratch
+file failing in the deal or in the first bucket failing the compact, a
+bucket's run of sparse ids taken from the first sparse id, the scratch
+file made by `create_private`, and a length read back summed before it is
+held to the index's.
+
+*Measured* (a scratch program over `Database::maintain`, the compact
+beside the database; `docker run --cpus=3`, Linux aarch64 under macOS's
+Docker, the 1-minute load under 3 at each run's start, main and this
+change in ABBA order). A file of a million documents of 1 KB, each
+updated once at a random key: 2.04 GB, 1.02 live. In a container of 512
+MB, past the room: by id, 44.9-51.1 s over 10 runs, 526 000-531 000 major
+faults, the process's anonymous memory peaking at 27-29 MB and the
+volume's use at 977 MB over the old file (the new one); in turn, with
+buckets of 16 MiB, 4.6-6.6 s over 10 runs, 1 550-2 630 major faults, 28-30
+MB, 1 921-1 945 MB (the scratch file beside the new one). Of a compact in
+turn, dealing the records took 2.9-3.2 s and reading the buckets back and
+writing them 1.7-1.9 (16 MiB). A scratch file left to the kernel's
+writeback, against one synced and its pages dropped every 64 MB: 5.0-8.5
+s against 5.0-6.5, the writeback stalling the deal (2.6-5.0 s against
+2.8-3.2). Half a million such documents in a container of 2.5 GB, which
+fits: 1.1-2.1 s on main, 1.0-2.8 on this change, by id both, no fault, 16
+MB. Both compacts' files are the same bytes (`cmp`, every pair), so are
+their images' indexes (4 001 502 and 2 000 758 bytes), their opens (a
+warm open 2.7-6.3 ms, the small one 1.5-2.0, by either binary) and their
+scans: a scan of the large one in id order took 74-76 ms where the read
+before had left it in the page cache and 283-736 ms where it had left less
+of it, by either binary on either file; the small one 35-38 ms. `fennec-server`
+(aarch64 macOS, release) grew 16 592 bytes, the browser module none (863
+088 bytes: `store::in_turn` and `fs::Scratch` are a 64-bit Unix's and
+Windows' with `std-fs`). The perf gate's `file-compact` shape (10 000
+rows, under `FROM`), counted by a copy of it on macOS, gave 10.21 million
+instructions on both, heap bytes equal, and a pinned image of the same
+rows 5.65 million against 5.68.
+
+*Rejected.* Laying the new file in the order the records stood in the old
+one (this change's first round): the copy read the file in turn and needed
+no scratch file, but the file kept the order of the last writes -- a scan
+in id order of a million records past the page cache took 2.0-31.7 s
+against 0.21-0.59, the image's index 7.75 MB against 4.00 (a place out of
+id order 4-5 varint bytes, not 1), a warm open 4.7-6.3 ms against 3.5-3.7,
+and the list of the live records by place 16 bytes a document beside 8
+more to index them, 46-53 MB of anonymous memory against 27-30. A list of
+the live records sorted by place, to read only the pages holding one: 16
+bytes a document where the walk of the frames holds nothing, and it reads
+dead pages alike once updates have left a live record on most. A pass over
+the file a window of ids at a time: sixteen passes of 2 GB for 64 MB
+windows. The scratch file's bytes put at their places as they are dealt,
+the file then copied out whole: written at random, a page past the cache is
+read back to be written again. A scratch file a bucket: a descriptor each,
+past a few hundred buckets more than a process may hold, and a name each
+to leave.
+
 ## File format
 
 **File format** (see README *File format*): every record is
@@ -333,6 +866,43 @@ The replay stopped there as at a torn tail, as it did before records had
 lengths, and the frames after it vanished while the open went on with the
 records after them (found in the review of the fuzzer's pull request,
 `a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied`).
+A frame's op is a put (1) or a del (2), and the replay refuses any other
+by its byte and the frame's place in the file ("unknown write op 3 at
+4096") before the frame changes anything: a later version's op, or damage
+below the durable point, which the replay reads unchecked, is never read
+as another. It matches the op once (`Store::replay_noting`,
+`replay_mapped`), each arm counting the version it leaves dead as well as
+the frame itself, and counts no more than before (instructions from
+`proc_pid_rusage` under a bump allocator, medians of 6 runs): `file-open`'s
+100 000 rows mapped -0.02%, read into memory -1.5% (`copy_frame` tests
+`active`'s seal inline, where `active` whole in both arms was a call a
+frame, +1.3%), and a del through `Store::append` -3.4%, its dead count
+taken from `remove`'s answer instead of a second lookup. The browser
+module grew 400 bytes, fennec-server's code some 690. A replica's apply
+refuses one before the frame lands (`Database::apply_frames`, "a write op
+3 is neither a put nor a del"), so `Store::land_frame` is only ever handed
+a put or a del, its other arm a `debug_assert`. An image's index,
+which a mapped open takes in the place of the walk (`Store::adopt_index`),
+reads no op: it names each live document's payload, whatever else the
+record holds. A checkpoint's record holds its frames as they stand,
+deletes and versions written over among them, counted in the index's
+`dead` (`Store::write_image`); only a compact's holds puts alone
+(`write_live`). So a new op comes behind a new mark on the index, which a
+build that does not know it leaves to the walk (the id counter's index,
+below).
+Every release from 0.1.0 through 0.2.0 replayed such a frame as one that
+changed nothing: it counted the version before it dead while the index
+still pointed at it, counted itself live, and the next compact dropped it
+with no word (`store::tests::an_unknown_op_is_refused_by_its_byte`,
+`an_unknown_op_in_the_file_is_refused_by_its_byte`; through a record of
+its own, a block's, a spill's and a land's, each refusal naming the
+frame's place in the file, in
+`a_frame_of_an_op_neither_a_put_nor_a_del_is_refused_where_a_file_is_opened_and_applied`).
+A replica before 0.2.0 landed one in its store as an open replayed it
+(v0.1.12's `apply_frames` handed it to `Store::append`), and took the row
+out of its indexes besides (`unindex_doc(old, None)`) while the store
+still held it. 0.2.0's apply refuses it
+(`a_frame_that_does_not_read_changes_nothing`).
 A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
 append in flight looks torn from outside. Zeros to the end of the
@@ -463,8 +1033,10 @@ in 491 and 2 801 mapped, 866 read.
 *Cut, or refused.* Past D, damage -- a record failing its sum, or a head no
 record reads from: zeros, stale bytes, a record of no sum after checked
 ones, a counter's head anywhere but the front, a head naming a collection
-no create gives (`u32::MAX` on, `whole_record`, whose length fits) -- is
-judged by what follows it (`judge_after`). A whole record after it, by its sum, whose claim is
+no create gives (`u32::MAX` on, `whole_record`, whose length fits), a
+plain one (`0a ff ff ff ff 0f 05`, a newline read as a kind) as well as a
+checked one whose record fails its sum -- is judged by what follows it
+(`judge_after`). A whole record after it, by its sum, whose claim is
 past the damage says an fsync covered the damaged bytes before that
 record was appended: they were on the disk and changed since, and the
 open is refused, naming both ("the record at 1234 fails its checksum, and
@@ -485,6 +1057,232 @@ does a head whose length was damaged past the end (below). The log says
 what the open knows -- "a torn tail: no whole record after it says a sync
 covered it" -- where it said "none of it a write answered as durable",
 which those two make false.
+
+*What a cut leaves.* The open that cuts leaves a close's mark after what
+it keeps (`REC_SYNCED`, its claim its own start; `FileSink::cut`,
+`Database::cut_to`): every byte before the mark was read by that open --
+below D unchecked, past it held to its sums -- and is durable before the
+mark is, and the mark says so, so the next open finds D at the cut and
+reads the file as the open that cut it did. The
+records claiming D are most often the newest whole ones, past the damage,
+and they go with the tail: unmarked, as every version from v0.2.0, which
+brought the claims, cut until the fix (2026-11-22), the next open found
+the file durable only as far as the records left claimed, held the ones
+between that point and the cut to their sums, and judged what failed: a
+row the disk had flipped a bit of below D, read unchecked by the open
+that cut, was cut then as a torn tail with every record after it, synced
+ones. v0.2.0's `torn-wide.fennec` is that file -- its first open cuts
+2 307 463 bytes (23 records) back to 194 119, and unmarked the next cut
+5 358 more, two synced rows -- silently on a Unix, while on Windows, whose
+open cuts and opens again at once (`cut_and_open`), the second open
+refused it ("cut short again"; CI's four Windows jobs on the sixth
+train). Only where a record the open keeps carries a sum
+(`Database::marks_cut`, found from the front at the cut, the first record
+past the counter in a file this version wrote): in a file of no sums --
+a version before checksums wrote it, its torn tail cut -- no claim decides
+what an open reads, and the mark would be the first record that version
+refuses. Nor where a mark whole by its sum already ends the records kept
+-- a close's, or the one a cut a crash stopped left (below): it claims
+them as the cut's would, and the cut is the length's alone, after an
+fsync that makes a close's mark, written unsynced, durable first. The mark is
+the record v0.2.0's closes write, and its survey takes the mark's claim
+for D as this one's does, so a v0.2.0 binary reads a cut file as this
+build does. An open that cuts nothing runs none of it.
+The browser module reads no claim, checking every record past the image,
+so its own cut (`openFile`'s truncate) needs no mark and makes none: it
+reads a file a native open cut and marked as it read the file before the
+cut (refused, both, where a whole record claims past a row failing its
+sum; unmarked, it took the cut file by cutting the two synced rows too).
+
+*The cut's order.* Each step is fsynced before the next: the pages one
+fsync covers reach the disk in no set order, the file's length among them.
+1. The file is fsynced: the pages the earlier process never synced, which
+the open read from the page cache after a crash of the process alone, the
+torn tail with them, and a close's mark that ends what the cut keeps,
+which a close writes unsynced. 2. Marked, the mark is written over the
+torn record's first eight bytes, in place, and right after it a head
+whose length runs past any file (`engine::CUT_SHORT`, 11 bytes: the head
+of a block 2^63 - 1 bytes long), and fsynced: one write inside a 512-byte
+sector, which a power cut is taken to leave whole or as it was (*The
+sector, an assumption*, below), and across a sector's
+end -- the cut in the 18 bytes before one -- three, each fsynced: a zero
+over the torn record's kind byte, the other 18 bytes, then the mark's
+kind byte, so the head at the cut is the torn record's, a zero or the
+whole mark, never a mix. 3. The file is cut after the mark (`set_len(whole
++ 8)`, which grows it back where the tail was shorter than what step 2
+wrote) and fsynced. Unmarked -- a file of no sums, or a whole mark
+already ending what is kept -- the cut is step 1 and step 3.
+
+A power cut leaves, before step 1 returns, the file the earlier crash
+left, nothing of the cut on the disk: the next open is a cutting open
+again. After step 1, the torn file the open read, durable, which the next
+open cuts as this one did. Inside step 2, inside a sector, that, or the 19
+bytes whole, or the length alone where the write grew the file (the torn
+bytes and zeros after them, cut as before). After step 2, the mark and the head past
+the end: the next open finds D at the cut, the mark's claim, reads every
+record before it as this open read them, and stops its walk at the head
+as at any torn tail -- nothing of the torn record after the mark read or
+judged, whatever it holds -- cutting right after the mark and marking
+nothing (a whole mark ends what it keeps). Inside step 3 that, or the file
+cut and marked; after it, the file cut and marked. Unmarked, the torn file
+with what it keeps durable, or the file cut. Each opens, every way a file
+opens, as the open that cut it read it, cutting nothing it kept, and
+every open that writes leaves it as the uninterrupted cut does: the bytes
+kept and one mark. A write or an fsync of the cut that fails fails the
+open, nothing after it written; an open tried again reads the file as the
+page cache holds it -- what the failed step wrote among it, the mark
+perhaps, which may never reach the disk -- and goes on from there, as
+every reopen after a failed fsync takes the page cache's word for bytes
+the disk may not hold ([durability.md](durability.md#storage-errors): the
+kernel may have dropped the pages, and a failed fsync is never retried):
+that general case, which the cut neither widens nor closes but in one
+state. Across a sector's end, a failure once the zero is written -- its
+fsync, the write of the other 18 bytes or of the mark's kind byte (step
+2's second and third writes), or the fsync after either -- leaves the
+zero where an open tried again reads it, durable once its own fsync ran,
+and the kind byte perhaps not: that open reads the window's state below
+with no power cut, refused or, in the window's cases, cutting the flipped
+row and the synced rows after it. A failed cut (step 3) leaves the mark
+whole and durable, read as after step 2.
+
+What came before. The mark alone in one write (57f77b58): torn across a
+sector's end, its first bytes and the torn record's next framed a head
+anew, and with `83 01 ff ff 7f` there (a data head whose length runs past
+the end) the next open cut the flipped row and the synced row after it
+in `torn-wide`'s shape; whole, the walk went on after it into the torn
+record's bytes, and a record there whole by its sum -- a client's text
+can be one -- was read as a write. A single zero after the mark stopped
+the walk but judged what followed it, refusing the open where a record
+there claimed past the zero: a client's text so made, or a later spill of
+a dead block an fsync covered. And a close's mark, unsynced, could lose to
+the shorter length of the cut after it, which the next open then judged
+from the kept records' claims alone: the flipped row and those after it
+cut.
+
+One window is left, inside step 2 across a sector's end: between the zero
+and the mark's kind byte. The zero stops the walk at the cut, so D is the
+claim of the records kept alone, and what follows the zero is judged,
+never read (`judge_after`). Where that is the cutting open's D -- the torn
+record ran past the end or did not frame, or nothing past it claimed more
+-- the open reads the file as the open that cut it did and cuts at the
+zero, or is refused where a whole record after the zero claims past it (a
+later spill of a dead block an fsync covered; a client's text so made).
+Where the records past the cut raised D and a row between the two points
+fails its sum (`torn-wide`'s shape), that row is judged across what
+follows the zero: refused where a record there claims past it -- the
+records past the torn record, still on the disk until step 3 ("the record
+at 289 fails its checksum, and the whole record at 5692 says the file was
+durable past it", the test's) -- and cut, with every record after it,
+synced ones, where the judgment reaches none. It reaches none in two
+ways, three files the test holds to this window (`window_case`). Every
+record claiming past the row -- one, in each file built -- has its head
+under the 19 bytes the cut writes, which take it: the dead spill whose head the zero is (a block
+that spilled just after an fsync and never landed: the row and the three
+synced after it cut, "a dead spill, 3 bytes before a sector's end"), or
+the one record after a torn record shorter than those bytes, whose head
+the other 18 write over (a row of no text, 13 bytes, torn, then one row,
+the only record claiming the fsync past the flipped row: the row and the
+synced one after it cut, "a torn record shorter than the cut writes, 3
+bytes before a sector's end, then one record", and 12 bytes before). Or
+the torn record's own bytes, a client's text, are made a record whole by
+its sum that claims nothing and then a head whose length runs past the
+end: found before the cut's other 18 bytes reach it, that record sends
+the judgment on to the head, where it stops short of the records that
+claim past the row (the row and the synced one after it cut). So a cut of
+synced rows needs all of a row the disk damaged below D, a crash that
+tore the tail, a power cut in the window -- three fsyncs, about 10 ms
+here -- or a write or an fsync failing there (above), and a cut in the 18
+bytes before a sector's end (18 in 512 cuts). Closing it needs a judgment that
+stops at the cut's zero rather than looking past it: a byte no head of
+this version is, which a judgment reaching it refuses -- a change to how
+an open judges any damaged file, not made here.
+
+*The sector, an assumption.* That a power cut leaves a 512-byte sector's
+bytes whole or as they were is what the cut assumes, not what every disk
+promises. NVMe promises it: a write no longer than its atomic write unit
+for a power failure (AWUPF, a logical block at least: 512 bytes or 4 KiB)
+that crosses no atomic boundary lands whole or not at all, and so any
+512-byte span inside one block. SATA's standard promises nothing of a
+sector a power cut stops. SQLite assumes less than the cut: that a sector
+is written linearly, from one end, so a power cut keeps a part of it at its
+front or its back. On a disk that tears a sector so, step 2's one write
+inside a sector can be kept in part as a write across a sector's end can,
+with no zero before it -- a front of the mark and the torn record's next
+bytes framing a head anew, or the mark whole and nothing of the head past
+the end -- the states 57f77b58 left (*What came before*): the next open
+may cut the flipped row and the synced rows after it in `torn-wide`'s
+shape, or read a record of the torn record's bytes whole by its sum as a
+write. The three writes hold under such a tear -- a byte alone kept or
+not, the 18 bytes kept at either end from any byte, as the test builds
+them across a sector's end -- and inside a sector too would cost every
+marked cut two writes and two fsyncs more (+257 k instructions and about
+7 ms an open here, as across a sector's end): not done here, as NVMe's
+promise makes them needless.
+
+On Windows a view another process maps of the file refuses the cut itself
+(step 3; `cut_refused`, `SetEndOfFile`'s `ERROR_USER_MAPPED_FILE`, the
+message naming the views): marked, the mark and the head past the end
+are on the disk by then over the torn record's first bytes, the length
+kept, and the open once the views go reads that file as above, cutting
+right after the mark; unmarked, nothing was written.
+
+Measured (rusage's instruction counter and the wall clock, arm64 macOS,
+a release build of each tree, 3 rounds of 15 opens of an APFS clone of
+each file, the three binaries alternating, medians of the rounds' medians,
+the 1-minute load under 2.5 at the start and 2.1 at the end, 2026-11-22),
+the cut's first form (1a4f8e5b) -> the last round's (57f77b58) -> this
+one: an open cutting a torn last row off a file of 24 rows, the cut inside
+a sector, takes 1.276 M -> 1.427 M -> 1.427 M instructions mapped (1.234 M
+-> 1.389 M -> 1.407 M read into memory), of 10 024 rows 4.437 M -> 4.680 M
+-> 4.683 M (4.904 M -> 5.183 M -> 5.187 M), and 4.9 ms -> 12.6 ms ->
+12.9 ms of wall time on the 24 rows mapped: the 19 bytes written cost what
+the 8 did. The cut 3 bytes before a sector's end, two writes and two
+fsyncs more: 1.256 M -> 1.415 M -> 1.672 M (1.228 M -> 1.392 M -> 1.655 M),
+4.434 M -> 4.694 M -> 4.965 M (4.917 M -> 5.192 M -> 5.468 M), and 5.0 ms
+-> 12.7 ms -> 19.9 ms (6.8 ms -> 14.4 ms -> 22.4 ms on the 10 024), each
+`F_FULLFSYNC` about 4 ms here, in 18 cuts of 512. One cutting a torn
+record right after a close's mark, the length's alone, with the fsync
+before it now: 1.262 M -> 1.154 M -> 1.288 M (1.241 M -> 1.128 M ->
+1.265 M), 4.284 M -> 4.175 M -> 4.418 M (4.771 M -> 4.654 M -> 4.887 M),
+and 4.6 ms -> 4.5 ms -> 8.5 ms. Each on an open only a crash leaves a
+tail for; the files without a tail open in the same count (560 k -> 560 k
+-> 561 k, 3.234 M -> 3.232 M -> 3.230 M mapped). The first form had cost
+133 k-145 k over no mark (602 k -> 736 k on its own files of 24 rows).
+`fennec-server`'s `__text` 4 974 592 -> 4 975 232 bytes (+640, +1 728
+over no mark; the release build, arm64 macOS; the file the same
+7 123 776): what it costs that no file a power cut leaves of the cut is
+read otherwise but in the window; the browser module the same 862 018
+bytes, none of it built there.
+Held by `a_cut_a_power_cut_stops_at_any_step_opens_as_the_cutting_open_read_it`
+(fs.rs: from the steps each way an open writes took, every file a power
+cut after each may leave -- each write after the last fsync lost, whole,
+its length alone, and where it crosses a sector's end split at every byte
+either way, and before the first fsync bytes the earlier process never
+synced lost too -- of 30 files: one torn as `torn-wide` is and one whose
+kept rows no fsync covered, torn long and short, each cut inside a sector
+and 3 and 12 bytes before a sector's end, the torn record's bytes from its
+ninth as written, `83 01 ff ff 7f`, a record whole by its sum claiming its
+own start from its ninth byte and from its tenth, and one claiming
+nothing, that head after it; a dead spill; a torn record of 13 bytes, a
+row of no text, then the one record claiming past a flipped row, at the
+same three places; a close's mark, then a torn record. 639 files a power
+cut may leave, each opened every way, read-only too: each as the cutting
+open read it, but in the window above, where 1 080 opens were refused,
+and its three cases cut, 40 opens of the crafted record, 160 of the dead
+spill and 220 of the record after the short torn one (44 files, each
+after the zero's fsync, the other 18 bytes over that record's head kept
+whole or in part), each case held to be reached. On 57f77b58's cut 679
+opens of 52 of the 27 files then built failed: the record whole at the torn record's ninth byte read as a write
+after the mark, inside a sector too; the mark torn across a sector's end
+cutting the flipped and the synced rows or refusing the open; and the
+length cut after a close's mark kept with the mark lost, the flipped row
+and the four after it cut. On the cut's first form an earlier form of the
+test read lost bytes as zeros and cut the synced rows),
+`a_file_an_open_cut_opens_again_as_that_open_read_it` (a file torn as
+`torn-wide` is, cut by each way an open writes and opened again by every
+way, read-only too) and
+`torn_wide_cut_by_an_open_opens_again_as_that_open_read_it` (the fixture
+itself, answering as v0.2.0 did after each).
 
 *Framed first, a byte at a time last.* What follows the damage is read
 record by record where it can be. A record whose head frames -- a kind this
@@ -512,9 +1310,48 @@ past that the open is refused ("what follows it could not be judged"), as a
 version before refused any head it could not frame, and never for a tear
 at the end, which is never looked past. A head of a kind this version does
 not know whose record is whole by its sum is a later version's, refused as
-before ("unknown record kind 15 at 1234"). A file with no record carrying a
-sum -- one a version before wrote -- keeps the old rule: a record cut short
-at the end or zeros from a head (`zero_tail`, above) cut, any other stop
+before ("unknown record kind 143 at 1234": the message prints the byte,
+here a checked record's of kind 15 with a one-byte claim -- a wider claim
+prints another byte, 175 for two -- where a plain head of kind 15 reads
+"unknown record kind 15"), and so is one naming a collection no create
+gives whole by its sum ("a record names collection
+4294967295, an id no create gives"): a crash leaves bytes no sum holds,
+so a whole record that does not read is damage refused by name, never
+cut (`whole_head`, which sums a head of any kind naming any collection).
+The fuzz fix's walk, as its second review found, judged such a head as
+stale bytes, cutting it and the file there, where a version before
+refused it; one of a kind this version knows whose sum fails is judged
+as a record failing its sum, from its end, as a version before framed
+it, and what the cut takes counts it, as a version before counted it
+(`records_from`). An archive's reader sums one the same way
+(`checked_claim`): read as a record of no sum, it was cut from its
+segment as a power cut's hole, where a version before took it and a
+restore refused it as it applied it. In a file whose records so far
+carry no sum -- the magic alone, the magic and the counter, or one a
+version before checksums wrote -- a checked head of a kind this version
+knows naming such a collection is judged as it is past checked records,
+by its sum, where it is the file's tail: its frame ends the file, or
+zeros run from its end to the file's (`zero_tail` from where its length
+says it ends). A version before read it as the file's first checked
+record and cut it torn where its sum failed. Until the fuzz fix's third
+review the load judged a stopped walk only once a record had carried a
+sum, and refused such a file by the collection the head names, where a
+crash's stale bytes start at a record's head on a block's boundary
+(`a_torn_tail_naming_an_unmade_collection_is_cut_in_a_file_of_no_sums`).
+Whole by its sum it is refused by name, and so is one anywhere else,
+plain records after it, whatever its sum, the file left as it is:
+nothing in such a file says where a crash's tail begins, and judged,
+it would be cut with every plain record after it. A version before cut
+it so, and so did the third review's first fix, which judged such a
+head wherever it framed; its check found it, and the decision taken is
+to refuse it there, as the fuzz fix's walk did before that review. A
+checked head whose varint does not read is refused, as every version
+refused it there, and so is one of a kind this version does not know,
+whatever its sum ("unknown record kind 143 at 1234" at the end of such
+a file, its sum failing): a later version's kind is refused by its
+number, a decision taken too, for the same reason. Otherwise a file
+with no record carrying a sum keeps the old rule: a record cut short at
+the end or zeros from a head (`zero_tail`, above) cut, any other stop
 refused, a counter's head past the front among them, which read as one
 moved the image's end.
 
@@ -751,6 +1588,91 @@ close's mark torn by a power cut after the close is cut by the next open
 and not said as a cut (`torn_mark`): it was no write, and every byte
 before it was durable (`a_torn_close_mark_is_cut_unsaid`).
 
+*What a reader maps.* `fs::open_read_only` takes no lock (root CLAUDE.md,
+*Single writer*), so a server may open the file while the reader walks it,
+and a server opening a file after a crash cuts its torn tail
+(`FileSink::cut`): a page of a mapping wholly past a file's end is the
+process's end to read (`SIGBUS`), the reader's alone, no byte of the file
+harmed. An open cuts where its walk stops, at a record failing its sum
+that ends past the durable point the survey found, or where the spills the
+walk ends with start (`load_records`' `whole`) -- never before the record
+holding that point, nor before a run of spills, the close's marks among
+them, reaching it. So on a Unix the reader first surveys the file by
+reading it, a mebibyte at a time, never through a mapping
+(`engine::surveyed`): the survey's own walk over the heads, stopping where
+it stops, finding the same graphs, newest records and samples and so the
+same durable point, which its load takes in the place of a walk of the
+mapping (`Database::load_surveyed`) -- the heads are walked once, as
+before -- and the runs of spills, with where a record starts kept every 64
+KiB. It maps the file up to the last such start at or before the point,
+rounded down to 64 KiB, the largest page of a system it maps on, and reads
+the rest into memory of its own laid over the mapping's pages
+(`Mapping::reading`: anonymous memory `MAP_FIXED` over them before
+anything reads them, made read-only once read). What its walk reads past
+the point is that copy, which no cut reaches, and a file cut by then is
+covered as far as it was read; the load then covers the mapping only to
+the records it took (`Mapping::cover`). What it read holds whatever the
+file does after: cut, appended to, or replaced by a rename, which leaves
+the reader the old file, whose pages its mapping keeps. What it reads
+into memory has no bound but the file's: every byte past the point, and
+the record holding it whole however large -- a graph a server kept in the
+tail, a block's record of up to 16 MB, the spills of a block still open.
+A server's file under `--sync always` is durable to within a page of its
+end, so the copy is the last 64 KiB to 128 KiB and that record; under a
+periodic sync (a server's default, 250 ms) the writes since the last one
+too; under `--sync off`, running or after a crash, every write since the
+server opened the file or last wrote it anew, a compact or a checkpoint,
+until its shutdown syncs it; after a crash, the torn tail. A file no
+sync ever claimed past its image -- a library's, written and let go of
+with no `sync` -- is read whole past the image, and whole where it has
+none, as one with a sync log beside it always was (`read_with_sync_log`). A file with nothing past its image -- what a
+compact, a checkpoint, `.save` and a backup write -- is mapped whole, none
+of it read: no cut lands inside an image (a walk stopping there refuses
+the open), so the point no open cuts before is never short of the image's
+end, and the file's length with nothing past it, its last page mapped
+rather than read. Until 2026-11-21 that point was the last 64 KiB start at
+or before it, which with no record after the image's last is that
+record's start, of a collection with no graph its data: about the whole
+file read into memory (`a_reader_maps_a_file_with_nothing_past_its_image_whole`
+holds a `.save`'s and a checkpoint's to their length and to no byte of
+their rows read, which before was every byte of them). The open is
+cheaper for its survey, which walks a buffer read a mebibyte at a time
+where it faulted mapped pages in (rusage's instruction counter, arm64
+macOS, five runs a side, medians, 2026-11-21): the perf gate's `file-open`
+file -- 100 000 rows, 6.56 MB, written with no `sync`, so read whole --
+150.13 M -> 147.13 M instructions (-2.0%); the same rows synced and closed,
+68 KB read, 139.98 M -> 134.90 M (-3.6%); with 4 KiB written past the
+close, 72 KB read, 140.01 M -> 134.95 M; with 16 MiB past it, 16.4 MB
+read, 297.29 M -> 294.39 M (-1.0%). What the copy costs is the gap
+between those savings: nothing a run tells from its spread for 4 KiB,
+about 2.2 M instructions for 16 MiB and 2.1 M for the 6.5 MB read whole --
+and the bytes it holds, in memory of its own rather than the page cache.
+A file with nothing past its image, mapped whole since its point is its
+length, reads none: a `.save` of 100 000 rows of 1 KB in one collection
+with no index, 102 475 488 bytes, read its data record into memory and
+now reads nothing -- 70.70 M -> 16.18 M instructions (-77%), the
+footprint the open added 103.4 MB -> 1.3 MB, the process's peak
+footprint 104.5 MB -> 2.3 MB and its maxrss 105.8 MB -> 3.7 MB (the same
+counter and runs, a release build of each tree, load 2.37 at the start
+and the end, 2026-11-21).
+`tests/reader.rs` holds the survey to the walk's and the point to the
+open's cut over a file torn at every 4 093rd byte of its tail, cut short
+or zeroed to its end -- an image with a graph, graphs in the tail, spills
+landed and put back, records of 200 KiB -- and
+`a_reader_that_looked_before_a_cut_walks_what_it_read` stops a reader
+between its look and its walk, cuts the file with a server's open and
+walks: mapped at its length, as the reader was until 2026-11-21, its walk
+summed the torn record's pages past the cut and the process ended. A
+byte-range lock on the file was the other way, read-held by the reader
+across its load and write-taken by the cut: a server's start would wait
+for a reader's load, or fail beside it, and a POSIX record lock is let go
+of by any close of the file in its process. On Windows the reader maps the
+file at its length still: its view refuses the cut
+(`ERROR_USER_MAPPED_FILE`), so a server opening a file a crash left torn
+fails by name until the reader is gone ([windows.md](windows.md)) -- not
+changed here, no Windows build being at hand to try a view ending where a
+copy begins.
+
 *The sum.* CRC32C: the instructions compute it -- aarch64's `crc32c`, in
 every Apple chip's target and found at run time elsewhere, and x86_64's
 SSE4.2 `crc32`, found at run time -- three lanes at once over a stretch of
@@ -876,7 +1798,26 @@ array (`push_above`), 4.8; in shares, a million rows of no vector open in
 quarter empty or reach the sparse map are read in turn, as `insert` places
 them, and so is an index whose shares do not read as it says. A binary that
 knows only `FRAMES_MARK` walks the record of a `FRAMES_SPLIT` image, as it
-walks one with no index. Read into memory, a load copies each frame as it stands into the
+walks one with no index.
+
+The mark is also what keeps a data op a later version adds refused rather
+than misread. `adopt_index` reads no frame's op: a frame's head is the chain
+of cache misses the index is there to skip (5.5 of a 14.2 ms open at
+100 000 x 128, `Store::image_index`), and reading each op would give that
+back. So under a mark this build knows, a frame of an op it does not is
+read as the put an entry says it is, or not at all, where the walk refuses
+it by its byte and its place ("unknown write op 3 at 4096", above). A version that adds an op
+writes its images' index under a mark of its own, the next number:
+`adopt_index` passes over a first byte it does not know (`false`, the store
+untouched), the open walks the record (`replay_mapped`, `load_from`'s other
+arm), mapped or read-only, and the walk refuses the frame; read into
+memory, a load walks every record whatever the mark. A put's op turned into
+another by damage inside an image is not seen by the index either, as a
+payload moved within the record is not: an image is read unchecked, and
+`fennec verify` holds it to its sums
+(`an_image_index_under_a_mark_this_build_does_not_know_leaves_its_record_to_the_walk`).
+
+Read into memory, a load copies each frame as it stands into the
 segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
 of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the

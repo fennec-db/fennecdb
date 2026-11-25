@@ -6,6 +6,7 @@
 mod api_dump;
 mod api_golden;
 mod calls;
+mod compat;
 mod crash;
 mod follow;
 mod hooks;
@@ -14,6 +15,7 @@ mod logs;
 mod mcp;
 mod openapi;
 mod otlp;
+mod primaries;
 mod providers;
 mod scheduled;
 mod shutdown;

@@ -1,0 +1,9 @@
+-- The statements every later build answers over waiting.fennec: an image
+-- whose graphs hold nodes waiting to be linked.
+describe wait
+get wait count
+get wait near v [0.1, -0.2, 0.3, 0.4] limit 3 select n
+get wait near v [0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get wait near q [0.1, -0.2, 0.3, 0.4] limit 3 select n
+get wait near q [0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get wait where n >= 18 and n < 22 order n

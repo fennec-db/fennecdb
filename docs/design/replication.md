@@ -86,7 +86,45 @@ a socket's bytes reach the replica after the process is killed, though
 not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
 (0.14 before the wait) and at most 283 ms under `--sync 250`, durable
 writes 254 a second against 246; ten failovers under `always` lost no
-acknowledged write. An archive (`fennec archive`,
+acknowledged write, each promoting a replica that kept up. That is the
+promise and all of it: none the replica was sent. A replica lagging,
+reconnecting or failed is waited for not at all, and a promotion asks no
+position, so one not connected, or behind, as its primary is lost is
+promoted where it stands, without the writes its primary answered
+meanwhile -- and on a plain-HTTP hop whoever can reach it can cut the
+stream and hold it there. It is watched (`connected`, `behind` and
+`last_contact_ms` in a replica's status, `fennec_replica_*` and a node's
+`fennec_copies_*` in `/_metrics`, the kit's alerts on each) and a
+tenant's promotion says what its copy knew ([tenants.md](tenants.md),
+`replication::Heard`); the site said a failover under `--sync always`
+lost none, from 0.1.5, until the review's second round (G14, area D).
+"Sent" is handed to the primary's kernel, which a machine lost takes
+with it; and a stream sent an image is waited for from the image's flush
+(`sending_standby`), so the writes answered between it and the replica's
+adoption of the image -- its check and load, which a halt walks away
+from -- are lost to a promotion then, the copy saying `connected` false.
+`behind` counts from what the primary last said of its disk: a keep-alive
+every `ALIVE` (2 s), which a stream sent only once it had caught up, so a
+replica as far behind as the feed's buffer -- its reads slower than the
+writes, its socket full -- read `behind` 0, and so did a node's
+`fennec_copies_behind`, a promotion's answer and the router's line, and
+`FennecTenantCopiesBehind` never fired on it. A stream behind now sends
+one after the writes it sends once `ALIVE` has passed since it last told
+(`stream`'s `told`; the review's third round): 33 bytes every 2 s a
+lagging stream, a stream that has sent every write on disk saying
+nothing. It looks, at the clock once a `W` message and at the feed's
+`durable` once `ALIVE` has passed, after `Feed::sent` has let the writes
+waiting on that `W` go, and sends the keep-alive in a flush of its own --
+a `write` every 2 s, none a `W` -- so a `--sync always` write waits for
+neither: nothing on a request's path. The third round sent it in the
+`W`'s flush, where such a write waited on the look and, every 2 s, on the
+keep-alive's bytes; the fourth moved both after `Feed::sent`. Every
+replica since 0.1.5 reads a keep-alive between any two messages, and an
+archiver syncs its segment on one, as it does every
+250 ms while it takes writes. `connected` is true until a read fails: a
+primary's process killed ends the stream at once, its machine lost or cut
+off only after `SILENCE` (10 s) -- past a 5 s lease's lapse -- so a
+router reads `last_contact_ms` beside it ([tenants.md](tenants.md)). An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
@@ -154,11 +192,12 @@ reaches -- or, where a file of that name stays, the first
 `consolidating-<end>-<k>.fennec` that does not (`scratch_name`) -- and
 reads it back through the handle that wrote it (`assemble_into`), never
 opening it again by its name: on Windows that handle writes it from its
-making (`copied`), where a copier holding it between `fs::copy` and an
+making (`fs::copy_private`), where a copier holding it between `fs::copy` and an
 open after kept the round's appends, and its read -- an open of a
 database asks to write (`fs::open_in_memory`) -- from it. On a Unix the
-image is still copied by the system (a clone on APFS, `copy_file_range`
-on Linux) and nothing changes but the name. What rounds left goes as a
+image is cloned on APFS where it is its owner's alone and copied by
+`copy_file_range` on Linux (docs/design/durability.md#files-modes), and
+nothing changes but the name. What rounds left goes as a
 round begins and as an archiver opens the archive to write
 (`Archive::sweep`, in `writer`, never while a round runs beside it),
 `consolidating.fennec` among it, and a file that will not go is said in
@@ -202,6 +241,625 @@ is, some 30 bytes more in an image's own rename, and 768 bytes of
 macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
+
+*What a replica reads of its primary.* Whoever answers at the address a
+replica follows -- or stands between them where the hop is plain HTTP --
+sends what they like, and the reader of a stream (a follower, `fennec
+archive`, `fennec backup`, a node's archiver) holds every byte of it to
+what a primary of this code sends, refusing the rest in words; the
+internal review G14 (area D, 2026-11-15) found four ways it did not. Each
+is held by a stand-in at the primary's address in fennec-http's
+`tests/primaries.rs`, and for a tenant node -- its read answered, its
+admin's promotion completed and the node stopped on SIGTERM within 10 s
+after each -- in fennec-server's.
+
+- *A message is held to its kind's bound before its body is read, and
+  grown as it comes* (`read_kind`). An image and writes are `LONGEST`, a
+  terabyte: an image is the whole database, and a block's record goes
+  alone however long it is -- past 16 MB a block spills into its primary's
+  file, and the feed sends it whole (`landed_block`), so nothing smaller
+  bounds it. A hello, a keep-alive and an end are `SHORT`, a mebibyte: a
+  keep-alive is 24 bytes, and a hello's lineage an entry of 18 bytes at
+  the most for each promotion its database had, some 58 000 of them. A
+  node's stream of every tenant adds a name's 256 bytes to each
+  (`node_sends`). A kind no primary sends is refused at its head, as it
+  was at its body. The body was `vec![0; len]` for any length to a
+  terabyte, allocated before a byte of it came: Linux's overcommit
+  refuses an allocation past memory and swap, and std answers a refused
+  one by aborting the process, so nine bytes killed a node with every
+  tenant it held, and its supervisor's restart followed the same stream.
+  On macOS the terabyte was mapped lazily and its read refused (EINVAL);
+  the unit test's reader was asked to fill 1 099 511 627 776 bytes for 3
+  MiB sent. Now a body is first given `FIRST` (2 MiB and 16 bytes) at the
+  most and doubles, to its length and no further, as its bytes fill it,
+  and a message cut short says so with its length. Each allocation is
+  asked with `try_reserve_exact`, a refusal an error naming the kind, the
+  length and the bytes asked for (`grown`): with `reserve_exact` a refused
+  one still aborted a node, `fennec archive` or `fennec backup` once a
+  peer sent enough bytes (the review's second round); the image's room
+  for the record saying it follows is asked so too (`loaded`, the third
+  round), where `reserve_exact` copied the image whole into a buffer
+  aborting on a refusal. What `Database::load` allocates as it reads the
+  image -- its documents, its indexes -- still aborts the process on a
+  refusal: the engine has no fallible path for a load, and an image taken
+  whole is a database's size by its primary's word. A growth holds the
+  bytes that came and the buffer twice as long the allocator moves them
+  into -- three times what came at the most -- and a message read whole
+  has held twice its length at the most, not the "twice what came" this
+  first said: measured by an allocator counting the reading thread's
+  bytes, a growth counted as the move it may be (`tests/message_peak.rs`,
+  a binary of its own), an image of 40 MiB held 72 MiB at the most, 1.80
+  times it; one a byte past `FIRST` doubled twice, 2.00 times; and a
+  terabyte announced with 3 MiB sent, refused as cut short, 6 MiB, three
+  times the `FIRST` that had come as it grew. The follower's image then
+  takes the record saying it follows, one more growth of the image's
+  length (`loaded`). A stream's writes in one message where no
+  record goes alone -- `MESSAGE` of records and a time for each, fewer
+  bytes than its record -- are under `FIRST`, so a steady stream's message
+  is still one zeroed allocation of its length and one `read_exact`, the
+  code it was but a match on its kind and a comparison
+  (`a_message_is_held_in_its_length_and_its_kind_bound` holds the
+  capacity to the length). Past it, an image is copied as it doubles and
+  zeroed as it grows -- once its length over, beside its transfer, its
+  checks and its load.
+- *A `W` message's count of writes is held to its bytes.* `16 + 8 * n`
+  wrapped in a release build for a count of 2^61, a body of 32 bytes
+  passed, and the times were collected 2^61 of them: a panic of the
+  follower's thread -- in a debug build the multiplication's own -- and in
+  `fennec archive`, built with `panic = abort`, the process's end. The
+  check is `node_archive`'s, which had it already: `checked_mul`,
+  `checked_add`, past the body refused naming the count. `fennec backup`
+  reads a hello and an image alone, and met the terabyte.
+- *The answer's head is held to the server's bound for a request's*
+  (`MAX_HEADER_BYTES`, 64 KiB), each line read by the server's own reader
+  (`http::read_line`) with what is left of it: the status line was read
+  to its newline however long, and a header line measured only once its
+  newline came, so a stand-in sending a line with no end, a byte in each
+  `SILENCE`, grew a replica's memory for as long as it liked -- the test's
+  stand-in wrote 64 MiB of a status line into one. A line two bytes at the
+  least, the count of header lines is held by the bytes, as a request's
+  is; a line runs a buffer's fill past the bound at the most before it
+  is refused.
+- *A panic anywhere in a session is that session's failure*
+  (`Follower::session_caught`), caught in words, logged as a broken
+  stream is (`replication: a panic in the session: ...; connecting
+  again`) and in the status's `error`. It was caught around `apply`
+  alone: one in the framing, an image's check and load, its adoption or
+  a hello's callback ended the thread, and `ended` stayed false -- the
+  line setting it was at the end of `run`, which a panic skips -- so the
+  copy served what it held for good, `running` said it ran, a tenant's
+  close kept it open, and a halt waited for ever: a promotion's; a
+  release's, holding the tenant's slot, behind which every later `get` of
+  the tenant waited, connection threads piling up to the cap, and the
+  node's shutdown, which takes every slot, never completed. The thread
+  now says its end as a guard's drop (`Ends`), whichever way it ends. A
+  panic that changed nothing of the copy -- the framing, an image's check,
+  the image loaded into a database of its own before the lock, a hello's
+  callback -- is a session that failed: the follower connects again after
+  its back-off. One that may have left the copy part way through a change
+  the engine does not put back itself -- an image adopted (its file
+  replaced, then its memory), its history followed, this server's feed
+  started on it, a message's times, its flush and its fsync -- unwinds
+  through `Changing`, made before the write lock so it drops after it,
+  which fails the database in words (`Database::fail`: "a panic as the
+  follower adopted its primary's image: the copy's file and memory may
+  disagree, ..."): no write lands on the copy, a promotion's fork is
+  refused with those words (500), its status's `error` names the panic,
+  and the loop stops, as after its disk failed; opened again, the copy is
+  its file's. A panic in `apply` is the engine's, which puts back what did
+  not land or fails the database from the sink call on, as before. No
+  panic of the image path is reached by a primary's bytes in a release
+  build -- `check_records` and `load` are the `image` target's -- but one
+  was in a debug build: a `debug_assert` that the image is at the change
+  its hello said, now a refusal before the image replaces anything. The
+  tests force one through a hook a database already has, a watcher whose
+  `notify` panics, which `adopt` calls last, under the lock, and one
+  through a hello's callback.
+- *A halt waits on the thread's end as an event* (a `Condvar` `wait`; it
+  looked every 50 ms), and every place the thread can be is bounded: a
+  read of the primary ends at the cut -- on Unix at once, on Windows at
+  once where it waited already -- and one begun after the cut ends at its
+  next byte, the read looking at the halt before each read of the socket
+  (`Watched`, an atomic's load beside a system call), or at `SILENCE`, the
+  10 s every read has, from a primary gone silent; a connect is walked
+  away from within 10 ms, the back-off within 20; else the thread is
+  landing one message under the lock, an image's load and adoption among
+  them, and its fsync. A primary sending a byte in each `SILENCE` kept a
+  Windows read begun after the cut, and the halt, going for as long as it
+  liked. A promotion and a tenant's release end within that, and a `get`
+  of the tenant and the node's shutdown, which wait for the slot a release
+  holds as it halts. `tests/primaries.rs` in fennec-server holds a primary
+  gone silent in the middle of a message, the follower blocked reading it:
+  its promotion answers at once. That passes without `Watched` on Unix,
+  where the cut ends the read; `replication::tests::a_halt_a_read_in_a_message_missed_ends_at_the_next_byte`
+  holds `Watched` itself on every platform: a halt come after the look
+  between messages and its cut missed -- the flag alone, as Windows' cut is
+  to a read begun after it -- a primary sending a byte every 20 ms, and the
+  thread's end waited for `SILENCE`; with `Watched`'s look taken out it
+  read on and the test failed at its bound (the review's second round, run
+  so before the look went back).
+- *A halt is looked at past the socket's reads too* (`Follower::halted`):
+  as an image has arrived, and once it is loaded, before `Changing`. The
+  bound above held an image's `check_records`, `load` and adoption whole --
+  minutes for many gigabytes -- for a promotion, a release under the
+  tenant's slot, every `get` behind it and the node's shutdown. Walked away
+  from, the copy holds what it held and follows on from there once
+  started again. A halt that comes while the check and load are under way
+  still waits for them -- nothing looks inside `load`, minutes for many
+  gigabytes -- and walks away at the second look, before the adoption.
+  What a halt can still wait for besides is an adoption begun: the
+  image written over the copy's file and synced, a write of the image's
+  length, then the copy's memory pointed at it; or one message landing
+  and its fsync. `a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`
+  has the halt come at each look (a test's seam, `halt_at`, which sets the
+  flag at that look and is compiled into tests alone), the thread ending
+  with the copy at change 0 and no image taken; with either look taken
+  out, the follower took the image and the test failed.
+- *A peer's words reach a log line and the status's `error` cut and
+  escaped* (`peer_words`): the first 200 characters, as Rust writes a
+  string -- a newline `\n`, an escape character `\u{1b}`, a quote `\"` --
+  and the bytes there were where that is not all. An `E` message's text
+  (a mebibyte, any bytes) and a refusal's body (64 KiB) went in as they
+  came, while the status line was cut to 80: whoever answers at a
+  primary's address, or stands on a plain-HTTP hop before it, wrote lines
+  of its own into the log and a mebibyte into it and the status at every
+  reconnect. One helper at every place a peer's bytes reach either -- a
+  primary's `E` (`decode`), a node's (`node_archive`), a refusal's body
+  (`answered`: a follower's, an archiver's, a backup's, a node archiver's)
+  and a status line (`read_head`); `a_peers_words_are_cut_and_escaped`
+  holds each with a mebibyte holding a newline, an escape and quotes. A
+  router's log of a node's answers and the errors it answers with -- `said`,
+  a promotion's refusal, every `{status}: {body}` of a node's -- went in as
+  they came too, from anyone at a node's address or on a plain-HTTP hop;
+  they go through it now (`peer_words_within`, fennec-shard's `words`, the
+  third round), cut at 2 000 characters rather than 200: a node's refusal
+  is shown whole, the lineage one a failover meets 313 bytes, whose `force`
+  a cut at 200 took off (fennec-shard's
+  `a_standby_that_never_synced_is_promoted_by_force_alone_and_its_read_replica_follows`
+  failed so). `a_nodes_words_are_cut_and_escaped` holds `said`, `words`
+  and `expect` to it.
+
+The stream's framing is a parser of untrusted bytes, fuzzed as one: the
+`stream` target ([conventions.md](conventions.md#fuzzing)) hands
+`read_answer` -- the head, each message held to its bound, decoded -- a
+replica's stream and a node's, whole or a few bytes a read, its seeds a
+primary's answer, a node's, a refusal and the two findings above. An
+image its hello promised, accepted as the follower accepts one (`loaded`,
+the follower's own path: its records' sums, the record saying it follows,
+the load, the change its hello said), is adopted by a copy mapped as a
+server's -- its sink an in-memory one that hands the rewritten bytes back
+as the mapping -- so `Database::adopt`'s `repoint` walks the image's
+records and `rebind` binds its statements, which no target reached before
+(the review's second round, where it was suspected and not settled), and
+every collection of the copy is read after (`an_answers_image_is_adopted_by_a_mapped_copy`
+holds the path to the adoption). The seeds' answer holds such an image.
+
+### An image sent as it is read
+
+**An image goes out as a pin takes it, and is written as it is read**
+(`Database::pin_image`, `PinnedImage`, `replication::image_message`). A
+replica's first follow, one past the feed's buffer, a backup (`fennec
+backup`, the stream's `archive=1`), an archiver's image and a node's archive
+stream's (`node_stream.rs`) and a move's image (`GET
+/_admin/tenants/<t>/file`, `admin::export`) are each the database's image,
+and every release from 0.1.5, replication's first, to 0.2.0 built it whole
+in the primary's heap under the read lock (`snapshot()`) and wrote it as one
+message: a second copy of every live document beside the database, three
+for a follower that reads no sums (`plain_unless` copied it again, and
+`plain_records` once more inside it). The soak harness found it (P6, round
+6): 250 000 records, 259 MB, under a container of 256 MiB, the primary was
+killed out of memory 0.7 s after its replica began to follow, twice of two.
+
+Under the read lock `pin_image` runs the image's own writer
+(`Database::snapshot_into`) into a `PinnedImage`, which copies every byte
+but a collection's documents -- the counter, the history, the schemas,
+each collection's index of its frames (a few bytes a row), its graphs, the
+statements and their marks -- and takes each collection's documents as
+`Store::pinned` takes a pinned read's: the id index copied, 12 bytes a row,
+the mapped file and the segments shared. Its length is known then, so the
+message's head says it; `PinnedImage::write_to` writes it with no lock
+held, each collection's live records read from its pinned store a document
+at a time (`Store::write_live`, the walk by id a snapshot's records take
+too: a compact past the page cache reads its file in turn through
+`Store::compact_live`, which this never calls --
+[storage.md](storage.md#reading-the-file-in-turn)), into the
+connection's buffer. A record's sum is made as it is written out
+(`Framing::Later`: `Summed` marks where a record begins and where its sum
+goes, and the writer carries the sum over the bytes between): summed as
+taken, every document would be read under the lock. A follower that reads
+no sums is sent the image taken plain (`Framing::Plain`: each record's head
+framed with its body's length, no claim, no sum -- what `plain_image` makes
+of a snapshot), its history record written through `put_record` natively so
+that it is framed as the rest are; the browser module writes it as it did.
+Nothing a write changes in place is held: an append to the open segment
+copies it first (8 MB at most, once an image), and a handover or a compact
+lets go of its own hold only, the mapping keeping the file it renamed over;
+on Windows a cut of a torn tail at an open waits for the image's view to go,
+as for a pinned read's (`cut_refused` names both). A move's image is the
+tenant's as it is frozen; an image a node's stream holds until the tenant's
+disk covers it (`Pending`) holds the pin, never a copy.
+
+**An image is held to a pace while it goes out** (`replication::Pace`): its
+time is `SILENCE` (10 s) and a second more for every 64 KiB its receiver
+took (`IMAGE_RATE`), and past it the server ends the stream, its log
+saying so (`the image to <peer> ended, <n> of its bytes taken in <s> s: a
+server ends an image taken slower than 64 KiB a second`); the receiver,
+which reads the same pace, gives its cut the same words
+(`taken_of`: `an image cut short of its <len> bytes, <got> taken in <s>
+s: ...`, which a replica logs and `fennec backup` and an archiver say). A
+pin holds the image until it is out -- each collection's id index, 12
+bytes a row, up to 8 MB of the open segment copied, and the disk of the
+file a compact renamed over since -- and the socket's write timeout
+(`SILENCE`, each write) bounds only a receiver that takes nothing: one
+taking a few bytes inside each held the pin for as long as it liked. The
+pace is looked at in the writer under the stream's buffer
+(`replication::Sending`, node_stream's `Out`), before each write of the
+socket, where a slow receiver's write blocks: looked at above the buffer,
+a write filling it waited for the receiver to take a mebibyte between two
+looks. One clock read a socket write -- a mebibyte, or what the socket
+took -- costs nothing beside the write. A minimum rate rather than a deadline for
+the whole image, a constant rather than a flag: a receiver keeping it is
+never cut however large the image, as a request keeping `conn::MIN_RATE`
+is never cut; 64 KiB a second (512 kbit/s) is far below whatever can keep
+a copy -- a replica, a backup, an archiver, a move's target, each writing
+a disk; a 254 MB image went out in 40 ms on loopback and is taken in under
+a second -- and holds a 1 GiB image, a node's largest, to some 4.6 hours,
+254 MB to 66 minutes. Nearer a working link's rate, a slow replica's image
+would be ended for good, sent and pinned again at every try, which costs
+the primary more than one slow send; the server's timeouts
+(`--write-timeout`, `--header-timeout`) are a request's and an answer's,
+and a flag for this one would be a knob nobody can set better than the
+floor. The pace counts what the socket accepted, so what the kernel's
+buffers hold at the start is credited as taken, and the receiver is cut
+that much later: 3.1 MB on a container's loopback (Linux, 3 CPUs), where
+the test's sender ended its image 1.75 s in (its 1 s and 3.1 MB at 4 MiB a
+second) and the receiver, reading 512 KiB a second, met the cut 8 s in,
+4.2 MB of 16.2 taken. `message_peak`'s
+`an_image_taken_slower_than_its_pace_is_ended_and_said_so` holds a pace of
+1 s and 4 MiB a second (`set_image_pace`) to an image of 16 MB: taken as
+fast as the socket goes it is whole, and a receiver reading 512 KiB a
+second is cut, in those words; with the pace taken out (`Pace::kept`
+always true) that receiver took the image whole, which fails it.
+
+The bytes are the snapshot's at the image's change, to the last one:
+fennec-core's `pinned::a_pinned_image_is_the_snapshot_at_its_pin` holds
+`pin_image` to `snapshot()` and `plain_image(snapshot())`, over a database
+with every index kind, a graph with tombstones, a field added, a named and a
+scheduled statement and a history, its documents in the mapped file and in
+memory, written out after deletes, updates, a field added, a statement
+defined, a handover and a compact beside it, a few bytes a write and whole.
+The follow's numbering and durability are as they were: the image is taken
+where `snapshot()` was, at the change judged under the same read lock, and
+sent once the feed is durable to it. What it holds is a constant beside 16
+bytes a row: `message_peak`'s
+`a_primary_sends_an_image_holding_a_constant_however_large_the_database`
+counts every thread of the process while an in-process primary sends a
+replica its first image -- 1.29 MB at the most for 8 000 rows of a kilobyte
+(an image of 8.1 MB), 1.70 for 32 000 (32.5 MB), plain alike, the
+connection's 1 MiB buffer among it -- and failed on main's path (12.4 MB
+for the first, past its 3 MiB). Over 250 000 rows of a kilobyte, a file of
+253 MB and an image of 254 (macOS arm64, release, three rounds, a load of
+1.6-1.8; the process's instructions retired less an open's): main's way
+held the lock 55-56 ms, held 257 MB more than the open and took 426-430 M
+instructions; the pin holds the lock 4.7 ms, holds 6.2 MB more -- 12 bytes
+a row of id index, 4 of frames' index, the buffer -- and takes 347-348 M,
+the whole image written in 40 ms against 55. Plain, main's held the lock
+113-199 ms and 764 MB more, 724-766 M instructions; the pin's 4.7 ms, 6.2
+MB, 210-211 M (no sum to make). Rejected: an image spilled into a file
+beside the database under the lock and sent from there -- a heap of a
+constant, but the lock held for a disk write of the image, longer than the
+copy it replaces, the image's bytes written and read twice, and a file a
+crash leaves to sweep; the image's stretches held as the browser module
+holds them (`Kept`) -- a live image is written a document at a time, so a
+piece a document, three times the id index; the frames' index made again
+from the pin as the image is written, 4 bytes a row fewer held, for a second
+walk of the index under the lock to say the record's length.
+fennec-server's code grows 9.6 KB for it (macOS arm64, release, its text
+against main's): the pin and its writer, a move's answer, the node stream's
+writer; the export writes through the replication stream's own writer
+type, whose code the binary holds already -- through one of its own it was
+13.4. The browser module is the same size: every change to the image's
+writer is native.
+
+What takes the image takes it as it arrives (next section).
+
+### An image taken as it arrives
+
+**Whatever takes an image writes it to disk as it comes, every record held
+to its sum as it streams, and adopts it by a rename** (`replication::take_image`,
+`Database::from_side`, `Database::adopt_side`). Until this a replica read
+its primary's image whole into memory (`read_kind`), checked it there
+(`check_records`), loaded it into a database in memory (`loaded`) and
+wrote it over its file under the write lock (`adopt`, the sink's
+`rewrite`), every document of it held two and three times; `fennec backup`
+read it whole, appended its fork record and, sealed, sealed a second copy;
+a move's router read the source's answer whole (`Pool::call`) and sent it
+as the target's request body, which the target's connection read whole
+(to `--max-import`, 1 GiB) and `Tenants::import` replayed in memory before
+its rename; an archiver read a hello's image whole, a node's archiver each
+tenant's; and an archive's consolidation read its assembled end whole,
+loaded it in memory and took a snapshot of it. So a database larger than
+the memory of the machine taking it did not follow, back up, move or
+consolidate, whatever the primary held.
+
+Each takes it the one way now, a stream's bytes copied into a file as they
+are read and checked as they pass (`take_image`: `fennec_core::engine::check_reader`,
+`fennec verify`'s check, a stretch and a record's head held at a time;
+a stream cut short is `UnexpectedEof`, a halt or a timeout the reader's
+own error, damage refused naming the record):
+
+- **A replica** (`Follower::session`, and the `stream` fuzz target's
+  `read_answer` over a copy mapped as a server's) writes it into a file
+  beside the copy's, `<file>.taking` (`Sink::image_side`: a name of its
+  own, never `.beside`, which a replica's own `compact` may be writing
+  meanwhile), made by `fs::SideFile` (`create_private`: owner-only, no
+  link followed), with no lock held -- reads and the copy's upkeep go on --
+  then the record saying the copy follows the hello's lineage after it, and
+  syncs it (`arrived`). The copy is loaded from that file as the copy is
+  held (`Database::from_side`): mapped, its documents stay where they lie
+  and only what an open of the file builds is in memory, read into memory
+  where the copy is (`--no-mmap`), an image cut short of a whole record
+  refused; held to the hello's change (`loaded`). Under the write lock the
+  sink renames it into the copy's place (`Sink::adopt`, as a `compact`
+  beside the database puts its file there: given the file's mode, the sync
+  log forgotten, the directory synced) and the stores the load built
+  stand, their file the copy's now: nothing written under the lock but the
+  rename, and nothing walked. What is renamed in is the file the follower
+  wrote, the one those stores map: `adopt_side` holds `.taking` to the
+  side file's own handle (`still_named`) before the sink is asked, a file
+  put there since refused with the copy as it was and taking writes, and
+  the sink renames through a `dup` of that handle, never one it opened by
+  the name. Until the review, the sink opened `.taking` again with
+  `O_NOFOLLOW`, which refused a link but took a regular file put there and
+  renamed it in, the copy's file then another than the one its stores read
+  (fennec-core's `tests/side_files.rs`,
+  `an_image_is_adopted_only_from_the_file_its_follower_wrote`, which fails
+  so). A compact beside the database renames `.beside` through its
+  writer's handle the same way. On Windows the rename goes by the name and
+  the file is opened again by it after (`fs::windows::swap`), so the name
+  is held to the handle first by the file's identity -- its volume's
+  serial number and its index there, `GetFileInformationByHandle`'s,
+  against the name opened as no link for no access -- in `adopt_side`, in
+  the sink's `adopt` and in a rewrite's swap (`still_named`, its Windows
+  half), a mismatch failing the sink there as on a Unix; until the image
+  review's second round nothing held it there but `<file>.lock`, whose
+  holder alone writes `.taking` (`Sink::adopt` let its handle be).
+  `tests/side_files.rs`' adoption test runs on Windows CI for a file put at
+  the name (a link asks a privilege CI's tests lack). An archive's
+  records, a backup and an unseal still rename by the name alone there. A
+  copy whose sink has no file -- the fuzzer's, a test's; a
+  server's copy is a file's -- takes it in memory, grown as it comes.
+- **`fennec backup`** writes it into the backup's side file, its fork
+  record after it, sealed a frame at a time where it is sealed
+  (`seal::Sealing`: a frame held until the next byte or the end says
+  whether it is the last, the frames `seal::seal_whole`'s), into an archive's
+  directory as an archiver's image (`Archive::add_image_with`). Its sums
+  are checked now; read whole, a backup of a damaged image was written as
+  it came.
+- **An archiver's image**, a hello's (`Archive::hello_with`) and each of a
+  node's tenants' (`node_archive`, which passes over what an image refused
+  part way left unread before the next message, as it passes over a
+  tenant's it does not archive), is written into its file as it comes,
+  sealed as it goes (`Archive::put_with`); an image of another history
+  (`Took::Diverged`) is not read at all.
+- **An archive's end** (`Archive::end_image`, `consolidate`, and the image
+  a line sealed before version 3 goes on from) is opened mapped through the
+  handle its round's file was assembled with (`fs::mapped`) and its image
+  written from a pin as it is read (`PinnedImage::write_to`).
+- **A move** relays the image through the router as it comes: the
+  source's answer read as a body (`Answer::body_reader`) into the target's
+  install on a fresh connection (`Pool::call_streamed`, which a body read
+  as it goes cannot be sent again on), asked of the frozen source again
+  where the target answered 409. The target reads an install that says its
+  length as it comes, before any other route (`admin::import`, past
+  `open_refusal` alone of what is above it): into `<file>.importing` beside
+  the tenant's, checked as it streams, synced, opened from there mapped to
+  check it whole as the node opens its tenants, mapped or not
+  (`Tenants::import_from`), then renamed into place under
+  the tenant's slot (`still_named` first). One refused
+  before its body is read whole ends its connection with the answer; a
+  chunked install is still read whole, to `--max-import`. The side file is
+  the install's own: before it is made the install claims the name in the
+  process (`Tenants::claim_import`) and takes `<file>.lock`, which it holds
+  through the take, the check and the rename, the file going before the
+  lock does. A second install of the name, a create or a reclaim of it, is
+  refused at once, its body unread -- 503 naming its wait, never the 409
+  that says a file is there, which a router took for one
+  ([tenants.md](tenants.md#an-install-under-way-is-no-file-there)); a
+  create claims the name as an install does, in the step that looks for
+  another's claim, so it never waits on the lock under the slot -- and
+  another process holding the lock refuses the install before its body is
+  read. Made before the slot was taken, as round 2
+  made it, two installs of one name each made `.importing` anew -- removing
+  the other's by its name -- and each removed it as it went: on a Unix
+  `still_named` turned that into two refusals, but on Windows, where no
+  rename is held to its writer's handle, one could rename the other's
+  half-written image into the tenant's place. Made under the slot, as
+  before round 2, the slot -- every request for the name -- was held for
+  the whole transfer. `tests/tenants.rs`'s
+  `an_install_under_way_holds_its_name_and_another_is_refused` holds the
+  second install and a create to 503 with the first's image half taken,
+  the second's body unread, and the first to land whole; round 2's code
+  installed the second and refused the first. On Windows the lock holds
+  as on a Unix -- taken before the file is made and let go after its
+  rename or its removal, it keeps every other install of the name, in
+  this process or another, from writing, removing or renaming `.importing`
+  meanwhile -- and the rename is held to the install's handle by the
+  file's identity too (`still_named`'s Windows half).
+
+What a crash leaves: before the rename, the copy's file as it was and the
+image beside it, whole or not, which the next open never reads and the
+next open to write the file removes (`FileSink::create`) -- its owner's,
+under `<file>.lock`: a primary's, a copy's, an app's or the shell's, never
+a tool that only looks (`open_read_only`), nor a file at the name with a
+lock file beside it, held or not ([durability.md](durability.md#files-modes));
+after the rename, the image
+with the record saying the copy follows, which the next start opens as a
+copy of the primary's lineage at the image's change -- the image taken
+inside its rename, as before. Until the review only a follower starting
+removed `.taking`, and a copy started again as a primary kept a file as
+large as the database for good; a crash's `.importing` stayed until an
+install of the name came again. A node now removes both as it starts
+(`tenants::sweep_left`, from `Tenants::new`), each under its tenant's lock
+taken without waiting, so one another process holds the lock of -- its
+install under way -- stays; for a tenant whose file is a link, beside the
+file it leads to, where its open, its install and its lock put them
+(`fs::resolved`), which the sweep, looking in the node's directory alone,
+missed until the image review's second round
+(`a_node_starts_by_removing_what_was_left_beside_a_linked_tenants_file`,
+a Unix's) (fennec-core's `tests/side_files.rs`,
+`an_image_a_crash_left_goes_as_the_file_is_opened_to_be_written`, mapped,
+in memory and a server's open, a read-only one leaving it; fennec-http's
+`tests/tenants.rs`,
+`a_node_starts_by_removing_what_its_last_process_left_beside_its_tenants`,
+one whose tenant's lock is held kept). A torn image, a refused sum, an
+image whose records hold their sums but that does not load, an image at
+another change than its hello's: the side file goes as it drops, the copy
+and its file as they were, to the byte, nothing beside it
+(`tests/images_taken.rs`, `an_image_torn_or_refused_leaves_the_copy_as_it_was`);
+a halt as the image has arrived or once it is loaded likewise, over a
+copy with a file (`replication::tests::a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`,
+a unit test: its halt comes at a look only a test build can hold). Each
+fails with its guard taken out, which the review round showed by running
+it so: the hello's change unchecked in `loaded`, the copy adopted an
+image of another change; the load's refusal in `Database::from_side`
+swallowed, the change check refused the image in its stead (a load that
+fails leaves the change at 0), and with both taken out the image was
+renamed in; either halt's look taken out of the session, the image was
+renamed in. Round 2's wording said
+`tests/images_taken.rs` built every one of these states; it built the
+torn and the refused image and the crash's files alone. The
+follow's order, numbering and durability are as they were: the image is
+adopted under the same write lock, its history followed and the copy's own
+feed started on it there, and the times a copy keeps for its writes begin
+again with the image, as they did.
+
+What each holds is a constant beside what its own open of the image
+builds: `tests/message_peak.rs` counts every thread of the process --
+primary and taker -- while 8 000 and 32 000 rows of a kilobyte (images of
+8.1 and 32.5 MB) are taken: a replica 4.4 and 4.9 MB, `fennec backup` 4.5
+and 4.9 into a file, 7.6 and 8.1 sealed, 4.4 and 4.9 into a directory, an
+archive's end 1.4 and 2.5 MB; fennec-shard's `tests/move_peak.rs`, the
+router and both nodes in one process, 3.4 and 3.9 MB for the move. The
+buffers are most of it: the stream's (1 MiB), the check's (1 MiB and 64
+KiB), the side file's writer, the primary's own (1 MiB), a sealed frame and
+its seal (2 MiB). On the receivers before this each failed at the first
+size: the replica held 19.5 MB, the backup 26.5, the archive's end 32.5,
+the move 24.5.
+
+A follow of 250 000 rows of a kilobyte, a 253 MB file, timed from the
+replica's start to its first image, three rounds each (Linux, aarch64,
+musl, release, in a container of 3 CPUs; macOS's loopback, 49.7 days up,
+stalled every transfer past 16 KB): round 1's replica took it in 1.31-1.48
+s and 0.77-1.00 s of CPU, its resident set peaking at 770 MB, 514 MB of it
+anonymous; this one in 0.74-0.88 s and 0.34-0.40 s of CPU, peaking at
+9.2-9.8 MB, 4.2-5.3 MB anonymous. The image is written once, into its
+file as it comes, and opened there by its offset index, where it was read
+whole, checked, loaded, written over the file again and every record's
+head walked to point the stores at it.
+
+fennec-server's code grows 30.7 KB for it (macOS arm64, release, its text
+against round 1's), `fennec` 13.2 KB: the import read as it comes and
+checked beside the tenant's file (`Tenants::import_from`,
+`admin::import`, about 6.5 KB), `check_reader` now linked where only the
+copy's in-memory check was (4.1 KB), the copy's contents taken by one
+path for both adoptions (`take_contents`, `from_side`), the follower's
+image path, the streaming sealer, and the readers the check reads through.
+The copying reader is one type over a `dyn Read` and a copy with no file
+takes its image into a plain `Vec`: a reader type per stream, and a
+writer of its own for the in-memory image, were each a reader's or a
+writer's every method made again. The browser module is the same size,
+none of it reaching wasm32.
+
+Still read whole: a sealed archive's base image as a restore or a
+consolidating round assembles its end (`read_whole`, then `open_whole`),
+and a segment, 64 MiB at the most, as either reads it; a sealed backup
+as `fennec unseal` opens it (`seal::open_whole`); a move across
+regions, which the global router relays through the regions' routers as
+requests and answers read whole; and an install sent chunked. A node takes
+an image of 1 GiB at the most (`max_import`, which no flag sets): a body's
+ceiling is judged from its head (the conn rule), whether or not it is read
+whole.
+
+### A copy across a compact
+
+**A copy agrees with its primary across a compact because a compact
+changes no place** ([storage.md](storage.md#dropped-places)). A compact is
+no record: it rewrites the file, marks the feed durable and sends nothing,
+so a copy, an archive or a standby holds whatever places it held, and
+applies every record after the compact by them. A compact that took a
+dropped field's places out -- every release from 0.1.7 to 0.2.0 -- left
+each copy reading the collection's later writes one field early. A copy
+that compacted itself first -- a server's own compaction runs on a
+following database from 0.1.10 -- read them one field late. An archive's restore
+from an image before the compact misread them, and so did its images
+after. A `--dir` node's standby misread them, and a failover made those
+values the tenant's. Kept places, each one's value made a `null`, leave
+every copy's documents readable by the primary's places whichever of the
+two compacts, and in whatever order.
+`tests/replication.rs` holds a copy caught up before its primary's compact,
+one behind that catches up across it by the records, one connecting after
+it, and one compacting first, each over real replication. `tests/archive.rs`
+holds a restore from the image before the compact, its `verify`, and an
+image of the archive's own end. fennec-shard's `tests/replicas.rs` holds a
+standby and its failover, the promoted copy's file read on its own. The sync
+protocol's replicas take rows as values and write them by their own schema
+(`fennec_abi::sync`), so no place reaches them; `fennec-abi`'s
+`tests/sync.rs` holds one across a drop and a compact on its server.
+
+*A 0.2.0 primary.* Replicas upgrade before primaries, so for as long as a
+0.2.0 primary runs, its compact still takes the places out and tells
+nobody. A newer copy tells at the primary's next write of that collection:
+it reads each write as it was made (`Schema::read_written`), a value at
+every place up to the last field and none past it, as every release since
+0.1.7 encodes one (`Store::encode_doc` writes a `null` at every dropped
+place a field follows), and a write made by other places than the copy
+holds -- one value short where the primary took a place out, one over
+where the copy did, under a release that compacted it -- is refused by name
+before anything reads it: "the primary's writes moved the fields of `x`:
+... seed the copy again from its primary". An alter that comes first is
+refused alike: it carries the schema after it (record kind 12), whose
+dropped places the copy holds to its own, the same or one more for a drop
+(`keeps_places`); a `create index` carries the whole schema, held to the
+copy's layout as it was. Where no field followed the dropped one, its
+place was last in every document, which a write leaves out: the primary's
+writes after its compact hold what the copy's would, read alike on both,
+and the copy tells at the primary's next alter or `create index` of the
+collection instead. A server's follower takes an image of its primary
+on a write it cannot apply, and holds what the primary holds from there,
+so no value read a field off reaches a copy's file. The check is the end
+of the read `apply` makes of every write already, and costs the copy a
+comparison a write; a check at the compact itself would need the compact
+to say so in the feed, a record kind, which a format change and an older
+copy's refusal would bring, for a window 1.0 closes.
+
+*A 0.2.0 copy.* The other way round -- a 1.x primary, a 0.2.0 copy, as a
+`--dir` node upgraded first leaves its tenants' standbys on the node not
+yet upgraded -- a field dropped on the primary keeps its place, and the
+copy's own compact takes it out of the copy's documents: it reads every
+later write of the collection a field late, with nothing to check it, and
+a failover makes those values the tenant's. The primary cannot tell the
+copy's release to refuse the drop: a copy's request names only where it
+stands (`since`, `history`, `sums`, `image`, `archive`, `reader`) with its
+token, and the hello is the primary's; both are the same in 0.2.0 and 1.x.
+The compatibility contract's rule is to drop no field until every node and
+every copy runs 1.x, or to run each 0.2.0 copy with `--auto-compact off`
+until it does.
+
+An archive does not tell: it keeps the stream's bytes, and a restore is an
+image and the writes after it opened (`Archive::restore`, `fs::open`),
+which reads a payload by the schema it holds and never refuses one for its
+length -- an open reads the documents of an image written before an `add
+field`, one value short, as every image has. A restore from an image
+taken before a 0.2.0 primary's stripping compact, to a moment after it,
+reads the writes after it a field early, as every image the archiver
+takes from there does. What an operator does is the compatibility
+contract's ([compatibility.md](compatibility.md#a-020-node-and-a-compact)).
+`tests/replication.rs`'
+`a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write`
+holds a follower of a stripped primary seeded again at the write, and
+fennec-core's `compact_places::a_copy_refuses_a_write_made_by_other_places_than_it_holds`
+both directions.
 
 ## A write's time
 
@@ -429,7 +1087,9 @@ archiver refuses it and the node's moves the line aside to
 takes, of a tenant's lines, the one that began last by then
 (`node_archive::lines`; `Archive::began`, its oldest image's time, which a
 `prune` letting that image go writes into `began` first -- written with the
-first image it was an fsync more a tenant of the stream's first pass), and
+first image it was an fsync more a tenant of the stream's first pass; sealed,
+each image's head says it and `began` is held to that, and `presence` is
+sealed, [below](#sealed-archives)), and
 refuses a moment `--keep` let go of (`Restoring::LetGo`, exit 1) rather than
 pass the tenant over as never archived; `verify` and `prune` run on every
 line, and `Archive::verify` names a gap an image alone ends. One tenant's
@@ -462,7 +1122,9 @@ archiver's fsyncs on the same disk -- against 31-33 with none and 65-86 a
 stream each, and a close 4.0 ms p50, 15-33 at most, against 3.8-4.0 and
 12-25 with none. With no archiver and with a stream each, every figure
 stayed main's in ABBA turns (the pass 31.0-31.4 and 67-73 ms p50 on main, a
-close 3.6-3.9). The pending feed, the lock held up and the departures moved
+close 3.6-3.9) -- the pass every dirty tenant synced in turn, as a node
+synced them before [each had a thread of its
+own](durability.md#a-nodes-syncs), which the example still times. The pending feed, the lock held up and the departures moved
 nothing, four turns a side against the build before them: the writes while
 the first images were taken 13.9-15.3 ms p50 and 26.7-32.9 p99 against
 13.9-14.9 and 29.5-30.6, the first images 14.8-16.8 s against 15.1-16.8, and
@@ -728,101 +1390,424 @@ encryption, so with a key every archive file and a backup file is
 ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors, every case of
 Wycheproof's, and 2 000 random cases against node:crypto): ChaCha20 over
 AES-GCM because it has no secret-indexed tables in software, Poly1305 in
-26-bit limbs. Frames carry a random nonce, and their file's id, place and
-last-ness in the AAD (below); an image and the history are sealed whole
-(`open_whole` refuses a file cut short), a segment a frame for
-each batch of writes, whole records in each, so a crash cuts off a frame as
-it cut a record (`open_appended`, the segment's `sealed` state). A frame's
-length is under no tag: changed, the bytes then read as its tag are not it
-and the frame is refused, unless the length now runs past the segment's
-end, which is a frame cut short there and nothing tells from a crash's --
-a verify then counts the bytes from it on as torn, as it would in a
-segment whoever can write the archive had cut
+26-bit limbs. Each file is sealed under a key of its own, its frames under
+random nonces with the tag before them, their place and last-ness in the
+AAD (below); an image, the history and a tenant's presence are sealed whole
+(`open_whole` refuses a file cut short), a segment a frame for each batch
+of writes, whole records in each and a mebibyte at most, so a crash cuts
+off a frame as it cut a record (`open_appended`, the segment's `sealed`
+state). A frame's length is under no tag: changed, the bytes then read as
+its tag are not it and the frame is refused, unless the length now runs
+past the segment's end, which is a frame cut short there and nothing tells
+from a crash's -- a verify then counts the bytes from it on as torn, as it
+would in a segment whoever can write the archive had cut; so with the
+magic's version byte set back to 2 or 1, or the tenant's name made longer,
+which reads the first frame from further on, its length past the end: the
+file one of no frame, as if cut after its head, a head no tag vouches for,
+which no reader holds a file to until a frame opened
 (`a_bit_changed_is_refused_unless_a_length_then_runs_past_the_end` walks
 every bit of a file; the archive's own test changed its segment's middle
 byte, wherever the run's flushes had put it, and failed the run that put a
-length there). A file of
-the other kind than the archive is refused. About 400 MB/s either way on
-one core. The live file stays plain -- mapped and read in place -- for the
-disk to encrypt. A checksum a record was measured and not taken: hardware
-CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
-lock, and the browser has no hardware CRC.
+length there). A file of the other kind than the archive is refused. About
+400 MB/s either way on one core. The live file stays plain -- mapped and
+read in place -- for the disk to encrypt. A checksum a record was measured
+and not taken: hardware CRC32C was 45 ns of an 840 ns put at 530 bytes, 357
+at 3 KB, under the write lock, and the browser has no hardware CRC.
 
-**A frame is bound to its file** (`FENECSL\x02`, `seal::FileId`). A file
-sealed now begins with the magic and its id, 16 bytes of the system's
-randomness -- refused without it, as a nonce is -- and every frame's AAD
-is `[id 16][index u64][last u8]`, 25 bytes. Until 1.0's security review
-the AAD was the place and last-ness alone, version 1
-(`FENECSL\x01`, every release from 0.1.7 to 0.2.0): two files sealed under
-one key -- two images of an archive, two segments, last week's backup and
-today's -- each held frames at places the other's frames of those places
-would open in, so a frame of one put in the other at its place opened, and
-the file read as whole with another's megabyte or batch of writes in it,
-every tag good. Every segment's frames sit at small indexes and every
-image's from 0, so anyone able to write to the bucket, holding no key,
-could splice them. With the id a frame opens only in the file it was sealed
-into, and an id changed, cut short or dropped -- the magic set back to
-version 1's to match -- opens nothing: Poly1305 takes the AAD's length in,
-so a 25-byte AAD's tag never stands for a 9-byte one (`seal::tests`,
-`a_frame_from_another_file_does_not_open`). What it does not cover: a whole
-file put in another's place -- an older image under a newer one's name, one
-backup for another -- opens, a whole file as it was sealed; an archive's
-names, the change numbers its records carry and its history hold it to its
-order, and a backup is the database it holds.
+**A file is sealed under its own key, and each frame's tag covers the one
+before it** (`FENECSL\x03`, `seal::begin`, `seal::Frames`). A file begins
+with the magic, its id -- 16 bytes of the system's randomness, refused
+without it, as a nonce is -- and what it is (`seal::Binding`, below). Its
+frames are sealed under a key of its own, HChaCha20 (`crypto::hchacha20`,
+draft-irtf-cfrg-xchacha's construction and vector) of the id under a key
+made from the key for that alone -- HKDF-Expand's of the key, never the key
+itself (below) -- and each frame's AAD is the tag of the frame before it --
+the first frame's, the file's whole head -- then its place and whether it
+is the last. Three things 1.0's security review found in version 2 close
+so:
 
-*Rejected*: a key a file derived from the id (HKDF), which binds no better
-for a second primitive to hold to its vectors; the file's name or path in
-the AAD, which a sync tool's copy, a renamed backup or a node archive's
-directory moved would break where a sealed file opens wherever it is
-copied; a tag over the whole file, which an appended segment cannot keep
-without writing it again; an id counted by the archive, which two
-archivers or two backups under one key would share.
+- *A frame spliced across a cut.* Version 2's AAD was the file's id, the
+  frame's place and its last-ness. A segment's last frames cut while its
+  archiver was down, the archiver going on from the last whole frame sealed
+  new frames at the places the cut ones had -- often batched otherwise, the
+  lengths in the clear -- so an old frame k and a new frame k+1 opened
+  together, writes dropped or doubled in the segment's middle. With the tag
+  before it in its AAD a frame opens only after the frame it followed, and
+  only a run of whole frames from the head does: the old ones or the new,
+  which hold the same writes as far as both go (`position` goes on from the
+  last whole frame's tag, `open_appended`'s `next`). What remains is a
+  file cut at a frame's edge (below).
+- *A nonce among every file's.* Every frame of every archive, backup and
+  tenant took a random 96-bit nonce under the one key, with no count: a
+  repeat -- which gives away the two frames' XOR and Poly1305's key for
+  that nonce, every tag under it forgeable -- was a 2^-32 chance at 6.1e9
+  frames, about 70 days of 1 000 frames a second, and 0.6% a year at 10^6
+  a second across a node's tenants. Under a key of its own a nonce can
+  repeat only among one file's frames: 2^-32 at 6.1e9 frames in one file,
+  even odds near 3e14. A segment closes at 64 MB of writes, each frame a
+  whole record of 8 bytes and more, so it holds at most some 2^23 frames,
+  a chance below 2^-50; an image is a frame a mebibyte. Two files share a
+  key only where their 128-bit ids do, 2^-32 at 2^48 files. The nonce stays
+  random, never a count: a place is sealed again after a cut, as above.
+- *A frame's length cast.* `seal_frame` wrote `plain.len() as u32`, and a
+  segment sealed each batch of writes as one frame whatever its size: a
+  `W` message carries a mebibyte of records at most (`replication::MESSAGE`),
+  but a longer record goes alone, so a single record of 4 GiB -- a block's
+  writes -- would have written a wrapped length, and nothing after it
+  opened. Not reproduced, no test allocating 4 GiB: settled by reading. A
+  frame is now a mebibyte at most (`seal::FRAME`, `Frames::seal` refusing
+  more, its length checked), a batch going out in frames of whole records,
+  and a record longer than a frame in frames of its own, beginning one
+  (`Segment::write_by`). A crash between those leaves the record cut short
+  after whole frames: `position` cuts it where it began, a frame's end
+  (`seal::open_appended_to`), and `verify` counts it as the last segment's
+  torn tail (`a_batch_goes_out_in_frames_of_whole_records`, at frames of
+  256 bytes).
 
-*Older files.* A version 1 file opens as it did (`tests/sealed-v1/`, an
-archive and a backup 0.2.0 sealed, held by
-`a_v1_sealed_archive_still_opens`), and a segment an older archiver began
-goes on in version 1 frames, `FileId::V1` read back from it: frames of two
-versions in one file would open as neither. Nothing new is begun as
-version 1: images and segments taken after the upgrade are version 2
-beside the older files, which leave as `prune` lets them go. Since a
-version 1 file still opens under its key, the binding holds only for a key
-that never sealed one: whoever holds two version 1 files sealed under a
-key builds a third from their frames and puts it wherever a file sealed
-under that key is read, a version 2 archive's or a backup's place among
-them. Neither pruning the older files nor restoring a backup and sealing it
-again under the same key ends that -- the older files are wherever they
-were copied -- so the way out is a new key (`fennec key`) sealing
-everything from then on and a new archive begun under it, the older files
-read with the old key while they are kept. A switch refusing version 1
-files is not built: under it every archive and backup 0.2.0 sealed would
-be unreadable, and it is left for a later decision. A version past 2
-is refused by its number (`sealed as version 3, which this binary does not
-open`), never read as a plain file: `is_sealed` reads the magic's first
-seven bytes. A binary from before the id took the magic's whole eight
-bytes, so a version 2 file is no sealed file to it, and it refuses one:
-`fennec restore today.sealed out.fennec --key-file k` says `today.sealed:
-not a sealed file`, `fennec verify` or `restore` of an archive `<image>:
-not sealed, where the archive is`, and without a key an image does not
-open as a database (`corrupt: invalid fennecdb signature`), the file asked
-for never made. The binaries reading an archive are upgraded before the one
-writing it.
+**A file's key is never made under the key itself** (`seal::FILE_KEYS`,
+`Key::of`, `seal::file_key`). Version 3 as first made sealed a file under
+HChaCha20(key, id), the id read from the file, while the same key seals
+version 1 and 2 frames with ChaCha20 itself -- the one finding of 1.0's
+review of version 3 that held it back. A ChaCha20 block is the 20 rounds
+over the constants, the key, the counter c and the nonce N with that state
+added back; HChaCha20 of c || N is the same rounds' words 0-3 and 12-15 with
+nothing added back. So a block's keystream, its words 0-3 less the
+constants and 12-15 less (c, N), is HChaCha20(key, c || N): bytes 0-15 and
+48-63 of a block of a frame whose plaintext was known -- a string of 127
+bytes and more written through the API before an upgrade, or a backup's
+first block, its magic, change number and schema -- gave the key of a
+version 3 file of id c || N, and whoever could write where archives are
+kept, holding a version 1 or 2 file and no key, sealed a whole version 3
+file -- any role, archive, tenant, change and rows -- that `unseal`,
+`restore` and `restore --tenants` took. `an_older_files_keystream_gives_no_file_key`
+does it with a version 2 frame of 64 known bytes: at 4a834627 its forged
+image of tenant `xeno`'s at change 99 opened, holding what the forger
+chose.
 
-*Cost*: one Poly1305 block more a frame -- the AAD padded to 32 bytes
-where it was 16 -- and 16 bytes a file, some 13 000 instructions a
-64 MB file sealed and opened. Measured, that took 3 970.2 and 3 970.1
-million instructions before, 3 974.3 and 3 970.4 million after
-(`/usr/bin/time -l`, six rounds less one, two runs of each): the 0.01 to
-0.1% between them is the runs' own spread, a build's whole runs differing
-by up to 34 million between two tries. Timed on a quiet M1 before the
-change, 164 ms to seal and 165 to open at the median, about 410 MB/s; the
-machine was not quiet again while this was measured (a load of 8 to 10),
-where both builds took 244 to 282 ms alike, so the instructions stand for
-the time. fennec-server's code grew by 3.2 KB: the head read, the AAD
-built and a version named.
+- *What a block under the key had for its input, in versions 1 and 2.*
+  Counter 0 under each frame's nonce, Poly1305's one-time key
+  (`aead_tag`), and counters 1 to the frame's length in 64-byte blocks
+  under it, the keystream (`chacha20_xor`), wrapping at 2^32; the nonce
+  12 bytes of the system's randomness -- before 0.2.0, where a descriptor
+  ran out, SHA-256 of the clock and the process: never a value anyone
+  chose. An opener runs block 0 under any nonce a file names, but only for
+  a tag it compares, and opens no keystream before the tag matched: no
+  block leaves but those of frames the key sealed. No code bounded a frame
+  below 2^32 bytes: `seal_frame` cast its length to `u32` and sealed the
+  whole batch, which a record of up to 2^40 bytes could be (`read_message`).
+  A constant input whose counter is 2^32 - 1, the review's way, is out of
+  their reach only because no frame of 256 GiB was ever sealed, and by the
+  nonce's 96 random bits.
+- *What version 3's own keys give away.* A file's key runs ChaCha20, so its
+  frames' known plaintext gives HChaCha20 of the file's key, which makes
+  no key; the key files' keys are made under runs HChaCha20 alone, never
+  ChaCha20, so no keystream gives HChaCha20 under it away.
+- *So that key is HKDF-Expand's* (RFC 5869, 2.3) of the key, `FILE_KEYS`
+  its info, 32 bytes: HMAC-SHA256(key, info || 0x01), the key 32 uniformly
+  random bytes, so no Extract. HMAC-SHA256 shares no rounds with ChaCha20:
+  what ChaCha20 under the key gives away tells nothing of it, whatever a
+  frame's length or nonce, and it is held to RFC 4231's vectors and
+  Wycheproof's already (`the_file_keys_key_is_hkdf_expand` holds the
+  first block to RFC 5869's SHA-256 cases, so a reader's own HKDF makes
+  it). It is made once a key, as the key is read, and a file pays the one
+  HChaCha20 it paid.
+
+The derivation's vector, computed apart from this code in Python -- HMAC
+and HKDF from its standard library, HChaCha20 written from the draft and
+held to its 2.2.1 vector -- is `a_file_key_is_the_one_another_reader_makes`:
+the key 00..1f, the id f0..ff, the info `fennecdb sealed file keys,
+version 3`, the key files' keys are made under
+`b334afb4e085eabd2c6cd511a3ee509a414695c8e2fd8d1f50845a65eb2e47da`, the
+file's key `862970b95cd16be8c85c3e3f58f648a77eafd77a3a3a96a3aa0de9fdf0421c09`.
+
+**A file says what it is, and every read holds it to that**
+(`seal::Binding`, `Archive::learned`, `Archive::held`). The head names,
+under the first frame's tag and so every frame's: the file's role (a
+segment, an image, an archive's history, a tenant's presence, a backup),
+the archive's id -- 16 bytes of the system's randomness made as the
+archive's first sealed file is, and read back from its files' heads after
+-- the tenant whose line it is (none for one database's), a segment's
+first change, an image's change and time, and an image's archive's start
+(`began`). Version 2 bound a file to its id alone, and a write's record
+carries no change number -- `writes_in` counts its writes and `entries`
+numbers them from the segment's name -- so whoever could write the bucket:
+
+- deleted a middle segment and renamed the next into its name -- one
+  beginning at an image's change plus one, which the hourly images make
+  common -- and `verify` passed, naming a gap later than where the writes
+  went, and a restore to a moment inside it gave a database missing a run
+  of writes and holding later ones. A segment's head now says its first
+  change, and a name saying another is refused
+  (`a_segment_renamed_into_anothers_place_is_refused`);
+- copied tenant X's directory, or a line of its moved aside, over tenant
+  A's -- every tenant sealed with the one key -- and `restore --tenants`
+  wrote X's rows into A's file, which A's tokens then read, or passed A
+  over as gone. A tenant's line is read as its tenant's
+  (`node_archive::Line::archive`, `Archive::of_tenant`): a file naming
+  another is refused by name
+  (`a_tenants_archive_copied_over_anothers_is_refused`);
+- put an archive's image where a backup was asked for, or a backup in an
+  image's place, and each opened as the other: an image has its primary's
+  history, a backup a fork of its own. Each is now refused as what it is
+  (`an_image_and_a_backup_do_not_stand_in_for_each_other`).
+
+Every reader holds each file it opens -- `verify`, a restore to the end, a
+change or a moment, `restore --tenants`, `consolidate`'s assembly, the
+archiver going on (`position`, `ends_on_image_of`) and `unseal` -- and a
+directory's files to one another: its sealed files' heads, read without
+opening them, must name one archive and one tenant -- the line's, under
+`--tenants` -- and their images one start, else nothing of it is read; a
+head changed to agree opens nothing, its first frame's tag over it. What
+is chosen from a head before its file is read is vouched for by that
+file's first frame (`seal::vouched_in`): the archive's id and tenant, from
+the first file that has one -- the history's few bytes as a rule -- and
+`began`, from the first image's first mebibyte once it is asked for
+(`Archive::began_of`). Read from the heads alone, every image's head
+edited with the plain `began` chose another line for a restore to a
+moment, or passed the tenant over as not yet archived, opening no image
+whose tag would refuse it, and the archiver sealed its next images so; it
+is refused now (`presence_and_began_edited_are_refused`). The rest need
+only agree, each held once it is opened. A
+segment cut inside its head, or after it and before a frame, vouches for
+nothing and holds no write, and is read as one cut as it was made. A line
+read as one database's -- `fennec verify <root>/<tenant>` -- holds its files
+to one another, and `verify` says whose they are.
+
+The plain files that choose what a restore reads are sealed or held to the
+sealed ones. `began` -- when a line took its first image, written plain by
+the prune that lets that image go, which chose the line a restore to a
+moment read and whether one before it was refused or passed over -- is in
+every image's head, and a plain `began` saying otherwise is refused by name
+(`Archive::began`); lost, the images still say it. `presence` -- a tenant
+gone and back, which marked a tenant gone, so passed over, by a line
+written by hand -- is sealed as the line's other files are
+(`Archive::note`, `Archive::presence`); one an archiver before this version
+left plain is read only while nothing of its line is sealed in this
+version, and an archiver's start seals it first (`Archive::seal_presence`).
+So an operator who must mark a tenant gone by hand -- a node lost, its word
+never heard -- does it in a plain archive by a line in `presence` as
+before, and in a sealed one leaves the tenant's file out of a restore's
+output (or moves its lines out of the root): no tool writes a sealed
+presence but the archiver.
+
+What none of this covers, and the docs say: a file cut at a frame's edge
+opens as the shorter file, which nothing tells from a crash's -- the
+archive's own order notices it in any segment but the last (a gap no image
+ends, refused; a gap an image ends, named by `verify`), and `verify` says
+where the last ends; a middle segment deleted is such a gap; and an older
+whole file, or a whole archive or line, put back opens as what it was, the
+names and heads holding a file to its place, never to its age. A bucket
+that keeps versions or locks objects is what holds an archive to its age.
+A plain archive promises nothing against whoever can write it.
+
+*Rejected*: the file's name or path in the AAD, which a sync tool's copy, a
+renamed backup or a node archive's directory moved would break where a
+sealed file opens wherever it is copied -- the head names the numbers a
+name carries, and a tenant, and a reader compares them with the name it
+found; a file's key from HKDF alone, an HMAC -- four SHA-256 blocks -- a
+file where HChaCha20 is one block's rounds (the key HChaCha20 runs under
+is HKDF-Expand's, made once a key); HChaCha20 of the key itself under an
+input of its own, the review's way -- a counter word of 2^32 - 1, which a
+ChaCha20 block of an older frame reaches only past 256 GiB -- whose
+separation rests on no such frame ever sealed and on the nonces'
+randomness, where HMAC's rests on nothing a frame did; the frame's place as its nonce,
+which a cut sealed again; a tag over the whole file, which an appended
+segment cannot keep without writing it again; an id counted by the archive,
+which two archivers or two backups under one key would share; a sealed
+manifest of an archive's files, which would hold it to its age only where
+the manifest itself could not be put back, and an archive's directory can.
+
+*Older files.* Version 2 (`FENECSL\x02`, the id after the magic and every
+tag over it and the frame's place, the frames under the key itself, main's
+builds from 2026-11-15 and no release) and version 1 (`FENECSL\x01`, no id,
+every release from 0.1.7 to 0.2.0) open as they did (`tests/sealed-v1/` and
+`tests/sealed-v2/`, an archive and a backup each version's code sealed,
+held by `older_sealed_archives_still_open`). Nothing is sealed in either
+any more, and a segment an older archiver began is gone on in by none: the
+archiver cuts its tail, durably, and its next write begins a version 3
+segment after it, and after an image of version 3 of the line's end
+(below) -- frames of two versions in one file would open as neither, and
+going on in an older one sealed writes bound to nothing. Their
+files bind nothing a reader holds them to, so the binding holds only for a
+key that never sealed one: whoever holds version 1 files under a key builds
+others from their frames, and a version 1 or 2 file of any archive under
+the key -- a segment, an image -- reads where it is put, but past a line's
+first file of version 3. There an older image or segment is held to where
+it stands in the archive's order (`Archive::older`): before the first
+image or segment sealed in version 3, by its name -- an image of an
+earlier change, or of its change taken earlier, a segment whose writes all
+come before it -- it reads; at or past it, it is refused by name. Tenant
+xeno's image from before an upgrade, copied into acme's line under a later
+change, and xeno's segment named before acme's first image with its writes
+running on past it, each restored as acme's at 4a834627 (at changes 6 and
+5, `older_files_put_past_a_lines_newer_ones_are_refused`); each is refused
+now, and so is a presence sealed in version 1 or 2, which no archiver
+wrote.
+
+That first file is an image: an archiver going on in a line an older one
+sealed -- or a line of no file of version 3 -- seals an image of version 3
+of the line's end before its first segment of version 3
+(`Archive::seal_before_version`), assembled from the line's files as the
+hourly round takes one and timed after every image the line holds:
+one database's archiver as it goes on, a node's for each tenant as it
+starts, on the thread beside its stream (`NodeArchive::seal_ends`,
+`Archive::seal_end`), or at the tenant's first write where that comes
+before the tenant's turn, a write meanwhile waiting for the image being
+sealed beside rather than assembling a second (`Archive::sealing`).
+Sealed at a tenant's first write, as the second round of this review
+made it, a line no write reached after the upgrade held no file of
+version 3, and an older image put in meanwhile -- of its end's change
+under a later time, or of a later change -- was what that image was at
+last assembled from, its rows sealed in and read by every restore past it
+(1.0's third review of version 3; at 0abe1d44 the idle line of
+`an_idle_lines_upgrade_image_is_sealed_as_the_archiver_starts` held no
+image of version 3 20 s after its archiver started). A line moved
+aside is not sealed: it takes no write, and a restore to a moment reads
+it only before the line after it began, where an image timed at the
+upgrade is never the base. Begun with a segment, as
+version 3 was first made, the line's first file of version 3 left before
+it, in the archive's order, an image of the change before that segment
+taken at any time: an older image of that change -- another tenant's or
+another database's under the key -- copied in under a later time was the
+base of every restore past the upgrade until the first round's image, an
+hour on by default, which then sealed it in (1.0's second review of
+version 3; at 9865040b a tenant's restore to the end held another
+database's notes for 6 of its 8, and with such an image of the change
+before it for 5 of its 8, `an_older_image_put_in_after_an_upgrade_is_no_restores_base`).
+Now such an image of the end's change stands at or past the upgrade's
+image, and is refused; one of an earlier change stands before it, and a
+restore past the upgrade starts from it or a later image. Where a line's
+first file of version 3 is a segment -- that image let go of by `prune`,
+which lets go of every image before it first, or a line with no image --
+an older image is refused wherever it stands: put in before that segment
+it was the base of a restore to a moment the line no longer held, which
+was refused, that segment's writes read on it (at 9865040b a restore to
+the change after it held another database's notes for 6 of its 7,
+`an_older_image_is_read_only_before_an_image_of_version_3`). A line's
+first segment of version 3 that a crash left holding no write, the
+image's name lost with it, is removed as the archiver goes on, and the
+image sealed then (`an_upgraded_line_goes_on_from_an_image_of_its_end`).
+Where a file of version 3 stands is noted once it is in place
+(`Archive::landed`, after an image's rename and a segment's create), never
+as it is bound: noted so, an image whose write then failed -- a full disk,
+on Windows a scanner holding its side file -- left the line taken for one
+whose first file of version 3 was that image, so the archiver going on on
+the same archive, as `follow` does, sealed none and began the line with a
+segment, and after a restart every older image was refused and no restore
+past the upgrade had a base (1.0's third review; at 0abe1d44
+`an_upgrades_image_that_failed_to_write_is_sealed_as_the_archiver_goes_on`'s
+restore to the end was refused: `<image>: an image of change 1, sealed
+before version 3, where the first file this archive holds of version 3 is
+its segment beginning at change 5, and an older image is read only before
+an image of version 3`). The id an archive's first sealed file is made
+with is kept as it is made, written or not, rather than the identity
+cleared on a failed write: the round beside the stream binds files of the
+same line, and one bound under the id before the failure and landed after
+a rescan had made another would leave two archives' files in one
+directory, which every read refuses. An end that does not restore is
+refused as the line's damage before anything of version 3 is written,
+naming the ways out: put right what `fennec verify` refuses in it, or
+begin a new line, keeping this one for restores to earlier moments -- one
+database's by archiving into a new directory, a node's tenant's by moving
+its directory aside as `<tenant>.<any name>`, the archiver stopped, after
+which the archiver begins the new line with the node's image. One
+database's archiver stops on it, a node's passes over that tenant
+(`an_upgraded_line_whose_end_does_not_restore_is_refused_as_damaged`). The
+image is one assembly a line, once: what the first round would have taken
+of it within the hour, about 9 s a GB of database
+(`archive::tests::upgrade_image_cost`, by hand in a release build: a line
+of 262 144 notes, a sixteenth of them in a segment after its older image,
+its image of 266.6 MB assembled, opened, imaged and sealed in 2.06 to 2.38
+s over three rounds, 7.7 to 8.9 s a GB, on an 8-core arm64 Mac at a load
+of 2.5 to 2.7). One database's archiver spends it on its stream, before it
+takes the next write: its primary fills the stream's socket meanwhile,
+then waits for it at most `SENT_WAIT` on one durable write, marks it
+lagging and answers the writes after without it until it catches up, and a
+send held up past `SILENCE` ends the stream, which the archiver makes
+again from its end. A node's spends it beside its stream, where the stream
+waits only for a tenant written before the pass reaches it. A line this
+version's first builds upgraded -- its first file of version 3 a segment;
+no release and no build of main wrote one -- reads none of its older
+images: restores from its first image of version 3 on, and its archiver,
+go on; a `verify`, a restore before that image and, until it holds one,
+its round refuse each older image by name, until they are moved out.
+
+No upgrade puts an older file where it is refused. The review read one
+as able to: a primary behind its archive sending an image of an earlier
+change at the first hello after the upgrade, leaving an older segment
+holding writes past a version 3 image. A hello's image of a change before
+the archive's end leads from no history the archive is on, whatever its
+lineage (`History::continues`), so it is not taken (`Took::Diverged`) --
+one database's archiver stops, a node's moves the line aside -- before
+anything is written (`a_hello_behind_an_older_line_leaves_it_as_it_was`).
+So a refusal names the file and the way out: `<file>: an image of change
+7, sealed before version 3, at or past its image of change 7 taken at
+<ms>, the first file this archive holds of version 3: no archiver puts it
+there, so it is not this archive's. Move it out of the archive's
+directory, and the archive is read without it`.
+
+What remains: an older file standing before a line's first of version 3
+-- its images and segments before it, which an older file of another line
+can be put among, read by a restore to a moment before the upgrade, and
+those put in before the upgraded archiver sealed that image, from which it
+was assembled -- and every file of a line with none of version 3 -- a line
+a node's archiver moved aside before its upgrade, or one whose version 3
+files were deleted -- which reads as an older whole line put back does. A line's history sealed in version 1 or 2
+reads wherever it is, in place of one of version 3 too: it has no place in
+the order, and is read by the archiver going on and by `verify` alone,
+never a restore, so all it decides is whether a primary's hello is taken
+as leading from the archive. Neither pruning
+the older files nor restoring a backup and sealing it again under the same
+key ends that -- they are wherever they were copied -- so the way out is a
+new key (`fennec key`) sealing everything from then on and a new archive
+begun under it, the older files read with the old key while they are kept.
+A switch refusing them is not built: under it every archive and backup
+0.2.0 sealed would be unreadable. A version past 3 is refused by its number
+(`sealed as version 4, which this binary does not open (it opens 1 to 3): a
+later fennecdb's`), never read as a plain file: `is_sealed` reads the
+magic's first seven bytes, and a role a version 3 head names that this
+binary does not know is refused by its number too. A version 3 file is
+refused alike by the binaries before it: main's version 2 builds say
+`sealed as version 3, which this binary does not open (it opens 1 and 2): a
+later fennecdb's`; 0.2.0, which took the magic's whole eight bytes, finds no
+sealed file -- `fennec restore today.sealed out.fennec --key-file k` says
+`today.sealed: not a sealed file`, `fennec verify` or `restore` of an
+archive `<image>: not sealed, where the archive is`, and without a key an
+image does not open as a database (`corrupt: invalid fennecdb signature`).
+The binaries reading an archive are upgraded before the one writing it.
+
+*Cost*: a file's own key is one HChaCha20 -- a ChaCha20 block's rounds --
+as it is begun and as it is opened, and the key it runs under one
+HMAC-SHA256 a process, as the key is read (`Key::of`); its head is 66 bytes and its tenant's
+name where version 2's was 24, and its first frame's AAD the head, three
+Poly1305 blocks more than version 2's and one more for each 16 bytes of
+the name; every frame after takes 25 bytes of AAD, the tag before and its
+place, as version 2's took the id and its place: nothing more a frame,
+and not one byte more a write -- but a batch past a mebibyte, now split,
+32 bytes a mebibyte. Measured in one release binary, version 3 against
+version 2, each the best of three rounds taken in turn
+(`seal::tests::seal_cost`, run by hand), on an M1 shared with others whose
+load was 2.9 as it began and 2.0 as it ended (a run beside a load of 9.5
+was discarded): 10 000 frames of 1 KiB, a thousand a file, 1.00; of 1 MiB,
+1.00 (26.1 s against 26.0, some 400 MB/s); and 10 000 files of one 64-byte
+frame each 1.86, 1.0 µs more a file -- the subkey, the longer first AAD
+and, on version 3's side of the loop alone, the system's randomness for
+the id, which version 2 drew as it began too. Measured with version 3's
+first derivation, HChaCha20 under the key itself: a file now runs the same
+HChaCha20 under the key HKDF-Expand made once, in `seal_cost`'s loop as in
+an archive's. An archive's files are an
+image an hour and a segment each 64 MB: nothing a write pays. The seal is
+the `fennec` binary's alone -- `fennec-server` reaches no archive and no
+seal, and fennec-http is not in the browser module -- and its code grew
+by 18.9 KB (`__text` 2 850 944 bytes built from `train-d`, 2 870 272 with
+version 3, profile `cli` on macOS arm64; the file 32.4 KB larger): the
+binding written and held by every reader, the vouched heads, the chained
+frames and the split batch.
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
-`fennec key`'s, the hooks' stand-in key, SCRAM's client nonce. Each was
+`fennec key`'s, the hooks' stand-in key, SCRAM's client nonce, a sealed
+file's id and an archive's. Each was
 read from `/dev/urandom`, and where its open failed -- at a busy server's
 descriptor limit, EMFILE -- the nonces fell back to SHA-256 of the clock,
 the process id, a stack address and a count that began again at each call:
@@ -831,7 +1816,7 @@ gives away the XOR of their plaintexts and Poly1305's one-time key, so
 both tags could be forged. The randomness is now read with no descriptor
 (`crypto/unix.rs`) -- `getrandom` on Linux (glibc 2.25, musl, the kernel's
 3.17), `getentropy` on macOS, 256 bytes a call -- and where the system
-gives none a seal fails as a write does (`seal_frame`'s error, the
+gives none a seal fails as a write does (`Frames::seal`'s error, the
 archive's), a key is not made and a SCRAM sign-in is refused. A nonce is
 one call where it was an open, a read and a close: 1.0-1.2 us against
 10.7-13.8 on an M1, 200 000 draws three rounds each. A test runs
@@ -845,6 +1830,26 @@ is built for; where the file cannot be read either, the seal is refused. Only id
 be secret -- request and trace ids, a hook set's version -- may take the
 clock where the system gives nothing (`crypto::id_u64`, a count of the
 process's own in place of the one that began again).
+
+**The key file is warned of where others can read it** (`seal::open_key`,
+by `conn::open_to`'s rule, `--tls-key`'s): its name and mode on stderr as
+`Key::from_file` reads it, on Unix alone, never a refusal -- a container's
+secret volume mounts its files 0644 -- where whoever reads it opens every
+archive and backup it sealed and seals files that open as theirs. Held
+through the command (`fennec-cli`'s `a_key_file_others_can_read_is_warned_of`:
+`fennec verify --key-file` of a file of mode 0644 says so, of 0600 says
+nothing), so a `Key::from_file` that dropped its log fails it, as the
+seal's own test of `open_key`'s words did not.
+
+**A line read as one database's says whose it is.** Only `--tenants`
+holds a tenant's line to its directory's name (`Line::archive`), so a line
+copied where one database's archive was -- or a node's tenant's moved
+there -- restores with `fennec restore <dir>` as that database: its files
+agree with one another, and a database's archive names no database. `fennec
+verify` and `fennec restore` of such a directory say ``sealed as tenant
+`x`'s archive`` (`Verified::tenant`, `Restored::tenant`,
+`a_tenants_line_restored_alone_says_whose_it_is`); one database's says
+nothing, and SECURITY.md says one database's archive is bound to no name.
 
 ## follow
 
@@ -861,7 +1866,15 @@ finished: a copy cut short is made again rather than streamed on top of,
 which would lose the rows it never reached. An update arrives without its
 TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
-before each such read cost the batching, 5 900 rows/s against 17 100. Commit
+before each such read cost the batching, 5 900 rows/s against 17 100. The
+pending writes are put at `--batch` changes or once their rows hold
+`BATCH_BYTES`, 16 MiB, counted as a copy's batch is
+([crates.md](crates.md#a-sqlite-files-lengths)), each document moved into
+its statement: put at `--batch` changes alone and copied into the
+statement beside the pending ones, a transaction of a 4 MiB row and 2 000
+of 28 KiB held 377 MB at once, and holds 97 MB now, under five times
+`BATCH_BYTES` and its largest row
+(`a_follower_holds_its_writes_by_their_bytes_not_their_count`). Commit
 to visible: p50 0.16 ms (`make follow-bench`). `fennec-server --follow` runs the
 same follower on a thread of the server's, over the database it serves, so
 the mirror is served over HTTP and subscriptions with no second process
@@ -871,8 +1884,9 @@ importer's options come as `--follow-index` and the rest
 collection takes no write but the follower thread's (a write hook, 403):
 the next change from PostgreSQL would write over one, or a copy made again
 forget it. The follower stops at the server's shutdown flag, and the
-shutdown waits for it (`durability::before_shutdown`, 5 s at most, past which a
-copy still being made is left for the next start) before its checkpoint;
+shutdown waits for it (`durability::before_shutdown`, 5 s at most; a copy
+still being made stops within `client::LOOK` and is left for the next
+start, below) before its checkpoint;
 an error it cannot wait out stops the server rather than leave it serving
 a mirror that no longer moves -- through the one shutdown, exit code 1
 (`durability::stop_with`, [durability.md](durability.md#the-one-shutdown)). This is why the PostgreSQL client is
@@ -905,6 +1919,86 @@ before the pg wire went gave 3.7 and 3.7 the same day); a server killed
 while the table was written to held every row 370 ms after it started
 again. The
 follower adds 178 KB to `fennec-server`.
+
+*The copy waits on PostgreSQL with no lock held.* `ensure_copy` decides
+under the write lock -- the `_follow` entry read, a stale collection
+dropped, the entry written unfinished -- and lets it go; the dial, the
+sign-in and the COPY are read with none, and the rows land a batch at a
+time, each batch, index and the checkpoint a statement of its own under
+the lock (`load::run_locked`, `Land`), the entry marked finished after the
+last. Every release with a server that follows held the write lock from
+the dial to the last row: `fenec-pg --follow` (v0.1.5, v0.1.6),
+`fenec-server --follow` (v0.1.7 to v0.1.12) and `fennec-server --follow`
+(v0.2.0), so every request of the server, of any collection, waited on
+PostgreSQL for as long as the table took to come -- and for good where
+whoever answered at its address sent a byte a little under every 30 s, a
+read's timeout; the shutdown takes the same lock, so a SIGTERM never ended
+that server either. The dial took std's connect (the system's 75 s and
+more, the name's lookup unbounded) and every read of the sign-in 30 s
+anew. Now the sign-in is held to one deadline, libpq's `connect_timeout`
+(30 s by default; `client::CONNECT_WAIT`): the name looked up on a thread
+of its own (`fennec_http::dial::resolve`), each address dialed within what
+is left, the TLS handshake (`dial_within`) and every message to the first
+`ReadyForQuery` read through `Until`, PBKDF2's own time added back, since
+it is this side's. The COPY's socket has a read timeout of `client::LOOK`,
+200 ms, and its reads (`Watched`) ask again at each until the stop flag is
+set or the server has said nothing for 30 s: a stop or a shutdown ends the
+copy within 0.2 s wherever it waits, the copy left unfinished as a kill
+leaves one, made again from the start at the next start. A reader sees the
+collection fill a batch at a time, its `_follow` entry unfinished until
+the end -- what a reader saw before was nothing at all until the copy was
+whole, its request waiting the while. A failed copy drops what it landed,
+under the lock, as before. The cost is the lock taken once a batch
+(`--follow-batch`, 2 000 rows by default) where it was taken once a copy,
+and a 200 ms timer on the copy's socket, which a busy copy never meets:
+a copy's rows are read and put as they were. fennec-server's
+`a_copy_held_up_holds_up_no_request_nor_the_shutdown` holds it at the three
+places a stand-in stalls -- a startup never answered, a TLS handshake
+begun and never answered, a COPY sending a byte every half second --
+each time a write and a read of another collection answered at once and
+a SIGTERM ending the server, exit 0, within its wait.
+
+*A keepalive's end is confirmed only where the server is proven.* With
+nothing pending, the follower confirmed the end a keepalive named: the
+walsender's word for how far its log had gone, which lets a quiet
+publication's slot move with the log other tables' writes fill --
+PostgreSQL 15 and later skip an empty transaction, so with no change of
+its table the slot hears nothing else, and its own subscriber reports the
+position received where nothing is pending (`send_feedback`) for that
+reason. But a keepalive is anyone's on a path no CA checked, and an end
+named past what the stream reached, confirmed, has PostgreSQL skip every
+change before it for good: PostgreSQL 17.12, sent a confirm a terabyte
+past its log's tip on a slot's stream, set the slot's
+`confirmed_flush_lsn` to it, and a row inserted after never came on the
+next stream, where one inserted before the confirm did. `pg_recvlogical` never confirms a keepalive's
+end: its written and flushed positions are the last XLogData's start, put
+on disk. The follower now does as PostgreSQL's subscriber does only on a
+proven stream (`WalStream::proven`: this machine, TLS checked against a
+CA, or a sign-in bound to the session, `SCRAM-SHA-256-PLUS`), and as
+`pg_recvlogical` does on any other, where a quiet table's slot keeps the
+server's log until its next change -- the price of a stream someone may be
+writing. A commit's end is confirmed once on disk on any stream, as
+`pg_recvlogical` confirms what it wrote: on one not proven, whoever can
+write a keepalive can write a commit, and the changes before it, which no
+rule of the follower's tells from the server's -- only `verify-full` and a
+bound sign-in keep that writer out, which is why they are the default
+off this machine. Every release with `--follow`, v0.1.5 to v0.2.0, confirmed any
+keepalive's end. fennec-import's
+`a_keepalive_moves_no_confirmed_position_on_a_stream_not_proven` sends one
+naming a terabyte past the commit, over plain text to a name off this
+machine (`dial::stand_in`), and holds no status update to it; over
+loopback it is confirmed.
+
+*What the client keeps is bounded by what it asked.* A simple query's
+answer is held to 100 000 rows (`QUERY_ROWS`; the client's queries read a
+catalog for a row or a few, the follower's read-back one row, `limit 1`)
+and to `MAX_MESSAGE` of what the rows cost here, 24 bytes a row and a cell
+beside their bytes: a null cell is 4 bytes of the server's and 24 of
+memory, so a server's answer of a gigabyte of rows held six. A COPY's line
+is held to `MAX_MESSAGE`, PostgreSQL's bound of a row, and each byte is
+scanned for its end once (`CopyOut::scanned`): a line sent a byte a
+message was scanned whole at every message, quadratic, and kept without
+bound. Every release since v0.1.0 kept both without bound and scanned so.
 
 *A follower that stops lets its slot go before it returns -- within a
 bound, and on a clean stop alone.* It ends the stream as the protocol ends
@@ -1101,8 +2195,19 @@ TLS to the source (`sslmode`, `fennec_wire::client::SslMode`) is asked
 for as libpq asks: an `SSLRequest` before the startup message, so the
 user's and the database's names, and SCRAM's exchange, go out only once
 the handshake is done -- and under `verify-full` only to the server the
-certificate names. The modes are libpq's five but `allow`, with its
-default, `prefer`, and its rules: `prefer` goes on in plain text on an
+certificate names. The modes are libpq's five but `allow`, with libpq's
+rules but for the default: `verify-full` for a host off this machine,
+`prefer` only for `localhost` and a loopback address
+(`client::on_this_machine`), a mode the string or `PGSSLMODE` names
+always winning. libpq's `prefer` everywhere -- v0.2.0's, the first release
+with TLS (v0.1.x spoke plain text alone) -- spoke to whoever answered a
+connection string copied across a network and checked nothing; the
+default is now the one that keeps a stand-in out, a deliberate break
+([compatibility.md](compatibility.md#changed-on-purpose-before-10)),
+said once at each start (`Url::tls_said`: the shell's `tls` line, the
+server's `follow:` log line), and a refusal under it names the cause,
+the CAs trusted -- `sslrootcert`'s file, libpq's root file or Mozilla's --
+and the ways out, a CA to trust or `sslmode=require`. The rules: `prefer` goes on in plain text on an
 `N` and dials again without TLS when the handshake fails (fe-connect.c's
 `CONNECTION_FAILED` after it: failing there would keep out no one, since
 whoever can break a handshake can as well answer `N`), never after an
@@ -1122,7 +2227,18 @@ server's (CVE-2021-23222, libpq's). An error in answer is said to be one,
 its text never read: it comes before TLS and any password, so anyone in
 the path writes it, and shown it would put their words in a log or a
 terminal as the server's (libpq stopped showing it in 17.2,
-CVE-2024-10977). A build
+CVE-2024-10977). The same holds after the handshake wherever the server
+is not proven (`Client::proven`: this machine, a chain checked against a
+CA, or a sign-in bound to the session): an `ErrorResponse`'s own words
+are not shown, its SQLSTATE -- held to five digits or capitals -- and this
+client's words for it are (`server_error`, `sqlstate_words`). What is
+shown of a server's -- an error's words on a proven connection, a column's
+name, a cell that does not parse, `server_version` -- goes through
+`peer_text`: control and bidirectional characters escaped, cut at 512
+bytes (a cell at 64) with the length said; the follower's log lines and
+the shell's errors pass through it again, cut at 4 KiB, so a server's
+escape sequence never reaches a terminal or a log as one. Every release
+since v0.1.0 printed them raw. A build
 without the `tls` feature takes `prefer` as plain text and refuses the
 rest, as libpq built without SSL does. The wait for the next replication
 message is `TlsStream::readable` over TLS: it takes whole records in under
@@ -1141,7 +2257,9 @@ the `fennec` binary's z -- more than half an hour of an M1 core even at
 its widest, eight a cycle at 3.2 GHz, and some three hours by the CPU
 time 2^20 rounds took on this machine shared with other work (2.9 s; 1.2
 s keyed, below) -- `fennec import`, or `--follow` connecting again,
-waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
+waiting on it. The client runs `SCRAM_MIN_ITERATIONS`, 4 096 (RFC 7677's
+floor, PostgreSQL's default; below it a proof is cheap to guess from, and
+`i=1`, which every release took, makes it four HMACs), to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
 times PostgreSQL's `scram_iterations` default of 4 096: 28.6 thousand
 million instructions at the bound, 51.5 at opt-level z, which took 6.3 s
 and 9.2 s of a core here under a load average past 40) and refuses any
@@ -1167,7 +2285,71 @@ The exchange's messages are `Scram`'s, the nonce given, so
 `scram_rfc7677_exchange` holds them to RFC 7677's example byte for byte,
 the proof and the server signature among them; the server signature is
 compared by `ct_eq`, as every signature is
-([conventions.md](conventions.md#secrets-compared)).
+([conventions.md](conventions.md#secrets-compared)). The server-first
+message is held to RFC 5802: its nonce must begin with the client's and be
+longer, and an `m=` extension is refused; the client is driven to verify
+the signature by `the_client_refuses_a_server_signature_it_cannot_verify`,
+a stand-in sending a wrong one and one sending `AuthenticationOk` in its
+place. A password that is not ASCII is PBKDF2's as its UTF-8 bytes, not
+SASLprep'd: libpq sends exactly that where its SASLprep refuses a
+password, and the verifier a server made of one SASLprep leaves as it is
+-- one in NFKC, as one typed nearly always is -- is the same; a password
+SASLprep would change (a compatibility character, a non-ASCII space) fails
+here where libpq signs in, a gap the docs name and a table of NFKC's
+would close.
+
+*Who may ask for the password.* Holding one, the client signs in by
+SCRAM-SHA-256 alone (`RequireAuth::default_for`), libpq's
+`require_auth=scram-sha-256`: a request for it in clear text (`R3`) or as
+MD5 (`R5`) is refused before anything goes out, as is an
+`AuthenticationOk` before SCRAM's exchange finished -- a stand-in needs no
+password to send one, and taking it proved nothing. Every release since
+v0.1.0 answered `R3` with the password under any `sslmode`, so whoever
+stood in for the server -- anyone on the path, under `prefer` -- had it.
+`require_auth` is libpq's, its rules (`check_expected_areq`): a list of
+`password`, `md5`, `gss`, `sspi`, `scram-sha-256` and `none`, all negated
+or none, `none` letting a server ask for nothing; MD5 is never spoken.
+Without a password a server asking none is taken, as before.
+
+*The sign-in is bound to TLS where the server offers it.* Over TLS the
+client takes `SCRAM-SHA-256-PLUS` with `tls-server-end-point` (RFC 5929):
+the channel binding is the hash of the certificate it was shown, by the
+certificate's own signature hash -- SHA-256 for MD5 and SHA-1, RSA-PSS's by
+its parameters, none for Ed25519, refused -- computed in fennec-tls with
+rustls's own ring (`server_end_point`, the DER walk bounds-checked and
+held by `a_certificate_cut_or_changed_never_panics_the_binding`, and
+fuzzed: `crates/fennec-fuzz`'s `certificate` target). A relay under
+`require` or `prefer` that passes the offer on shows its own certificate,
+so the server's comparison fails and the sign-in with it. One that takes
+`-PLUS` out of the offer and dials the server in plain text is not caught:
+the client, offered no `-PLUS` over TLS, signs in unbound saying `y,,`
+(RFC 5802: it could have bound), and PostgreSQL refuses `y` only on a
+connection of its own over TLS (`ssl_in_use`, `read_client_first_message`)
+-- so a server whose `pg_hba.conf` takes the role by a `host` line, not
+`hostssl` alone, signs the relay in, which then reads the rows and can
+write the stream's commits. What keeps that relay out: `verify-full`, where
+no certificate but the server's passes (the default off this machine), or
+`channel_binding=require` at the client, which refuses a server offering
+no `-PLUS` and a connection in plain text; under `require`, `hostssl` alone
+at the server too. Under `prefer` `hostssl` does not: the stand-in answers
+the client's `SSLRequest` with `N`, takes its sign-in in plain text --
+`n,,`, nothing to bind -- and relays it over TLS of its own to the server,
+which takes `n,,`, its offer of `-PLUS` never shown to the client. A
+stream signed in unbound is not proven, so its keepalives move nothing it
+confirms (above). The first form of this section, SECURITY.md and the
+import page said a stand-in under `require` got no sign-in it could relay;
+the review of the change found the plain-text relay by reading
+PostgreSQL's SCRAM, and the three now say what holds. `channel_binding` is libpq's: `prefer` binds where
+offered and says `y,,` where no `-PLUS` came over TLS -- a server that did
+offer it, its offer taken out on a connection that reaches it over TLS,
+refuses -- `require` refuses a server not offering it
+(`a_plus_offer_taken_out_is_told_the_client_could_bind`), a connection in
+plain text (`channel_binding_required_refuses_a_sign_in_in_plain_text`)
+and a sign-in it did not bind, an `AuthenticationOk` with no SCRAM before
+it (`channel_binding_required_refuses_a_sign_in_it_did_not_bind`);
+`disable` sends `n,,`. A bound sign-in makes the connection proven.
+PostgreSQL offers `-PLUS` over TLS from 11 on, so `make import-test`'s
+server, TLS on, signs every live test in bound.
 
 **Run on CI.** Those tests -- fennec-import's `tests/pg.rs` (9) and
 `tests/follow.rs` (4), fennec-server's `tests/follow.rs` (4), each

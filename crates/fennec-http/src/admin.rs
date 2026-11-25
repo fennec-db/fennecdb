@@ -1,7 +1,8 @@
 //! Node administration under `/_admin/`: the surface a router drives.
 //!
 //! ```text
-//! GET    /_admin/stats                 {tenants, disk, memory, open}: flat
+//! GET    /_admin/stats                 {tenants, disk, memory, open,
+//!                                      no_token}: flat
 //! GET    /_admin/open                  the open tenants: name, memory, frozen
 //! GET    /_admin/tenants               names on disk
 //! GET    /_admin/sizes                 {"<tenant>": bytes on disk, ...}
@@ -80,6 +81,7 @@ use crate::http::{Method, Request, Response};
 use crate::instance;
 use crate::tenants::{Kept, Refused, Tenants};
 use crate::{crypto::ct_eq, Config};
+use std::io::{BufWriter, Write};
 
 /// Whether `req` carries the admin `token`, compared in constant time.
 pub(crate) fn carries(req: &Request, token: &str) -> bool {
@@ -90,8 +92,10 @@ pub(crate) fn carries(req: &Request, token: &str) -> bool {
     ct_eq(given.as_bytes(), token.as_bytes())
 }
 
-/// The answer to a request under `/_admin/` without the admin token.
+/// The answer to a request under `/_admin/` without the admin token:
+/// counted as a guess at a token, which no good JWT starts again.
 pub(crate) fn refused() -> Response {
+    crate::audit::refused_as(crate::audit::Kind::Token);
     Response::error(401, "invalid or missing admin token").header("WWW-Authenticate", "Bearer")
 }
 
@@ -109,18 +113,163 @@ pub(crate) fn is_import(req: &Request) -> bool {
         && segs.next().is_none()
 }
 
-pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
+/// Whether `req` is a tenant's image going out, `GET
+/// /_admin/tenants/<t>/file`, which [`export`] answers before [`handle`]:
+/// read off its path with nothing allocated, as [`is_import`].
+pub(crate) fn is_export(req: &Request) -> bool {
+    let mut segs = req.path.split('/').filter(|s| !s.is_empty());
+    req.method == Method::Get
+        && segs.next() == Some("_admin")
+        && segs.next() == Some("tenants")
+        && segs.next().is_some()
+        && segs.next() == Some("file")
+        && segs.next().is_none()
+}
+
+/// The admin token asked of a request under `/_admin/`: `None` where it
+/// carries it, the refusal otherwise.
+fn admitted(cfg: &Config, req: &Request) -> Option<Response> {
     let Some(token) = &cfg.admin_token else {
-        return Response::error(404, "the admin endpoints are off (--admin-token)");
+        return Some(Response::error(
+            404,
+            "the admin endpoints are off (--admin-token)",
+        ));
     };
     if !carries(req, token) {
-        return refused();
+        return Some(refused());
     }
     crate::audit::verified();
+    None
+}
+
+/// `GET /_admin/tenants/<t>/file`, a move's image: pinned under the
+/// tenant's read lock ([`Tenants::export_pinned`]) and written out as it is
+/// read, after a head saying its length; every refusal as [`handle`]
+/// answers it. Answered as a body, the image was a second copy of the
+/// tenant in the node's memory, and a tenant larger than what was left of
+/// it killed the node and every tenant on it
+/// (docs/design/replication.md#an-image-sent-as-it-is-read). The answer's
+/// status, and whether the connection may go on.
+pub(crate) fn export(
+    out: &mut &crate::conn::Conn,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    keep_alive: bool,
+) -> (u16, bool) {
+    let mut answer = |resp: Response| {
+        let status = resp.status;
+        let sent = crate::cors(resp, cfg).write(out, keep_alive, false);
+        (status, sent.is_ok())
+    };
+    if let Some(no) = admitted(cfg, req) {
+        return answer(no);
+    }
+    let segs = req.segments();
+    let image = match tenants.export_pinned(segs.get(2).copied().unwrap_or("")) {
+        Ok(image) => image,
+        Err(r) => return answer(r.response()),
+    };
+    let mut head = String::with_capacity(256);
+    head.push_str("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ");
+    crate::http::push_number(&mut head, image.len());
+    head.push_str("\r\nConnection: ");
+    head.push_str(if keep_alive { "keep-alive" } else { "close" });
+    head.push_str("\r\n");
+    if let Some(origin) = cfg.cors.as_deref() {
+        crate::cors::push_into(&mut head, origin);
+    }
+    crate::request_id::with(|id| {
+        if !id.is_empty() {
+            head.push_str(crate::request_id::HEADER);
+            head.push_str(": ");
+            head.push_str(id);
+            head.push_str("\r\n");
+        }
+    });
+    crate::audit::push_verified(&mut head);
+    head.push_str("\r\n");
+    // A store's records go out a document at a time: through a buffer, as
+    // a replica's stream sends them -- the same one, a writer of the same
+    // type, whose code the binary holds once -- held to an image's pace
+    // (`replication::Pace`), as the tenant's freeze and its pin are held
+    // until the router took it.
+    let sending = crate::replication::Sending {
+        conn: out,
+        image: Some(crate::replication::Pace::new()),
+    };
+    let mut w = BufWriter::with_capacity(crate::replication::MESSAGE, sending);
+    let sent = (w.write_all(head.as_bytes()))
+        .and_then(|_| image.write_to(&mut w))
+        .and_then(|_| w.flush());
+    (200, sent.is_ok())
+}
+
+/// `PUT /_admin/tenants/<t>/file`, an image installed as a new tenant, its
+/// `len` bytes of body read off `body` as they come into a file beside the
+/// tenant's (`Tenants::import_from`), every refusal as [`handle`] answers
+/// it. Read whole as the request's body -- to `max_import`, 1 GiB -- and
+/// replayed in memory, a move's image was the tenant twice in the target
+/// node's memory, and a tenant larger than what was left of it killed the
+/// node (docs/design/replication.md#an-image-taken-as-it-arrives). The
+/// answer's status, whether it went out, and whether the body was read
+/// whole: refused before its end, the connection ends with the answer.
+pub(crate) fn import(
+    out: &mut &crate::conn::Conn,
+    body: &mut impl std::io::Read,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    len: usize,
+    keep_alive: bool,
+) -> (u16, bool, bool) {
+    let mut rest = std::io::Read::take(body, len as u64);
+    let resp = match admitted(cfg, req) {
+        Some(no) => no,
+        None => {
+            let segs = req.segments();
+            let t = segs.get(2).copied().unwrap_or("");
+            installed(tenants, t, req, &mut rest, len as u64).unwrap_or_else(Refused::response)
+        }
+    };
+    let whole = rest.limit() == 0;
+    let status = resp.status;
+    let sent = crate::cors(resp, cfg).write(out, keep_alive && whole, false);
+    (status, sent.is_ok(), whole)
+}
+
+/// An image of `len` bytes off `body` installed as tenant `t`
+/// ([`Tenants::import_from`]), and the answer saying so.
+fn installed(
+    tenants: &Tenants,
+    t: &str,
+    req: &Request,
+    body: &mut dyn std::io::Read,
+    len: u64,
+) -> Result<Response, Refused> {
+    proposed(req)
+        .and_then(|id| tenants.import_from(t, body, len, id))
+        .and_then(|id| tenants.get(t).map(|tenant| (tenant, id)))
+        .map(|(tenant, id)| {
+            Response::json(
+                201,
+                format!(
+                    "{{\"imported\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
+                    lineage_json(&tenant),
+                    instance::json(id)
+                ),
+            )
+        })
+}
+
+pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
+    if let Some(no) = admitted(cfg, req) {
+        return no;
+    }
 
     let segs = req.segments();
     let result = match (req.method, &segs[1..]) {
-        (Method::Get, ["stats"]) => Ok(stats(tenants)),
+        (Method::Get, ["stats"]) => Ok(stats(tenants, cfg)),
         (Method::Get, ["open"]) => Ok(open(tenants)),
         (Method::Get, ["tenants"]) => Ok(names(tenants)),
         (Method::Get, ["sizes"]) => Ok(sizes(tenants)),
@@ -184,7 +333,8 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
         // A router taking back a file it left, the node the judge: 200 only
         // where it is gone -- taken, or not there -- which a node from
-        // before identities never answers here (404).
+        // before identities never answers here (404); 503 while an install
+        // of the name is under way, which may put the file there yet.
         (Method::Post, ["tenants", t, "reclaim"]) => superseded(tenants, req)
             .and_then(|_| {
                 instance::list_in(&String::from_utf8_lossy(&req.body)).map_err(|e| Refused(400, e))
@@ -229,16 +379,8 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Post, ["tenants", t, "thaw"]) => tenants
             .thaw(t)
             .map(|_| Response::json(200, "{\"frozen\":false}")),
-        (Method::Get, ["tenants", t, "file"]) => tenants.export(t).map(|image| Response {
-            status: 200,
-            body: image,
-            content_type: "application/octet-stream",
-            extra: Vec::new(),
-            seq: None,
-            history: None,
-            version: None,
-            no_transform: false,
-        }),
+        // `GET tenants/<t>/file` is answered by `export`, its image written
+        // out as it is read.
         // A router recording the lineage of a tenant made before it kept
         // any, to bind its read replicas to, or asking the primary it
         // places a tenant on which lineage it is of. `ready`: whether the
@@ -255,19 +397,12 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 ),
             )
         }),
-        (Method::Put, ["tenants", t, "file"]) => proposed(req)
-            .and_then(|id| tenants.import_as(t, &req.body, id))
-            .and_then(|id| tenants.get(t).map(|tenant| (tenant, id)))
-            .map(|(tenant, id)| {
-                Response::json(
-                    201,
-                    format!(
-                        "{{\"imported\":\"{t}\",\"lineage\":{},\"instance\":{}}}",
-                        lineage_json(&tenant),
-                        instance::json(id)
-                    ),
-                )
-            }),
+        // A body with a length, on a tenant node, is read as it comes by
+        // `import`; a chunked one is read whole first, to `max_import`.
+        (Method::Put, ["tenants", t, "file"]) => {
+            let len = req.body.len() as u64;
+            installed(tenants, t, req, &mut &req.body[..], len)
+        }
         // The failover, tenant by tenant: what a replica's file needs to
         // take writes. It goes through the admin token the router already
         // holds rather than the replication one, which the router does not.
@@ -275,19 +410,24 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // held to, or forces it ([`expected`]).
         (Method::Post, ["tenants", t, "promote"]) => superseded(tenants, req)
             .and_then(|_| expected(&req.body))
-            .and_then(|want| tenants.promote_as(t, &want))
-            .map(|(seq, id)| {
+            .and_then(|want| tenants.promote_heard(t, &want))
+            .map(|(seq, id, heard)| {
                 // Its lineage, which the router records: another file of
                 // the tenant, promoted by force, is of one of its own.
                 let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
                 // The identity the promotion gave it, which the router
                 // records ([`Tenants::promote_as`]).
                 let instance = instance::json(tenants.instance(t));
+                // What the copy knew of its primary: a failover promotes it
+                // where it stands, and what it was not sent -- a write its
+                // primary answered among it -- is lost. The router logs it
+                // and counts a copy promoted not connected.
+                let heard = heard.json();
                 Response::json(
                     200,
                     format!(
                         "{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\",\
-                         \"lineage\":{lineage},\"instance\":{instance}}}"
+                         \"lineage\":{lineage},\"instance\":{instance}{heard}}}"
                     ),
                 )
             }),
@@ -586,13 +726,20 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
 
 /// Flat on purpose: it is what a router reads, and a flat object is what
 /// `json::parse_object` accepts -- the per-tenant list is `/_admin/open`.
-fn stats(tenants: &Tenants) -> Response {
+/// `GET /_admin/stats`: the node's tenants, disk, memory and open tenants,
+/// and `no_token`, whether it asks no data token -- neither `--http-token`
+/// nor JSON Web Tokens -- which a router listening past loopback reads as
+/// a node is added and before it forwards to one (fennec-shard's
+/// `Router::open_node`): it forwards nothing to such a node, its clients
+/// being the network's.
+fn stats(tenants: &Tenants, cfg: &Config) -> Response {
     let s = tenants.stats();
     let memory: usize = s.open.iter().map(|(_, m, _)| m).sum();
+    let no_token = cfg.token.is_none() && cfg.access.is_none();
     Response::json(
         200,
         format!(
-            "{{\"tenants\":{},\"disk\":{},\"memory\":{},\"open\":{}}}",
+            "{{\"tenants\":{},\"disk\":{},\"memory\":{},\"open\":{},\"no_token\":{no_token}}}",
             s.tenants,
             s.disk,
             memory,
