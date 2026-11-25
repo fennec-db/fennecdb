@@ -71,10 +71,23 @@ P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
 ([docs/design/conventions.md](docs/design/conventions.md#secrets-compared));
 HChaCha20 to draft-irtf-cfrg-xchacha's vector, a sealed file's key to a
 vector computed apart from our code and to RFC 5869's HKDF cases, and RS256 at each end of the
-keys it takes, 2041 and 8192 bits, and just past each, to signatures
+keys it takes, 2048 and 8192 bits, and just past each, to signatures
 OpenSSL made.
 Vectors are no proof: a bug they miss is as welcome a report as any. What a
 browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.
+
+No outside audit has been made of this code, and 1.0 does not wait for
+one. In its place a review independent of the code's author went over the
+hand-written cryptography and sealed files, the tokens at the HTTP edge
+and the router, the PostgreSQL and SQLite readers, and replication and
+both C ABIs; each finding fixed was fixed with a test that fails without
+the fix, and those still open are named, with their place in the code, in
+the rows of the [threat model](docs/design/security.md#the-boundaries)
+they belong to. What an outside audit would take -- the files, their sizes,
+the vectors and fuzzing that hold them, and the questions to start from --
+is kept current in the
+[threat model](docs/design/security.md#an-outside-audit), so that one can
+be commissioned, or funded, whenever the project chooses.
 
 In scope, and worth reporting:
 
@@ -156,7 +169,11 @@ browser client in [`web/CLAUDE.md`](web/CLAUDE.md), studio in
 [`studio/CLAUDE.md`](studio/CLAUDE.md). The desktop app (beta) is a window on
 a studio that a `fennec-server` serves
 ([`integrations/CLAUDE.md`](integrations/CLAUDE.md)); what a page shows of
-the server's data is the server's to decide, as in a browser.
+the server's data is the server's to decide, as in a browser. The
+[threat model](docs/design/security.md#the-boundaries) orders every one of
+these boundaries in one table, each with the code that enforces it, the
+test that proves it -- or "no test", where none does yet -- and what it
+does not defend.
 
 Eight parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec

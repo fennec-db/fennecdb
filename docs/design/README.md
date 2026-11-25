@@ -36,6 +36,7 @@ The conventions hold no invariant of the code, and are listed apart:
 
 - [compatibility.md](compatibility.md) -- what 1.x freezes (the file, FennecQL, the API, `fennec.h`, the JS types, the SDKs, the sync protocol, CLI flags, metrics, release assets), the check that holds each, the upgrade order, the grammar epoch and the support window
 - [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors
+- [security.md](security.md) -- the threat model: every trust boundary the area files keep as rules, ordered in one table -- what it protects, who attacks it, the code that enforces it, the test that proves it and what is not defended -- held to the code by `tools/security_md_check.py`; the scope an outside review of the hand-written cryptography, authentication and parsers would take, its open questions, the decision on an outside audit, and what the internal review in its place found and its fixes closed
 
 A proposal holds no invariant until it is built, and is listed apart:
 

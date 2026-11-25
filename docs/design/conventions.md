@@ -1021,8 +1021,9 @@ HKDF-Expand's first block, one HMAC -- to RFC 5869's three SHA-256 cases
 and the whole derivation to a vector computed apart in Python
 (`the_file_keys_key_is_hkdf_expand`, `a_file_key_is_the_one_another_reader_makes`);
 RS256 at each end of the keys
-`RsaKey::new` takes -- 2041 bits with e = 3, 8192 with a 64-bit exponent --
-and just past each -- 2040 bits, 8200, an exponent of 65 bits -- refused,
+`RsaKey::new` takes -- 2048 bits with e = 3, 8192 with a 64-bit exponent --
+and just past each -- 2047 bits, as many bytes as 2048, 8200, an exponent
+of 65 bits -- refused,
 every key and signature OpenSSL's, the commands beside the test
 (`rs256_at_each_end_of_the_keys_it_takes`, `rsa_bounds_vectors.txt`), where
 Wycheproof stops at 4096; ES256 to Wycheproof's (`tests/es256.rs`); and
@@ -1246,6 +1247,52 @@ files searched alone would let a file stripped of every flag, path and link
 pass. Each primitive's needle is its own declaration (`pub fn sha256(`), so a
 test function of a like name does not hold it. What a line scan cannot tell
 is in the tool's header.
+
+The same program holds the threat model,
+[security.md](security.md#the-boundaries), and SECURITY.md's decision on an
+outside audit -- "no outside audit has been made", linked to
+[its section](security.md#an-outside-audit), a sentence claiming one
+refused. It reads the table of boundaries row by row: an enforcing item,
+`path::item`, defined at its path outside the test module (a method's
+type defined or implemented there); a cited test a test at its path that
+CI builds and runs -- a Rust `#[test]`, never `#[ignore]`d, its file a
+`mod` of `tests/all.rs` or a `[[test]]`, a JS `test(` by its title, a
+Python or shell test by its name; each row a test or the words "no test";
+15 rows at the least, the plan's G2; every link read from `docs/design/`.
+A Rust item or test, and a primitive's needle, is found in code alone:
+`tools/secret_eq_check.py`'s reader blanks the comments, strings and
+characters (nested block comments, raw strings and a lifetime told from a
+character, as Rust reads them) and every item a `#[cfg(test)]` is on, and
+the declaration is anchored where Rust's grammar puts an item -- after a
+`{`, `}`, `;` or an attribute's `]`, then its visibility and qualifiers.
+Until then it matched `fn|struct|... <name>` anywhere before the test
+module: a row citing a renamed item passed while a comment or a string
+named it, and in the 102 Rust files the table cites that pattern matched
+189 places in comments, strings and test-only items and 155 in types and
+generics (`&'static str`, `*const T`, `<const N: bool>`), none of them a
+cited item's only mention, so the counts are unchanged; and it missed a
+`static mut`. Lexing alone would leave the types, and anchoring alone a
+block comment or a raw string spanning lines; the reader was there,
+tested by its own self-test. What the check proves is that each name
+exists where its row cites it, not that the test exercises the boundary
+or would fail without its enforcement: that is the row's claim, and the
+reviewers' to judge ([security.md](security.md)).
+It runs in the one step it ran in, a sibling program buying nothing but a
+second line in CI: the threat model's paths, anchors and flags are read
+by SECURITY.md's own functions. When the table was written it counted 825
+things (41 boundaries, 141 enforcing items, 107 cited tests, 175 of the
+threat model's paths and anchors, 18 of its flags, 4 promises), and named
+the 9 rows saying "no test" on a line of their own, as it does on every
+run: what no test proves is listed, never passed over. After the internal
+review's fixes (#677, #678, #679) were written into the rows it counts 937
+(41 boundaries, 175 enforcing items, 160 cited tests, 182 of the threat
+model's paths and anchors, 20 of its flags, 4 promises) and names 10: a
+release's provenance left the list, its jobs' permissions now held by
+`tools/workflow_check.py` and its files' attestations by
+`tools/release-verify.sh`, each with its tests, and two rows joined it
+for what the review found no test of (a forged `Commit`'s end on a
+PostgreSQL stream not proven; the system's randomness answering
+nothing).
 
 The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
 lands on `main` and the pull request says which releases had the bug; from
