@@ -14,7 +14,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicIsize, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -111,7 +114,7 @@ unsafe impl GlobalAlloc for Counting {
         let Some((before, outer)) = tagged(l) else {
             return std::ptr::null_mut();
         };
-        let now = ALL.load(Relaxed);
+        let now = ALL.load(Acquire);
         if now != 0 {
             counted(l.size() as isize, 0);
         }
@@ -124,7 +127,7 @@ unsafe impl GlobalAlloc for Counting {
         let Some((before, outer)) = tagged(l) else {
             return std::ptr::null_mut();
         };
-        let now = ALL.load(Relaxed);
+        let now = ALL.load(Acquire);
         if now != 0 {
             counted(l.size() as isize, 0);
         }
@@ -136,7 +139,7 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: `p` is a block this allocator made with `l`, as
         // `GlobalAlloc::dealloc`'s caller guarantees.
         let ((before, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
-        let now = ALL.load(Relaxed);
+        let now = ALL.load(Acquire);
         if now != 0 && made == now {
             counted(-(l.size() as isize), 0);
         }
@@ -152,7 +155,7 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: `p` is a block this allocator made with `l`, as
         // `GlobalAlloc::realloc`'s caller guarantees.
         let ((_, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
-        let now = ALL.load(Relaxed);
+        let now = ALL.load(Acquire);
         if now != 0 {
             match made == now {
                 true => counted(to as isize - l.size() as isize, to as isize),
@@ -181,11 +184,16 @@ static ALLOC: Counting = Counting;
 /// Counts every thread's allocations from here, the bytes the blocks made
 /// since hold and the most they held at once ([`peak_now`]), under a number
 /// no count before took ([`ALL`]).
+///
+/// The number is stored with `Release` and read with `Acquire` by the
+/// allocator: a thread that sees the new number sees the reset before it,
+/// or on aarch64 a block it made would be wiped by the reset and its free
+/// in the count still taken away.
 fn count_all() {
     ALL.store(0, Relaxed);
     LIVE.store(0, Relaxed);
     PEAK.store(0, Relaxed);
-    ALL.store(COUNTS.fetch_add(1, Relaxed) + 1, Relaxed);
+    ALL.store(COUNTS.fetch_add(1, Relaxed) + 1, Release);
 }
 
 /// Stops the count [`count_all`] began: the most the blocks every thread
