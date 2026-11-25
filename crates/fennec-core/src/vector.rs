@@ -5241,40 +5241,49 @@ impl VectorIndex {
     /// The live, linked node of the highest level a walk from `from` down
     /// its levels meets, the lowest id among equals: each level's lists
     /// read from the nodes met above it and at it, [`ENTER_STEPS`] lists
-    /// in all, and `None` where those meet no such node.
+    /// in all, and `None` where those meet no such node. The nodes met are
+    /// marked in this thread's search buffer, as a search marks them
+    /// ([`Scratch::see`]): a `HashSet` of them, hashing each node, was
+    /// 1.8 KB of `fennec-server`'s code and 2.2 KB of the shell's built for
+    /// macOS, std's table for `u32`s, which nothing else of either builds.
     #[cfg(target_pointer_width = "64")]
     fn live_near(&self, from: u32) -> Option<u32> {
-        let mut met = vec![from];
-        let mut seen = std::collections::HashSet::from([from]);
-        let mut best: Option<(usize, u32)> = None;
-        let mut steps = 0;
-        for l in (0..=self.node_levels(from)).rev() {
-            let mut i = 0;
-            while i < met.len() {
-                if steps == ENTER_STEPS {
-                    return best.map(|(_, node)| node);
-                }
-                steps += 1;
-                let x = met[i];
-                i += 1;
-                for &y in self.neighbors(x, l) {
-                    if !seen.insert(y) {
-                        continue;
+        SCRATCH.with(|cell| {
+            let mut seen = cell.borrow_mut();
+            seen.begin(self.doc_ids.len());
+            seen.see(from);
+            let mut met = vec![from];
+            let mut best: Option<(usize, u32)> = None;
+            let mut steps = 0;
+            for l in (0..=self.node_levels(from)).rev() {
+                let mut i = 0;
+                while i < met.len() {
+                    if steps == ENTER_STEPS {
+                        return best.map(|(_, node)| node);
                     }
-                    met.push(y);
-                    if self.enters(y) {
-                        let level = self.node_levels(y);
-                        if best.is_none_or(|(top, at)| level > top || (level == top && y < at)) {
-                            best = Some((level, y));
+                    steps += 1;
+                    let x = met[i];
+                    i += 1;
+                    for &y in self.neighbors(x, l) {
+                        if !seen.see(y) {
+                            continue;
+                        }
+                        met.push(y);
+                        if self.enters(y) {
+                            let level = self.node_levels(y);
+                            if best.is_none_or(|(top, at)| level > top || (level == top && y < at))
+                            {
+                                best = Some((level, y));
+                            }
                         }
                     }
                 }
+                if best.is_some() {
+                    break;
+                }
             }
-            if best.is_some() {
-                break;
-            }
-        }
-        best.map(|(_, node)| node)
+            best.map(|(_, node)| node)
+        })
     }
 
     /// The first live, linked node at the highest level a live node holds,

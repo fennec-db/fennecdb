@@ -5349,13 +5349,17 @@ fn nodes_past(
     old: Option<&Document>,
     written: &[Document],
 ) -> Result<()> {
-    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    // Compared in place: each side collected into a `Vec` of its bits was
+    // 0.2 KB more of this out-of-line check.
+    let same_bits = |a: &[f32], b: &[f32]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    };
     for (field, ix) in c.vectors.iter() {
         let Some(Value::Vector(v)) = doc.get(field) else {
             continue;
         };
         if let Some(Value::Vector(was)) = old.and_then(|o| o.get(field)) {
-            if bits(&v[..]) == bits(&was[..]) {
+            if same_bits(&v[..], &was[..]) {
                 continue;
             }
         }
