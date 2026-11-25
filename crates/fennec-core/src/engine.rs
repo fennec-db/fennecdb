@@ -4292,23 +4292,59 @@ impl Collection {
     /// A write that ended pays nothing for this: the panic's put-back
     /// alone runs it, once, for the last write of its block. `false` where
     /// a vector found no node ([`Self::put_back_doc`]).
+    ///
+    /// The graphs are put back by the row `id` alone, out of the way of
+    /// the removals: where `before` holds a vector, the row keeps the node
+    /// it holds if it holds that vector -- the write stopped short of it --
+    /// or is given back the node the write took ([`VectorIndex::put_back`]),
+    /// and elsewhere its node is taken out ([`Self::vectors_back`]). Taken
+    /// out by the removals, the node the write stopped short of was a
+    /// tombstone a put-back had to find again, and the node the write
+    /// placed went among those a put-back finds: a row written A, then B,
+    /// then A again by a write a panic stopped had the stopped write's node
+    /// made live again for the block's start's.
     #[cfg(panic = "unwind")]
     #[cold]
     #[inline(never)]
-    fn put_back_torn(&mut self, now: Option<&Document>, before: Option<&Document>) -> bool {
+    fn put_back_torn(
+        &mut self,
+        id: DocId,
+        now: Option<&Document>,
+        before: Option<&Document>,
+    ) -> bool {
         for ix in self.texts.values_mut() {
             if let Some(ix) = ix.get_mut() {
                 ix.forget_words();
             }
         }
+        let graphs = std::mem::take(&mut self.vectors);
         if let Some(now) = now {
             self.unindex_doc(now, None);
         }
-        let Some(before) = before else {
-            return true;
-        };
-        self.unindex_doc(before, None);
-        self.put_back_doc(before, None)
+        if let Some(before) = before {
+            self.unindex_doc(before, None);
+        }
+        self.vectors = graphs;
+        self.vectors_back(id, before);
+        before.is_none_or(|before| self.put_back_doc(before, None))
+    }
+
+    /// Takes row `id` out of each graph where `before`, the row a write
+    /// put back gives it again, holds no vector -- a node the block placed
+    /// for it -- each node so made a tombstone left off those a put-back
+    /// finds ([`VectorIndex::take_back`]): the block's own. Taken out as a
+    /// write takes a row out, a row written A, then null, then A again in
+    /// one block had the node of its second A, the newest tombstone
+    /// holding A, made live again for the block's start's; and every
+    /// put-back after a block's inserts were taken out looked past each of
+    /// their nodes, under the write lock.
+    #[cfg(any(panic = "unwind", target_pointer_width = "64"))]
+    fn vectors_back(&mut self, id: DocId, before: Option<&Document>) {
+        for (name, ix) in self.vectors.iter_mut() {
+            if !matches!(before.and_then(|b| b.get(name)), Some(Value::Vector(_))) {
+                ix.take_back(id);
+            }
+        }
     }
 
     /// `doc`, the row a write put back holds again, into the indexes, `old`
@@ -4377,11 +4413,14 @@ impl Collection {
         true
     }
 
-    /// Lets go of the tombstones a put-back looks among in each graph
-    /// ([`VectorIndex::forget_retired`]): a block put back whole.
+    /// A block put back whole, in each graph: the links into the nodes
+    /// its put-back made live again made again ([`VectorIndex::link_revived`]),
+    /// and the tombstones a put-back looks among let go of
+    /// ([`VectorIndex::forget_retired`]).
     #[cfg(target_pointer_width = "64")]
-    fn forget_retired(&mut self) {
+    fn graphs_put_back(&mut self) {
         for ix in self.vectors.values_mut() {
+            ix.link_revived();
             ix.forget_retired();
         }
     }
@@ -9939,15 +9978,20 @@ impl Database {
                     let before = c.store.read(&c.schema, id).ok().flatten();
                     #[cfg(all(panic = "unwind", target_pointer_width = "64"))]
                     if last {
-                        whole &= c.put_back_torn(now.as_ref(), before.as_ref());
+                        whole &= c.put_back_torn(id, now.as_ref(), before.as_ref());
                         continue;
                     }
                     #[cfg(all(panic = "unwind", not(target_pointer_width = "64")))]
                     if last {
-                        c.put_back_torn(now.as_ref(), before.as_ref());
+                        c.put_back_torn(id, now.as_ref(), before.as_ref());
                         continue;
                     }
                     if let Some(now) = &now {
+                        // Natively the block's own nodes go out first, off
+                        // the tombstones a put-back finds; the removal
+                        // finds none left to take.
+                        #[cfg(target_pointer_width = "64")]
+                        c.vectors_back(id, before.as_ref());
                         c.unindex_doc(now, before.as_ref());
                     }
                     if let Some(before) = &before {
@@ -10113,7 +10157,7 @@ impl Database {
                 let c = self.collections.get_mut(&name).unwrap();
                 c.store.rewind(mark);
                 #[cfg(target_pointer_width = "64")]
-                c.forget_retired();
+                c.graphs_put_back();
             }
         }
         // A vector no node was found for, left out of its graph: a graph

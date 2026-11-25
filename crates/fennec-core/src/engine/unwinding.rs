@@ -713,6 +713,7 @@ mod torn {
         let path = dir.join(format!("{name}.fennec"));
         let mut db = made(&path);
         let before = state(&db);
+        let held: Vec<_> = (1..=4).map(|id| node_of_row(&db, id)).collect();
         let stmt = write(w);
         let r = catch_unwind(AssertUnwindSafe(|| {
             if alone {
@@ -738,6 +739,8 @@ mod torn {
         assert!(!db.in_block(), "{tag}: a block left open");
         assert!(db.failure().is_none(), "{tag}: the database failed");
         assert_eq!(state(&db), before, "{tag}: put back");
+        let back: Vec<_> = (1..=4).map(|id| node_of_row(&db, id)).collect();
+        assert_eq!(back, held, "{tag}: the rows' nodes");
         match db
             .changes_since("t", before.seq, None, None, &[])
             .expect("changes")
@@ -2049,6 +2052,160 @@ mod torn {
                 graph_of(&db),
                 (nodes + 1, dead + 1),
                 "{case}: one node placed"
+            );
+        }
+    }
+
+    /// The node row `id` of `t` holds in its graph.
+    fn node_of_row(db: &Database, id: DocId) -> Option<u32> {
+        let ix = db.collections["t"].vectors.get("v").expect("v");
+        ix.node_held(id)
+    }
+
+    /// A block that rewrote every row's vector, rolled back with no bound
+    /// near: each row has its node back, the block's nodes tombstones, and
+    /// each row's own vector finds it at ef 16, as the graph a rollback
+    /// placing every vector again leaves. Its nodes made live again with
+    /// the links of their own and none into them -- a list chosen again
+    /// while a node was a tombstone left it out -- 7 to 10 of 1 000 rows
+    /// were found at ef 16 by no walk: the links into each are made again
+    /// from its own as the put-back ends (`VectorIndex::link_revived`).
+    #[test]
+    fn a_rollback_gives_each_row_its_node_and_the_links_into_it() {
+        let (n, dim) = (1000u64, 16);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut vector = || {
+            let v: Vec<f32> = (0..dim)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect();
+            v
+        };
+        let old: Vec<Vec<f32>> = (0..n).map(|_| vector()).collect();
+        let new: Vec<Vec<f32>> = (0..n).map(|_| vector()).collect();
+        let mut db = Database::new();
+        let spec = VectorIndexSpec::default().resolved();
+        let field = Field::new("v", DataType::Vector(dim, VecPrec::F32));
+        db.execute(&Statement::CreateCollection {
+            schema: Schema::new("t", vec![field.indexed(IndexKind::Vector(spec))]).expect("t"),
+            if_not_exists: false,
+        })
+        .expect("create");
+        let docs = (old.iter().enumerate())
+            .map(|(i, v)| {
+                vec![
+                    ("id".to_string(), Expr::Lit(Value::Int(i as i64 + 1))),
+                    ("v".to_string(), Expr::Lit(Value::Vector(v.clone()))),
+                ]
+            })
+            .collect();
+        db.execute(&Statement::Put {
+            collection: "t".into(),
+            docs,
+            docs_param: None,
+            insert: true,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        })
+        .expect("the rows");
+        let (nodes, dead) = graph_of(&db);
+        assert_eq!((nodes, dead), (n as usize, 0));
+        let held: Vec<_> = (1..=n).map(|id| node_of_row(&db, id)).collect();
+        db.begin().expect("begin");
+        for (i, v) in new.iter().enumerate() {
+            db.execute(&Statement::Update {
+                collection: "t".into(),
+                set: vec![("v".into(), Expr::Lit(Value::Vector(v.clone())))],
+                filter: Some(eq("id", Value::Int(i as i64 + 1))),
+                require: None,
+                pick: None,
+            })
+            .expect("a row's new vector");
+        }
+        db.rollback();
+        assert_eq!(
+            graph_of(&db),
+            (2 * n as usize, n as usize),
+            "the block's nodes"
+        );
+        let back: Vec<_> = (1..=n).map(|id| node_of_row(&db, id)).collect();
+        assert!(back == held, "a row given another node");
+        let ix = db.collections["t"].vectors.get("v").expect("v");
+        let missed: Vec<u64> = (1..=n)
+            .filter(|&id| {
+                let found = ix.search(&old[id as usize - 1], 1, Some(16), |_| true);
+                found.first().map(|f| f.0) != Some(id)
+            })
+            .collect();
+        assert!(
+            missed.is_empty(),
+            "{} rows not found: {missed:?}",
+            missed.len()
+        );
+    }
+
+    /// A row written twice in one block is given back the node it held as
+    /// the block began: A, null and A again, rolled back; and A, then B,
+    /// then A again by a write a panic stopped once it placed A's node
+    /// (`put_back_torn`). A put-back's own tombstones -- the node of the
+    /// second A, taken out -- went among those a put-back makes live, the
+    /// newest holding A, and the row was given it for its own.
+    #[test]
+    fn a_row_written_twice_in_a_block_gets_the_node_it_began_with() {
+        let scratch = Scratch::new("fennecdb-twice");
+        let set = |v: Value| Statement::Update {
+            collection: "t".into(),
+            set: vec![("v".into(), Expr::Lit(v))],
+            filter: Some(eq("id", Value::Int(3))),
+            require: None,
+            pick: None,
+        };
+        let a = Value::Vector(vec![3.0, 1.0, 0.5, 0.0]);
+        let b = Value::Vector(vec![9.0, 9.0, 9.0, 9.0]);
+        for case in ["null", "torn"] {
+            let mut db = made(&scratch.0.join(format!("{case}.fennec")));
+            let before = state(&db);
+            let (nodes, dead) = graph_of(&db);
+            let held = node_of_row(&db, 3);
+            assert!(held.is_some(), "{case}: row 3's node");
+            db.begin().expect("begin");
+            let placed = match case {
+                "null" => {
+                    db.execute(&set(Value::Null)).expect("null");
+                    db.execute(&set(a.clone())).expect("A again");
+                    db.rollback();
+                    1
+                }
+                _ => {
+                    db.execute(&set(b.clone())).expect("B");
+                    let r = catch_unwind(AssertUnwindSafe(|| {
+                        PANIC_AT.with(|p| p.set(Some("graph-link")));
+                        db.execute(&set(a.clone())).map(drop)
+                    }));
+                    assert!(r.is_err(), "the panic");
+                    assert!(PANIC_AT.with(|p| p.take()).is_none(), "the test's");
+                    2
+                }
+            };
+            assert!(!db.in_block(), "{case}: a block left open");
+            assert_eq!(db.failure(), None, "{case}");
+            assert_eq!(state(&db), before, "{case}: put back");
+            unfed(&db, before.seq, case);
+            assert_eq!(
+                node_of_row(&db, 3),
+                held,
+                "{case}: the block's start's node"
+            );
+            assert_eq!(
+                graph_of(&db),
+                (nodes + placed, dead + placed),
+                "{case}: the block's nodes, tombstones"
             );
         }
     }

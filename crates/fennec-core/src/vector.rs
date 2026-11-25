@@ -3170,16 +3170,26 @@ pub struct VectorIndex {
     /// The vector being placed, as the arena would store it: kept from one
     /// insert to the next.
     stored_buf: Vec<u8>,
-    /// The nodes made tombstones, in turn, since the graph was made or a
-    /// block was last put back ([`Self::forget_retired`]): where a
+    /// The nodes writes made tombstones, in turn, since the graph was made
+    /// or a block was last put back ([`Self::forget_retired`]): where a
     /// put-back finds the node its write took from the row
-    /// ([`Self::put_back`]), which no vector placed finds. A node is made a
+    /// ([`Self::put_back`]), which no vector placed finds. A put-back's own
+    /// tombstones -- the nodes the block placed, as it takes them out --
+    /// never go on it ([`Self::take_back`]): a row written A, null, A in a
+    /// block had the node of its second A, the newest holding A, made live
+    /// again for the block's start's, and every put-back after a block's
+    /// inserts were taken out looked past each of them. A node is made a
     /// tombstone once until a put-back makes it live, so it holds no more
     /// than [`Self::dead`] nodes, 4 bytes a tombstone beside its 150 or
     /// more. Natively alone: the browser module's graph never meets the
     /// bound a put-back keeps to, and places a node as a write does.
     #[cfg(target_pointer_width = "64")]
     retired: Vec<u32>,
+    /// The nodes a put-back made live again, in turn ([`Self::revive`]),
+    /// whose links in are made again from their own once the put-back
+    /// ends ([`Self::link_revived`]). Natively alone, as `retired` is.
+    #[cfg(target_pointer_width = "64")]
+    revived: Vec<u32>,
 }
 
 /// The nodes by their vector as the arena stores it, for a vector written
@@ -3598,6 +3608,8 @@ impl VectorIndex {
             stored_buf: Vec::new(),
             #[cfg(target_pointer_width = "64")]
             retired: Vec::new(),
+            #[cfg(target_pointer_width = "64")]
+            revived: Vec::new(),
         }
     }
 
@@ -3747,7 +3759,7 @@ impl VectorIndex {
 
     #[cfg(target_pointer_width = "64")]
     fn retired_bytes(&self) -> usize {
-        self.retired.capacity() * 4
+        (self.retired.capacity() + self.revived.capacity()) * 4
     }
 
     #[cfg(not(target_pointer_width = "64"))]
@@ -4711,25 +4723,67 @@ impl VectorIndex {
             let max_deg = if l == 0 { self.m0 } else { self.spec.m };
             self.set_neighbors(node, l, &selected);
             for &nb in &selected {
-                if l > 0 && l > self.node_levels(nb) {
-                    continue; // the neighbour does not have this level
-                }
-                if self.push_neighbor(nb, l, node, max_deg) {
-                    continue;
-                }
-                // The list is full: reselect with the diversity heuristic.
-                let mut buf = std::mem::take(&mut self.prune_buf);
-                let pruned = self
-                    .view()
-                    .pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
-                self.set_neighbors(nb, l, &pruned);
-                self.prune_buf = buf;
+                self.link_into(nb, l, node, max_deg);
             }
         }
 
         if level > self.max_level {
             self.max_level = level;
             self.entry = Some(node);
+        }
+    }
+
+    /// `node` into `nb`'s list at level `l`, which, full, is chosen again
+    /// by the diversity heuristic: the link back a node's own link to `nb`
+    /// makes ([`Self::link_node`], [`Self::link_back`]).
+    #[inline(always)]
+    fn link_into(&mut self, nb: u32, l: usize, node: u32, max_deg: usize) {
+        if l > 0 && l > self.node_levels(nb) {
+            return; // the neighbour does not have this level
+        }
+        if self.push_neighbor(nb, l, node, max_deg) {
+            return;
+        }
+        // The list is full: reselect with the diversity heuristic.
+        let mut buf = std::mem::take(&mut self.prune_buf);
+        let pruned = self
+            .view()
+            .pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
+        self.set_neighbors(nb, l, &pruned);
+        self.prune_buf = buf;
+    }
+
+    /// The links into `node`, a tombstone made live again ([`Self::revive`]),
+    /// made again from its own: each node its lists reach takes it back
+    /// into its list at that level, as a node linked takes its neighbours'
+    /// links back ([`Self::link_into`]), no search made. Its own lists are
+    /// those it had, but a list chosen again while it was a tombstone left
+    /// it out (`select_heuristic` takes no tombstone). Over 4 000 x 32,
+    /// m = 16, a block's `set` of every row's vector rolled back, made
+    /// live again with no links in left 227 to 273 rows their own vector
+    /// did not find at ef 8 and 2 to 6 at ef 40, recall@10 at ef 100
+    /// 0.960 to 0.966; a block's `put` of every row, linked as a batch,
+    /// 3 899 to 3 968 of the 4 000, recall 0.008 to 0.017. The graph of a
+    /// rollback placing every vector again left 5 and none (12 to 52 and up
+    /// to 7 after the `put`), recall 0.960 to 0.964 (0.987 to 0.988); taken
+    /// back from their own lists once the put-back ends
+    /// ([`Self::link_revived`]), 0 to 3 and none, recall 0.995 to 0.997,
+    /// the rollback taking 12 to 21 ms where placing them again took 360
+    /// to 470.
+    #[cfg(target_pointer_width = "64")]
+    #[cold]
+    #[inline(never)]
+    fn link_back(&mut self, node: u32) {
+        let mut own = Vec::new();
+        for l in 0..=self.node_levels(node) {
+            let max_deg = if l == 0 { self.m0 } else { self.spec.m };
+            own.clear();
+            own.extend_from_slice(self.neighbors(node, l));
+            for &nb in &own {
+                if nb != node && !self.neighbors(nb, l).contains(&node) {
+                    self.link_into(nb, l, node, max_deg);
+                }
+            }
         }
     }
 
@@ -4810,13 +4864,14 @@ impl VectorIndex {
     /// Makes live again the node a write took from `doc` that holds `held`
     /// (`raw` as the arena holds it, `hash` its hash): the newest such
     /// tombstone of [`Self::retired`], taken off it. Its vector, level and
-    /// links are those it had -- a node its write took is the row's node
-    /// before the write, so a block put back whole has its rows' nodes back
-    /// -- and lists that dropped it as a tombstone while it was one stay as
-    /// they are, as a search finding it through its own links finds it. A
-    /// node no link reaches -- it waited to be linked when the write took
-    /// it, and a block's linking passed it over as a tombstone -- is linked
-    /// now, unless it waits still. Out of line, at a put-back alone.
+    /// own links are those it had -- a node its write took is the row's
+    /// node before the write, so a block put back whole has its rows' nodes
+    /// back -- and the links into it a list chosen again while it was a
+    /// tombstone dropped are made again from its own once the put-back
+    /// ends ([`Self::link_revived`]). A node with no links of its own -- it
+    /// waited to be linked when the write took it, and a block's linking
+    /// passed it over as a tombstone -- is linked now, unless it waits
+    /// still. Out of line, at a put-back alone.
     #[cfg(target_pointer_width = "64")]
     #[cold]
     #[inline(never)]
@@ -4839,8 +4894,9 @@ impl VectorIndex {
         if self.same.built && self.find_copy(held).1 != Some(node) {
             self.same_put(node, hash);
         }
-        let linked = self.entry == Some(node) || self.l0_len[node as usize] > 0;
-        if !linked && !self.pending.contains(&node) {
+        if self.l0_len[node as usize] > 0 {
+            self.revived.push(node);
+        } else if self.entry != Some(node) && !self.pending.contains(&node) {
             let query = self.build_query(raw);
             self.link_node(node, self.node_levels(node), None, query.as_deref());
         }
@@ -4852,6 +4908,44 @@ impl VectorIndex {
     #[cfg(target_pointer_width = "64")]
     pub fn forget_retired(&mut self) {
         self.retired.clear();
+    }
+
+    /// The links into each node a put-back made live again and left live,
+    /// made again from its own ([`Self::link_back`]), once the put-back has
+    /// ended: every node it gives back is live by then, so a list chosen
+    /// again keeps them and lets go of the block's own. Made as each was
+    /// made live, a list chosen again let go of the nodes still tombstones
+    /// that the put-back would make live after it, their own links: in the
+    /// rollbacks [`Self::link_back`] measures, 4 to 7 rows a `set`'s missed
+    /// at ef 8, and 62 to 71 a `put`'s, 6 to 10 at ef 40, recall 0.963 to
+    /// 0.994.
+    #[cfg(target_pointer_width = "64")]
+    pub fn link_revived(&mut self) {
+        let revived = std::mem::take(&mut self.revived);
+        for &node in &revived {
+            if !self.is_deleted(node) {
+                self.link_back(node);
+            }
+        }
+    }
+
+    /// `doc` out of the graph as a put-back takes it out ([`Self::remove`])
+    /// -- a row the block made, or a vector it gave a row that had none --
+    /// its node, where it is made a tombstone, left off [`Self::retired`]:
+    /// a node a put-back makes a tombstone is the block's, which no
+    /// put-back after it asks for.
+    #[cfg(target_pointer_width = "64")]
+    pub fn take_back(&mut self, doc: DocId) {
+        let top = self.retired.len();
+        self.remove(doc);
+        self.retired.truncate(top);
+    }
+
+    /// [`Self::take_back`] where no graph keeps [`Self::retired`].
+    #[cfg(not(target_pointer_width = "64"))]
+    #[inline(always)]
+    pub fn take_back(&mut self, doc: DocId) {
+        self.remove(doc);
     }
 
     /// `items` into the graph as [`Self::insert_batch`] puts them -- or as
@@ -4941,6 +5035,12 @@ impl VectorIndex {
     #[inline]
     fn node_of(&self, doc: DocId) -> Option<u32> {
         self.by_doc.get(doc).checked_sub(1)
+    }
+
+    /// [`Self::node_of`], for a test holding a row to the node it had.
+    #[cfg(test)]
+    pub(crate) fn node_held(&self, doc: DocId) -> Option<u32> {
+        self.node_of(doc)
     }
 
     /// Changes to the graph since it was made or restored: nodes added,

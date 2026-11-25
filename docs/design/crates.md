@@ -302,17 +302,51 @@ the block half put back (`set v = ... where tag = 'red'` over two rows with
 one node left), or, in a write a panic stopped, a second panic that aborts.
 So a put-back gives the row the node its write took (`VectorIndex::put_back`,
 in `rewind` and `put_back_torn` natively): a graph keeps, in turn, the
-nodes it made tombstones (`retired`, pushed where `detach` makes one, let
-go of as a block is put back), and the row's vector, where neither its
-node nor a live node holds it, makes live again the newest of them that
-holds it for that row, as the write left it -- its vector, level and
-links, the lists that dropped it as a tombstone meanwhile left as they are,
-a node no link reaches (one waiting, which a block's linking passed over)
-linked then. Taken off the end, it is the node the row held before the
-write, so a block put back whole has its rows' nodes back, and only the
-nodes it placed stay, tombstones; a put-back places a node only where none
-is held, and only where the graph takes one. A node a tombstone once until
-a put-back makes it live, the list holds no more than the graph's
+nodes its writes made tombstones (`retired`, pushed where `detach` makes
+one, let go of as a block is put back), and the row's vector, where
+neither its node nor a live node holds it, makes live again the newest of
+them that holds it for that row, as the write left it -- its vector, level
+and its own links; a node with none (one waiting, which a block's linking
+passed over) linked then. Taken off the end, it is the node the row held
+before the write. The tombstones a put-back makes itself -- the block's
+nodes, as it takes them out -- never go on the list (`take_back`, through
+`Collection::vectors_back` in `rewind` and `put_back_torn`, whose
+removals now leave the graphs to it): taken out as a write takes a row
+out, a row written A, null, A in one block was given the node of its
+second A, the newest holding A, and so was a row written A, B and A again
+by a write a panic stopped; and every put-back after a block's inserts
+were taken out looked past each of their nodes, under the write lock (the
+review's 20 000 inserts taken out, then 5 000 nodes made live: 94 ms). The links into
+a node made live, which a list chosen again while it was a tombstone
+dropped (`select_heuristic` takes none), are made again from its own once
+the put-back ends (`link_revived`, `link_back`): each node its lists reach
+takes it back into its list at that level, as a node linked takes its
+neighbours' links back, through the same pruning, no search made.
+Measured over 4 000 x 32, m = 16, after a block writing every row's vector
+again was rolled back (3 seeds; misses are rows their own vector does not
+find, recall@10 at ef 100 over 500 other queries): left with no links in,
+227 to 273 rows missed at ef 8 and 2 to 6 at ef 40 after a `set` of each,
+recall 0.960 to 0.966, and after one `put` of them all, linked as a
+batch, 3 899 to 3 968 of the 4 000, recall 0.017 at best; the graph of
+the rollback placing every vector again, as before the bound, 5 and none
+(after the `put`, 12 to 52 and up to 7), recall 0.960 to 0.964 (0.987 to
+0.988); links made again, 0 to 3 and none, recall 0.995 to 0.997, the
+rollback taking 12 to 21 ms against 360 to 470. Made as each node was
+made live, as the review first put it, a list chosen again let go of
+neighbours the put-back had not made live yet: 4 to 7 missed at ef 8
+after the `set`, 62 to 71 and 6 to 10 at ef 40 after the `put`. A `put`
+over fewer rows than a link batch (512) leaves them waiting, never
+linked, and its rollback gives the graph back as it was. One shape still
+leaves rows hard to reach by their own vector at a small ef: over 2 000 x
+16, after the `put`, 439 to 444 missed at ef 8 and 61 to 72 at ef 40,
+where placing them again missed 0 and 1 -- the batch's top node, a
+tombstone now, stays the graph's entry, its links all to the block's
+tombstones; recall@10 is 0.9996 against 1.0. So a block put back whole
+has its rows' nodes back, each with its links both ways, and the nodes it
+placed stay in the graph, tombstones, until it is made again (a compact,
+an open rebuilding it); a put-back places a node only where none is
+held, and only where the graph takes one. A node a tombstone once until a
+put-back makes it live, the list holds no more than the graph's
 tombstones, 4 bytes each beside a node's 150 or more, and a push where a
 write makes one, which a write over a row's vector pays beside the
 linking of its new one. A first cut made room instead, the graph made
@@ -377,6 +411,15 @@ put-back at the bound -- a block rolled back, a `set` of two rows refused
 at its second, a write a panic stopped -- over rows sharing a vector and
 beside a row that does not read, each its state and its graph's nodes as
 they were (`a_put_back_at_a_graphs_bound_revives_the_node_its_write_took`);
+off it, a block writing 1 000 rows' vectors again rolled back, each row
+its node, the block's nodes tombstones, and each found by its own vector
+at ef 16 (`a_rollback_gives_each_row_its_node_and_the_links_into_it`, 13
+rows not found where no links in were made), a row written A, null, A and
+one written A, B, A by a write a panic stopped, each given the node it
+began the block with
+(`a_row_written_twice_in_a_block_gets_the_node_it_began_with`), and every
+write a panic stops leaving each row the node it had
+(`a_panic_anywhere_in_a_write_puts_its_block_back_whole`);
 an open at the bound, rows sharing vectors taken and one past refused,
 and a restored graph's catch-up
 (`an_open_counts_a_graphs_nodes_as_the_graph_places_them`); a replica

@@ -141,7 +141,14 @@ nothing else leaves one while a block is open. Natively a rollback gives
 each row back the node its write took from it, a tombstone the graph still
 holds (`VectorIndex::put_back`), rather than place its vector again: a
 graph at its bound has no node left for one more ([crates.md,
-limits](crates.md#limits)). A lone statement links as
+limits](crates.md#limits)). The node comes back with its own links, and
+the links into it that lists chosen again while it was a tombstone let go
+of are made again from its own once the put-back ends (`link_revived`):
+each node it links to takes it back, pruned as a link is, no search made
+-- made with none, a rollback of a `put` rewriting 4 000 rows left 3 899 or
+more of them unfound by their own vector. The nodes the block placed
+stay, tombstones, until the graph is made again; the tombstones a
+put-back makes are never the ones it makes live (`take_back`). A lone statement links as
 it did, and so does the browser module's `run` of several: its one thread
 links a vector as it is written (`DEFERS`), the waiting being 843 bytes
 brotli of it for nothing. Linked a row at a time, as a `/batch` of single puts would have

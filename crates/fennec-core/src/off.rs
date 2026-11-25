@@ -125,6 +125,13 @@ impl VectorIndex {
     pub fn forget_retired(&mut self) {
         match self.never {}
     }
+    #[cfg(target_pointer_width = "64")]
+    pub fn link_revived(&mut self) {
+        match self.never {}
+    }
+    pub fn take_back(&mut self, doc: DocId) {
+        match self.never {}
+    }
     pub fn insert_held(
         &mut self,
         items: &[(DocId, Vec<f32>)],
