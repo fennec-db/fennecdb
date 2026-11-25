@@ -501,6 +501,51 @@ from before the watch, the new criteria judge nothing of the reads and
 find the replica's compactions not watched: a fourth failure, the others
 as they were.
 
+**A window is bounded, and so is what it holds.** The review of the
+tenth round found a broken watch passing both new criteria: its
+container gone in a compaction and `docker run` failing after, the window
+stayed open to the run's end, so the reads' bound was hours long, the
+counter's count was excused as the one open at the last look, and every
+read through the replica meanwhile was the compaction's. A thread that
+never slept again passed the same way, and the operations held for the
+window grew 24 bytes each, rescanned and moved whole at every operation
+under the slot's lock. Now the open window's allowance in both criteria,
+its length and its count, holds only where the watch was looking at the
+last look (`r_watch` 1 on the last line). A window whose watch stays gone
+a minute (`R_WATCH_GONE`: ten containers or more, started again 5 s after each) is
+cut at a minute's look, said, never counted, and its operations counted
+as if no window had been. A window is held to what a compaction of the
+replica's file plausibly takes (`plausible_ms`, `r_compact_bound_ms` on
+each line): 500 s a GB of the file, three times the slowest any run
+measured (the third dry run's replica, 2.06 GB in 344 s), or four times
+the slowest of the primary's compacts on the run a GB (`compact_ms`) where
+that is more, and ten minutes at the least. A window the watch sees open
+past it, or that ends past it, is cut and fails a criterion of its own
+(`r_compacts_overlong`, "no replica compaction open past what its file
+plausibly takes"), never an excuse. The held operations of a worker are a
+queue in the order they ended: settled from the oldest as soon as its
+window's verdict is known, each look asking of one window, and at the
+latest at each minute's line; at `HELD_MAX` (2^17, 3 MiB a worker, past
+the bound's length at the soak's rates) the window is cut and said. The
+run's last line settles what is held whichever way the run ends -- the
+environment's end lost it before -- by the watch's word where it looks,
+as if no window had been where it does not. The window opens before the
+counter's base is read: that read waits on the replica's lock up to 10 s,
+and reads answered meanwhile took the class they had without the window
+(round nine's minute 118 again); the base is the same read either way,
+the counter counting at a compaction's end. A counter lower at a window's
+end than at its start -- the replica started again in it, its thread
+numbered as before -- was read as a rise; it is a reset now, judged by
+the count since the restart (`r_compacts_reset`), and a window judged on
+a base read before it began, its own read failed (`r_compacts_stale`), or
+on no read at its end (`r_compacts_unread`, the watch's word) is counted
+and said, in the log and the criterion's line. A watch started again is
+looking only once its container lists the threads, not before: a `docker
+run` that hangs never does. A last hour with no compact's operation, read
+as 0, passed the compacts' half of the last hour's tail against any; with
+either hour's figure missing the half is "not judged", the steady half
+judged as before.
+
 **The servers ask a token.** Both, and the backup's read-only server, run
 with `--http-token` and `--replication-token`, two secrets of the run's
 own (32 bytes of `/dev/urandom` each, held in memory), handed to each
@@ -815,8 +860,13 @@ compaction of its own and their workers' backlog (`r_compact_ops`,
 compaction thread saw end (`r_compacts_watched`, the longest in ms
 `r_compact_ms`), those cut before their end was seen (`r_compacts_cut`),
 the windows the replica's counter did not move in (`r_compacts_false`),
-whether one was open at the look and for how long (`r_compact_open`,
-`r_compact_open_ms`) and whether it was watching then (`r_watch`);
+those found open past their bound (`r_compacts_overlong`, the bound at
+the look `r_compact_bound_ms`), those the counter judged across a reset,
+on a stale base or on no read (`r_compacts_reset`, `r_compacts_stale`,
+`r_compacts_unread`), whether one was open at the look and for how long
+(`r_compact_open`, `r_compact_open_ms`) and whether it was watching then
+(`r_watch`); the time of the schedule's compact that ended in the minute
+(`compact_ms`);
 `errors`, `refused` (writes refused by their status) and `down`;
 `mismatches`, `lost_writes`, `lost_ms_max`, `backup_differs`; the streams'
 `stream_missing`, `stream_twice`, `stream_order`, `stream_late`,
@@ -876,7 +926,8 @@ than in the other -- the replica's own compactions, on no schedule, out
 of both figures; a two-hour run has no such hour and is not judged on
 it, and neither is an hour with no operation on its schedule, which has
 no steady p99 (written as 0, a last hour behind its schedule passed
-against any); the file at most 2.2 times the live bytes every minute; the primary's
+against any), nor the compacts' half where either hour had no compact's
+operation; the file at most 2.2 times the live bytes every minute; the primary's
 `rss_anon` beyond what the server holds by its own account grown less
 than 5% of its `rss_anon` within each life (it is killed every 30
 minutes) and between two compactions, from the median of a stretch's
@@ -972,10 +1023,13 @@ backup and restore clean; match and near as a scan; every key read back,
 after each restart and at the end; no server died and none was
 OOM-killed; the reads the replica's own compactions held, and their
 workers' backlog, within the longest compaction the watch saw end, or
-the one open at the last look so far, and two seconds (`p99_r_compact`;
-none, nothing judged); the replica's compactions as its counter counted
-them, seen to end at its compaction thread, but for one open at the last
-look -- a run whose watch never looked fails as not watched; and the open
+the one open at the last look so far where the watch was looking then,
+and two seconds (`p99_r_compact`; none, nothing judged); the replica's
+compactions as its counter counted them, seen to end at its compaction
+thread, but for one open at the last look the watch was looking at -- a
+run whose watch never looked fails as not watched; no window of the
+replica's open past what a compaction of its file plausibly takes
+(`r_compacts_overlong`, `r_compact_bound_ms`); and the open
 loop back on its schedule (`behind_s` a second
 at most) at some look of every stretch as long as the kill interval -- a
 compact's or a restart's backlog drains, at 80% of the peak a kill's in
