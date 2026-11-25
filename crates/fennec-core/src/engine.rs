@@ -7242,7 +7242,7 @@ impl Database {
                 #[cfg(not(target_arch = "wasm32"))]
                 Some(b) if index.is_some_and(|ix| store.adopt_index(b, at, len, ix)) => Ok(0),
                 Some(b) => store.replay_mapped(b, at, len, note),
-                None => store.replay_noting(chunk, note),
+                None => store.replay_noting(chunk, at, note),
             }
         })
     }

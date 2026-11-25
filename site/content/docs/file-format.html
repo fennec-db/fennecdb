@@ -59,7 +59,11 @@ from before writes each plain record it takes with a checksum of its own,
 so its file, its archive and every restore from it stay checked.</p>
 
 <p>Inside a data record, each document is
-<code>[op][doc-id][length][fields]</code>, each field a tagged value. A
+<code>[op][doc-id][length][fields]</code>, each field a tagged value. The
+op is 1 for a put and 2 for a delete. An open refuses any other it reads,
+naming its byte and where it is (<code>unknown write op 3 at
+4096</code>), and a replica one its primary sends: neither takes it as a
+write that changes nothing. A
 <code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
 indices, each as its distance from the one before, then the weights as
 <code>f32</code>. An object, in a <code>json</code> field, is
@@ -431,7 +435,11 @@ than walking the record's frames, whose heads each say where the next one
 starts: a chain of cache misses that was 5.5 ms of a 14.2 ms open at
 100 000 × 128, which opens in 8.4 ms with it. An index that does not fit the
 record — another length, ids out of order, a payload past its end — is
-passed over and the record walked. Every reader of the record, older ones
+passed over and the record walked, and so is one whose first byte, the mark
+of its layout, the binary does not know. The index reads no document's op,
+so a later version that adds an op writes its index under a new mark: an
+older binary walks the record and refuses the op by its byte rather than
+taking the frame for a put. Every reader of the record, older ones
 included, reads the counter and nothing after it.</p>
 </details>
 

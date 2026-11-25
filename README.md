@@ -454,6 +454,10 @@ FennecQL does not share with SQL, and
 
 To report a vulnerability, privately, see [`SECURITY.md`](SECURITY.md): what is
 in scope, the supported versions and the acknowledgement within 3 working days.
+The [threat model](docs/design/security.md) lists every trust boundary with
+the code that enforces it, the test that proves it and what it does not
+defend; no outside audit has been made, and the scope one would take is
+kept there.
 
 ## Contributing
 
