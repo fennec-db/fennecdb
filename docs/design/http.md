@@ -2044,6 +2044,55 @@ With the archive's round file ([replication.md](replication.md#replication),
 `fennec-shard`'s 1 024 (aarch64-apple-darwin): the slot's moves and
 drops, the held request's, the sweep and its line.
 
+**A file's server counts a subscription apart, under `--http-max-streams`
+alone.** `Config::max_streams` said so from the first commit -- "sharing a
+single ceiling would let `max_connections` subscribers close the server to
+ordinary requests" -- and the server reference too, but a stream kept its
+connection's `Slot` for its whole life beside its `StreamSlot`, in every
+release from 0.1.0 to 0.2.0: the two ceilings were one, a default server's
+64 subscribers held 64 of its 100 connections, and in the P6 soak a
+primary's 64 subscriptions, 32 workers and its replica's stream held 97, its
+status probes, each on a connection of its own, refused 503 `too many
+connections`. Now `serve_connection` hands a file's server's subscription
+its slot by value (`sse::serve`'s `connection`), which drops it once
+`Hub::reserve` gave the stream its own place, before the `Fennec-After`
+wait and the head: a value moved in goes back once whichever way the
+stream ends -- a refusal's return, a panic's unwinding -- never twice, and
+before the socket closes, which `serve_connection` holds still. A
+subscription refused at `--http-max-streams` held its connection alone,
+given back as it ends. A server's threads are `--max-connections` and
+`--http-max-streams` at most -- where `--http-max-streams` bounds them: at
+0 (unlimited, through the flag or `Config { max_streams: 0 }`) `Hub::reserve`
+refuses none, so a stream keeps its slot (`serve_connection`'s
+`cfg.max_streams > 0` guard), or its threads would be under no ceiling at
+all, where `--max-connections` bounded them before
+(`an_unbounded_stream_stays_under_the_connection_ceiling`). A tenant node's
+stream keeps its slot, as the
+docs said of a node: `--http-max-streams` is each tenant's hub's, so
+handed back the node's threads were the connections and 64 for every
+tenant, which no flag bounds, where `--max-connections` is the bound every
+tenant shares, its quarter a tenant's default `streams` quota
+([quotas.md](quotas.md#tenant-quotas)) and the regions' alert reading
+`fennec_connections` against it. The other connections that last are
+connections on either server, as their docs say: a replica's or an
+archiver's stream ([replication.md](replication.md#a-nodes-archive)), a
+`/_changes` wait and a held write (`Fennec-Wait`, 30 s at most each,
+[waits.md](waits.md#fennec-wait)); MCP opens no stream (`GET /_mcp` is
+405). `fennec_connections` still counts every connection open, a
+subscription too: on a file's server it may pass `--max-connections` by the
+streams, which the monitoring page says; no metric was renamed.
+`server.rs`'s `subscriptions_are_counted_apart_from_connections` (two
+streams at a ceiling of two, then two connections kept alive and a third
+refused), `the_stream_ceiling_refuses_past_it`,
+`a_subscriptions_end_gives_its_stream_slot_back` and
+`a_panic_in_a_stream_gives_back_what_it_holds` (a shape's function
+panicking on the row a write brings) hold it, each ceiling read exactly
+after, which a slot given back twice would have moved; `tenants.rs`'s
+`a_tenants_stream_is_one_of_the_nodes_connections` holds the node's. A
+request pays nothing: the slot moves at a connection's start and a
+stream's, outside the loop a request runs. `fennec-server`'s `__text` grew
+320 bytes (aarch64-apple-darwin), its file not at all.
+
 ## A body's ceiling
 
 **A body is held to the ceiling its head earns** (`body_ceiling`,
