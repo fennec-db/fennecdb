@@ -49,7 +49,8 @@ lock held (`IndexCopy::read`), and the writes made meanwhile during a
 graph's build or a file's rewrite are caught up in rounds, looked up
 under the read lock and read after it (`catch_up_graphs`, `catch_up`),
 the write lock taking the last round's few: a graph's links costing
-`GRAPH_HELD` at most (`link_cost`), past which a compact keeps the graph
+`GRAPH_HELD` at most (`link_cost`: by dimensions, `m` and
+`ef_construction`, a saturating `u64`), past which a compact keeps the graph
 and names it (`KeptGraph`) and `create index` is refused; a rewrite's
 bounded by the rounds' pace alone. Every collection is asked before any
 graph is placed. Each hold is timed and handed back

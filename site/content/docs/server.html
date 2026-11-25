@@ -627,8 +627,11 @@ beside the queries: it reads the documents, rebuilds a vector index that
 holds deleted entries and writes the new file with no lock held, and takes
 the write lock only for the writes of its last moments and to put the new
 file in place. A vector index whose writes outrun its rebuild -- more
-written during its last round of catching up than about 0.1 s of linking,
-128 vectors at 768 dimensions, 33 at 3 072 -- is kept as it stands until
+written during its last round of catching up than about 0.1 s of linking
+at any <code>m</code> and <code>ef_construction</code>, 128 vectors at
+768 dimensions, 33 at 3 072 at the defaults, fewer as a wider
+<code>m</code> or <code>ef_construction</code> makes each link cost more
+-- is kept as it stands until
 the next compact, rather than every write held while the compact links
 them, and the log line says so. A sustained ingest of vectors can keep it
 at every compact, its deleted entries growing until a quieter one.</p>

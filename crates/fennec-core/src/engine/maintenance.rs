@@ -21,6 +21,7 @@
 //! rather than putting it in place.
 
 use super::*;
+use crate::schema::VectorIndexSpec;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -747,9 +748,16 @@ impl Database {
                 // Each a link under the write lock: past the bound the
                 // rounds fell behind the vectors written, and the index is
                 // refused rather than every writer held while it catches up.
-                if ids.len() > held_links(copy.dim()) {
+                let spec = copy.spec();
+                if ids.len() > held_links(copy.dim(), &spec) {
                     let left = ids.len();
-                    return Err(fell_behind(&copy.collection, &copy.field, left, copy.dim()));
+                    return Err(fell_behind(
+                        &copy.collection,
+                        &copy.field,
+                        left,
+                        copy.dim(),
+                        &spec,
+                    ));
                 }
                 // `insert` keeps a node that holds the vector already, and
                 // retires it otherwise.
@@ -1013,7 +1021,7 @@ impl Database {
             }
         }
         // What the write lock's links may cost, the graphs' together.
-        let mut room = GRAPH_HELD * link_cost(HELD_DIM);
+        let mut room = held_cost();
         let mut kept = Vec::new();
         for (b, t) in built.into_iter().zip(tails) {
             let keep = |behind| KeptGraph {
@@ -1037,7 +1045,7 @@ impl Database {
             // The rounds fell behind the vectors written: the graph stays as
             // it stands, as where a document does not read, for the next
             // compact, rather than every writer held while it catches up.
-            let cost = ids.len() * b.copy.link_cost();
+            let cost = links_cost(ids.len(), b.copy.link_cost());
             if cost > room {
                 kept.push(keep(Some(ids.len())));
                 continue;
@@ -1382,7 +1390,8 @@ fn catch_up_graphs(
     longest: &mut Duration,
 ) -> Result<()> {
     for _ in 0..CATCH_UP_ROUNDS {
-        if graph_round(db, built, retire, longest)? < GRAPH_DONE * link_cost(HELD_DIM) {
+        let done = GRAPH_DONE * link_cost(HELD_DIM, &VectorIndexSpec::default());
+        if graph_round(db, built, retire, longest)? < done {
             break;
         }
     }
@@ -1402,13 +1411,13 @@ fn graph_round(
     built: &mut [BuiltIndex],
     retire: bool,
     longest: &mut Duration,
-) -> Result<usize> {
+) -> Result<u64> {
     let tokens: Vec<u64> = built.iter().map(|b| b.copy.token).collect();
     let drained = drain(db, &tokens, longest)?;
     if drained.iter().any(Option::is_none) {
         return Ok(0);
     }
-    let mut caught = 0;
+    let mut caught: u64 = 0;
     let mut docs = crate::store::Snapshot::default();
     for (b, mut ids) in built.iter_mut().zip(drained.into_iter().flatten()) {
         // A graph left as it stood takes nothing more.
@@ -1417,7 +1426,7 @@ fn graph_round(
         };
         ids.sort_unstable();
         ids.dedup();
-        caught += ids.len() * b.copy.link_cost();
+        caught = caught.saturating_add(links_cost(ids.len(), b.copy.link_cost()));
         for chunk in ids.chunks(CATCH_UP_CHUNK) {
             let linked = match looked_up(
                 db,
@@ -1638,11 +1647,19 @@ impl IndexCopy {
         }
     }
 
+    /// The settings of the graph built from this copy: its field's.
+    fn spec(&self) -> VectorIndexSpec {
+        match &self.kind {
+            IndexKind::Vector(spec) => *spec,
+            _ => VectorIndexSpec::default(),
+        }
+    }
+
     /// What a link into the graph built from this copy costs the lock
     /// ([`link_cost`]).
     #[cfg(not(target_arch = "wasm32"))]
-    fn link_cost(&self) -> usize {
-        link_cost(self.dim())
+    fn link_cost(&self) -> u64 {
+        link_cost(self.dim(), &self.spec())
     }
 
     /// Reads the field of every document of the store as it stood when the
@@ -1939,54 +1956,107 @@ const CATCH_UP_DONE: usize = 1_000;
 /// the graph under the write lock that follows, where a rewrite's is a
 /// copy of the record.
 #[cfg(not(target_arch = "wasm32"))]
-const GRAPH_DONE: usize = 64;
+const GRAPH_DONE: u64 = 64;
 /// What the write lock's links cost at most once a graph's rounds end, its
 /// graphs' together -- what was written during the last round -- counted
-/// as this many links into graphs of [`HELD_DIM`] dimensions: a link costs
-/// about its dimensions and 64 more ([`link_cost`]), so the write lock
-/// links 128 at 768 dimensions, 66 at 1 536, 33 at 3 072 and 1 331 at 16
+/// as this many links into graphs of [`HELD_DIM`] dimensions at the default
+/// `m` and `ef_construction`: a link costs about its dimensions and 64
+/// more, times its beam and its neighbours past the defaults
+/// ([`link_cost`]), so the write lock links 128 at 768 dimensions, 66 at
+/// 1 536, 33 at 3 072 and 1 331 at 16, and at 768 dimensions 64 at
+/// `ef_construction` 400, 32 at `m` 32 with it and 10 at `m` 48 with 800
 /// ([`held_links`]). A single link took at the median, into a graph of
 /// 20 000 vectors on one core of an M-series Mac, 0.08 ms at 16
 /// dimensions, 0.15 at 128, 0.38 at 384, 0.82-0.89 at 768, 1.80 at 1 536
 /// and 3.7 at 3 072, and 1.14 ms into one of 100 000 x 768: the bound
 /// holds every writer 85-125 ms into 20 000 vectors at any of those
 /// dimensions and about a third more into 100 000, under the 0.19-0.31 s
-/// the rewrite's copy holds the soak's file. Counted in links alone, 128
-/// held it 230 ms at 1 536 dimensions and 470 at 3 072, and 10 at 16.
+/// the rewrite's copy holds the soak's file -- and 75-117 ms at the `m`
+/// and `ef_construction` timed past the defaults. Counted in links alone,
+/// 128 held it 230 ms at 1 536 dimensions and 470 at 3 072, and 10 at 16;
+/// at dimensions alone, 1.0 s at `m` 48 and `ef_construction` 800.
 /// Twice [`GRAPH_DONE`]: a round ends costing less than 64, and where the
 /// links keep up with the vectors written the round after it costs less
 /// again, so only a burst or writes that outran 16 rounds pass it. Past it
 /// a compact keeps the graph as it stood, for the next, and says so
 /// ([`KeptGraph`]), and `create index` is refused ([`fell_behind`]); with no
 /// bound the last hold linked whatever the 16th round left, without end
-/// where the writes outran the links.
-const GRAPH_HELD: usize = 128;
+/// where the writes outran the links. A graph whose one link costs more
+/// than the whole bound -- at 768 dimensions `m` times `ef_construction`
+/// past 409 600, each at its default at least: `m` 16 with an
+/// `ef_construction` past 25 600 -- links none under the lock, and any
+/// vector written during its last round keeps it or refuses its
+/// `create index`.
+const GRAPH_HELD: u64 = 128;
 /// The dimensions [`GRAPH_HELD`] counts its links at.
 const HELD_DIM: usize = 768;
 
-/// What a link into a graph of `dim` dimensions costs the lock, in
-/// dimensions: each distance it measures reads them all, and the walk
-/// itself costs about 64 more. The links timed at 16 to 3 072 dimensions
-/// ([`GRAPH_HELD`]) fit it within a fifth: over at 128 and 384, under at
-/// 1 536 and 3 072, where each dimension costs a little more.
-fn link_cost(dim: usize) -> usize {
-    dim + 64
+/// What a link into a graph of `dim` dimensions built by `spec` costs the
+/// lock, in dimensions at the default `m` and `ef_construction`: each
+/// distance it measures reads them all, and the walk itself costs about
+/// 64 more ([`GRAPH_HELD`]), each layer searched with a beam of
+/// `ef_construction` whose every node's neighbours, up to `m` of them, are
+/// measured (`VectorIndex::link_node`). The links timed at 16 to 3 072
+/// dimensions fit the dimensions within a fifth: over at 128 and 384, under
+/// at 1 536 and 3 072, where each dimension costs a little more. Into
+/// 20 000 x 768 a link took 0.91 ms at the defaults, 1.47 at
+/// `ef_construction` 400, 2.34 at 800, 3.65 at `m` 32 with 400 and 7.87 at
+/// `m` 48 with 800: 1.6, 2.6, 4.0 and 8.6 times the default's, which the
+/// product of the two ratios puts at 2, 4, 4 and 12 -- a hair under at
+/// `m` 32 (4.0 against 4.01), over the rest by 24-56%. Below the defaults
+/// a link is counted at theirs, never less, as nothing was timed there.
+/// In `u64`, saturating: on a 32-bit target the products of a large
+/// graph's settings, or of a round's millions of ids ([`links_cost`]),
+/// wrapped `usize`.
+fn link_cost(dim: usize, spec: &VectorIndexSpec) -> u64 {
+    let base = VectorIndexSpec::default();
+    let beam = spec.ef_construction.max(base.ef_construction) as u64;
+    let m = spec.m.max(base.m) as u64;
+    (dim as u64)
+        .saturating_add(64)
+        .saturating_mul(beam)
+        .saturating_mul(m)
+        .div_ceil((base.ef_construction * base.m) as u64)
 }
 
-/// The links into a graph of `dim` dimensions that cost the write lock
-/// what [`GRAPH_HELD`] links of [`HELD_DIM`] do.
-fn held_links(dim: usize) -> usize {
-    GRAPH_HELD * link_cost(HELD_DIM) / link_cost(dim)
+/// What `links` links of `each` cost, saturating rather than wrapping a
+/// 32-bit `usize` (5.2 million at 768 dimensions wrapped it).
+#[cfg(not(target_arch = "wasm32"))]
+fn links_cost(links: usize, each: u64) -> u64 {
+    (links as u64).saturating_mul(each)
+}
+
+/// What the write lock's links cost at most, a compact's graphs' together
+/// ([`GRAPH_HELD`]).
+fn held_cost() -> u64 {
+    GRAPH_HELD * link_cost(HELD_DIM, &VectorIndexSpec::default())
+}
+
+/// The links into a graph of `dim` dimensions built by `spec` that cost
+/// the write lock what [`GRAPH_HELD`] links of [`HELD_DIM`] do at the
+/// defaults: 0 where one costs more.
+fn held_links(dim: usize, spec: &VectorIndexSpec) -> usize {
+    usize::try_from(held_cost() / link_cost(dim, spec)).unwrap_or(usize::MAX)
 }
 
 /// `create index`'s refusal where the writes left more for the write lock
-/// to link than it links into a graph of `dim` dimensions ([`held_links`]).
-fn fell_behind(collection: &str, field: &str, left: usize, dim: usize) -> Error {
+/// to link than it links into a graph of `dim` dimensions built by `spec`
+/// ([`held_links`]).
+fn fell_behind(
+    collection: &str,
+    field: &str,
+    left: usize,
+    dim: usize,
+    spec: &VectorIndexSpec,
+) -> Error {
     Error::Query(format!(
         "the graph of `{collection}.{field}` fell behind its writes: {left} documents were \
          written during its last round of catching up, and the write lock links {} at most \
-         at {dim} dimensions; run `create index` again when fewer vectors are being written",
-        held_links(dim)
+         at {dim} dimensions, m {} and ef_construction {}; run `create index` again when \
+         fewer vectors are being written",
+        held_links(dim, spec),
+        spec.m,
+        spec.ef_construction
     ))
 }
 
@@ -2220,8 +2290,13 @@ mod tests {
     /// a graph of tombstones a compact rebuilds -- or, `indexed` false, no
     /// graph, for `create index` to build.
     fn graphed(n: i64, indexed: bool) -> Database {
+        graphed_by(n, indexed, VectorIndexSpec::default())
+    }
+
+    /// [`graphed`], its graph built by `spec`.
+    fn graphed_by(n: i64, indexed: bool, spec: VectorIndexSpec) -> Database {
         let mut db = Database::new();
-        made(&mut db, "g", indexed);
+        made_by(&mut db, "g", indexed, spec);
         filled(&mut db, "g", n);
         written_over(&mut db, "g", n);
         db
@@ -2230,9 +2305,14 @@ mod tests {
     /// The collection `name`: `meta`, a vector `v` with its graph where
     /// `indexed` says, and a `tag` a second `create index` takes.
     fn made(db: &mut Database, name: &str, indexed: bool) {
+        made_by(db, name, indexed, VectorIndexSpec::default())
+    }
+
+    /// [`made`], its graph built by `spec`.
+    fn made_by(db: &mut Database, name: &str, indexed: bool, spec: VectorIndexSpec) {
         let v = Field::new("v", DataType::Vector(2, VecPrec::F32));
         let v = match indexed {
-            true => v.indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
+            true => v.indexed(IndexKind::Vector(spec.resolved())),
             false => v,
         };
         let fields = vec![
@@ -2448,6 +2528,15 @@ mod tests {
             "v" => IndexKind::Vector(VectorIndexSpec::default().resolved()),
             _ => IndexKind::Hash { unique: false },
         };
+        create_index_of(field, kind)
+    }
+
+    /// `create index` on `g`'s `v`, its graph built by `spec`.
+    fn create_index_by(spec: VectorIndexSpec) -> Statement {
+        create_index_of("v", IndexKind::Vector(spec.resolved()))
+    }
+
+    fn create_index_of(field: &str, kind: IndexKind) -> Statement {
         Statement::CreateIndex {
             collection: "g".into(),
             field: field.into(),
@@ -2803,14 +2892,33 @@ mod tests {
     }
 
     /// What the last round leaves is linked under the write lock up to what
-    /// costs `GRAPH_HELD` -- at 2 dimensions, 1 613 links; past it a compact
-    /// keeps the graph the writes left, and says so, and `create index` is
-    /// refused saying why, rather than every writer held out while it links
-    /// them.
+    /// costs `GRAPH_HELD` -- at 2 dimensions, 1 613 links, and as many
+    /// fewer as `ef_construction` and `m` widen past the defaults each link's
+    /// search: 201 at `ef_construction` 1 600, 100 at `m` 32 with it. Past it
+    /// a compact keeps the graph the writes left, and says so, and
+    /// `create index` is refused saying why, rather than every writer held
+    /// out while it links them.
     #[test]
     fn past_the_last_hold_a_compact_keeps_its_graph_and_create_index_is_refused() {
-        let held = held_links(2);
-        assert_eq!(held, 1_613);
+        let at = |m, ef_construction| VectorIndexSpec {
+            m,
+            ef_construction,
+            ..VectorIndexSpec::default()
+        };
+        for (spec, held) in [
+            (at(16, 200), 1_613),
+            (at(16, 1_600), 201),
+            (at(32, 1_600), 100),
+        ] {
+            assert_eq!(held_links(2, &spec), held);
+            past_the_last_hold(spec, held);
+        }
+    }
+
+    /// [`past_the_last_hold_a_compact_keeps_its_graph_and_create_index_is_refused`]
+    /// of a graph built by `spec`, whose last hold links `held`.
+    fn past_the_last_hold(spec: VectorIndexSpec, held: usize) {
+        let (m, efc) = (spec.m, spec.ef_construction);
         for left in [held, held + 1] {
             let all = 1..=(10 + left) as DocId;
             // Ten in the first round, which ends the rounds, and `left`
@@ -2828,10 +2936,10 @@ mod tests {
                 }
                 _ => {}
             };
-            let lock = Arc::new(RwLock::new(graphed(300, true)));
+            let lock = Arc::new(RwLock::new(graphed_by(300, true, spec)));
             let (r, holds) = beside(&lock, &Statement::Compact(None), writes);
             r.expect("the compact");
-            let mut want = graphed(300, true);
+            let mut want = graphed_by(300, true, spec);
             for id in 1..=10 {
                 put(&mut want, id, vec_of(id, 2));
             }
@@ -2858,14 +2966,14 @@ mod tests {
                 // it held.
                 false => {
                     assert_eq!(ix.dead(), 10 + left.min(290), "{left}");
-                    assert!(holds.kept.is_empty());
+                    assert!(holds.kept.is_empty(), "{left}");
                 }
             }
             assert!(holds.put > Duration::ZERO);
             drop(db);
 
             let lock = Arc::new(RwLock::new(graphed(300, false)));
-            let (r, _) = beside(&lock, &create_index("v"), writes);
+            let (r, _) = beside(&lock, &create_index_by(spec), writes);
             let db = lock.read().expect("lock");
             let g = db.collection("g").expect("g");
             match left > held {
@@ -2873,7 +2981,7 @@ mod tests {
                     let says = format!(
                         "the graph of `g.v` fell behind its writes: {left} documents were written \
                          during its last round of catching up, and the write lock links {held} at \
-                         most at 2 dimensions"
+                         most at 2 dimensions, m {m} and ef_construction {efc}"
                     );
                     assert!(
                         matches!(&r, Err(Error::Query(m)) if m.starts_with(&says)),
@@ -2889,6 +2997,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A link's cost grows with the beam its search walks and the
+    /// neighbours it measures, past the defaults: at the settings timed into
+    /// 20 000 x 768 the last hold links as many fewer as each link costs
+    /// more, every one near the default's 116 ms, and below the defaults
+    /// as many as at them. One link costing past the whole bound leaves none
+    /// held, and the widest settings a schema takes saturate, never wrap.
+    #[test]
+    fn a_link_costs_by_its_beam_and_its_neighbours() {
+        let at = |m, ef_construction| VectorIndexSpec {
+            m,
+            ef_construction,
+            ..VectorIndexSpec::default()
+        };
+        for (m, efc, held) in [
+            (16, 200, 128),
+            (16, 400, 64),
+            (16, 800, 32),
+            (32, 400, 32),
+            (48, 800, 10),
+            (2, 4, 128),
+            (8, 100, 128),
+            (16, 25_600, 1),
+            (16, 25_601, 0),
+            (100, 4_097, 0),
+        ] {
+            assert_eq!(
+                held_links(768, &at(m, efc)),
+                held,
+                "m {m}, ef_construction {efc}"
+            );
+        }
+        assert_eq!(held_links(3_072, &at(16, 200)), 33);
+        let widest = at(crate::schema::MAX_M, u32::MAX as usize);
+        let max_dim = crate::schema::MAX_DIM;
+        assert_eq!(link_cost(max_dim, &widest), u64::MAX.div_ceil(3_200));
+        assert_eq!(held_links(max_dim, &widest), 0);
+    }
+
+    /// What a round's links cost is a `u64`, saturating: on a 32-bit
+    /// target the `usize` product of 5.2 million links at 768 dimensions
+    /// wrapped, and a round past it read as one costing less than
+    /// `GRAPH_DONE`, or a last hold past the bound as one under it.
+    #[test]
+    fn a_cost_of_links_never_wraps() {
+        let each = link_cost(768, &VectorIndexSpec::default());
+        assert_eq!(each, 832);
+        assert_eq!(links_cost(5_200_000, each), 4_326_400_000);
+        let most = links_cost(usize::MAX, each);
+        assert!(most >= usize::MAX as u64 && most > held_cost(), "{most}");
+        if usize::BITS == 64 {
+            assert_eq!(most, u64::MAX);
+        }
+        assert_eq!(links_cost(2, u64::MAX), u64::MAX);
     }
 
     /// The write lock's links are bounded across a compact's graphs, not

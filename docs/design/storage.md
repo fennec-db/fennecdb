@@ -234,9 +234,11 @@ less than 64 at 768 dimensions (`GRAPH_DONE`) ends them, 16 at most.
 
 **The write lock links what 128 links at 768 dimensions cost, at most**
 (`GRAPH_HELD`), the graphs' together: what was written during the last
-round. A link costs about its dimensions and 64 more (`link_cost`), so
-that is 128 links at 768, 66 at 1 536, 33 at 3 072 and 1 331 at 16
-(`held_links`). A single link took, at the median into a graph of 20 000
+round. A link costs about its dimensions and 64 more, times its
+`ef_construction` over 200 and its `m` over 16 (`link_cost`), so that is
+128 links at 768, 66 at 1 536, 33 at 3 072 and 1 331 at 16 at the
+defaults, and at 768 dimensions 64 at `ef_construction` 400, 32 at 800,
+32 at `m` 32 with 400 and 10 at `m` 48 with 800 (`held_links`). A single link took, at the median into a graph of 20 000
 vectors (`VectorIndex::insert` timed alone, a document written over and a
 new one a thousand times each, one core of an M-series Mac, three runs a
 dimension, each begun under a load below 4), 0.08 ms at 16 dimensions,
@@ -249,6 +251,26 @@ bound holds every writer 85-125 ms into 20 000 vectors at any of those
 dimensions, about a third more into 100 000 -- under the 0.19-0.31 s the
 rewrite's copy holds the soak's file. The second cut counted links alone,
 128 whatever the dimensions: 230 ms at 1 536, 470 at 3 072 and 10 at 16.
+The third counted dimensions alone, whatever the graph's settings, and an
+insert searches every layer with a beam of `ef_construction`, measuring
+each node's neighbours, up to `m` of them: into 20 000 x 768, one core,
+release build, the median link of 600 took 0.91 ms at `m` 16 and
+`ef_construction` 200, 1.47 at 16 and 400, 2.34 at 16 and 800, 3.65 at
+32 and 400 and 7.87 at 48 and 800 -- 1.6, 2.6, 4.0 and 8.6 times the
+default's, so 128 links held every writer 1.0 s at 48 and 800. The
+product of the two ratios puts them at 2, 4, 4 and 12: a hair under at
+32 and 400 (4.0 against 4.01), over the rest by 24-56%, so the bound
+holds every writer 75-117 ms at each, against 116 at the defaults. Below
+the defaults a link is counted at theirs, never less, as nothing was
+timed there; past those timed the product is the guess, and `m`'s pruning
+may cost it more than linearly where it is wide and the beam narrow. The
+cost and its products are `u64`s, saturating: a 32-bit `usize` -- armv7
+Android compacts beside its database too -- wrapped past 5.2 million ids
+at 768 dimensions, and a round past it read as cheap. A graph whose one
+link costs more than the whole bound -- at 768 dimensions `m` times
+`ef_construction` past 409 600, `m` 16 with an `ef_construction` past
+25 600 -- links none under the write lock: any vector written during its
+last round keeps it, or refuses its `create index`.
 Linking the last ones as a batch (`insert_batch`) instead was not taken:
 its nodes do not see one another, so it is not the graph the rounds and
 the read lock link in turn, and it is faster only by the cores a server
@@ -359,7 +381,11 @@ cannot read, or cannot look up (`Store::snapshot` refusing it), keeps the
 graph and names it, the other collection's rebuilt; at 1 613 left at 2
 dimensions a compact places its graph and `create index` its index, at
 1 614 the compact keeps the graph as the writes left it, naming it, and
-`create index` is refused; of two collections left 900 each, the first's
+`create index` is refused -- at 201 and 202 so with `ef_construction`
+1 600, and at 100 and 101 with `m` 32 too, `held_links` asked at the
+settings timed, below the defaults, past the whole bound and at the widest
+a schema takes, and a cost of `usize::MAX` links saturating; of two
+collections left 900 each, the first's
 graph is placed and the second's kept, the bound spent across them; and a
 compact of three collections holds one collection's charge on the pins'
 budget at each graph's read and none in its rounds, a long read pinned

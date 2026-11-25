@@ -325,11 +325,18 @@ time at the next open, never data.</p>
     of every collection places no graph when one of them changed. The
     vectors written while a graph is built are linked into it in rounds
     beside the queries, and the write lock links at most about 0.1 s of
-    them, those of the last round — 128 at 768 dimensions, 66 at 1 536, 33
-    at 3 072. Where more were written than that, faster than the rounds
+    them at any <code>m</code> and <code>ef_construction</code>, those of
+    the last round — 128 at 768 dimensions, 66 at 1 536, 33 at 3 072 at the
+    defaults, as many fewer as a wider <code>m</code> or
+    <code>ef_construction</code> makes each link cost more: 32 at 768
+    dimensions with <code>m = 32, ef_construction = 400</code>, 10 with
+    48 and 800. Where more were written than that, faster than the rounds
     could link them, a <code>create index</code> of the graph is refused,
     saying so, and a compact keeps the graph as it stands until the next,
-    its log line naming it. The documents written during a compact's last
+    its log line naming it. Settings under which one link costs more than
+    the whole bound — at 768 dimensions <code>m</code> times
+    <code>ef_construction</code> past 409 600 — link none under the lock:
+    any vector written during the last round does so. The documents written during a compact's last
     round and the handover after it are copied under the write lock with no
     such bound: beside 1 000-row <code>POST</code>s at 10 000 to 30 000 rows
     a second that held every write 6.6 to 29 ms, but as fast as three CPUs
