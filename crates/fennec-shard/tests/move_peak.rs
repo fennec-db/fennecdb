@@ -14,61 +14,194 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicIsize, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct Counting;
 
-/// Whether every thread's allocations are counted, the bytes they hold now
-/// past what they held as the count began, and the most they held.
-static ALL: AtomicBool = AtomicBool::new(false);
+/// The count of every thread's allocations under way, by its number (0:
+/// none), the bytes the blocks made since it began hold now, and the most
+/// they held. Each count takes a number of its own ([`count_all`]), which
+/// every block made carries before it ([`TAG`]): a block made before the
+/// count, or in another, is neither added nor taken away as it is let go
+/// of, and moved, it is the count's from there. Taken away, as every block
+/// was until 2026-11-25, what was let go of in a count lowered its peak by
+/// as much whenever it was made: the servers of the 8 000 rows' move, which
+/// serve on through the 32 000 rows', or a block the setup made, and
+/// fennec-http's `message_peak.rs`, which counted the same way, read a
+/// replica's growth of 20 bytes a row as 64.12 on macOS CI once a stream
+/// an earlier test left let go of its 1 MiB writer in its count.
+static ALL: AtomicU64 = AtomicU64::new(0);
+static COUNTS: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicIsize = AtomicIsize::new(0);
 static PEAK: AtomicIsize = AtomicIsize::new(0);
 
-/// `grow` bytes more held, `held` of them at once at the most -- a move
-/// holds the old block and the new together.
+/// `grow` bytes more held by the count under way, `held` of them at once at
+/// the most -- a move holds the old block and the new together.
 fn counted(grow: isize, held: isize) {
-    if ALL.load(Relaxed) {
-        let live = LIVE.fetch_add(grow, Relaxed);
-        PEAK.fetch_max(live + held.max(grow), Relaxed);
+    let live = LIVE.fetch_add(grow, Relaxed);
+    PEAK.fetch_max(live + held.max(grow), Relaxed);
+}
+
+/// The bytes before every block, the number of the count it was made in
+/// (or 0) in the last 8 of them; a block aligned past them has its
+/// alignment's bytes before it.
+const TAG: usize = 16;
+
+/// The bytes before a block of `l`, and the layout of the block the
+/// system's allocator is asked for: those and the block.
+fn tagged(l: Layout) -> Option<(usize, Layout)> {
+    let before = l.align().max(TAG);
+    let outer = Layout::from_size_align(l.size().checked_add(before)?, before).ok()?;
+    Some((before, outer))
+}
+
+/// [`tagged`]'s answer for the layout of a block this allocator made.
+///
+/// # Safety
+///
+/// `l` is the layout a block this allocator handed out was made with.
+unsafe fn tagged_made(l: Layout) -> (usize, Layout) {
+    let before = l.align().max(TAG);
+    // SAFETY: `tagged` made this layout of `l` as the block was made,
+    // which `Layout::from_size_align` took.
+    (before, unsafe {
+        Layout::from_size_align_unchecked(l.size() + before, before)
+    })
+}
+
+/// The block `before` bytes into `base`, carrying the count `n`; null where
+/// `base` is.
+///
+/// # Safety
+///
+/// `base` is null or a block of a layout [`tagged`] gave, `before` the
+/// bytes it gave before it.
+unsafe fn marked(base: *mut u8, before: usize, n: u64) -> *mut u8 {
+    if base.is_null() {
+        return base;
+    }
+    // SAFETY: `before` is a power of two of 16 or more and the block's
+    // alignment, so the block's start and the 8 bytes before it are within
+    // what `System` made, and aligned for a `u64`.
+    unsafe {
+        let p = base.add(before);
+        p.cast::<u64>().sub(1).write(n);
+        p
     }
 }
 
-// SAFETY: every call is handed to the system's allocator as it came; the
-// counting reads and writes atomics alone, allocating nothing.
+/// The count the block at `p` was made in, or 0.
+///
+/// # Safety
+///
+/// `p` is a block this allocator handed out.
+unsafe fn tag_of(p: *mut u8) -> u64 {
+    // SAFETY: the 8 bytes before every block this allocator hands out are
+    // its tag, aligned for a `u64` ([`marked`]).
+    unsafe { p.cast::<u64>().sub(1).read() }
+}
+
+// SAFETY: every call is handed to the system's allocator for a block of the
+// layout `tagged` gives, the caller's block within it; the counting reads
+// and writes the counts' atomics alone, allocating nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        counted(l.size() as isize, 0);
-        // SAFETY: `l` is this call's layout, of a nonzero size as
-        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
-        unsafe { System.alloc(l) }
+        let Some((before, outer)) = tagged(l) else {
+            return std::ptr::null_mut();
+        };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            counted(l.size() as isize, 0);
+        }
+        // SAFETY: `outer` is of a nonzero size, `l`'s and the tag's, and the
+        // block `System` makes of it is what `marked` takes.
+        unsafe { marked(System.alloc(outer), before, now) }
     }
 
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        counted(l.size() as isize, 0);
+        let Some((before, outer)) = tagged(l) else {
+            return std::ptr::null_mut();
+        };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            counted(l.size() as isize, 0);
+        }
         // SAFETY: as `alloc`'s.
-        unsafe { System.alloc_zeroed(l) }
+        unsafe { marked(System.alloc_zeroed(outer), before, now) }
     }
 
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        counted(-(l.size() as isize), 0);
-        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
-        // on to it -- as `GlobalAlloc::dealloc`'s caller guarantees.
-        unsafe { System.dealloc(p, l) }
+        // SAFETY: `p` is a block this allocator made with `l`, as
+        // `GlobalAlloc::dealloc`'s caller guarantees.
+        let ((before, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
+        let now = ALL.load(Acquire);
+        if now != 0 && made == now {
+            counted(-(l.size() as isize), 0);
+        }
+        // SAFETY: `before` bytes before `p` is the block `System` made of
+        // `outer` ([`marked`]).
+        unsafe { System.dealloc(p.sub(before), outer) }
     }
 
     unsafe fn realloc(&self, p: *mut u8, l: Layout, to: usize) -> *mut u8 {
-        counted(to as isize - l.size() as isize, to as isize);
-        // SAFETY: `p` is `System`'s, made with `l`, and `to` is nonzero and
-        // fits `isize` once rounded to `l.align()`, as
+        let Some((before, _)) = Layout::from_size_align(to, l.align()).ok().and_then(tagged) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: `p` is a block this allocator made with `l`, as
         // `GlobalAlloc::realloc`'s caller guarantees.
-        unsafe { System.realloc(p, l, to) }
+        let ((_, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            match made == now {
+                true => counted(to as isize - l.size() as isize, to as isize),
+                // Made before the count: the block it moves into is the
+                // count's.
+                false => counted(to as isize, to as isize),
+            }
+        }
+        // SAFETY: `before` bytes before `p` is the block `System` made of
+        // `outer`, and `to` and the tag's bytes are nonzero and fit `isize`
+        // once rounded to `before`, which `tagged` took; the block it moves
+        // into is what `marked` takes.
+        unsafe {
+            marked(
+                System.realloc(p.sub(before), outer, to + before),
+                before,
+                now,
+            )
+        }
     }
 }
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
+
+/// Counts every thread's allocations from here, the bytes the blocks made
+/// since hold and the most they held at once ([`peak_now`]), under a number
+/// no count before took ([`ALL`]).
+///
+/// The number is stored with `Release` and read with `Acquire` by the
+/// allocator: a thread that sees the new number sees the reset before it,
+/// or on aarch64 a block it made would be wiped by the reset and its free
+/// in the count still taken away.
+fn count_all() {
+    ALL.store(0, Relaxed);
+    LIVE.store(0, Relaxed);
+    PEAK.store(0, Relaxed);
+    ALL.store(COUNTS.fetch_add(1, Relaxed) + 1, Release);
+}
+
+/// Stops the count [`count_all`] began: the most the blocks every thread
+/// made since held at once.
+fn peak_now() -> isize {
+    ALL.store(0, Relaxed);
+    PEAK.load(Relaxed)
+}
 
 struct Node {
     addr: String,
@@ -182,12 +315,9 @@ fn a_move_holds_a_constant_however_large_the_tenant() {
             }
             db.sync().unwrap();
         }
-        LIVE.store(0, Relaxed);
-        PEAK.store(0, Relaxed);
-        ALL.store(true, Relaxed);
+        count_all();
         let r = call(port, "POST", "/_shard/tenants/big/move", r#"{"to":"n2"}"#);
-        ALL.store(false, Relaxed);
-        let peak = PEAK.load(Relaxed);
+        let peak = peak_now();
         assert_eq!(r.0, 200, "{}", r.1);
         assert_eq!(rows_on(&nodes[1], "big"), rows, "every row moved");
         eprintln!(
@@ -201,7 +331,8 @@ fn a_move_holds_a_constant_however_large_the_tenant() {
         peaks.push(peak);
     }
     // What grows with the rows is the source's pin and the target's open,
-    // a few dozen bytes a row: never the image.
+    // 20 bytes a row measured (3 401 121 bytes at 8 000 rows, 3 881 456 at
+    // 32 000): never the image, some 1 000 bytes a row.
     assert!(
         peaks[1] - peaks[0] <= 96 * 24_000,
         "{peaks:?}: grown by more than 96 bytes a row"

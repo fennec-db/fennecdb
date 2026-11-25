@@ -16,7 +16,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicIsize, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 struct Counting;
 
@@ -38,56 +41,164 @@ fn counted(f: impl FnOnce(usize, usize) -> (usize, usize)) {
     });
 }
 
-/// Whether every thread's allocations are counted, the bytes they hold now
-/// past what they held as the count began (less where they let go of
-/// older ones), and the most they held.
-static ALL: AtomicBool = AtomicBool::new(false);
+/// The count of every thread's allocations under way, by its number (0:
+/// none), the bytes the blocks made since it began hold now, and the most
+/// they held. Each count takes a number of its own ([`count_all`]), which
+/// every block made carries before it ([`TAG`]): a block made before the
+/// count, or in another, is neither added nor taken away as it is let go
+/// of, and moved, it is the count's from there. Taken away, as every block
+/// was until 2026-11-25, what an earlier test's server let go of in a later
+/// count lowered its peak by as much: a stream whose follower had gone
+/// holds its 1 MiB writer until its second keep-alive's write fails, 4 s
+/// on, and one let go of as a replica took 8 000 rows on macOS CI read its
+/// 4 431 233 bytes as 3 372 979, the replica's growth of 20 bytes a row as
+/// 64.12, past its bound.
+static ALL: AtomicU64 = AtomicU64::new(0);
+static COUNTS: AtomicU64 = AtomicU64::new(0);
 static ALL_LIVE: AtomicIsize = AtomicIsize::new(0);
 static ALL_PEAK: AtomicIsize = AtomicIsize::new(0);
 
-/// `grow` bytes more held, `held` of them at once at the most -- a move
-/// holds the old block and the new together.
+/// `grow` bytes more held by the count under way, `held` of them at once at
+/// the most -- a move holds the old block and the new together.
 fn counted_all(grow: isize, held: isize) {
-    if ALL.load(Relaxed) {
-        let live = ALL_LIVE.fetch_add(grow, Relaxed);
-        ALL_PEAK.fetch_max(live + held.max(grow), Relaxed);
+    let live = ALL_LIVE.fetch_add(grow, Relaxed);
+    ALL_PEAK.fetch_max(live + held.max(grow), Relaxed);
+}
+
+/// The bytes before every block, the number of the count it was made in
+/// (or 0) in the last 8 of them; a block aligned past them has its
+/// alignment's bytes before it.
+const TAG: usize = 16;
+
+/// The bytes before a block of `l`, and the layout of the block the
+/// system's allocator is asked for: those and the block.
+fn tagged(l: Layout) -> Option<(usize, Layout)> {
+    let before = l.align().max(TAG);
+    let outer = Layout::from_size_align(l.size().checked_add(before)?, before).ok()?;
+    Some((before, outer))
+}
+
+/// [`tagged`]'s answer for the layout of a block this allocator made.
+///
+/// # Safety
+///
+/// `l` is the layout a block this allocator handed out was made with.
+unsafe fn tagged_made(l: Layout) -> (usize, Layout) {
+    let before = l.align().max(TAG);
+    // SAFETY: `tagged` made this layout of `l` as the block was made,
+    // which `Layout::from_size_align` took.
+    (before, unsafe {
+        Layout::from_size_align_unchecked(l.size() + before, before)
+    })
+}
+
+/// The block `before` bytes into `base`, carrying the count `n`; null where
+/// `base` is.
+///
+/// # Safety
+///
+/// `base` is null or a block of a layout [`tagged`] gave, `before` the
+/// bytes it gave before it.
+unsafe fn marked(base: *mut u8, before: usize, n: u64) -> *mut u8 {
+    if base.is_null() {
+        return base;
+    }
+    // SAFETY: `before` is a power of two of 16 or more and the block's
+    // alignment, so the block's start and the 8 bytes before it are within
+    // what `System` made, and aligned for a `u64`.
+    unsafe {
+        let p = base.add(before);
+        p.cast::<u64>().sub(1).write(n);
+        p
     }
 }
 
-// SAFETY: every call is handed to the system's allocator as it came; the
-// counting reads and writes this thread's cells alone, allocating nothing.
+/// The count the block at `p` was made in, or 0.
+///
+/// # Safety
+///
+/// `p` is a block this allocator handed out.
+unsafe fn tag_of(p: *mut u8) -> u64 {
+    // SAFETY: the 8 bytes before every block this allocator hands out are
+    // its tag, aligned for a `u64` ([`marked`]).
+    unsafe { p.cast::<u64>().sub(1).read() }
+}
+
+// SAFETY: every call is handed to the system's allocator for a block of the
+// layout `tagged` gives, the caller's block within it; the counting reads
+// and writes this thread's cells and the counts' atomics alone, allocating
+// nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         counted(|live, peak| (live + l.size(), peak));
-        counted_all(l.size() as isize, 0);
-        // SAFETY: `l` is this call's layout, of a nonzero size as
-        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
-        unsafe { System.alloc(l) }
+        let Some((before, outer)) = tagged(l) else {
+            return std::ptr::null_mut();
+        };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            counted_all(l.size() as isize, 0);
+        }
+        // SAFETY: `outer` is of a nonzero size, `l`'s and the tag's, and the
+        // block `System` makes of it is what `marked` takes.
+        unsafe { marked(System.alloc(outer), before, now) }
     }
 
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         counted(|live, peak| (live + l.size(), peak));
-        counted_all(l.size() as isize, 0);
+        let Some((before, outer)) = tagged(l) else {
+            return std::ptr::null_mut();
+        };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            counted_all(l.size() as isize, 0);
+        }
         // SAFETY: as `alloc`'s.
-        unsafe { System.alloc_zeroed(l) }
+        unsafe { marked(System.alloc_zeroed(outer), before, now) }
     }
 
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         counted(|live, peak| (live.saturating_sub(l.size()), peak));
-        counted_all(-(l.size() as isize), 0);
-        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
-        // on to it -- as `GlobalAlloc::dealloc`'s caller guarantees.
-        unsafe { System.dealloc(p, l) }
+        // SAFETY: `p` is a block this allocator made with `l`, as
+        // `GlobalAlloc::dealloc`'s caller guarantees.
+        let ((before, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
+        let now = ALL.load(Acquire);
+        if now != 0 && made == now {
+            counted_all(-(l.size() as isize), 0);
+        }
+        // SAFETY: `before` bytes before `p` is the block `System` made of
+        // `outer` ([`marked`]).
+        unsafe { System.dealloc(p.sub(before), outer) }
     }
 
     unsafe fn realloc(&self, p: *mut u8, l: Layout, to: usize) -> *mut u8 {
         // Moved, the old block and the new are held at once.
         counted(|live, peak| (live - l.size().min(live) + to, peak.max(live + to)));
-        counted_all(to as isize - l.size() as isize, to as isize);
-        // SAFETY: `p` is `System`'s, made with `l`, and `to` is nonzero and
-        // fits `isize` once rounded to `l.align()`, as
+        let Some((before, _)) = Layout::from_size_align(to, l.align()).ok().and_then(tagged) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: `p` is a block this allocator made with `l`, as
         // `GlobalAlloc::realloc`'s caller guarantees.
-        unsafe { System.realloc(p, l, to) }
+        let ((_, outer), made) = unsafe { (tagged_made(l), tag_of(p)) };
+        let now = ALL.load(Acquire);
+        if now != 0 {
+            match made == now {
+                true => counted_all(to as isize - l.size() as isize, to as isize),
+                // Made before the count: the block it moves into is the
+                // count's.
+                false => counted_all(to as isize, to as isize),
+            }
+        }
+        // SAFETY: `before` bytes before `p` is the block `System` made of
+        // `outer`, and `to` and the tag's bytes are nonzero and fit `isize`
+        // once rounded to `before`, which `tagged` took; the block it moves
+        // into is what `marked` takes.
+        unsafe {
+            marked(
+                System.realloc(p.sub(before), outer, to + before),
+                before,
+                now,
+            )
+        }
     }
 }
 
@@ -95,8 +206,32 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOC: Counting = Counting;
 
 /// Held by each test while it counts: a count of every thread's bytes
-/// would count the other test's.
+/// would count the other test's ([`alone`]).
 static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`ALONE`], taken for a test: let go of as the test ends, passed or
+/// panicked, it first removes the files the test wrote ([`scratch`]),
+/// whose directory the next test makes again. A run writes some 600 MB
+/// there -- each test's primaries of 8 and 32 MB, their copies, backups
+/// and archives -- and, left, a loop of runs filled the disk it ran on. A
+/// server a test left serving reads its file as it was, mapped or through
+/// its handle; on Windows, which removes no open file, what one holds open
+/// stays.
+fn alone() -> Alone {
+    Alone {
+        _held: ALONE.lock().unwrap_or_else(|e| e.into_inner()),
+    }
+}
+
+struct Alone {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for Alone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(scratch_dir());
+    }
+}
 
 /// The most bytes `f` held at once on this thread.
 fn peak_of(f: impl FnOnce()) -> usize {
@@ -146,7 +281,7 @@ fn answer(len: usize, sent: usize) -> Vec<u8> {
 /// the head's line, the hello -- are let go before the message is read.
 #[test]
 fn a_message_holds_twice_its_length_and_three_times_what_came() {
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     const FIRST: usize = (2 << 20) + 16;
     const BESIDE: usize = 4 << 10;
     for len in [40 << 20, 4 * FIRST + 1] {
@@ -183,11 +318,17 @@ fn a_message_holds_twice_its_length_and_three_times_what_came() {
 
 const TOKEN: &str = "image-peak-replication-token";
 
-/// This process's own directory for the tests' files.
+/// This process's own directory for the tests' files, made where it is
+/// not there.
 fn scratch() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("fennec-image-peak-{}", std::process::id()));
+    let dir = scratch_dir();
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// [`scratch`]'s directory, whether or not it is there.
+fn scratch_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fennec-image-peak-{}", std::process::id()))
 }
 
 /// Documents `from` to `to` put into `docs`, a kilobyte each, a thousand
@@ -267,35 +408,40 @@ fn primary_named(
     (port, image, kept)
 }
 
-/// Counts every thread's allocations from here, the bytes held and the most
-/// held at once ([`peak_now`]).
+/// Counts every thread's allocations from here, the bytes the blocks made
+/// since hold and the most they held at once ([`peak_now`]), under a number
+/// no count before took ([`ALL`]).
+///
+/// The number is stored with `Release` and read with `Acquire` by the
+/// allocator: a thread that sees the new number sees the reset before it,
+/// or on aarch64 a block it made would be wiped by the reset and its free
+/// in the count still taken away.
 fn count_all() {
+    ALL.store(0, Relaxed);
     ALL_LIVE.store(0, Relaxed);
     ALL_PEAK.store(0, Relaxed);
-    ALL.store(true, Relaxed);
+    ALL.store(COUNTS.fetch_add(1, Relaxed) + 1, Release);
 }
 
-/// Stops the count [`count_all`] began: the most every thread held at once
-/// past what they held as it began.
+/// Stops the count [`count_all`] began: the most the blocks every thread
+/// made since held at once.
 fn peak_now() -> isize {
-    ALL.store(false, Relaxed);
+    ALL.store(0, Relaxed);
     ALL_PEAK.load(Relaxed)
 }
 
 /// A replica's first follow of the primary on `port`, `sums` or not: the
-/// image's length, read and let go of a buffer at a time, and the most
-/// every thread of the process held at once past what it held as the
-/// request went out -- the primary's connection taking and sending the
-/// image above all.
+/// image's length, read and let go of a buffer at a time, and the most the
+/// blocks every thread of the process made from the request on held at
+/// once -- the primary's connection taking and sending the image above
+/// all.
 fn followed(port: u16, sums: bool) -> (u64, isize) {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(std::time::Duration::from_secs(60)))
         .unwrap();
     let mut buf = [0u8; 1 << 16];
-    ALL_LIVE.store(0, Relaxed);
-    ALL_PEAK.store(0, Relaxed);
-    ALL.store(true, Relaxed);
+    count_all();
     write!(
         s,
         "GET /_replication?since=0&sums={} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
@@ -328,8 +474,7 @@ fn followed(port: u16, sums: bool) -> (u64, isize) {
             break len;
         }
     };
-    ALL.store(false, Relaxed);
-    (image, ALL_PEAK.load(Relaxed))
+    (image, peak_now())
 }
 
 /// The most a primary holds as it sends a replica its first image is a
@@ -342,7 +487,7 @@ fn followed(port: u16, sums: bool) -> (u64, isize) {
 /// follow. Checked and plain (a follower that reads no sums) alike.
 #[test]
 fn a_primary_sends_an_image_holding_a_constant_however_large_the_database() {
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     const HELD: isize = 3 << 20;
     for rows in [8_000, 32_000] {
         let (port, len) = primary(rows);
@@ -376,7 +521,7 @@ fn a_primary_sends_an_image_holding_a_constant_however_large_the_database() {
 fn a_replica_takes_an_image_holding_a_constant_however_large_the_database() {
     use fennec_http::replication::{self, Follower};
     use std::sync::{Arc, RwLock};
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     const HELD: isize = 8 << 20;
     let mut peaks = Vec::new();
     for rows in [8_000, 32_000] {
@@ -420,8 +565,11 @@ fn a_replica_takes_an_image_holding_a_constant_however_large_the_database() {
         );
         peaks.push(peak);
     }
-    // What grows with the rows is what the copy's open builds and what the
-    // primary's pin copies, a few dozen bytes a row: never the image.
+    // What grows with the rows is the primary's pin, 20 bytes a row (the id
+    // index it copies, 12, and the frames' index it encodes), the peak
+    // coming as the image streams; the copy's open, which builds its id
+    // index, 12, comes once the check's buffers are let go of, so the two
+    // at once are 32 at the most. Never the image: some 1 000 bytes a row.
     assert!(
         peaks[1] - peaks[0] <= 64 * 24_000,
         "{peaks:?}: grown by more than 64 bytes a row"
@@ -438,7 +586,7 @@ fn a_replica_takes_an_image_holding_a_constant_however_large_the_database() {
 fn a_backup_takes_an_image_holding_a_constant_however_large_the_database() {
     use fennec_http::archive;
     use fennec_http::replication::Upstream;
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     const HELD: isize = 10 << 20;
     let key = fennec_http::seal::Key::from_hex(&"5a".repeat(32)).unwrap();
     for rows in [8_000, 32_000] {
@@ -498,7 +646,7 @@ fn an_archive_takes_an_image_of_its_end_holding_a_constant_however_large_the_dat
     use fennec_http::replication::Upstream;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     const HELD: isize = 10 << 20;
     for rows in [8_000, 32_000] {
         let (port, _, primary) = primary_named(&format!("archived-{rows}"), rows);
@@ -606,7 +754,7 @@ fn an_image_taken_slower_than_its_pace_is_ended_and_said_so() {
             replication::set_image_pace(Duration::from_secs(10), 64 << 10);
         }
     }
-    let _alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let _alone = alone();
     let (port, len) = primary(16_000);
     replication::set_image_pace(Duration::from_secs(1), 4 << 20);
     let _paced = Paced;
