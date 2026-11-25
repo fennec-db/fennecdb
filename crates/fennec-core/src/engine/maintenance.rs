@@ -4,9 +4,13 @@
 //! compacted collection from the live ones and every index over them. Run
 //! by [`Database::execute`], the whole build holds the write lock, and every
 //! reader and writer waits it out -- ~10 s for an HNSW index over 100 000 x
-//! 128. [`Database::maintain`] copies what the build reads under the read
-//! lock, builds with no lock held, and takes the write lock only to catch up
-//! with the writes made meanwhile and put the result in place.
+//! 128. [`Database::maintain`] takes under the read lock only what the build
+//! reads from -- each store as it stands, cloned as a pin clones it -- reads
+//! the documents and builds with no lock held, catches up with the writes
+//! made meanwhile in rounds beside the database, and takes the write lock
+//! only for the last few and to put the result in place. Read under the
+//! read lock, a compact's graphs' vectors held it for seconds past the page
+//! cache, and every writer with it -- and, a writer waiting, every reader.
 //!
 //! Those writes are known exactly, not guessed from the change ring (which
 //! a long build would overflow): every write passes through
@@ -17,6 +21,123 @@
 
 use super::*;
 use std::sync::RwLock;
+use std::time::Duration;
+
+/// How long a maintenance beside the database held the database's lock,
+/// each kind of hold at its longest: what a writer waited out at most, and
+/// -- `RwLock` making a reader wait behind a waiting writer -- every reader
+/// after it. Its build is a compact's graphs or a `create index`'s index;
+/// its file a compact's rewrite. One `Instant` a hold
+/// ([`Database::last_holds`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Holds {
+    /// The read lock the build's stores were taken under.
+    pub copy: Duration,
+    /// The longest read hold of the build's catch-up rounds.
+    pub rounds: Duration,
+    /// The write lock the build was put in place under, with the writes
+    /// the last round left.
+    pub put: Duration,
+    /// The read lock the rewrite's stores were taken under, each graph's
+    /// record written there.
+    pub file_copy: Duration,
+    /// The longest read hold of the rewrite's catch-up rounds.
+    pub file_rounds: Duration,
+    /// The write lock the rewrite took the file's place under.
+    pub swap: Duration,
+}
+
+impl Holds {
+    /// The longest of them.
+    pub fn longest(&self) -> Duration {
+        [
+            self.copy,
+            self.rounds,
+            self.put,
+            self.file_copy,
+            self.file_rounds,
+            self.swap,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or_default()
+    }
+}
+
+/// `the build's copy 1.2ms, rounds 0.4ms, put in place 0.9ms; the file's
+/// copy 2.1ms, rounds 3.0ms, swap 6.2ms`, the file's half where there was
+/// one: what a server's log line says of a maintenance.
+impl std::fmt::Display for Holds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the build's copy {:.1?}, rounds {:.1?}, put in place {:.1?}",
+            self.copy, self.rounds, self.put
+        )?;
+        if self.swap > Duration::ZERO {
+            write!(
+                f,
+                "; the file's copy {:.1?}, rounds {:.1?}, swap {:.1?}",
+                self.file_copy, self.file_rounds, self.swap
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// When a hold of the lock began, to say how long it was. The browser
+/// module has no clock (`Instant::now` panics there) and maintains nothing
+/// beside a page: there it is nothing, and every hold none.
+#[derive(Clone, Copy)]
+struct Began {
+    #[cfg(not(target_arch = "wasm32"))]
+    at: std::time::Instant,
+}
+
+impl Began {
+    #[inline]
+    fn now() -> Began {
+        Began {
+            #[cfg(not(target_arch = "wasm32"))]
+            at: std::time::Instant::now(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn held(self) -> Duration {
+        self.at.elapsed()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    fn held(self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+/// What a test runs where a maintenance holds no lock ([`SEAM`]).
+#[cfg(test)]
+type Seam = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs where a maintenance holds no lock: `read` once the
+    /// first value of a copy is read from its store ([`IndexCopy::read`]),
+    /// `round` once a graph's round has looked its documents up and before
+    /// it links them ([`graph_round`]). A writer gets through there, and
+    /// its writes reach what is built.
+    static SEAM: std::cell::RefCell<Option<Seam>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn seam(at: &str) {
+    let f = SEAM.with(|s| s.borrow_mut().take());
+    if let Some(mut f) = f {
+        f(at);
+        SEAM.with(|s| *s.borrow_mut() = Some(f));
+    }
+}
 
 /// The writes a maintenance has to catch up with.
 pub(super) struct Tail {
@@ -37,7 +158,7 @@ impl Tails {
     /// The ids written under the maintenance `token` since it was watched or
     /// last drained, taken out of its tail; `None` once its collection's
     /// schema changed or it is gone, which the maintenance will refuse.
-    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn drain(&mut self, token: u64) -> Option<Vec<DocId>> {
         let t = self.list.iter_mut().find(|t| t.token == token)?;
         (!t.schema).then(|| std::mem::take(&mut t.ids))
@@ -74,6 +195,17 @@ struct IndexCopy {
     /// orders its text in, and the fold a `nocase` field's keys are.
     order: TextOrder,
     values: Vec<(DocId, Option<Value>)>,
+    /// The collection's store as it stood when the copy was taken, cloned
+    /// under the read lock -- its records in the file and its segments
+    /// shared, its id index copied, 12 bytes a row -- and shared with the
+    /// collection's other graphs: `values` is read from it with no lock
+    /// held ([`Self::read`]), and it is let go of then.
+    from: Option<Arc<Store>>,
+    /// Where the field is in a payload, past the dropped places before it:
+    /// what a catch-up round reads of a document looked up under the lock
+    /// and read after it ([`crate::store::field_at`]).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    place: usize,
 }
 
 /// An index over several fields' keys, copied: each row's in id order, and
@@ -87,6 +219,26 @@ struct CompositeCopy {
     keys: Vec<(DocId, crate::composite::RowKey)>,
     /// What the keys were made by: the empty index over the parts.
     keyed: CompositeIndex,
+    /// The store and its schema as they stood when the copy was taken:
+    /// `keys` is read from them with no lock held, as an [`IndexCopy`]'s
+    /// values are.
+    from: Option<(Store, SchemaCell)>,
+}
+
+#[cfg(feature = "composite")]
+impl CompositeCopy {
+    /// Reads every document's key from the store as it stood, with no lock
+    /// held.
+    fn read(&mut self) -> Result<()> {
+        let Some((store, schema)) = self.from.take() else {
+            return Ok(());
+        };
+        self.keys.reserve_exact(store.len());
+        let keys = &mut self.keys;
+        super::composite_keys(&store, &schema, &self.index, &self.keyed, &mut |id, k| {
+            keys.push((id, k))
+        })
+    }
 }
 
 /// One of these is made a maintenance and moved into place once, so the
@@ -108,6 +260,9 @@ enum Built {
 struct BuiltIndex {
     copy: IndexCopy,
     index: Built,
+    /// A document the copy or a catch-up round could not read: `create
+    /// index` is refused for it, and a compact keeps the graph as it stood.
+    broken: Option<Error>,
 }
 
 /// Takes the maintenances' tails off the list however the run ends: on an
@@ -233,31 +388,82 @@ impl Database {
         stmt: &Statement,
         during: &mut dyn FnMut(),
     ) -> Option<Result<Response>> {
-        Some(match stmt {
+        Self::maintained(db, stmt, during).map(|(r, _)| r)
+    }
+
+    /// [`Self::maintain`], and how long it held the lock, each hold at its
+    /// longest: what a server's log says of a statement it ran so. Where
+    /// it put its result in place, [`Self::last_holds`] says the same until
+    /// the next.
+    pub fn maintain_held(
+        db: &RwLock<Database>,
+        stmt: &Statement,
+    ) -> Option<(Result<Response>, Holds)> {
+        Self::maintained(db, stmt, &mut || {})
+    }
+
+    fn maintained(
+        db: &RwLock<Database>,
+        stmt: &Statement,
+        during: &mut dyn FnMut(),
+    ) -> Option<(Result<Response>, Holds)> {
+        let mut holds = Holds::default();
+        // What runs under the write lock throughout, its hold its put.
+        let mut held = |run: &dyn Fn(&mut Database) -> Result<Response>| {
+            let mut g = write(db);
+            let began = Began::now();
+            let r = run(&mut g);
+            holds.put = began.held();
+            g.note_holds(&r, holds);
+            r
+        };
+        let r = match stmt {
             // A path's index -- a hash or an ordered one, a value a row, 11
             // and 21 ms over 100 000 documents -- is built under the write
             // lock, as `execute` builds it.
             Statement::CreateIndex { field, .. } if field.contains('.') => {
-                write(db).execute_with(stmt, &[])
+                held(&|g| g.execute_with(stmt, &[]))
             }
             Statement::CreateIndex {
                 collection,
                 field,
                 kind,
                 if_not_exists,
-            } => index_online(db, collection, field, kind, *if_not_exists, during),
+            } => index_online(
+                db,
+                collection,
+                field,
+                kind,
+                *if_not_exists,
+                during,
+                &mut holds,
+            ),
             #[cfg(feature = "composite")]
             Statement::CreateComposite {
                 collection,
                 index,
                 if_not_exists,
-            } => composite_online(db, collection, index, *if_not_exists, during),
+            } => composite_online(db, collection, index, *if_not_exists, during, &mut holds),
             // Refused, the feature named, as `execute` refuses it.
             #[cfg(not(feature = "composite"))]
-            Statement::CreateComposite { .. } => write(db).execute_with(stmt, &[]),
-            Statement::Compact(which) => compact_online(db, which.as_deref(), during),
+            Statement::CreateComposite { .. } => held(&|g| g.execute_with(stmt, &[])),
+            Statement::Compact(which) => compact_online(db, which.as_deref(), during, &mut holds),
             _ => return None,
-        })
+        };
+        Some((r, holds))
+    }
+
+    /// Notes how long the maintenance that put its result in place under
+    /// this write lock held the lock ([`Self::last_holds`]); one refused
+    /// notes nothing.
+    #[inline]
+    fn note_holds<T>(&mut self, r: &Result<T>, holds: Holds) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if r.is_ok() {
+            self.holds = holds;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (r, holds);
     }
 
     fn watch(&self, cid: u32) -> u64 {
@@ -384,12 +590,11 @@ impl Database {
         if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
             return Ok(Err(done));
         }
+        // The documents are read once the lock is let go
+        // ([`IndexCopy::read`]): past the page cache each may wait for the
+        // disk.
         let c = &self.collections[collection];
         let pos = c.schema.field_pos(field).unwrap();
-        let mut values = Vec::with_capacity(c.store.len());
-        for id in c.store.iter_ids() {
-            values.push((id, c.store.read_field(id, pos)?));
-        }
         Ok(Ok(IndexCopy {
             token: self.watch(c.id),
             cid: c.id,
@@ -399,12 +604,18 @@ impl Database {
             kind: kind.resolved(),
             ty: c.schema.fields[pos].ty.clone(),
             order: c.schema.fields[pos].text_order(),
-            values,
+            values: Vec::new(),
+            from: Some(Arc::new(c.store.clone())),
+            place: c.schema.place(pos),
         }))
     }
 
     fn finish_index(&mut self, b: BuiltIndex) -> Result<Response> {
-        let BuiltIndex { copy, index } = b;
+        let BuiltIndex {
+            copy,
+            index,
+            broken,
+        } = b;
         let tail = self.unwatch(copy.token);
         self.refuse_if_failed()?;
         // A long build outlives a lease: the index lands only if it still holds.
@@ -418,6 +629,10 @@ impl Database {
         let tail = tail.ok_or_else(changed)?;
         if tail.schema || self.named(copy.cid).as_deref() != Some(&copy.collection) {
             return Err(changed());
+        }
+        // A document a catch-up round could not read, as one read below.
+        if let Some(e) = broken {
+            return Err(e);
         }
         // A statement bound after `del` meanwhile -- a definition notes no
         // collection's tail -- refuses a `@ttl` here as at the start: this
@@ -541,8 +756,8 @@ impl Database {
         )))
     }
 
-    /// The keys of an index over several fields copied under the read lock,
-    /// as [`Self::begin_index`] copies a field's values.
+    /// What the keys of an index over several fields are read from with no
+    /// lock held, as [`Self::begin_index`] takes a field's.
     #[cfg(feature = "composite")]
     fn begin_composite(
         &self,
@@ -557,17 +772,14 @@ impl Database {
         let c = &self.collections[collection];
         let keyed = super::empty_composite(&c.schema, comp)
             .ok_or_else(|| super::not_built("the index", "composite"))?;
-        let mut keys = Vec::with_capacity(c.store.len());
-        super::composite_keys(&c.store, &c.schema, comp, &keyed, &mut |id, k| {
-            keys.push((id, k))
-        })?;
         Ok(Ok(CompositeCopy {
             token: self.watch(c.id),
             cid: c.id,
             collection: collection.to_string(),
             index: comp.clone(),
-            keys,
+            keys: Vec::new(),
             keyed,
+            from: Some((c.store.clone(), c.schema.clone())),
         }))
     }
 
@@ -637,9 +849,14 @@ impl Database {
     }
 
     /// The graphs a compact of a mapped database rebuilds: those of `which`
-    /// holding tombstones, their vectors copied as `create index` copies
-    /// them. Nothing else is: the records stay in the file until the
-    /// rewrite streams the live ones into the new one.
+    /// holding tombstones, each with its collection's store as it stood, to
+    /// read their vectors from once the lock is let go ([`IndexCopy::read`])
+    /// as `create index` reads them. Nothing else is: the records stay in
+    /// the file until the rewrite streams the live ones into the new one.
+    /// The vectors read here held the read lock -- and every writer, and
+    /// every reader behind a waiting writer -- 5 to 6 s in the P6 soak's
+    /// dry run 5, a page fault each past the page cache (20 000 documents
+    /// of a 2 GB file mapped in a container of 512 MB).
     #[cfg(not(target_arch = "wasm32"))]
     fn begin_graphs(&self, which: Option<&str>) -> Result<Vec<IndexCopy>> {
         self.may_write(true)?;
@@ -653,25 +870,15 @@ impl Database {
         let mut copies = Vec::new();
         for name in targets {
             let c = &self.collections[&name];
+            let mut store: Option<Arc<Store>> = None;
             for (field, ix) in &c.vectors {
                 if ix.dead() == 0 {
                     continue;
                 }
                 let pos = c.schema.field_pos(field).unwrap();
-                let mut values = Vec::with_capacity(c.store.len());
-                let read: Result<()> = c.store.iter_ids().try_for_each(|id| {
-                    values.push((id, c.store.read_field(id, pos)?));
-                    Ok(())
-                });
-                // A document it cannot read leaves the graph as it stands,
-                // tombstones and all, and answering as it did: one built
-                // without it would not, and the compact is never refused
-                // for what a document holds.
-                if read.is_err() {
-                    continue;
-                }
+                let from = store.get_or_insert_with(|| Arc::new(c.store.clone()));
                 copies.push(IndexCopy {
-                    token: 0,
+                    token: self.watch(c.id),
                     cid: c.id,
                     collection: name.clone(),
                     field: field.clone(),
@@ -679,18 +886,18 @@ impl Database {
                     kind: c.schema.fields[pos].index.clone(),
                     ty: c.schema.fields[pos].ty.clone(),
                     order: TextOrder::BYTES,
-                    values,
+                    values: Vec::new(),
+                    from: Some(Arc::clone(from)),
+                    place: c.schema.place(pos),
                 });
             }
-        }
-        for copy in &mut copies {
-            copy.token = self.watch(copy.cid);
         }
         Ok(copies)
     }
 
     /// Puts the rebuilt graphs in place, each caught up with the writes
-    /// made while it was built. The rewrite follows ([`rewrite_beside`]).
+    /// the rounds left ([`catch_up_graphs`]). The rewrite follows
+    /// ([`rewrite_beside`]).
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_graphs(&mut self, built: Vec<BuiltIndex>) -> Result<()> {
         let tails: Vec<Option<Tail>> = built.iter().map(|b| self.unwatch(b.copy.token)).collect();
@@ -702,6 +909,13 @@ impl Database {
                     "`{}` changed while it was compacted; run `compact` again",
                     b.copy.collection
                 )));
+            }
+            // A document it cannot read leaves the graph as it stands,
+            // tombstones and all, and answering as it did: one built
+            // without it would not, and the compact is never refused for
+            // what a document holds.
+            if b.broken.is_some() {
+                continue;
             }
             let Built::Vector(mut ix) = b.index else {
                 unreachable!("only graphs are rebuilt beside a mapped compact")
@@ -923,37 +1137,157 @@ impl Database {
 /// the worst 100 ms of a 1 GB file's first round. A document written again
 /// after its copy is in the tail again, for the next round. How many ids it
 /// copied; the next round takes those written meanwhile, and the write lock
-/// only the last few.
+/// only the last few. `longest` is the longest hold of the read lock so
+/// far.
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
-fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
-    let drained: Vec<Option<Vec<DocId>>> = {
-        let g = read(db);
-        g.refuse_if_failed()?;
-        let mut tails = g.tails.lock().unwrap_or_else(|e| e.into_inner());
-        b.parts.iter().map(|p| tails.drain(p.token)).collect()
+fn catch_up(db: &RwLock<Database>, b: &mut Beside, longest: &mut Duration) -> Result<usize> {
+    let tokens: Vec<u64> = b.parts.iter().map(|p| p.token).collect();
+    let Some(drained) = drain(db, &tokens, longest)? else {
+        return Ok(0);
     };
     let mut copied = 0;
     let mut docs = crate::store::Snapshot::default();
-    for (p, ids) in b.parts.iter_mut().zip(drained) {
-        // A schema change, or a collection gone: the finish refuses it.
-        let Some(mut ids) = ids else {
-            return Ok(0);
-        };
+    for (p, mut ids) in b.parts.iter_mut().zip(drained) {
         ids.sort_unstable();
         ids.dedup();
         copied += ids.len();
         for chunk in ids.chunks(CATCH_UP_CHUNK) {
-            {
-                let g = read(db);
-                let Some(live) = g.collections.get(&p.name).filter(|c| c.id == p.cid) else {
-                    return Ok(0);
-                };
-                live.store.snapshot(chunk, &mut docs)?;
+            if !looked_up(db, &p.name, p.cid, chunk, &mut docs, longest)? {
+                return Ok(0);
             }
             copy_writes(p, &docs, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
         }
     }
     Ok(copied)
+}
+
+/// The ids written under each of `tokens` since the last round, drained
+/// under one hold of the read lock; `None` where a collection's schema
+/// changed or it is gone, which the finish refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn drain(
+    db: &RwLock<Database>,
+    tokens: &[u64],
+    longest: &mut Duration,
+) -> Result<Option<Vec<Vec<DocId>>>> {
+    let g = read(db);
+    let began = Began::now();
+    g.refuse_if_failed()?;
+    let mut tails = g.tails.lock().unwrap_or_else(|e| e.into_inner());
+    let drained = tokens.iter().map(|t| tails.drain(*t)).collect();
+    drop(tails);
+    *longest = (*longest).max(began.held());
+    Ok(drained)
+}
+
+/// `ids` of the collection `name` looked up under one hold of the read lock
+/// into `docs` ([`Store::snapshot`]), to be read once it is let go; `false`
+/// where the collection is gone, which the finish refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn looked_up(
+    db: &RwLock<Database>,
+    name: &str,
+    cid: u32,
+    ids: &[DocId],
+    docs: &mut crate::store::Snapshot,
+    longest: &mut Duration,
+) -> Result<bool> {
+    let g = read(db);
+    let began = Began::now();
+    let Some(live) = g.collections.get(name).filter(|c| c.id == cid) else {
+        return Ok(false);
+    };
+    live.store.snapshot(ids, docs)?;
+    *longest = (*longest).max(began.held());
+    Ok(true)
+}
+
+/// Catches the graphs built beside the database up with the writes made
+/// while they were, in rounds: each round's ids drained from the tails at
+/// once, their documents looked up under the read lock a few thousand at a
+/// time and read after it, as the rewrite's rounds copy theirs
+/// ([`catch_up`]), and each vector linked into its graph with no lock held
+/// -- under the write lock, a link at 768 dimensions takes about a
+/// millisecond, and a build of seconds meets thousands of writes. A round
+/// catching fewer than [`GRAPH_DONE`] ends them, and the write lock takes
+/// the few written during it. `retire`: a write is taken out of the graph
+/// before it goes in again, as a compact's rebuilt graph always took the
+/// writes made meanwhile (`finish_graphs`); else a node holding the vector
+/// already is kept, as `create index` keeps it (`finish_index`).
+#[cfg(not(target_arch = "wasm32"))]
+fn catch_up_graphs(
+    db: &RwLock<Database>,
+    built: &mut [BuiltIndex],
+    retire: bool,
+    longest: &mut Duration,
+) -> Result<()> {
+    for _ in 0..CATCH_UP_ROUNDS {
+        if graph_round(db, built, retire, longest)? < GRAPH_DONE {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// A round of [`catch_up_graphs`]: how many ids it caught, 0 once a
+/// collection changed, which the finish refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn graph_round(
+    db: &RwLock<Database>,
+    built: &mut [BuiltIndex],
+    retire: bool,
+    longest: &mut Duration,
+) -> Result<usize> {
+    let tokens: Vec<u64> = built.iter().map(|b| b.copy.token).collect();
+    let Some(drained) = drain(db, &tokens, longest)? else {
+        return Ok(0);
+    };
+    let mut caught = 0;
+    let mut docs = crate::store::Snapshot::default();
+    for (b, mut ids) in built.iter_mut().zip(drained) {
+        // A graph left as it stood takes nothing more.
+        let (Built::Vector(ix), None) = (&mut b.index, &b.broken) else {
+            continue;
+        };
+        ids.sort_unstable();
+        ids.dedup();
+        caught += ids.len();
+        let place = b.copy.place;
+        for chunk in ids.chunks(CATCH_UP_CHUNK) {
+            if !looked_up(
+                db,
+                &b.copy.collection,
+                b.copy.cid,
+                chunk,
+                &mut docs,
+                longest,
+            )? {
+                return Ok(0);
+            }
+            #[cfg(test)]
+            seam("round");
+            let read = docs.each(|id, payload| {
+                let v = payload
+                    .map(|p| crate::store::field_at(p, place))
+                    .transpose()?;
+                match v {
+                    Some(Value::Vector(v)) => {
+                        if retire {
+                            ix.remove(id);
+                        }
+                        ix.insert(id, &v);
+                    }
+                    _ => ix.remove(id),
+                }
+                Ok(())
+            });
+            if let Err(e) = read {
+                b.broken = Some(e);
+                break;
+            }
+        }
+    }
+    Ok(caught)
 }
 
 /// Each of `docs` (ascending, once each) takes the state it had when they
@@ -1117,6 +1451,44 @@ impl Beside {
 }
 
 impl IndexCopy {
+    /// Reads the field of every document of the store as it stood when the
+    /// copy was taken, with no lock held, and lets the store go: a record
+    /// there never moves -- the file is only appended to, and a store
+    /// cloned shares nothing a write changes in place (`Arc::make_mut`), as
+    /// a pinned read's does -- so what it reads is what the read lock would
+    /// have read then. The writes made since are each in the copy's tail.
+    fn read(&mut self) -> Result<()> {
+        let Some(store) = self.from.take() else {
+            return Ok(());
+        };
+        self.values.reserve_exact(store.len());
+        for id in store.iter_ids() {
+            self.values.push((id, store.read_field(id, self.pos)?));
+            #[cfg(test)]
+            if self.values.len() == 1 {
+                seam("read");
+            }
+        }
+        Ok(())
+    }
+
+    /// A compact's graph built from the copy -- or, where a document of it
+    /// does not read, from nothing and marked so, for `finish_graphs` to
+    /// keep the graph as it stood.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rebuilt(mut self) -> BuiltIndex {
+        match self.read() {
+            Ok(()) => self.build(),
+            Err(e) => {
+                self.values.clear();
+                BuiltIndex {
+                    broken: Some(e),
+                    ..self.build()
+                }
+            }
+        }
+    }
+
     fn build(mut self) -> BuiltIndex {
         let index = match &self.kind {
             IndexKind::Vector(spec) => {
@@ -1185,7 +1557,11 @@ impl IndexCopy {
             }
             IndexKind::None => unreachable!("a create index names its kind"),
         };
-        BuiltIndex { copy: self, index }
+        BuiltIndex {
+            copy: self,
+            index,
+            broken: None,
+        }
     }
 }
 
@@ -1196,24 +1572,53 @@ fn index_online(
     kind: &IndexKind,
     if_not_exists: bool,
     during: &mut dyn FnMut(),
+    holds: &mut Holds,
 ) -> Result<Response> {
-    let copy = match read(db).begin_index(collection, field, kind, if_not_exists)? {
-        Ok(copy) => copy,
-        Err(done) => return Ok(done),
+    let mut copy = {
+        let g = read(db);
+        let began = Began::now();
+        let copy = g.begin_index(collection, field, kind, if_not_exists);
+        holds.copy = began.held();
+        match copy? {
+            Ok(copy) => copy,
+            Err(done) => return Ok(done),
+        }
     };
     let mut watching = Watching {
         db,
         tokens: vec![copy.token],
     };
     during();
-    let built = copy.build();
-    let r = write(db).finish_index(built);
+    copy.read()?;
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut built = copy.build();
+    // A graph's build takes seconds, and the writes made meanwhile are
+    // linked into it beside the database too. The other indexes' builds
+    // take milliseconds -- 11 to 21 ms over 100 000 documents -- and catch
+    // up under the write lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    if matches!(built.index, Built::Vector(_)) {
+        catch_up_graphs(
+            db,
+            std::slice::from_mut(&mut built),
+            false,
+            &mut holds.rounds,
+        )?;
+    }
+    let r = {
+        let mut g = write(db);
+        let began = Began::now();
+        let r = g.finish_index(built);
+        holds.put = began.held();
+        g.note_holds(&r, *holds);
+        r
+    };
     watching.tokens.clear();
     r
 }
 
-/// `create index` over several fields beside the database: the keys
-/// copied under the read lock, put in order with no lock held -- the
+/// `create index` over several fields beside the database: the keys read
+/// from the store as it stood and put in order with no lock held -- the
 /// inserts are the build -- and the writes made meanwhile caught up with
 /// under the write lock.
 #[cfg(feature = "composite")]
@@ -1223,18 +1628,33 @@ fn composite_online(
     comp: &Composite,
     if_not_exists: bool,
     during: &mut dyn FnMut(),
+    holds: &mut Holds,
 ) -> Result<Response> {
-    let copy = match read(db).begin_composite(collection, comp, if_not_exists)? {
-        Ok(copy) => copy,
-        Err(done) => return Ok(done),
+    let mut copy = {
+        let g = read(db);
+        let began = Began::now();
+        let copy = g.begin_composite(collection, comp, if_not_exists);
+        holds.copy = began.held();
+        match copy? {
+            Ok(copy) => copy,
+            Err(done) => return Ok(done),
+        }
     };
     let mut watching = Watching {
         db,
         tokens: vec![copy.token],
     };
     during();
+    copy.read()?;
     let built = CompositeIndex::build(copy.keyed.parts().to_vec(), copy.keys.clone());
-    let r = write(db).finish_composite(copy, built);
+    let r = {
+        let mut g = write(db);
+        let began = Began::now();
+        let r = g.finish_composite(copy, built);
+        holds.put = began.held();
+        g.note_holds(&r, *holds);
+        r
+    };
     watching.tokens.clear();
     r
 }
@@ -1243,6 +1663,7 @@ fn compact_online(
     db: &RwLock<Database>,
     which: Option<&str>,
     during: &mut dyn FnMut(),
+    holds: &mut Holds,
 ) -> Result<Response> {
     // No record is copied under a lock: the graphs holding tombstones are
     // rebuilt here, beside the database, and the rewrite -- the live records
@@ -1256,24 +1677,37 @@ fn compact_online(
     // compact kept them (docs/design/storage.md#dropped-places).
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let copies = read(db).begin_graphs(which)?;
+        let copies = {
+            let g = read(db);
+            let began = Began::now();
+            let copies = g.begin_graphs(which);
+            holds.copy = began.held();
+            copies?
+        };
         let mut watching = Watching {
             db,
             tokens: copies.iter().map(|c| c.token).collect(),
         };
         during();
-        let built: Vec<BuiltIndex> = copies.into_iter().map(IndexCopy::build).collect();
-        let r = write(db).finish_graphs(built);
+        let mut built: Vec<BuiltIndex> = copies.into_iter().map(IndexCopy::rebuilt).collect();
+        catch_up_graphs(db, &mut built, true, &mut holds.rounds)?;
+        let r = {
+            let mut g = write(db);
+            let began = Began::now();
+            let r = g.finish_graphs(built);
+            holds.put = began.held();
+            r
+        };
         watching.tokens.clear();
         r?;
-        rewrite_beside(db, which, during)
+        rewrite_beside(db, which, during, holds)
     }
     // The browser module has no thread to build beside the page and no
     // file to write beside its own, and maintains nothing (fennec-wasm
     // calls no `maintain`): its compact is `execute`'s, under the lock.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = during;
+        let _ = (during, holds);
         let mut g = write(db);
         g.may_write(true)?;
         g.compact(which, true)
@@ -1282,16 +1716,22 @@ fn compact_online(
 
 /// Rounds of catching up with the writes made meanwhile before the write
 /// lock is taken for the rest; each takes those written during the one
-/// before, and a round under `CATCH_UP_DONE` ids ends them.
-#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+/// before, and a round under `CATCH_UP_DONE` ids ends them -- a graph's
+/// rounds, under [`GRAPH_DONE`].
+#[cfg(not(target_arch = "wasm32"))]
 const CATCH_UP_ROUNDS: usize = 16;
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 const CATCH_UP_DONE: usize = 1_000;
+/// A graph's round catching fewer ids than this ends its rounds
+/// ([`catch_up_graphs`]): each is a link into the graph under the write
+/// lock that follows, where a rewrite's is a copy of the record.
+#[cfg(not(target_arch = "wasm32"))]
+const GRAPH_DONE: usize = 64;
 /// The documents a catch-up looks up under one hold of the read lock, and
 /// copies after it: 4 096, held 95 to 245 us at the median and 3.1 ms at
 /// the most, where copied under it they held it about 6 ms, and up to 291
 /// with their pages read from the disk.
-#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+#[cfg(not(target_arch = "wasm32"))]
 const CATCH_UP_CHUNK: usize = 4_096;
 
 /// The rewrite a compact of a mapped file ends with: the live records
@@ -1303,6 +1743,7 @@ fn rewrite_beside(
     db: &RwLock<Database>,
     which: Option<&str>,
     during: &mut dyn FnMut(),
+    holds: &mut Holds,
 ) -> Result<Response> {
     #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     {
@@ -1315,8 +1756,11 @@ fn rewrite_beside(
         let _rewriting = Rewriting(db);
         let (begun, need) = {
             let g = read(db);
+            let began = Began::now();
             let need = g.garbage();
-            (g.begin_beside(which)?, need.file + need.live + need.kept)
+            let begun = g.begin_beside(which);
+            holds.file_copy = began.held();
+            (begun?, need.file + need.live + need.kept)
         };
         if let Some(mut b) = begun {
             let room = crate::cache::room();
@@ -1344,7 +1788,7 @@ fn rewrite_beside(
             // updates a 4 s compact of a 1 GB file met held every reader 409
             // to 811 ms.
             for _ in 0..CATCH_UP_ROUNDS {
-                let copied = catch_up(db, &mut b)?;
+                let copied = catch_up(db, &mut b, &mut holds.file_rounds)?;
                 b.side.sync()?;
                 if copied < CATCH_UP_DONE {
                     break;
@@ -1352,9 +1796,16 @@ fn rewrite_beside(
             }
             b.hand_over()?;
             let after = b.after.take();
-            // The guard goes at the end of the statement, and the stores it
+            // The guard goes at the end of the block, and the stores it
             // handed back after it.
-            let r = write(db).finish_beside(b);
+            let r = {
+                let mut g = write(db);
+                let began = Began::now();
+                let r = g.finish_beside(b);
+                holds.swap = began.held();
+                g.note_holds(&r, *holds);
+                r
+            };
             watching.tokens.clear();
             let done = r.map(|(done, _retired)| done)?;
             // Read in where it fits on its own; past the room it would push
@@ -1369,7 +1820,11 @@ fn rewrite_beside(
         }
     }
     let _ = during;
-    let r = write(db).compact(which, false);
+    let mut g = write(db);
+    let began = Began::now();
+    let r = g.compact(which, false);
+    holds.swap = began.held();
+    g.note_holds(&r, *holds);
     r
 }
 
@@ -1465,5 +1920,255 @@ mod tests {
                 "beside: {beside}"
             );
         }
+    }
+
+    /// `id`'s vector, the `gen`th it was written: no two alike once a
+    /// cosine graph makes them units, so none is another's alias ("a vector
+    /// written again is one node").
+    fn vec_of(id: i64, gen: i64) -> [f32; 2] {
+        [1.0, (gen * 100_000 + id) as f32]
+    }
+
+    fn del(db: &mut Database, id: i64) {
+        db.execute(&Statement::Delete {
+            collection: "g".into(),
+            filter: Some(Expr::Cmp(
+                CmpOp::Eq,
+                Box::new(Expr::Field("id".into())),
+                Box::new(Expr::Lit(Value::Int(id))),
+            )),
+            require: None,
+            pick: None,
+        })
+        .expect("del");
+    }
+
+    /// `g` of `n` documents, each with a vector, every tenth written over:
+    /// a graph of tombstones a compact rebuilds -- or, `indexed` false, no
+    /// graph, for `create index` to build.
+    fn graphed(n: i64, indexed: bool) -> Database {
+        let mut db = Database::new();
+        let v = Field::new("v", DataType::Vector(2, VecPrec::F32));
+        let v = match indexed {
+            true => v.indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
+            false => v,
+        };
+        let schema = Schema::new("g", vec![Field::new("meta", DataType::Json), v]).expect("schema");
+        db.execute(&Statement::CreateCollection {
+            schema,
+            if_not_exists: false,
+        })
+        .expect("create");
+        for id in 1..=n {
+            put(&mut db, id, vec_of(id, 0));
+        }
+        for id in (1..=n).step_by(10) {
+            put(&mut db, id, vec_of(id, 1));
+        }
+        db
+    }
+
+    /// Every document's vector, in id order.
+    fn vectors(db: &Database) -> Vec<(DocId, Vec<f32>)> {
+        let c = db.collection("g").expect("g");
+        c.store
+            .ids()
+            .into_iter()
+            .filter_map(|id| match c.store.read_field(id, 1).expect("read") {
+                Some(Value::Vector(v)) => Some((id, v)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn spec(db: &Database) -> VectorIndexSpec {
+        match db.collection("g").expect("g").schema.fields[1].index {
+            IndexKind::Vector(spec) => spec,
+            ref other => panic!("no graph: {other:?}"),
+        }
+    }
+
+    /// The graph the read lock built, as every release before this change
+    /// built it: the vectors as they stood when the copy was taken linked
+    /// as a batch, then each document written meanwhile, in id order, taken
+    /// out and put back in -- or, for `create index`, a node holding its
+    /// vector already kept (`retire` false).
+    fn locked(
+        db: &Database,
+        before: &[(DocId, Vec<f32>)],
+        written: &[DocId],
+        retire: bool,
+    ) -> VectorIndex {
+        let mut ix = VectorIndex::with_precision(2, spec(db), VecPrec::F32);
+        ix.insert_batch(before);
+        let now = vectors(db);
+        let mut written = written.to_vec();
+        written.sort_unstable();
+        written.dedup();
+        for id in written {
+            match now.iter().find(|(d, _)| *d == id) {
+                Some((_, v)) => {
+                    if retire {
+                        ix.remove(id);
+                    }
+                    ix.insert(id, v);
+                }
+                None => ix.remove(id),
+            }
+        }
+        ix
+    }
+
+    /// Runs `stmt` beside the database, a writer getting through where it
+    /// holds no lock: a hundred documents written over once the copy's first
+    /// vector is read -- past `GRAPH_DONE`, so a second round runs -- and,
+    /// once the first round has looked its documents up, one deleted and
+    /// one made, each past every id the first round holds. Each write takes
+    /// the write lock with `try_write`, which fails while this thread holds
+    /// the read lock. The ids written.
+    fn written_beside(lock: &Arc<RwLock<Database>>, stmt: &Statement) -> Vec<DocId> {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (l, w) = (Arc::clone(lock), Arc::clone(&written));
+        let mut rounds = 0;
+        let seen = SEAM.with(|s| {
+            s.borrow_mut().replace(Box::new(move |at: &str| {
+                let mut w = w.lock().expect("written");
+                let mut g = l.try_write().expect("a writer got through, no lock held");
+                match at {
+                    "read" if w.is_empty() => {
+                        for id in 1..=100 {
+                            put(&mut g, id, vec_of(id, 2));
+                            w.push(id as DocId);
+                        }
+                    }
+                    "round" if rounds == 0 => {
+                        rounds += 1;
+                        del(&mut g, 150);
+                        put(&mut g, 400, vec_of(400, 0));
+                        w.extend([150, 400]);
+                    }
+                    _ => {}
+                }
+            }))
+        });
+        assert!(seen.is_none());
+        Database::maintain(lock, stmt)
+            .expect("a maintenance")
+            .expect("it ran");
+        SEAM.with(|s| s.borrow_mut().take());
+        let written = written.lock().expect("written").clone();
+        assert_eq!(written.len(), 102, "both seams were passed");
+        written
+    }
+
+    /// A compact reads its graphs' vectors with no lock held, catches up
+    /// with the writes made meanwhile in rounds beside the database, and
+    /// keeps the graph the read lock built, link for link -- the same
+    /// documents a rebuild at its end would hold, each with its vector.
+    #[test]
+    fn a_compact_reads_its_graphs_with_no_lock_held() {
+        let db = graphed(300, true);
+        assert_eq!(db.collection("g").expect("g").vectors["v"].dead(), 30);
+        let before = vectors(&db);
+        let lock = Arc::new(RwLock::new(db));
+        let written = written_beside(&lock, &Statement::Compact(None));
+        let db = lock.read().expect("lock");
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        assert_eq!(
+            ix.serialize_graph(),
+            locked(&db, &before, &written, true).serialize_graph()
+        );
+        let mut rebuilt = VectorIndex::with_precision(2, spec(&db), VecPrec::F32);
+        rebuilt.insert_batch(&vectors(&db));
+        assert_eq!(ix.dump(1..=400), rebuilt.dump(1..=400));
+        assert_eq!(ix.len(), 300);
+        // Each write meanwhile a tombstone, for the next compact.
+        assert_eq!(ix.dead(), 101);
+        let holds = db.last_holds();
+        assert!(holds.swap > Duration::ZERO && holds.longest() >= holds.swap);
+    }
+
+    /// `create index` reads its field with no lock held too, and links the
+    /// writes made meanwhile into its graph in rounds, keeping the node a
+    /// document holds already.
+    #[test]
+    fn create_index_reads_its_field_with_no_lock_held() {
+        let db = graphed(300, false);
+        let before = vectors(&db);
+        let lock = Arc::new(RwLock::new(db));
+        let spec = VectorIndexSpec::default().resolved();
+        let written = written_beside(
+            &lock,
+            &Statement::CreateIndex {
+                collection: "g".into(),
+                field: "v".into(),
+                kind: IndexKind::Vector(spec),
+                if_not_exists: false,
+            },
+        );
+        let db = lock.read().expect("lock");
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        assert_eq!(
+            ix.serialize_graph(),
+            locked(&db, &before, &written, false).serialize_graph()
+        );
+        assert_eq!(ix.len(), 300);
+        assert!(db.last_holds().put > Duration::ZERO);
+    }
+
+    /// With no write beside it, a compact beside the database rebuilds the
+    /// graph the one under the write lock does, byte for byte.
+    #[test]
+    fn a_graph_rebuilt_beside_is_the_one_the_lock_rebuilds() {
+        let lock = RwLock::new(graphed(300, true));
+        Database::maintain(&lock, &Statement::Compact(None))
+            .expect("a maintenance")
+            .expect("compact");
+        let beside = lock.into_inner().expect("lock");
+        let mut under = graphed(300, true);
+        under.execute(&Statement::Compact(None)).expect("compact");
+        let graph = |db: &Database| db.collection("g").expect("g").vectors["v"].serialize_graph();
+        assert_eq!(graph(&beside), graph(&under));
+        assert_eq!(beside.collection("g").expect("g").vectors["v"].dead(), 0);
+    }
+
+    /// A document a round cannot read leaves the graph as it stood, as one
+    /// the copy cannot read does, and the compact goes on.
+    #[test]
+    fn a_document_a_round_cannot_read_keeps_the_graph() {
+        let db = graphed(300, true);
+        let stood = {
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            (ix.len(), ix.dead(), ix.serialize_graph())
+        };
+        let lock = Arc::new(RwLock::new(db));
+        let l = Arc::clone(&lock);
+        let seen = SEAM.with(|s| {
+            s.borrow_mut().replace(Box::new(move |at: &str| {
+                if at != "read" {
+                    return;
+                }
+                // `meta` 100 lists deep, as the test above writes it, and
+                // noted as a write is.
+                let mut deep = Vec::new();
+                for _ in 0..100 {
+                    deep.extend_from_slice(&[TAG_LIST, 1]);
+                }
+                deep.push(TAG_NULL);
+                crate::codec::encode_value(&mut deep, &Value::Vector(vec![0.6, 0.8]));
+                let mut g = l.try_write().expect("no lock held");
+                let c = g.collections.get_mut("g").expect("g");
+                c.store.append(OP_PUT, 5, &deep);
+                let cid = c.id;
+                g.note(cid, 5);
+            }))
+        });
+        assert!(seen.is_none());
+        let r = Database::maintain(&lock, &Statement::Compact(None)).expect("a maintenance");
+        SEAM.with(|s| s.borrow_mut().take());
+        r.expect("compact");
+        let db = lock.read().expect("lock");
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        assert_eq!((ix.len(), ix.dead(), ix.serialize_graph()), stood);
     }
 }

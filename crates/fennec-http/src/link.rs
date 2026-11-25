@@ -301,11 +301,17 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
         Ok(_) => {
             AUTO_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
             refusal_is_news(what, None);
+            // The longest hold of the lock, then each: every one held every
+            // writer, and every reader behind a waiting writer. Where the
+            // line said the swap's alone, a graph's rebuild under the read
+            // lock held a soak's server 5-6 s and its log said 4 ms.
+            let holds = g.last_holds();
             crate::log!(
-                "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, {:.1?} under the write lock",
+                "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, the lock held {:.1?} at \
+                 most ({holds})",
                 before.file as f64 / 1e6,
                 g.garbage().file as f64 / 1e6,
-                g.last_compact_held()
+                holds.longest()
             );
         }
         // Put back as it was: the next look tries again. A compact is

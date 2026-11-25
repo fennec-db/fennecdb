@@ -39,7 +39,14 @@ on a thread, not under the write lock (`map::Teardown`).
 **[A lone `create index` or `compact` runs beside the database](../../../../docs/design/storage.md#maintenance-beside-the-database)**
 (`Database::maintain`): every write must pass `Database::note`; a schema
 change meanwhile fails it, and an image adopted meanwhile marks every tail
-changed (`Tails::all_changed`).
+changed (`Tails::all_changed`). Under the read lock it takes only what it
+reads from -- each store cloned as a pin clones it, and its tail's token --
+never a document out of the file: the copy is read with no lock held
+(`IndexCopy::read`), and the writes made meanwhile during a graph's build
+or a file's rewrite are caught up in rounds, looked up under the read lock
+and read after it (`catch_up_graphs`, `catch_up`), the write lock taking
+the last round's few. Each hold is timed (`Database::last_holds`), and a
+server's log names the longest.
 
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by

@@ -4237,11 +4237,26 @@ fn run_query(
     } else if let Some(built) = {
         let running = trace::span("execute");
         running.attr("fennec.beside", true);
-        let built = Database::maintain(db, &stmt);
+        let began = std::time::Instant::now();
+        let built = Database::maintain_held(db, &stmt);
         if built.is_none() {
             running.forget();
         }
-        built
+        // Said as `--auto-compact`'s compacts are (`link::compact`): how
+        // long it took, and the longest hold of the lock, which every
+        // writer waited out.
+        if let Some((Ok(_), holds)) = &built {
+            let what = match &*stmt {
+                Statement::Compact(_) => "compact",
+                _ => "create index",
+            };
+            crate::log!(
+                "{what}: ran beside the database in {:.1?}, the lock held {:.1?} at most ({holds})",
+                began.elapsed(),
+                holds.longest()
+            );
+        }
+        built.map(|(r, _)| r)
     } {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any

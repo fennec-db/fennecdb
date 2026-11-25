@@ -80,6 +80,7 @@ pub use garbage::{
     compact_when_due, compact_when_due_in, memory, CompactPolicy, Compactor, Garbage, Memory,
     AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO, ROOM_SHARE,
 };
+pub use maintenance::Holds;
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 
@@ -6190,6 +6191,10 @@ pub struct Database {
     /// place: what every read and write waited out at most.
     #[cfg(not(target_arch = "wasm32"))]
     swap_held: std::time::Duration,
+    /// How long the last maintenance beside the database -- a compact, a
+    /// `create index` -- held the lock, each hold at its longest.
+    #[cfg(not(target_arch = "wasm32"))]
+    holds: maintenance::Holds,
     /// The rows a read reads at least to be pinned ([`Self::pin`]), and
     /// the bytes this database's pins may hold together, beside what they
     /// hold now: [`pinned::PIN_AT`] and [`pinned::PIN_BUDGET`] unless set.
@@ -6441,6 +6446,8 @@ impl Database {
             compactions: 0,
             #[cfg(not(target_arch = "wasm32"))]
             swap_held: std::time::Duration::ZERO,
+            #[cfg(not(target_arch = "wasm32"))]
+            holds: maintenance::Holds::default(),
             #[cfg(not(target_arch = "wasm32"))]
             pin_at: pinned::PIN_AT,
             #[cfg(not(target_arch = "wasm32"))]

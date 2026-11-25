@@ -225,6 +225,14 @@ impl Database {
         self.swap_held
     }
 
+    /// How long the last compact or `create index` beside the database held
+    /// the lock, each hold at its longest -- its copy, its rounds and its
+    /// put in place, and a compact's file's -- for a server's log to name
+    /// ([`Holds`](super::Holds)).
+    pub fn last_holds(&self) -> super::Holds {
+        self.holds
+    }
+
     /// Whether a `create index` or a `compact` is running beside the
     /// database: a host's compact waits for the next look.
     pub fn maintaining(&self) -> bool {
