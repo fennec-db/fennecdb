@@ -96,7 +96,7 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 3.12 MB stripped on aarch64-apple-darwin, 3.58 on
+the shared one 4% larger. 3.15 MB stripped on aarch64-apple-darwin, 3.62 on
 x86_64 Linux with JNI (CI's figures, `integrations/ffi-sizes.md`, held by
 `site/build.py`), the sync (below) 165 and 198 KB of them, measured by hand
 when the libraries were 1.68 and 1.88 MB; a buffered put of a 128-dim vector 4.6 us against

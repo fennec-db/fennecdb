@@ -598,6 +598,41 @@ module builds neither test -- a wasm32 `Vec` stops at 2 GiB, and its memory
 long before 2^32 nodes -- and grew 17 bytes, 863 579 to 863 596 (12
 gzipped).
 
+*What the two weigh.* The binaries a release ships grew, as CI's build
+job measures them (x86_64 musl, against main's merge group for #692):
+`fennec-server` 8 547 024 to 8 575 696 bytes (+28 672, +0.34%), `make
+small` 3 033 672 to 3 054 152 (+20 480, +0.68%), `fennec` 5 118 832 to
+5 143 408 (+24 576, +0.48%); the native library (stripped) 3 600 160 to
+3 624 704 on x86_64 Linux (+24 544), 3 134 096 to 3 150 656 on
+aarch64-apple-darwin, and 560 bytes on armv7, a 32-bit target that builds
+no put-back. Built with their symbols on macOS, `fennec-server`'s code
+grew 21.8 KB: the put-back's graph code 14.3 KB -- `link_back` with
+`link_back_into` and `held_elsewhere` 3.9, `live_near` and its set 3.0,
+`mend` 1.6, `rewind` 1.2, `revive` 1.1, `put_back` 0.7, `put_back_torn`
+and `room_for` 0.6 each -- the two bounds' checks 7.5 KB -- `room_applied`
+1.1, `create index` and the compact beside the database 1.2, `nodes_past`
+and the open's count 0.9 each, `holds` 0.6, the apply's 0.4, the
+preparation's, `frames_fit` and the `put`'s 0.3 each -- and `place`'s
+helpers out of line once the put-back called them, 0.6 net; the tables a
+panic unwinds by 2.9 KB more. The shell without its default features:
+13.9 and 3.7 KB. Two pieces were code no path needed: `live_near` kept the
+nodes its walk met in a `HashSet<u32>`, the only one either binary built,
+std's table and SipHash for it beside the walk, and marks them in the
+search's own buffer now (`Scratch::see`); `nodes_past` collected each
+vector's bits into a `Vec` to compare them, and compares them in place.
+They took 1.8 and 0.2 KB of `fennec-server`'s code and 2.2 and 0.2 of the
+shell's, a 4 KB page off each in CI and 2.6 to 3.1 KB off the native
+library on Linux and Android. Neither is on a write's way: every other
+function of the builds disassembles as before but for alignment and
+addresses, and none of the rollbacks measured above calls `enter_live`,
+`live_anywhere` or `nodes_past`: measured again against the build before
+them, the `put`'s rollback read -86 instructions (SE 88), the `set`'s
++147 (SE 119) and the block writing no vector +71 (SE 70), each inside
+two standard errors. The rest is what the two buy -- no node
+id or payload length cut to 32 bits, and a rollback that gives each row
+its node, its links and the entry back, at a sixth of main's
+instructions after a `put` and two thirds after a `set`.
+
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
 dimension, beam and count of candidates or words, `hi` a `u32` so the
