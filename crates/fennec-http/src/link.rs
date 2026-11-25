@@ -290,9 +290,14 @@ pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> 
 /// said the swap's alone, a graph's rebuild under the read lock held a
 /// soak's server 5-6 s and its log said 4 ms. The holds are the ones its
 /// own maintenance handed back ([`fennec_core::prelude::Database::maintain_held`]).
+/// Then each graph a compact kept as it stood, rather than its rebuilt one
+/// -- ``; graph `docs.v` kept, 412 behind`` -- since a sustained ingest of
+/// vectors may keep it every time, its tombstones growing until a quieter
+/// compact, and nothing else says so.
 pub(crate) fn said_beside(what: &str, done: std::fmt::Arguments, took: Duration, holds: &Holds) {
+    let kept: String = holds.kept.iter().map(|k| format!("; {k}")).collect();
     crate::log!(
-        "{what}: {done} in {took:.1?}, the lock held {:.1?} at most ({holds})",
+        "{what}: {done} in {took:.1?}, the lock held {:.1?} at most ({holds}){kept}",
         holds.longest()
     );
 }
