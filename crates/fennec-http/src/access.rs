@@ -537,7 +537,7 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
             }
             Some("RSA") if alg.is_none_or(|a| a == "RS256") => KeyKind::Rsa(
                 RsaKey::new(&bytes("n")?, &bytes("e")?)
-                    .ok_or("an RSA key of 2048 bits at the least and an odd exponent from 3")?,
+                    .ok_or("an RSA key of 2048 to 8192 bits and an odd exponent from 3")?,
             ),
             Some("EC") if p256 && alg.is_none_or(|a| a == "ES256") => KeyKind::Ec(
                 P256Key::new(&bytes("x")?, &bytes("y")?)

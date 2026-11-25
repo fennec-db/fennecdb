@@ -1021,8 +1021,9 @@ HKDF-Expand's first block, one HMAC -- to RFC 5869's three SHA-256 cases
 and the whole derivation to a vector computed apart in Python
 (`the_file_keys_key_is_hkdf_expand`, `a_file_key_is_the_one_another_reader_makes`);
 RS256 at each end of the keys
-`RsaKey::new` takes -- 2041 bits with e = 3, 8192 with a 64-bit exponent --
-and just past each -- 2040 bits, 8200, an exponent of 65 bits -- refused,
+`RsaKey::new` takes -- 2048 bits with e = 3, 8192 with a 64-bit exponent --
+and just past each -- 2047 bits, as many bytes as 2048, 8200, an exponent
+of 65 bits -- refused,
 every key and signature OpenSSL's, the commands beside the test
 (`rs256_at_each_end_of_the_keys_it_takes`, `rsa_bounds_vectors.txt`), where
 Wycheproof stops at 4096; ES256 to Wycheproof's (`tests/es256.rs`); and

@@ -86,7 +86,7 @@ defended](#not-defended).
 | 5 | [A token bound to its tenant](#a-token-bound-to-its-tenant) | another tenant | `crates/fennec-http/src/lib.rs::route_tenant`, `crates/fennec-http/src/access.rs::Scope::reaches`, `crates/fennec-http/src/tenants.rs::Tenants::check_scoped_writes` | `crates/fennec-http/tests/tenants.rs::a_token_reaches_only_the_tenant_it_names`, `crates/fennec-http/tests/tenants.rs::a_scoped_write_to_a_tenant_is_checked`, `crates/fennec-shard/tests/router.rs::a_token_for_one_tenant_reaches_no_other_through_the_router` |
 | 6 | [Whom a token is for](#whom-a-token-is-for) | another app's token from the same keys | `crates/fennec-http/src/access.rs::Demands::whom`, `crates/fennec-http/src/access.rs::Access::check` | `crates/fennec-http/src/access.rs::whom_a_token_is_for_is_asked_where_told`, `crates/fennec-http/tests/providers.rs::a_token_for_another_issuer_or_audience_is_refused_on_every_route` |
 | 7 | [Expiry](#expiry) | a stale token's holder | `crates/fennec-http/src/access.rs::Access::verify`, `crates/fennec-http/src/access.rs::refusal_code`, `crates/fennec-http/src/access.rs::Access::scope`, `crates/fennec-http/src/sse.rs::EXPIRED` | `crates/fennec-http/src/access.rs::only_an_expired_token_is_told_by_its_code`, `crates/fennec-http/src/access.rs::an_exp_past_the_range_ends_nothing_early`, `crates/fennec-http/tests/access.rs::a_subscription_ends_when_its_token_expires` |
-| 8 | [A token's signature](#a-tokens-signature) | a forger | `crates/fennec-http/src/access.rs::Access::check`, `crates/fennec-http/src/access.rs::read_jwks`, `crates/fennec-http/src/crypto.rs::RsaKey::verify_sha256`, `crates/fennec-http/src/crypto/p256.rs::P256Key::verify_sha256` | `crates/fennec-http/src/access.rs::a_forged_or_stale_token_is_refused`, `crates/fennec-http/src/access.rs::an_identity_providers_keys_verify_its_tokens`, `crates/fennec-http/src/access.rs::a_jwks_read_half_written_is_read_again_once_whole`, `crates/fennec-http/tests/wycheproof.rs::rsa_pkcs1_sha256_wycheproof_2048`, `crates/fennec-http/src/crypto.rs::rs256_at_each_end_of_the_keys_it_takes`, `crates/fennec-http/tests/es256.rs::every_wycheproof_p256_sha256_case`, `crates/fennec-http/tests/es256.rs::a_jwks_takes_p256_keys_and_passes_over_other_curves`, `crates/fennec-http/tests/es256.rs::a_server_takes_es256_tokens_and_refuses_them_changed` |
+| 8 | [A token's signature](#a-tokens-signature) | a forger | `crates/fennec-http/src/access.rs::Access::check`, `crates/fennec-http/src/access.rs::read_jwks`, `crates/fennec-http/src/crypto.rs::RsaKey::new`, `crates/fennec-http/src/crypto.rs::RsaKey::verify_sha256`, `crates/fennec-http/src/crypto/p256.rs::P256Key::verify_sha256` | `crates/fennec-http/src/access.rs::a_forged_or_stale_token_is_refused`, `crates/fennec-http/src/access.rs::an_identity_providers_keys_verify_its_tokens`, `crates/fennec-http/src/access.rs::a_jwks_read_half_written_is_read_again_once_whole`, `crates/fennec-http/tests/wycheproof.rs::rsa_pkcs1_sha256_wycheproof_2048`, `crates/fennec-http/src/crypto.rs::rs256_at_each_end_of_the_keys_it_takes`, `crates/fennec-http/tests/es256.rs::every_wycheproof_p256_sha256_case`, `crates/fennec-http/tests/es256.rs::a_jwks_takes_p256_keys_and_passes_over_other_curves`, `crates/fennec-http/tests/es256.rs::a_server_takes_es256_tokens_and_refuses_them_changed` |
 | 9 | [Empty and short tokens](#empty-and-short-tokens) | a network peer | `crates/fennec-server/src/main.rs::env_secret`, `crates/fennec-http/src/lib.rs::Config::settled`, `crates/fennec-http/src/lib.rs::short_token`, `crates/fennec-http/src/lib.rs::TOKEN_MIN` | `crates/fennec-http/tests/empty_tokens.rs::an_empty_admin_token_leaves_admin_off`, `crates/fennec-shard/tests/tokens.rs::a_token_set_empty_is_no_token`, `crates/fennec-http/src/lib.rs::a_token_past_loopback_is_32_bytes_at_least`, `crates/fennec-server/tests/tokens.rs::a_short_token_is_refused_outside_loopback` |
 | 10 | [Guessing a token](#guessing-a-token) | a network peer; a scoped caller | `crates/fennec-http/src/crypto.rs::ct_eq`, `crates/fennec-http/src/lib.rs::authenticate`, `crates/fennec-http/src/audit.rs::failed_as`, `crates/fennec-http/src/audit.rs::verified_jwt` | `crates/fennec-http/tests/audit.rs::refusals_wait_and_schema_changes_and_refusals_are_logged`, `crates/fennec-http/tests/audit.rs::a_good_jwt_clears_no_count_of_guesses_at_a_servers_token`; no test of `ct_eq`'s time, which `tools/secret_eq_check.py` holds by its callers alone |
 | 11 | [A server that asks for no token](#a-server-that-asks-for-no-token) | a page; a network peer | `crates/fennec-http/src/lib.rs::open_refusal`, `crates/fennec-http/src/cors.rs::foreign`, `crates/fennec-http/src/cors.rs::local_host`, `crates/fennec-http/src/lib.rs::exposed`, `crates/fennec-http/src/audit.rs::routed_past_loopback`, `crates/fennec-shard/src/lib.rs::Router::open_node` | `crates/fennec-http/tests/open_servers.rs::a_rebound_name_is_refused_a_read_included`, `crates/fennec-http/tests/open_servers.rs::another_origins_post_is_refused_before_it_runs`, `crates/fennec-server/tests/start.rs::an_open_endpoint_without_a_token_is_refused_before_the_open`, `crates/fennec-shard/tests/cors.rs::a_router_past_loopback_reaches_no_node_that_takes_no_token`, `crates/fennec-shard/tests/cors.rs::a_router_past_loopback_asks_a_node_from_before_whether_it_is_open` |
@@ -267,9 +267,10 @@ the wrong length or out of range, a padding that is not PKCS#1's.
 *Enforced* by `Access::check`, which takes the algorithm from the header
 but only HS256, RS256 or ES256 and verifies each with a key of its own
 kind (an HMAC key never an RSA token's), `read_jwks`, which takes `oct`
-keys of 32 bytes, RSA keys of 2041 to 8192 bits (a modulus of 256 to
-1 024 bytes, an odd exponent from 3, of 64 bits at most) and P-256 keys
-on the curve, `RsaKey::verify_sha256`, which builds
+keys of 32 bytes, RSA keys of 2048 to 8192 bits (`RsaKey::new`,
+counting from the modulus's top bit, an odd exponent from 3, of 64
+bits at most) and P-256 keys on the curve, `RsaKey::verify_sha256`,
+which builds
 the whole encoded message and compares it rather than parsing the
 padding, and `P256Key::verify_sha256`, which takes `R || S` with each in
 `[1, n)`. A JWKS is a file fennec-server's `--jwt-keys` names, read again
@@ -283,9 +284,13 @@ fetches no URL.
 read as they come), neither a forgery, the server keeping verified tokens
 by their text (open question 4); public-key arithmetic in variable time,
 its inputs public. Wycheproof's RSA files stop at 4 096 bits; the keys'
-two ends, 2041 and 8192 bits, are held to signatures OpenSSL made, and
-some of the code's words still say "2048 bits at the least"
-(`crates/fennec-http/src/crypto.rs:686`, `crates/fennec-http/src/access.rs:540`).
+two ends, 2048 and 8192 bits, are held to signatures OpenSSL made, and
+2047 bits and 8200 refused. `RsaKey::new` counted the modulus in whole
+bytes, 256 at the least, and so took keys of 2041 to 2047 bits, short
+of RFC 7518's 2048 (section 3.3), v0.1.7 to v0.2.0; it counts bits
+now, a stricter refusal -- a JWKS file holding such a key is refused
+whole -- and before 1.0 a 0.x change, no break of the 1.x surfaces
+([compatibility.md](compatibility.md#what-10-refuses-that-v020-took)).
 [access.md](access.md#es256-and-the-algorithms-still-refused).
 
 ### Empty and short tokens
@@ -881,7 +886,7 @@ module, then the whole file.
 
 | Code | Lines | Implements | Specification | Vectors and known answers |
 |---|---|---|---|---|
-| `crates/fennec-http/src/crypto.rs` | 816 of 1 423 | SHA-256; HMAC-SHA-256 and `HmacKey`; PBKDF2-HMAC-SHA-256, one block; ChaCha20, HChaCha20, Poly1305 and their AEAD; base64 and base64url; `ct_eq`; the system's randomness; RS256 verification (`RsaKey`) | FIPS 180-4; RFC 2104, 4231; RFC 8018 section 5.2; RFC 8439; draft-irtf-cfrg-xchacha section 2.2; RFC 4648; RFC 8017 section 8.2.2, RFC 7518 section 3.3 | its test module (`sha256_vectors`, `hmac_rfc4231_all`, `pbkdf2_sha256_vectors`, `aead_rfc8439` and the appendix A tests, `hchacha20_draft_irtf_cfrg_xchacha`, `rsa_pkcs1_sha256_as_node_signs`, `rs256_at_each_end_of_the_keys_it_takes`: 2041 and 8192 bits and just past each, signatures OpenSSL made); `crates/fennec-http/tests/wycheproof.rs`, every case of Wycheproof's ChaCha20-Poly1305, HMAC-SHA-256, PBKDF2-HMAC-SHA-256 and RSA PKCS#1 v1.5 SHA-256 at 2048, 3072 and 4096 bits |
+| `crates/fennec-http/src/crypto.rs` | 821 of 1 429 | SHA-256; HMAC-SHA-256 and `HmacKey`; PBKDF2-HMAC-SHA-256, one block; ChaCha20, HChaCha20, Poly1305 and their AEAD; base64 and base64url; `ct_eq`; the system's randomness; RS256 verification (`RsaKey`) | FIPS 180-4; RFC 2104, 4231; RFC 8018 section 5.2; RFC 8439; draft-irtf-cfrg-xchacha section 2.2; RFC 4648; RFC 8017 section 8.2.2, RFC 7518 section 3.3 | its test module (`sha256_vectors`, `hmac_rfc4231_all`, `pbkdf2_sha256_vectors`, `aead_rfc8439` and the appendix A tests, `hchacha20_draft_irtf_cfrg_xchacha`, `rsa_pkcs1_sha256_as_node_signs`, `rs256_at_each_end_of_the_keys_it_takes`: 2048 and 8192 bits and just past each, signatures OpenSSL made); `crates/fennec-http/tests/wycheproof.rs`, every case of Wycheproof's ChaCha20-Poly1305, HMAC-SHA-256, PBKDF2-HMAC-SHA-256 and RSA PKCS#1 v1.5 SHA-256 at 2048, 3072 and 4096 bits |
 | `crates/fennec-http/src/crypto/p256.rs` | 485 of 646 | ES256 verification: P-256's field and scalars in Montgomery form, Jacobian points, Shamir's trick | FIPS 186-5 section 6.4.2; SEC 1 section 4.1.4; RFC 7518 section 3.4 | `crates/fennec-http/tests/es256.rs`: Wycheproof's P1363 file (262 cases), RFC 7515 A.3, tokens node:crypto signed; the curve's identities in the file's tests |
 | `crates/fennec-http/src/crypto/unix.rs`, `windows.rs` | 76 and 42 of 76 and 62 | the system's randomness | getrandom(2), getentropy(3), BCryptGenRandom | `random_is_not_constant`, `no_randomness_refuses_nonces_and_names_ids`, `randomness_needs_no_descriptor` |
 | `crates/fennec-http/src/seal.rs` | 799 of 1 544 | sealed files, version 3: the head naming what the file is (its role, archive, change, time and tenant), a key a file (HChaCha20 of its id under a key HKDF-Expand makes of the key), frames chained by their tags, each bound to its place and whether it is the last; versions 1 and 2 opened | RFC 8439's AEAD; draft-irtf-cfrg-xchacha's HChaCha20; RFC 5869's HKDF-Expand; the framing is ours | its test module (18 tests, `the_file_keys_key_is_hkdf_expand` against RFC 5869's cases and `a_file_key_is_the_one_another_reader_makes` against a vector computed apart from this code among them); `crates/fennec-http/tests/archive.rs`, `node_archive.rs` |
@@ -892,7 +897,7 @@ module, then the whole file.
 | `crates/fennec-http/src/cors.rs` and `open_refusal` | 290 of 437, and 20 | the open server's guard: `Host` and `Origin`, CORS | RFC 6454; RFC 6761 section 6.3; the Fetch standard's CORS | `crates/fennec-http/tests/open_servers.rs`; `crates/fennec-shard/tests/cors.rs`; the file's tests |
 | `web/fennec.js`'s `seal`, `unseal`, `aad`, `persist` and `restore` | about 200 of 4 387 | a page's image and chunks sealed with a `CryptoKey`, version 2: each record's tag covering the tag of the record before it | WebCrypto's AES-GCM, NIST SP 800-38D | `web/fennec.persist.test.js`, `web/fennec.sync.test.js` |
 
-The cryptography is 2 218 lines of code (3 751 with its tests); with the
+The cryptography is 2 223 lines of code (3 757 with its tests); with the
 PostgreSQL client, the use of TLS, the tokens, the webhooks, the guard and
 the page's sealing, about 14 400, of which the tokens' policies and field
 lists are some 4 600 a review of the cryptography and the sign-in can
@@ -973,8 +978,9 @@ reading did not settle it.
    whole encoded message, its `DigestInfo` with NULL parameters, and
    compares it, never parsing the padding -- so the form without
    parameters is refused (Wycheproof's `MissingNull` case, on purpose).
-   The key: 2041 to 8192 bits (a modulus of 256 to 1 024 bytes), an odd
-   exponent of at most 64 bits from 3, `R^2 mod n` by doubling;
+   The key: 2048 to 8192 bits, counted from the modulus's top bit (in
+   whole bytes until v0.2.0, which took 2041), an odd exponent of at
+   most 64 bits from 3, `R^2 mod n` by doubling;
    Montgomery multiplication (CIOS) over 32 to 128 limbs. Wycheproof's
    files reach 4 096 bits; both ends, and just past each, are held to
    signatures OpenSSL made (`rs256_at_each_end_of_the_keys_it_takes`).

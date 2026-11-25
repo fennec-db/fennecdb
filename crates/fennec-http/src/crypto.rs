@@ -683,11 +683,16 @@ fn sub_in(a: &mut [u64], b: &[u64]) {
 
 impl RsaKey {
     /// A key from its modulus and exponent, big-endian as a JWK's `n` and
-    /// `e` hold them: 2048 bits at the least, an odd exponent from 3.
+    /// `e` hold them: a modulus of 2048 to 8192 bits, an odd exponent from
+    /// 3 of 64 bits at most. The bits are counted, the top byte's leading
+    /// zeros taken off: in whole bytes, 256 at the least, a modulus of 2041
+    /// bits was taken (v0.1.7 to v0.2.0), where RFC 7518 (3.3) asks 2048.
+    /// A key is built as its JWKS file is read, never a request.
     pub fn new(n: &[u8], e: &[u8]) -> Option<RsaKey> {
         let n = &n[n.iter().position(|&b| b != 0)?..];
         let e = &e[e.iter().position(|&b| b != 0)?..];
-        if n.len() < 256 || n.len() > 1024 || e.len() > 8 || n[n.len() - 1] & 1 == 0 {
+        let bits = n.len() * 8 - n[0].leading_zeros() as usize;
+        if !(2048..=8192).contains(&bits) || e.len() > 8 || n[n.len() - 1] & 1 == 0 {
             return None;
         }
         let e = e.iter().fold(0u64, |a, &b| a << 8 | b as u64);
@@ -863,19 +868,20 @@ mod tests {
     }
 
     /// RS256 at each end of the keys `RsaKey::new` takes, and one step past
-    /// each: a modulus of 256 bytes at the least (2041 bits, e = 3) and of
-    /// 1024 at the most (8192 bits, e = 2^64 - 59, the widest exponent),
-    /// taken and verified; 255 bytes (2040 bits), 1025 (8200 bits) and an
-    /// exponent of 65 bits (2^64 + 13) refused, though each signature is
-    /// good. Every key and signature of `rsa_bounds_vectors.txt` (`taken`
-    /// or `refused`, then n, e, the message and its signature, in hex) is
-    /// OpenSSL 3.6's, made by these commands:
+    /// each: a modulus of 2048 bits at the least (e = 3) and of 8192 at
+    /// the most (e = 2^64 - 59, the widest exponent), taken and verified;
+    /// 2047 bits (e = 3: 256 bytes, as 2048 are, its top bit clear), 8200
+    /// bits and an exponent of 65 bits (2^64 + 13, a 2048-bit modulus)
+    /// refused, though each signature is good. Every key and signature of
+    /// `rsa_bounds_vectors.txt` (`taken` or `refused`, then n, e, the
+    /// message and its signature, in hex) is OpenSSL 3.6.3's, made by these
+    /// commands:
     ///
     /// ```text
     /// printf 'fennecdb: RS256 at the ends of the keys it takes' > msg
-    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2041 \
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
     ///   -pkeyopt rsa_keygen_pubexp:3 -out low.pem                    # taken
-    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2040 \
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2047 \
     ///   -pkeyopt rsa_keygen_pubexp:3 -out under.pem                  # refused
     /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
     ///   -pkeyopt rsa_keygen_pubexp:18446744073709551629 -out wide.pem # refused
@@ -884,15 +890,15 @@ mod tests {
     /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:8200 \
     ///   -pkeyopt rsa_keygen_pubexp:65537 -out over.pem               # refused
     /// openssl dgst -sha256 -sign <key>.pem -out <key>.sig msg
-    /// openssl rsa -in <key>.pem -noout -modulus   # n; -text: the exponent
+    /// openssl rsa -in <key>.pem -RSAPublicKey_out -outform DER  # n and e
     /// ```
     ///
     /// (8193 bits asked of OpenSSL gave 8192; 8200 is the first size it
     /// made past 1024 bytes.) Each bound has its reason, so none is
-    /// narrowed: RFC 7518 (3.3) asks 2048 bits at the least, held here in
-    /// whole bytes; a check's work grows with the square of the modulus,
-    /// and whoever serves the JWKS document chooses it; an exponent is a
-    /// `u64` here.
+    /// narrowed: RFC 7518 (3.3) asks 2048 bits at the least, counted in
+    /// bits (in whole bytes, 256 of them, v0.1.7 to v0.2.0 took 2041); a
+    /// check's work grows with the square of the modulus, and whoever
+    /// serves the JWKS document chooses it; an exponent is a `u64` here.
     #[test]
     fn rs256_at_each_end_of_the_keys_it_takes() {
         let mut taken = 0;
@@ -900,10 +906,11 @@ mod tests {
         for line in include_str!("rsa_bounds_vectors.txt").lines() {
             let f: Vec<&str> = line.split(' ').collect();
             let (n, e, msg, sig) = (unhex(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4]));
+            let bits = n.len() * 8 - n[0].leading_zeros() as usize;
             match f[0] {
                 "taken" => {
-                    let key = RsaKey::new(&n, &e).unwrap_or_else(|| panic!("{} bytes", n.len()));
-                    assert!(key.verify_sha256(&msg, &sig), "{} bytes", n.len());
+                    let key = RsaKey::new(&n, &e).unwrap_or_else(|| panic!("{bits} bits"));
+                    assert!(key.verify_sha256(&msg, &sig), "{bits} bits");
                     let mut bad = sig.clone();
                     bad[sig.len() / 2] ^= 1;
                     assert!(!key.verify_sha256(&msg, &bad));
@@ -912,8 +919,7 @@ mod tests {
                 _ => {
                     assert!(
                         RsaKey::new(&n, &e).is_none(),
-                        "{} bytes, e of {}",
-                        n.len(),
+                        "{bits} bits, e of {} bytes",
                         e.len()
                     );
                     refused += 1;

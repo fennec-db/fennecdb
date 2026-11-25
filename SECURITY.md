@@ -71,7 +71,7 @@ P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
 ([docs/design/conventions.md](docs/design/conventions.md#secrets-compared));
 HChaCha20 to draft-irtf-cfrg-xchacha's vector, a sealed file's key to a
 vector computed apart from our code and to RFC 5869's HKDF cases, and RS256 at each end of the
-keys it takes, 2041 and 8192 bits, and just past each, to signatures
+keys it takes, 2048 and 8192 bits, and just past each, to signatures
 OpenSSL made.
 Vectors are no proof: a bug they miss is as welcome a report as any. What a
 browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.

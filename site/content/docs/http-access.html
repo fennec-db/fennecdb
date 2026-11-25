@@ -842,8 +842,8 @@ fennec-server --file data.fennec --http 0.0.0.0:8080 --jwt-keys jwks.json --poli
 <details class="deep"><summary>How keys, algorithms and token checks work, timed</summary>
 <p><code>--jwt-keys</code> takes a JWKS file, <code>{"keys": [...]}</code>, in
 place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
-least 32 bytes. An <code>RSA</code> key whose modulus is 256 to 1 024 bytes
-(2041 to 8192 bits) and whose exponent is odd, from 3, verifies RS256
+least 32 bytes. An <code>RSA</code> key whose modulus is 2048 to 8192 bits
+and whose exponent is odd, from 3, verifies RS256
 tokens, which is what Auth0, Clerk, Firebase and most identity providers
 sign with. An <code>EC</code> key on the P-256 curve verifies ES256 tokens
 (ECDSA with SHA-256), as Supabase Auth's EC signing keys sign them; its
@@ -851,7 +851,9 @@ sign with. An <code>EC</code> key on the P-256 curve verifies ES256 tokens
 whole file is refused, as it is for an RSA key outside those sizes. A file
 whose malformed P-256 key an earlier version skipped therefore no longer
 loads: at the start the server refuses it, and on a reload it keeps the
-keys it read last. A token one of these providers issues is taken with
+keys it read last. Nor does a file holding an RSA key of 2041 to 2047
+bits, which v0.1.7 to v0.2.0 took: they counted the modulus in whole
+bytes, where RFC 7518 asks 2048 bits. A token one of these providers issues is taken with
 its public keys alone. Keys of any other kind (<code>OKP</code>, an <code>EC</code>
 key on P-384 or P-521) are skipped, and a token signed with EdDSA, PS256,
 ES384, ES512, RS384 or RS512 is refused (401). A key is only used for

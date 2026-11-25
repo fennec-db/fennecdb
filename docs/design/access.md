@@ -51,7 +51,8 @@ was 401. A scoped read's poll tag is a digest of its answer (`content_tag`,
 the query run every time): the change counter's tag, and a 304 answered
 unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
-`RSA` keys (2041 to 8192 bits -- a modulus of 256 to 1 024 bytes --
+`RSA` keys (2048 to 8192 bits, counted from the modulus's top bit,
+where v0.1.7 to v0.2.0 counted whole bytes and took 2041;
 `crypto::RsaKey`, 64-bit limbs: 166 us a check in
 32-bit ones, 38 now; held to every case of Wycheproof's 2048-, 3072- and
 4096-bit files, `tests/wycheproof.rs`) for an identity provider's RS256
