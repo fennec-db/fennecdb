@@ -455,7 +455,19 @@ same base (a replica's apply of one `put` 4 818 to 4 843, a record of 100
 frames 298 218 to 297 978, a `put` 21 159 to 21 187, 100 prepared 1 006 712
 to 1 007 368, a `set` 28 473 to 28 588, each inside two standard errors);
 a replica's apply writing a row's vector again, a tombstone and a push
-each, 630 452 to 630 450. Two first shapes cost more and were
+each, 630 452 to 630 450. The links made again into the nodes a put-back
+makes live, and the put-back's own tombstones kept off the list, moved
+none of them either, measured once more against the same base (an apply's
+`put` 4 856.0 to 4 855.8, a record of 100 299 157 to 298 014, a vector
+written again 630 820 to 631 104, a `put` 21 164 to 21 202, a record of
+100 prepared 1 006 751 to 1 007 773, a `set` 28 537 to 28 606 -- +68.5,
+SE 32.5, just past two standard errors, and again 28 567 to 28 535 -- each
+inside two but that one). A rollback pays for them: a block writing one
+row's vector again by a `put` and rolled back, over 2 000 rows of
+`vector<16>`, 42 667 instructions before them and 74 247 to 74 317 now --
+the links back, 31 651 more -- against 491 118 where the rollback placed
+the vector again; by a `set`, which links its new vector as it writes it,
+597 083, 648 324 to 648 650 and 975 447. Two first shapes cost more and were
 changed: the node test inline, reading the row written over, put an apply
 1% and a record of 100 2.6% over, outside two standard errors; and the
 payload's test asked of each prepared document was 5 instructions a
