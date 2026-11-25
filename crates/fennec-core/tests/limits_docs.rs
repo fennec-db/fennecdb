@@ -392,7 +392,6 @@ fn rows(problems: &mut Vec<String>) -> Vec<Row> {
                 ),
             ]),
         )
-        .note(format!("{} bytes", spaced(store::MAX_PAYLOAD as u64)))
         .note(format!("a document is at most {} bytes encoded", store::MAX_PAYLOAD)),
         row(
             "vector index node count",
@@ -819,10 +818,13 @@ fn problems(page: &str) -> Vec<String> {
                 "row `{key}`: held by no test, or with no reason given"
             ));
         }
+        let read = |f: &str| std::fs::read_to_string(format!("{ROOT}{f}")).ok();
         for (file, name) in tests {
             match std::fs::read_to_string(format!("{ROOT}{file}")) {
                 Ok(text) => {
-                    if let Err(why) = held_by(&text, name) {
+                    let found =
+                        declared(file, &read).and_then(|outer| held_by(&text, name, &outer));
+                    if let Err(why) = found {
                         problems.push(format!("row `{key}`: {file}: {why}"));
                     }
                 }
@@ -918,12 +920,12 @@ type Found = std::result::Result<(), String>;
 /// Whether `text`, a Rust file, holds `name` as a test CI runs: `fn
 /// <name>(` outside its comments and literals, `#[test]` among the
 /// attributes right before it and neither `ignore` nor `cfg_attr`, nothing
-/// around it but `mod`s, and every `cfg` on it, on those `mod`s and on the
-/// file met by one of CI's builds ([`BUILDS`]). Found as text alone, a
-/// helper of the name, a test
-/// commented out, `#[ignore]`d or `cfg`'d out of every build passed for
-/// one. What is wrong, otherwise.
-fn held_by(text: &str, name: &str) -> Found {
+/// around it but `mod`s, and every `cfg` on it, on those `mod`s, on the
+/// file and among `outer` -- the attributes of the `mod`s declaring the
+/// file ([`declared`]) -- met by one of CI's builds ([`BUILDS`]). Found as
+/// text alone, a helper of the name, a test commented out, `#[ignore]`d or
+/// `cfg`'d out of every build passed for one. What is wrong, otherwise.
+fn held_by(text: &str, name: &str, outer: &[String]) -> Found {
     let code = blanked(text);
     let needle = format!("fn {name}(");
     let mut first = None;
@@ -933,7 +935,7 @@ fn held_by(text: &str, name: &str) -> Found {
         if code[..at].ends_with(ident) {
             continue;
         }
-        match runs(text, &code, at) {
+        match runs(text, &code, at, outer) {
             Ok(()) => return Ok(()),
             Err(why) => first = first.or(Some(why)),
         }
@@ -945,8 +947,9 @@ fn ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Whether the `fn` at `at` of `text` (`code` blanked) runs as a test.
-fn runs(text: &str, code: &str, at: usize) -> Found {
+/// Whether the `fn` at `at` of `text` (`code` blanked) runs as a test,
+/// `outer` the attributes of what declares the file.
+fn runs(text: &str, code: &str, at: usize, outer: &[String]) -> Found {
     let mut attrs = attributes(text, code, at);
     if !attrs.iter().any(|a| a == "test") {
         return Err("its `fn` has no `#[test]` right before it: a helper, no test".into());
@@ -971,16 +974,8 @@ fn runs(text: &str, code: &str, at: usize) -> Found {
         };
         attrs.extend(attributes(text, code, item));
     }
-    // The file's own: `#![cfg(...)]` at its head.
-    let mut p = code.len() - code.trim_start().len();
-    while code[p..].starts_with("#![") {
-        let Some(end) = closing(&code[p + 3..]) else {
-            return Err("an attribute not closed".into());
-        };
-        attrs.push(fold(&text[p + 3..p + 3 + end]));
-        p += 3 + end + 1;
-        p += code[p..].len() - code[p..].trim_start().len();
-    }
+    attrs.extend(inner_attributes(text, code)?);
+    attrs.extend_from_slice(outer);
     let cfgs: Vec<&str> = (attrs.iter())
         .filter_map(|a| a.strip_prefix("cfg(")?.strip_suffix(')'))
         .collect();
@@ -996,6 +991,79 @@ fn runs(text: &str, code: &str, at: usize) -> Found {
     Err(format!(
         "`cfg`'d out of every build CI's `make test` makes: {cfgs:?}"
     ))
+}
+
+/// The file's own attributes: `#![cfg(...)]` at its head.
+fn inner_attributes(text: &str, code: &str) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut p = code.len() - code.trim_start().len();
+    while code[p..].starts_with("#![") {
+        let Some(end) = closing(&code[p + 3..]) else {
+            return Err("an attribute not closed".into());
+        };
+        out.push(fold(&text[p + 3..p + 3 + end]));
+        p += 3 + end + 1;
+        p += code[p..].len() - code[p..].trim_start().len();
+    }
+    Ok(out)
+}
+
+/// The attributes of the `mod` item declaring `file` -- a path under the
+/// repository's root -- with its declaring file's own, and so up to the
+/// crate's root: a `cfg` on any takes the file's tests out of a build as
+/// one on the test does, and `held_by` reads them beside its own. `mod
+/// x;` is looked for in `src/a.rs` or `src/a/mod.rs` for `src/a/x.rs`, in
+/// `src/lib.rs` or `src/main.rs` for `src/x.rs` and `src/x/mod.rs`, and in
+/// `tests/all.rs` for `tests/x.rs` -- a crate of its own where `all.rs`
+/// declares no `mod x;`. A file of `src` no `mod` declares there is
+/// refused: one `#[path]` takes in is no file this reads. `read` reads a
+/// file under the root.
+fn declared(
+    file: &str,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<Vec<String>, String> {
+    let bad = || format!("{file}: no path of a crate's file this reads");
+    let (dir, stem) = file.rsplit_once('/').ok_or_else(bad)?;
+    let stem = stem.strip_suffix(".rs").ok_or_else(bad)?;
+    let (home, name) = match stem {
+        "mod" => dir.rsplit_once('/').ok_or_else(bad)?,
+        _ => (dir, stem),
+    };
+    let tests = home.ends_with("/tests");
+    let src = home.ends_with("/src");
+    if (src && stem != "mod" && matches!(name, "lib" | "main")) || (tests && name == "all") {
+        return Ok(Vec::new());
+    }
+    let parents = match (src, tests) {
+        (true, _) => vec![format!("{home}/lib.rs"), format!("{home}/main.rs")],
+        (_, true) => vec![format!("{home}/all.rs")],
+        _ => vec![format!("{home}.rs"), format!("{home}/mod.rs")],
+    };
+    for parent in &parents {
+        let Some(text) = read(parent) else {
+            continue;
+        };
+        let code = blanked(&text);
+        let needle = format!("mod {name}");
+        let mut from = 0;
+        while let Some(at) = code[from..].find(&needle).map(|i| from + i) {
+            from = at + needle.len();
+            let declares = !code[..at].ends_with(ident)
+                && code[from..].trim_start().starts_with(';')
+                && !code[from..].starts_with(ident);
+            let Some(item) = module_at(&code[..from]).filter(|_| declares) else {
+                continue;
+            };
+            let mut attrs = attributes(&text, &code, item);
+            attrs.extend(inner_attributes(&text, &code)?);
+            attrs.extend(declared(parent, read)?);
+            return Ok(attrs);
+        }
+    }
+    match tests {
+        true => Ok(Vec::new()),
+        false => Err(format!("no `mod {name};` declares it in {parents:?}")),
+    }
 }
 
 /// Where the `mod` whose block opens right after `head` starts, its
@@ -1477,7 +1545,7 @@ fn a_helper_or_a_test_ci_does_not_run_is_no_test() {
         ("#[cfg(miri)]\n#[test]\nfn held() {}", "`miri` is no predicate"),
     ];
     for (text, says) in wrong {
-        match held_by(text, "held") {
+        match held_by(text, "held", &[]) {
             Err(why) => assert!(why.contains(says), "{text:?}: {why}"),
             Ok(()) => panic!("{text:?}: found"),
         }
@@ -1492,8 +1560,35 @@ fn a_helper_or_a_test_ci_does_not_run_is_no_test() {
         "mod a {\n    fn held() {}\n}\nmod b {\n    #[test]\n    fn held() {}\n}",
     ];
     for text in right {
-        assert_eq!(held_by(text, "held"), Ok(()), "{text:?}");
+        assert_eq!(held_by(text, "held", &[]), Ok(()), "{text:?}");
     }
+    // A `cfg` on the `mod` declaring the file, or on one declaring its
+    // parent, or at the head of either, is one on the test.
+    let files = |lib: &'static str, a: &'static str| {
+        move |f: &str| match f {
+            "crates/x/src/lib.rs" => Some(lib.to_string()),
+            "crates/x/src/a.rs" => Some(a.to_string()),
+            _ => None,
+        }
+    };
+    let test = "#[test]\nfn held() {}";
+    for (lib, a, out) in [
+        ("mod a;", "mod b;", false),
+        ("#[cfg(windows)]\nmod a;", "mod b;", true),
+        ("mod a;", "/// B.\n#[cfg(any())]\npub(crate) mod b;", true),
+        ("#![cfg(any())]\nmod a;", "mod b;", true),
+        ("mod a;", "#![cfg(windows)]\nmod b;", true),
+        ("#[cfg(unix)] pub mod a;", "#[cfg(test)]\nmod b ;", false),
+        ("mod a;", "mod bb;\nmod b {}", true),
+    ] {
+        let found = declared("crates/x/src/a/b.rs", &files(lib, a))
+            .and_then(|outer| held_by(test, "held", &outer));
+        assert_eq!(found.is_err(), out, "{lib:?} {a:?}: {found:?}");
+    }
+    // A file of `src` no `mod` declares is no test CI runs; one of `tests`
+    // that `all.rs` does not take in is a crate of its own.
+    assert!(declared("crates/x/src/c.rs", &files("mod a;", "")).is_err());
+    assert_eq!(declared("crates/x/tests/t.rs", &files("", "")), Ok(vec![]));
 }
 
 #[test]

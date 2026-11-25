@@ -58,6 +58,10 @@ impl VectorIndex {
     pub fn nodes(&self) -> usize {
         match self.never {}
     }
+    #[cfg(target_pointer_width = "64")]
+    pub fn holds(&self, _: DocId, _: &[f32]) -> bool {
+        match self.never {}
+    }
     pub fn dead(&self) -> usize {
         match self.never {}
     }

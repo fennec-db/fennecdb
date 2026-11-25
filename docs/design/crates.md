@@ -186,10 +186,13 @@ and through every write at a bound the test's thread holds it to (*A
 payload and a graph past a `u32`*, below). A named test is found as one CI
 runs (`held_by`): `#[test]` right before its `fn`, outside the file's
 comments and literals, neither `#[ignore]`d nor under a `cfg_attr`,
-nothing around it but `mod`s, and every `cfg` on it, on those `mod`s and on
-the file met by one of the builds CI's `make test` makes (Linux on x86-64
-and aarch64, macOS on aarch64, default features), a predicate it cannot
-read refused. Found as `fn <name>(` alone, as `tools/security_md_check.py`
+nothing around it but `mod`s, and every `cfg` on it, on those `mod`s, on
+the file and on the `mod` items declaring the file and its parents up to
+the crate's root (`declared`: `mod x;` in `src/a.rs` or `src/a/mod.rs`,
+`lib.rs`, a test crate's `all.rs`), met by one of the builds CI's `make
+test` makes (Linux on x86-64 and aarch64, macOS on aarch64, default
+features), a predicate it cannot read refused, and a file of `src` no
+`mod` declares refused. Found as `fn <name>(` alone, as `tools/security_md_check.py`
 finds its tests, a helper of the name passed, as would a test commented
 out, ignored or `cfg`'d out of every build
 (`a_helper_or_a_test_ci_does_not_run_is_no_test`). A row added to the page
@@ -228,7 +231,11 @@ The statement's block is put back whole. An import, `put t $n`, a named
 statement's write and a block's spill all land through these. A frame
 read past the bound -- an open's replay, mapped or in memory, and a
 replica's apply -- is damage (`store::frames_fit`, `Error::Corrupt`),
-refused before any frame of its record lands. It is asked once a record,
+refused before any frame of its record lands. So a file v0.1.0 to v0.2.0
+wrote holding such a document no longer opens at all, where those
+releases opened it with that one row cut short or unread ([What 1.0
+refuses that v0.2.0 took](compatibility.md#what-10-refuses-that-v020-took)).
+It is asked once a record,
 of one longer than a payload may be: a frame is held to what is left of
 its record, so a shorter one's frames all fit, and a compare a frame would
 be 100 000 instructions more an open of 100 000 rows. An image's index held
@@ -247,48 +254,104 @@ one up, the 2^32nd already took the one read as none. The refusal cannot
 be where a vector's components are tested (`value::held`, `held_copy`),
 which knows the field and not its graph. It is where a write encodes the
 row, beside the payload's test (`Collection::crowded`): each graph's
-count, with the statement's vectors not yet placed added -- a `put`'s
-`written`, a replica's batch -- held to the bound (`vector::takes_node`), a
-compare a graph, a collection with none reading its count of graphs. Only at
-the bound is the document read (`nodes_past`, out of line): a vector the
-row held to the bit places no node (`VectorIndex::retire`) and is taken,
-by its bits, since `same` takes `-0.0` for `0.0`; any other is refused
-naming its field, a query error,
-"field `v`: a vector index holds at most 4294967295 nodes, its tombstones
-among them, which a compact drops". A replica refuses its primary's write
-so, not as damage: its graph may hold tombstones its primary's compact
-dropped. A graph made from documents -- `create index` under the lock and
-beside the database, an open rebuilding one -- refuses more vectors than
-the bound, a graph record counting more is rebuilt, and `alloc_links`
-asserts the bound it never meets. Both bounds are driven: at the bound and
-one past it where they are decided (`store::tests`, `vector::tests`), and
-through every write at a bound the test's thread holds payloads to, between
-two collections' rows, or graphs counted at the bound (`PAYLOAD_MOST`,
-`NODES_BESIDE`, test builds alone) -- each write refused with nothing
+count, with every document of the statement not yet placed added -- a
+`put`'s `written`, a replica's batch -- held to the bound
+(`vector::takes_node`), a compare a graph, a collection with none reading
+its count of graphs. That filter counts a document of no vector as one, so
+only where it says a graph may be full is the count made exactly, out of
+line (`nodes_past`): of the documents waiting, those holding a vector in
+the graph's field their row's node does not hold (`VectorIndex::holds`,
+the test `place` asks), and the document's own vector none where the row
+held it to the bit (`VectorIndex::retire` keeps the node), by its bits,
+since `same` takes `-0.0` for `0.0`, and against the row read, since a row
+the statement wrote has its node still to come. A vector past the bound is
+refused naming its field, a query error, "field `v`: a vector index holds
+at most 4294967295 nodes, its tombstones among them, which a compact
+drops"; at one node left, a `put` of a document with no vector, one whose
+row holds its vector and one new vector is taken. A vector the graph holds
+for another row is counted as a node: at the bound a copy is refused
+rather than looked for.
+
+*A replica lands what its primary took.* The primary alone judges a
+write's nodes. Counted on the copy, a write the primary took could be
+refused: its batch holds every document of the collection, a `put {n:1}`
+before a `put` of a vector counted as one, and its graph counts its own
+tombstones -- a compact the primary made and it did not, a block the
+primary rolled back that it never saw, a put-back of its own -- so a pair
+at the bound broke, the follower connecting again for a full image, and
+again near the bound. A replica asks the same compare a frame, and only
+where it says a graph may be full (`Database::room_applied`, out of line)
+puts its batch into the graph and counts what the graph holds: a vector
+its row's node holds places none; a graph with no node for it that holds
+tombstones is made again from the rows without them (`build_graph`, as a
+compact makes it); and a graph whose live vectors still leave none is
+damage, `Error::Corrupt`, a write no primary takes -- the record put back
+whole, the follower taking an image. Over bit-coded vectors a graph made
+again may code them apart from the primary's, whose centres it learned in
+another order, so its live nodes may differ by the copies a code shared:
+at 2^32 nodes, and named here rather than met.
+
+*A put-back makes room.* A write over a row's vector leaves the node of
+the vector it replaced a tombstone, which no vector placed finds again
+(`find_copy` passes over tombstones). Put back -- a block rolled back, a
+statement refused at its second row, a replica's record refused part way
+-- the row's vector is placed again, a node more than the write took: at
+the bound, past it, where `alloc_links`' assert stops it under the write
+lock (`set v = ... where tag = 'red'` over two rows with one node left).
+Before a put-back places a row's vector in a graph with no node left, the
+graph is made again from the rows as the put-back has them, without its
+tombstones (`Collection::make_room`, in `rewind` and `put_back_torn`): the
+rows are a state the writes passed through, whose live vectors had nodes,
+and the graph made holds the row's own, which then places none. A row
+that does not read leaves the graph as it stands, as a compact does. It
+costs a graph's build, once a put-back meets the bound.
+
+A graph made from documents is held to the bound where it is made:
+`create index` under the lock (`build_graph`), beside the database as its
+copy is taken (`begin_index`) and as it catches up with the writes made
+during the build (`finish_index`, which placed them unchecked, a panic
+under the write lock at the bound), and an open rebuilding one (a file
+holding more vectors in a field, which a release before the bound wrapped,
+is refused naming the field). A graph record counting more is rebuilt, and
+`alloc_links` asserts the bound it never meets, counted as the engine
+counts. Both bounds are driven: at the bound and one past it where they are
+decided (`store::tests`, `vector::tests`: a record past the bound rebuilt,
+a node past it never placed), and through every write at a bound the test's
+thread holds payloads to, between two collections' rows, or graphs counted
+at the bound (`PAYLOAD_MOST`, `NODES_BESIDE`, test builds alone, which
+every count held to the bound adds) -- each write refused with nothing
 changed, alone and in a block, the block put back whole, a write placing no
-node taken (`engine::unwinding`'s
+node taken, an open mapped and in memory refusing a frame past it
+(`engine::unwinding`'s
 `a_document_past_a_frames_length_is_refused_and_its_block_put_back` and
-`a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`).
+`a_vector_past_a_graphs_nodes_is_refused_and_its_block_put_back`); a
+replica landing the review's case, a tombstone its primary's compact
+dropped, and refusing as damage what its live vectors leave no node for
+(`a_replica_lands_every_vector_its_primary_took`); `create index` each way
+(`maintenance::tests::create_index_refuses_a_graph_past_its_nodes`).
 
 *What the two cost.* A write tests both bounds in one branch: its
 payload's length against the bound and, in a collection with a graph, each
 graph's count (`crowded`), what a refusal needs out of line (`nodes_past`,
-`frames_fit`, the error's words). Against main before them (9351148f), in
-instructions an op on macOS (`tools/instr/compare.py`: 8 binary identities
-a build, 7 runs each, the load under 3), each inside two standard errors: a
-replica's apply of one `put` 4 819 to 4 844 and of a record of 100 frames
-298 296 to 298 170; a `put` over `/query` 21 193 to 21 160, and of 100
-documents prepared beside the readers 1 006 663 to 1 009 145; a `set` by id
-over REST 28 577 to 28 575 -- measured before a collection's count of
-graphs was read first, which takes instructions off. Traced in the build
-that has it, one call runs this many instructions of its own more: an
-apply 15 (`apply_frames`), a `put` 18, its encoded payload held past the
-unindex, a `set` 3 fewer, its encode inlined, and a block's preparation of
-a `put` of 100 documents 14. Two first shapes cost more and were changed:
-the node test inline, reading the row written over, put an apply 1% and a
-record of 100 2.6% over, outside two standard errors; and the payload's
-test asked of each prepared document was 5 instructions a document, 501 a
-preparation of 100 and 0.7% of the block. The browser
+`room_applied`, `make_room`, `frames_fit`, the error's words). Against main
+before them (9351148f), in instructions an op on macOS
+(`tools/instr/compare.py`: 8 binary identities a build, 7 runs each, the
+load under 3), each inside two standard errors: a replica's apply of one
+`put` 4 819 to 4 852 and of a record of 100 frames 295 573 to 297 991; a
+`put` over `/query` 21 190 to 21 144, and of 100 documents prepared beside
+the readers 1 006 203 to 1 009 542; a `set` by id over REST 28 549 to
+28 631. Single-stepped (`tools/instr/trace.py`, which the allocator's draw
+does not move), one call runs this many instructions of its own more: an
+apply 16 a frame (`apply_frames`, 1 501 a record of 100), a `put` 17, its
+encoded payload held past the unindex, a `set` 3 fewer, its encode
+inlined, and a block's preparation of a `put` of 100 documents 14. A
+replica landing what its primary took, an exact count and a put-back's
+room moved none by more than an instruction: each is reached only where
+the compare says a graph may be full. Two first shapes cost more and were
+changed: the node test inline, reading the row written over, put an apply
+1% and a record of 100 2.6% over, outside two standard errors; and the
+payload's test asked of each prepared document was 5 instructions a
+document, 501 a preparation of 100 and 0.7% of the block. The browser
 module builds neither test -- a wasm32 `Vec` stops at 2 GiB, and its memory
 long before 2^32 nodes -- and grew 17 bytes, 863 579 to 863 596 (12
 gzipped).

@@ -2614,14 +2614,17 @@ thread_local! {
     pub(crate) static NODES_BESIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// [`NODES_BESIDE`]: every count held to [`MAX_NODES`] adds it -- a
+/// graph's nodes, a collection's vectors a graph is built from, a graph
+/// record's count -- so each refusal is driven where the bound is decided.
 #[cfg(test)]
-fn nodes_beside() -> usize {
+pub(crate) fn nodes_beside() -> usize {
     NODES_BESIDE.with(std::cell::Cell::get)
 }
 
 #[cfg(not(test))]
 #[inline(always)]
-fn nodes_beside() -> usize {
+pub(crate) fn nodes_beside() -> usize {
     0
 }
 
@@ -3615,6 +3618,17 @@ impl VectorIndex {
         self.doc_ids.len() + nodes_beside()
     }
 
+    /// Whether `doc`'s node holds `raw` as the arena would store it, to the
+    /// bit: a vector placed for `doc` then takes no node, its node kept
+    /// ([`Self::retire`]'s test, as [`Self::place`] asks it). What counts a
+    /// write's nodes exactly asks it, out of line, at the bound alone.
+    #[cfg(target_pointer_width = "64")]
+    pub fn holds(&self, doc: DocId, raw: &[f32]) -> bool {
+        self.node_of(doc).is_some_and(|node| {
+            !self.is_deleted(node) && self.stored_of(node) == self.stored(&self.as_held(raw))
+        })
+    }
+
     /// Tombstones: nodes of documents deleted or rewritten, which stay in the
     /// graph -- still routing a search through them -- until it is rebuilt.
     pub fn dead(&self) -> usize {
@@ -3954,13 +3968,20 @@ impl VectorIndex {
         self.changes += 1;
         let node = self.doc_ids.len();
         // Never reached: the engine refuses a write whose vector would place
-        // a node past `MAX_NODES` before it changes anything, and a graph
-        // made from documents is held to it where it is made (`build_graph`,
-        // `create index` beside the database). Cut to 32 bits, as it was,
-        // the 2^32nd node took the id `by_doc` reads as none, and the next
-        // node 0's. A 32-bit build's `Vec` of ids stops at 2^28.
+        // a node past `MAX_NODES` before it changes anything, makes room
+        // before a put-back places one at the bound (`Collection::make_room`),
+        // and holds a graph made from documents to it where it is made
+        // (`build_graph`, an open's rebuild, `create index` beside the
+        // database). Cut to 32 bits, as it was, the 2^32nd node took the id
+        // `by_doc` reads as none, and the next node 0's. A 32-bit build's
+        // `Vec` of ids stops at 2^28. Asked of `nodes`, which a test's thread
+        // may count past the graph's own ([`NODES_BESIDE`]), so a path
+        // placing a node past the bound fails a test that drives it.
         #[cfg(target_pointer_width = "64")]
-        assert!(node < MAX_NODES, "a graph holds {MAX_NODES} nodes at most");
+        assert!(
+            self.nodes() < MAX_NODES,
+            "a graph holds {MAX_NODES} nodes at most"
+        );
         let node = node as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
@@ -5287,9 +5308,10 @@ impl VectorIndex {
             return None;
         }
         // Past what a graph holds: built again from the documents, which
-        // are held to it there (`build_graph`).
+        // are held to it there (an open's rebuild refuses a field holding
+        // more vectors than that, naming it).
         #[cfg(target_pointer_width = "64")]
-        if count > MAX_NODES {
+        if count + nodes_beside() > MAX_NODES {
             return None;
         }
         let read = match flat {
@@ -5839,6 +5861,63 @@ mod tests {
             "query error: field `v`: a vector index holds at most 4294967295 nodes, its \
              tombstones among them, which a compact drops"
         );
+        // What counts a write's nodes exactly: a document's node holding
+        // the vector as the arena stores it places none, a tombstone's does.
+        assert!(ix.holds(7, &[1.0, 0.0]) && !ix.holds(7, &[2.0, 0.0]));
+        ix.remove(7);
+        assert!(!ix.holds(7, &[1.0, 0.0]), "a tombstone holds nothing");
+    }
+
+    /// The bound's last guard: a node placed past [`MAX_NODES`] -- which a
+    /// path the engine does not hold to it would place -- panics rather
+    /// than take an id a node holds, counted as the engine counts it
+    /// ([`NODES_BESIDE`]).
+    #[test]
+    #[should_panic(expected = "a graph holds 4294967295 nodes at most")]
+    fn a_node_past_the_bound_is_never_placed() {
+        struct Lifted;
+        impl Drop for Lifted {
+            fn drop(&mut self) {
+                NODES_BESIDE.with(|n| n.set(0));
+            }
+        }
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert(1, &[1.0, 0.0]);
+        let _lifted = Lifted;
+        NODES_BESIDE.with(|n| n.set(MAX_NODES - 2));
+        ix.insert(2, &[2.0, 0.0]);
+        assert_eq!(ix.nodes(), MAX_NODES);
+        ix.insert(3, &[3.0, 0.0]);
+    }
+
+    /// limits.html's "vector index node count": a graph record counting
+    /// more nodes than a graph holds is no graph of this build's, rebuilt
+    /// from the documents (`None`), where one at the bound is restored.
+    /// Counted as a graph's nodes are, past its own ([`NODES_BESIDE`]): a
+    /// record of 2^32 nodes is past 16 GiB.
+    #[test]
+    fn a_graph_record_counting_past_the_bound_is_rebuilt() {
+        let mut ix = VectorIndex::new(2, spec());
+        let held: HashMap<u64, Vec<f32>> = (1..=3u64).map(|i| (i, vec![i as f32, 1.0])).collect();
+        for (&i, v) in &held {
+            ix.insert(i, v);
+        }
+        let lookup = |doc: u64, out: &mut Vec<f32>| {
+            out.clear();
+            out.extend_from_slice(held.get(&doc).map_or(&[][..], |v| &v[..]));
+            held.contains_key(&doc)
+        };
+        for bytes in [ix.serialize(false), ix.serialize_varint(false)] {
+            let restore = |beside: usize| {
+                NODES_BESIDE.with(|n| n.set(beside));
+                let back = VectorIndex::restore_graph(&bytes, 2, VecPrec::F32, lookup);
+                NODES_BESIDE.with(|n| n.set(0));
+                back.map(|ix| ix.len())
+            };
+            assert_eq!(restore(0), Some(3));
+            assert_eq!(restore(MAX_NODES - 3), Some(3), "at the bound");
+            assert_eq!(restore(MAX_NODES - 2), None, "past it");
+        }
     }
 
     /// A beam as wide as a graph's ids reach -- `near ... ef 4294967295`,
