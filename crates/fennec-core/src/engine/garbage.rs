@@ -225,14 +225,6 @@ impl Database {
         self.swap_held
     }
 
-    /// How long the last compact or `create index` beside the database held
-    /// the lock, each hold at its longest -- its copy, its rounds and its
-    /// put in place, and a compact's file's -- for a server's log to name
-    /// ([`Holds`](super::Holds)).
-    pub fn last_holds(&self) -> super::Holds {
-        self.holds
-    }
-
     /// Whether a `create index` or a `compact` is running beside the
     /// database: a host's compact waits for the next look.
     pub fn maintaining(&self) -> bool {
@@ -297,16 +289,17 @@ pub fn memory(policy: &CompactPolicy) -> Memory {
 /// few seconds, or starts a [`Compactor`]; the browser module has neither
 /// threads nor a file to write beside, and compacts when its page says so.
 pub fn compact_when_due(db: &RwLock<Database>, policy: &CompactPolicy) -> Option<Result<Response>> {
-    compact_when_due_in(db, policy, memory(policy))
+    compact_when_due_in(db, policy, memory(policy)).map(|(r, _)| r)
 }
 
 /// [`compact_when_due`] beside the memory `m` says the file's pages have
-/// ([`memory`]).
+/// ([`memory`]), and how long the compact held the lock, each hold at its
+/// longest ([`Database::maintain_held`]): what a server's log names.
 pub fn compact_when_due_in(
     db: &RwLock<Database>,
     policy: &CompactPolicy,
     m: Memory,
-) -> Option<Result<Response>> {
+) -> Option<(Result<Response>, super::Holds)> {
     let due = db
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -314,7 +307,7 @@ pub fn compact_when_due_in(
     if !due {
         return None;
     }
-    Database::maintain(db, &Statement::Compact(None))
+    Database::maintain_held(db, &Statement::Compact(None))
 }
 
 /// A thread that compacts one database when it is due, looking every

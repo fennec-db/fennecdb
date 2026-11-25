@@ -4237,24 +4237,37 @@ fn run_query(
     } else if let Some(built) = {
         let running = trace::span("execute");
         running.attr("fennec.beside", true);
+        // A compact says the file's size before and after, as
+        // `--auto-compact`'s line does (`link::said_beside`).
+        let compact = matches!(&*stmt, Statement::Compact(_));
+        let before = compact.then(|| db.read().unwrap_or_else(|e| e.into_inner()).garbage());
         let began = std::time::Instant::now();
         let built = Database::maintain_held(db, &stmt);
         if built.is_none() {
             running.forget();
         }
-        // Said as `--auto-compact`'s compacts are (`link::compact`): how
-        // long it took, and the longest hold of the lock, which every
-        // writer waited out.
-        if let Some((Ok(_), holds)) = &built {
-            let what = match &*stmt {
-                Statement::Compact(_) => "compact",
-                _ => "create index",
-            };
-            crate::log!(
-                "{what}: ran beside the database in {:.1?}, the lock held {:.1?} at most ({holds})",
+        match (&built, before) {
+            (Some((Ok(_), holds)), Some(before)) => {
+                let after = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
+                link::said_beside(
+                    "compact",
+                    format_args!(
+                        "compacted, {:.1} MB -> {:.1} MB",
+                        before.file as f64 / 1e6,
+                        after.file as f64 / 1e6
+                    ),
+                    began.elapsed(),
+                    holds,
+                );
+            }
+            // `index built on `c.f``, or that it was there already.
+            (Some((Ok(Response2::Ok(done)), holds)), None) => link::said_beside(
+                "create index",
+                format_args!("{done}"),
                 began.elapsed(),
-                holds.longest()
-            );
+                holds,
+            ),
+            _ => {}
         }
         built.map(|(r, _)| r)
     } {

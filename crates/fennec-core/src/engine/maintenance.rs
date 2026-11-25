@@ -5,12 +5,13 @@
 //! by [`Database::execute`], the whole build holds the write lock, and every
 //! reader and writer waits it out -- ~10 s for an HNSW index over 100 000 x
 //! 128. [`Database::maintain`] takes under the read lock only what the build
-//! reads from -- each store as it stands, cloned as a pin clones it -- reads
+//! reads from -- each store as it stands, taken as a pinned read takes it -- reads
 //! the documents and builds with no lock held, catches up with the writes
 //! made meanwhile in rounds beside the database, and takes the write lock
-//! only for the last few and to put the result in place. Read under the
-//! read lock, a compact's graphs' vectors held it for seconds past the page
-//! cache, and every writer with it -- and, a writer waiting, every reader.
+//! only for the last few -- a graph's at most [`GRAPH_HELD`] -- and to put
+//! the result in place. Read under the read lock, a compact's graphs'
+//! vectors held it for seconds past the page cache, and every writer with
+//! it -- and, a writer waiting, every reader.
 //!
 //! Those writes are known exactly, not guessed from the change ring (which
 //! a long build would overflow): every write passes through
@@ -27,9 +28,12 @@ use std::time::Duration;
 /// each kind of hold at its longest: what a writer waited out at most, and
 /// -- `RwLock` making a reader wait behind a waiting writer -- every reader
 /// after it. Its build is a compact's graphs or a `create index`'s index;
-/// its file a compact's rewrite. One `Instant` a hold
-/// ([`Database::last_holds`]).
+/// its file a compact's rewrite. One `Instant` a hold, handed back by the
+/// maintenance that held them ([`Database::maintain_held`]), never read
+/// off the database after it: another may have run between. More kinds
+/// may come, so a caller reads the fields and never builds one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Holds {
     /// The read lock the build's stores were taken under.
     pub copy: Duration,
@@ -195,12 +199,11 @@ struct IndexCopy {
     /// orders its text in, and the fold a `nocase` field's keys are.
     order: TextOrder,
     values: Vec<(DocId, Option<Value>)>,
-    /// The collection's store as it stood when the copy was taken, cloned
-    /// under the read lock -- its records in the file and its segments
-    /// shared, its id index copied, 12 bytes a row -- and shared with the
-    /// collection's other graphs: `values` is read from it with no lock
-    /// held ([`Self::read`]), and it is let go of then.
-    from: Option<Arc<Store>>,
+    /// The collection's store as it stood when the copy was taken, as a
+    /// pin takes it ([`Taken`]), shared with the collection's other graphs:
+    /// `values` is read from it with no lock held ([`Self::read`]), and it
+    /// is let go of then.
+    from: Option<Arc<Taken>>,
     /// Where the field is in a payload, past the dropped places before it:
     /// what a catch-up round reads of a document looked up under the lock
     /// and read after it ([`crate::store::field_at`]).
@@ -219,10 +222,41 @@ struct CompositeCopy {
     keys: Vec<(DocId, crate::composite::RowKey)>,
     /// What the keys were made by: the empty index over the parts.
     keyed: CompositeIndex,
-    /// The store and its schema as they stood when the copy was taken:
-    /// `keys` is read from them with no lock held, as an [`IndexCopy`]'s
-    /// values are.
-    from: Option<(Store, SchemaCell)>,
+    /// The store, as a pin takes it, and its schema as they stood when the
+    /// copy was taken: `keys` is read from them with no lock held, as an
+    /// [`IndexCopy`]'s values are.
+    from: Option<(Taken, SchemaCell)>,
+}
+
+/// A collection's store as a pinned read takes it ([`Store::pinned`]): the
+/// id index copied, 12 bytes a row, the segments and the mapped file
+/// shared, and the stretches of the file an image writes from left out --
+/// a read by id never asks for them, and a mapped tail of single writes
+/// holds 16 bytes of them a write. Its id index is charged to the pins'
+/// budget while it is held, as a pin's is ([`Database::pin`]): a long read
+/// that would take the budget past it runs under the lock meanwhile. A
+/// maintenance never declines for it -- reading under the lock instead is
+/// what held a server 5-6 s.
+struct Taken {
+    store: Store,
+    #[cfg(not(target_arch = "wasm32"))]
+    charged: (Arc<std::sync::atomic::AtomicUsize>, usize),
+}
+
+impl std::ops::Deref for Taken {
+    type Target = Store;
+
+    fn deref(&self) -> &Store {
+        &self.store
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Taken {
+    fn drop(&mut self) {
+        let (pins, bytes) = &self.charged;
+        pins.fetch_sub(*bytes, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[cfg(feature = "composite")]
@@ -392,9 +426,10 @@ impl Database {
     }
 
     /// [`Self::maintain`], and how long it held the lock, each hold at its
-    /// longest: what a server's log says of a statement it ran so. Where
-    /// it put its result in place, [`Self::last_holds`] says the same until
-    /// the next.
+    /// longest: what a server's log says of a compact or a `create index`,
+    /// whoever ran it. Handed back rather than kept on the database, where
+    /// a second maintenance finishing first would have its holds read for
+    /// this one's.
     pub fn maintain_held(
         db: &RwLock<Database>,
         stmt: &Statement,
@@ -414,7 +449,6 @@ impl Database {
             let began = Began::now();
             let r = run(&mut g);
             holds.put = began.held();
-            g.note_holds(&r, holds);
             r
         };
         let r = match stmt {
@@ -453,17 +487,25 @@ impl Database {
         Some((r, holds))
     }
 
-    /// Notes how long the maintenance that put its result in place under
-    /// this write lock held the lock ([`Self::last_holds`]); one refused
-    /// notes nothing.
-    #[inline]
-    fn note_holds<T>(&mut self, r: &Result<T>, holds: Holds) {
+    /// `store` as a pinned read takes it, charged to the pins' budget until
+    /// it is let go of ([`Taken`]).
+    fn taken(&self, store: &Store) -> Taken {
         #[cfg(not(target_arch = "wasm32"))]
-        if r.is_ok() {
-            self.holds = holds;
+        {
+            let bytes = store.pinned_bytes();
+            self.pins
+                .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+            Taken {
+                store: store.pinned(),
+                charged: (Arc::clone(&self.pins), bytes),
+            }
         }
+        // The browser module has no pins, and maintains nothing beside a
+        // page (fennec-wasm calls no `maintain`).
         #[cfg(target_arch = "wasm32")]
-        let _ = (r, holds);
+        Taken {
+            store: store.clone(),
+        }
     }
 
     fn watch(&self, cid: u32) -> u64 {
@@ -605,7 +647,7 @@ impl Database {
             ty: c.schema.fields[pos].ty.clone(),
             order: c.schema.fields[pos].text_order(),
             values: Vec::new(),
-            from: Some(Arc::new(c.store.clone())),
+            from: Some(Arc::new(self.taken(&c.store))),
             place: c.schema.place(pos),
         }))
     }
@@ -663,6 +705,12 @@ impl Database {
         // have: out with the value the build saw, in with the one there now.
         match index {
             Built::Vector(mut ix) => {
+                // Each a link under the write lock: past the bound the
+                // rounds fell behind the vectors written, and the index is
+                // refused rather than every writer held while it catches up.
+                if ids.len() > GRAPH_HELD {
+                    return Err(fell_behind(&copy.collection, &copy.field, ids.len()));
+                }
                 // `insert` keeps a node that holds the vector already, and
                 // retires it otherwise.
                 for id in ids {
@@ -779,7 +827,7 @@ impl Database {
             index: comp.clone(),
             keys: Vec::new(),
             keyed,
-            from: Some((c.store.clone(), c.schema.clone())),
+            from: Some((self.taken(&c.store), c.schema.clone())),
         }))
     }
 
@@ -870,13 +918,13 @@ impl Database {
         let mut copies = Vec::new();
         for name in targets {
             let c = &self.collections[&name];
-            let mut store: Option<Arc<Store>> = None;
+            let mut store: Option<Arc<Taken>> = None;
             for (field, ix) in &c.vectors {
                 if ix.dead() == 0 {
                     continue;
                 }
                 let pos = c.schema.field_pos(field).unwrap();
-                let from = store.get_or_insert_with(|| Arc::new(c.store.clone()));
+                let from = store.get_or_insert_with(|| Arc::new(self.taken(&c.store)));
                 copies.push(IndexCopy {
                     token: self.watch(c.id),
                     cid: c.id,
@@ -902,7 +950,13 @@ impl Database {
     fn finish_graphs(&mut self, built: Vec<BuiltIndex>) -> Result<()> {
         let tails: Vec<Option<Tail>> = built.iter().map(|b| self.unwatch(b.copy.token)).collect();
         self.refuse_if_failed()?;
-        for (b, t) in built.into_iter().zip(tails) {
+        // Every collection asked before any graph is placed: a refusal
+        // places none. Asked as each was placed, a compact of two whose
+        // second was altered meanwhile put the first's graph in place and
+        // then refused -- with the ids a round drained for it lost, so it
+        // held a document's old vector and the graph keeper would have
+        // saved it so.
+        for (b, t) in built.iter().zip(&tails) {
             let moved = t.as_ref().is_none_or(|t| t.schema);
             if moved || self.named(b.copy.cid).as_deref() != Some(&b.copy.collection) {
                 return Err(Error::Query(format!(
@@ -910,6 +964,10 @@ impl Database {
                     b.copy.collection
                 )));
             }
+        }
+        // What the write lock links, the graphs' together.
+        let mut room = GRAPH_HELD;
+        for (b, t) in built.into_iter().zip(tails) {
             // A document it cannot read leaves the graph as it stands,
             // tombstones and all, and answering as it did: one built
             // without it would not, and the compact is never refused for
@@ -920,10 +978,19 @@ impl Database {
             let Built::Vector(mut ix) = b.index else {
                 unreachable!("only graphs are rebuilt beside a mapped compact")
             };
-            let c = self.collections.get_mut(&b.copy.collection).unwrap();
-            let mut ids = t.unwrap().ids;
+            let Some(Tail { mut ids, .. }) = t else {
+                unreachable!("every tail was asked for above")
+            };
             ids.sort_unstable();
             ids.dedup();
+            // The rounds fell behind the vectors written: the graph stays as
+            // it stands, as where a document does not read, for the next
+            // compact, rather than every writer held while it catches up.
+            if ids.len() > room {
+                continue;
+            }
+            room -= ids.len();
+            let c = self.collections.get_mut(&b.copy.collection).unwrap();
             let caught: Result<()> = ids.into_iter().try_for_each(|id| {
                 ix.remove(id);
                 if let Some(Value::Vector(v)) = c.store.read_field(id, b.copy.pos)? {
@@ -1139,15 +1206,29 @@ impl Database {
 /// copied; the next round takes those written meanwhile, and the write lock
 /// only the last few. `longest` is the longest hold of the read lock so
 /// far.
+///
+/// What bounds the last: each write a round copies was appended to the file
+/// by its writer under the write lock, parsed, encoded and indexed there,
+/// and a round copies its bytes with no lock held and none of that -- so the
+/// rounds shrink by the writes' cost over the copy's, and the write lock
+/// copies what was written during a round of fewer than [`CATCH_UP_DONE`].
+/// Only a copy slower than the writes it copies runs the 16 rounds out. A
+/// graph's rounds have no such margin -- a link costs as much as the one
+/// the write that made it paid, and a block's puts link on every core --
+/// so the write lock links [`GRAPH_HELD`] at most. A document the store
+/// cannot look up fails the compact: the new file would be without it.
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 fn catch_up(db: &RwLock<Database>, b: &mut Beside, longest: &mut Duration) -> Result<usize> {
     let tokens: Vec<u64> = b.parts.iter().map(|p| p.token).collect();
-    let Some(drained) = drain(db, &tokens, longest)? else {
+    let drained = drain(db, &tokens, longest)?;
+    // A collection changed: the finish refuses the rewrite, and copies
+    // nothing more.
+    if drained.iter().any(Option::is_none) {
         return Ok(0);
-    };
+    }
     let mut copied = 0;
     let mut docs = crate::store::Snapshot::default();
-    for (p, mut ids) in b.parts.iter_mut().zip(drained) {
+    for (p, mut ids) in b.parts.iter_mut().zip(drained.into_iter().flatten()) {
         ids.sort_unstable();
         ids.dedup();
         copied += ids.len();
@@ -1162,14 +1243,14 @@ fn catch_up(db: &RwLock<Database>, b: &mut Beside, longest: &mut Duration) -> Re
 }
 
 /// The ids written under each of `tokens` since the last round, drained
-/// under one hold of the read lock; `None` where a collection's schema
-/// changed or it is gone, which the finish refuses.
+/// under one hold of the read lock, every tail's: `None` where a
+/// collection's schema changed or it is gone, which the finish refuses.
 #[cfg(not(target_arch = "wasm32"))]
 fn drain(
     db: &RwLock<Database>,
     tokens: &[u64],
     longest: &mut Duration,
-) -> Result<Option<Vec<Vec<DocId>>>> {
+) -> Result<Vec<Option<Vec<DocId>>>> {
     let g = read(db);
     let began = Began::now();
     g.refuse_if_failed()?;
@@ -1194,12 +1275,12 @@ fn looked_up(
 ) -> Result<bool> {
     let g = read(db);
     let began = Began::now();
-    let Some(live) = g.collections.get(name).filter(|c| c.id == cid) else {
-        return Ok(false);
+    let r = match g.collections.get(name).filter(|c| c.id == cid) {
+        Some(live) => live.store.snapshot(ids, docs).map(|()| true),
+        None => Ok(false),
     };
-    live.store.snapshot(ids, docs)?;
     *longest = (*longest).max(began.held());
-    Ok(true)
+    r
 }
 
 /// Catches the graphs built beside the database up with the writes made
@@ -1208,12 +1289,14 @@ fn looked_up(
 /// time and read after it, as the rewrite's rounds copy theirs
 /// ([`catch_up`]), and each vector linked into its graph with no lock held
 /// -- under the write lock, a link at 768 dimensions takes about a
-/// millisecond, and a build of seconds meets thousands of writes. A round
-/// catching fewer than [`GRAPH_DONE`] ends them, and the write lock takes
-/// the few written during it. `retire`: a write is taken out of the graph
-/// before it goes in again, as a compact's rebuilt graph always took the
-/// writes made meanwhile (`finish_graphs`); else a node holding the vector
-/// already is kept, as `create index` keeps it (`finish_index`).
+/// millisecond ([`GRAPH_HELD`]), and a build of seconds meets thousands of
+/// writes. A round catching fewer than [`GRAPH_DONE`] ends them, and the
+/// write lock takes the few written during it, [`GRAPH_HELD`] at most.
+/// `retire`: a write is
+/// taken out of the graph before it goes in again, as a compact's rebuilt
+/// graph always took the writes made meanwhile (`finish_graphs`); else a
+/// node holding the vector already is kept, as `create index` keeps it
+/// (`finish_index`).
 #[cfg(not(target_arch = "wasm32"))]
 fn catch_up_graphs(
     db: &RwLock<Database>,
@@ -1230,7 +1313,11 @@ fn catch_up_graphs(
 }
 
 /// A round of [`catch_up_graphs`]: how many ids it caught, 0 once a
-/// collection changed, which the finish refuses.
+/// collection changed, which the finish refuses whole. A chunk that cannot
+/// be looked up or read leaves its graph as it stood (`broken`), as one the
+/// copy cannot read does: a compact keeps it, and `create index` is
+/// refused. A check of a graph before a chunk is linked into it -- a bound
+/// on its nodes -- goes where `linked` is made, and marks it so too.
 #[cfg(not(target_arch = "wasm32"))]
 fn graph_round(
     db: &RwLock<Database>,
@@ -1239,12 +1326,13 @@ fn graph_round(
     longest: &mut Duration,
 ) -> Result<usize> {
     let tokens: Vec<u64> = built.iter().map(|b| b.copy.token).collect();
-    let Some(drained) = drain(db, &tokens, longest)? else {
+    let drained = drain(db, &tokens, longest)?;
+    if drained.iter().any(Option::is_none) {
         return Ok(0);
-    };
+    }
     let mut caught = 0;
     let mut docs = crate::store::Snapshot::default();
-    for (b, mut ids) in built.iter_mut().zip(drained) {
+    for (b, mut ids) in built.iter_mut().zip(drained.into_iter().flatten()) {
         // A graph left as it stood takes nothing more.
         let (Built::Vector(ix), None) = (&mut b.index, &b.broken) else {
             continue;
@@ -1252,42 +1340,55 @@ fn graph_round(
         ids.sort_unstable();
         ids.dedup();
         caught += ids.len();
-        let place = b.copy.place;
         for chunk in ids.chunks(CATCH_UP_CHUNK) {
-            if !looked_up(
+            let linked = match looked_up(
                 db,
                 &b.copy.collection,
                 b.copy.cid,
                 chunk,
                 &mut docs,
                 longest,
-            )? {
-                return Ok(0);
-            }
-            #[cfg(test)]
-            seam("round");
-            let read = docs.each(|id, payload| {
-                let v = payload
-                    .map(|p| crate::store::field_at(p, place))
-                    .transpose()?;
-                match v {
-                    Some(Value::Vector(v)) => {
-                        if retire {
-                            ix.remove(id);
-                        }
-                        ix.insert(id, &v);
-                    }
-                    _ => ix.remove(id),
-                }
-                Ok(())
-            });
-            if let Err(e) = read {
+            ) {
+                Ok(true) => link_looked_up(ix, &docs, b.copy.place, retire),
+                Ok(false) => return Ok(0),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = linked {
                 b.broken = Some(e);
                 break;
             }
         }
     }
     Ok(caught)
+}
+
+/// Links the documents a round looked up into `ix`, with no lock held: each
+/// vector at `place` in its payload, and each document without one taken
+/// out. `retire` as [`catch_up_graphs`] says.
+#[cfg(not(target_arch = "wasm32"))]
+fn link_looked_up(
+    ix: &mut VectorIndex,
+    docs: &crate::store::Snapshot,
+    place: usize,
+    retire: bool,
+) -> Result<()> {
+    #[cfg(test)]
+    seam("round");
+    docs.each(|id, payload| {
+        match payload
+            .map(|p| crate::store::field_at(p, place))
+            .transpose()?
+        {
+            Some(Value::Vector(v)) => {
+                if retire {
+                    ix.remove(id);
+                }
+                ix.insert(id, &v);
+            }
+            _ => ix.remove(id),
+        }
+        Ok(())
+    })
 }
 
 /// Each of `docs` (ascending, once each) takes the state it had when they
@@ -1610,7 +1711,6 @@ fn index_online(
         let began = Began::now();
         let r = g.finish_index(built);
         holds.put = began.held();
-        g.note_holds(&r, *holds);
         r
     };
     watching.tokens.clear();
@@ -1652,7 +1752,6 @@ fn composite_online(
         let began = Began::now();
         let r = g.finish_composite(copy, built);
         holds.put = began.held();
-        g.note_holds(&r, *holds);
         r
     };
     watching.tokens.clear();
@@ -1727,6 +1826,30 @@ const CATCH_UP_DONE: usize = 1_000;
 /// lock that follows, where a rewrite's is a copy of the record.
 #[cfg(not(target_arch = "wasm32"))]
 const GRAPH_DONE: usize = 64;
+/// The links the write lock makes at most once a graph's rounds end, its
+/// graphs' together: what was written during the last round. A single
+/// link took 0.82-0.88 ms at the median into a graph of 20 000 vectors of
+/// 768 dimensions, 1.14 ms into one of 100 000, and 0.08 ms at 16
+/// dimensions (one core of an M-series Mac), so 128 hold every writer
+/// 110-150 ms and 10 ms at most -- under the 0.19-0.31 s the rewrite's
+/// copy holds the soak's file. Twice [`GRAPH_DONE`]: a round
+/// ends with fewer than 64, and where the links keep up with the vectors
+/// written the round after it takes fewer again, so only a burst or
+/// writes that outran 16 rounds pass it. Past it a compact keeps the graph
+/// as it stood, for the next, and `create index` is refused
+/// ([`fell_behind`]); with no bound the last hold linked whatever the 16th
+/// round left, without end where the writes outran the links.
+const GRAPH_HELD: usize = 128;
+
+/// `create index`'s refusal where the writes left more for the write lock
+/// to link than [`GRAPH_HELD`].
+fn fell_behind(collection: &str, field: &str, left: usize) -> Error {
+    Error::Query(format!(
+        "the graph of `{collection}.{field}` fell behind its writes: {left} documents were \
+         written during its last round of catching up, and the write lock links {GRAPH_HELD} \
+         at most; run `create index` again when fewer vectors are being written"
+    ))
+}
 /// The documents a catch-up looks up under one hold of the read lock, and
 /// copies after it: 4 096, held 95 to 245 us at the median and 3.1 ms at
 /// the most, where copied under it they held it about 6 ms, and up to 291
@@ -1803,7 +1926,6 @@ fn rewrite_beside(
                 let began = Began::now();
                 let r = g.finish_beside(b);
                 holds.swap = began.held();
-                g.note_holds(&r, *holds);
                 r
             };
             watching.tokens.clear();
@@ -1824,7 +1946,6 @@ fn rewrite_beside(
     let began = Began::now();
     let r = g.compact(which, false);
     holds.swap = began.held();
-    g.note_holds(&r, *holds);
     r
 }
 
@@ -1836,8 +1957,12 @@ mod tests {
     use crate::value::VecPrec;
 
     fn put(db: &mut Database, id: i64, v: [f32; 2]) {
+        put_to(db, "g", id, v)
+    }
+
+    fn put_to(db: &mut Database, collection: &str, id: i64, v: [f32; 2]) {
         db.execute(&Statement::Put {
-            collection: "g".into(),
+            collection: collection.into(),
             docs: vec![vec![
                 ("id".into(), Expr::Lit(Value::Int(id))),
                 ("meta".into(), Expr::Lit(Value::Text("m".into()))),
@@ -1948,29 +2073,53 @@ mod tests {
     /// graph, for `create index` to build.
     fn graphed(n: i64, indexed: bool) -> Database {
         let mut db = Database::new();
+        made(&mut db, "g", indexed);
+        filled(&mut db, "g", n);
+        written_over(&mut db, "g", n);
+        db
+    }
+
+    /// The collection `name`: `meta`, a vector `v` with its graph where
+    /// `indexed` says, and a `tag` a second `create index` takes.
+    fn made(db: &mut Database, name: &str, indexed: bool) {
         let v = Field::new("v", DataType::Vector(2, VecPrec::F32));
         let v = match indexed {
             true => v.indexed(IndexKind::Vector(VectorIndexSpec::default().resolved())),
             false => v,
         };
-        let schema = Schema::new("g", vec![Field::new("meta", DataType::Json), v]).expect("schema");
+        let fields = vec![
+            Field::new("meta", DataType::Json),
+            v,
+            Field::new("tag", DataType::Text),
+        ];
         db.execute(&Statement::CreateCollection {
-            schema,
+            schema: Schema::new(name, fields).expect("schema"),
             if_not_exists: false,
         })
         .expect("create");
+    }
+
+    /// `n` documents in `name`, each with its vector.
+    fn filled(db: &mut Database, name: &str, n: i64) {
         for id in 1..=n {
-            put(&mut db, id, vec_of(id, 0));
+            put_to(db, name, id, vec_of(id, 0));
         }
+    }
+
+    /// Every tenth of `name`'s `n` documents written over: a tombstone each.
+    fn written_over(db: &mut Database, name: &str, n: i64) {
         for id in (1..=n).step_by(10) {
-            put(&mut db, id, vec_of(id, 1));
+            put_to(db, name, id, vec_of(id, 1));
         }
-        db
     }
 
     /// Every document's vector, in id order.
     fn vectors(db: &Database) -> Vec<(DocId, Vec<f32>)> {
-        let c = db.collection("g").expect("g");
+        vectors_of(db, "g")
+    }
+
+    fn vectors_of(db: &Database, name: &str) -> Vec<(DocId, Vec<f32>)> {
+        let c = db.collection(name).expect("the collection");
         c.store
             .ids()
             .into_iter()
@@ -2019,46 +2168,73 @@ mod tests {
         ix
     }
 
+    /// Runs `stmt` beside the database, `at` called where it holds no lock
+    /// -- `read` once a copy's first value is read, `round` once a round's
+    /// documents are looked up -- with the point, how many times it was met
+    /// before, and the database. A write there takes the lock with
+    /// [`writer`], which fails while this thread holds the read lock. Its
+    /// answer, and how long it held the lock.
+    fn beside(
+        lock: &Arc<RwLock<Database>>,
+        stmt: &Statement,
+        mut at: impl FnMut(&str, usize, &RwLock<Database>) + 'static,
+    ) -> (Result<Response>, Holds) {
+        let l = Arc::clone(lock);
+        let (mut reads, mut rounds) = (0, 0);
+        let seen = SEAM.with(|s| {
+            s.borrow_mut().replace(Box::new(move |point: &str| {
+                let met = match point {
+                    "read" => &mut reads,
+                    _ => &mut rounds,
+                };
+                *met += 1;
+                at(point, *met - 1, &l);
+            }))
+        });
+        assert!(seen.is_none());
+        let r = Database::maintain_held(lock, stmt).expect("a maintenance");
+        SEAM.with(|s| s.borrow_mut().take());
+        r
+    }
+
+    /// The write lock, taken where a maintenance holds none: `try_write`
+    /// fails while this thread holds the read lock.
+    fn writer(l: &RwLock<Database>) -> std::sync::RwLockWriteGuard<'_, Database> {
+        l.try_write().expect("a writer got through, no lock held")
+    }
+
     /// Runs `stmt` beside the database, a writer getting through where it
     /// holds no lock: a hundred documents written over once the copy's first
     /// vector is read -- past `GRAPH_DONE`, so a second round runs -- and,
     /// once the first round has looked its documents up, one deleted and
-    /// one made, each past every id the first round holds. Each write takes
-    /// the write lock with `try_write`, which fails while this thread holds
-    /// the read lock. The ids written.
-    fn written_beside(lock: &Arc<RwLock<Database>>, stmt: &Statement) -> Vec<DocId> {
+    /// one made, each past every id the first round holds. The ids written,
+    /// and how long it held the lock.
+    fn written_beside(lock: &Arc<RwLock<Database>>, stmt: &Statement) -> (Vec<DocId>, Holds) {
         let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (l, w) = (Arc::clone(lock), Arc::clone(&written));
-        let mut rounds = 0;
-        let seen = SEAM.with(|s| {
-            s.borrow_mut().replace(Box::new(move |at: &str| {
-                let mut w = w.lock().expect("written");
-                let mut g = l.try_write().expect("a writer got through, no lock held");
-                match at {
-                    "read" if w.is_empty() => {
-                        for id in 1..=100 {
-                            put(&mut g, id, vec_of(id, 2));
-                            w.push(id as DocId);
-                        }
+        let w = Arc::clone(&written);
+        let (r, holds) = beside(lock, stmt, move |point, met, l| {
+            let mut w = w.lock().expect("written");
+            match (point, met) {
+                ("read", 0) => {
+                    let mut g = writer(l);
+                    for id in 1..=100 {
+                        put(&mut g, id, vec_of(id, 2));
+                        w.push(id as DocId);
                     }
-                    "round" if rounds == 0 => {
-                        rounds += 1;
-                        del(&mut g, 150);
-                        put(&mut g, 400, vec_of(400, 0));
-                        w.extend([150, 400]);
-                    }
-                    _ => {}
                 }
-            }))
+                ("round", 0) => {
+                    let mut g = writer(l);
+                    del(&mut g, 150);
+                    put(&mut g, 400, vec_of(400, 0));
+                    w.extend([150, 400]);
+                }
+                _ => {}
+            }
         });
-        assert!(seen.is_none());
-        Database::maintain(lock, stmt)
-            .expect("a maintenance")
-            .expect("it ran");
-        SEAM.with(|s| s.borrow_mut().take());
+        r.expect("it ran");
         let written = written.lock().expect("written").clone();
         assert_eq!(written.len(), 102, "both seams were passed");
-        written
+        (written, holds)
     }
 
     /// A compact reads its graphs' vectors with no lock held, catches up
@@ -2070,22 +2246,33 @@ mod tests {
         let db = graphed(300, true);
         assert_eq!(db.collection("g").expect("g").vectors["v"].dead(), 30);
         let before = vectors(&db);
+        compacted_beside(db, before);
+    }
+
+    /// [`a_compact_reads_its_graphs_with_no_lock_held`] of `db`: the graph
+    /// it keeps is the one the read lock built, and every live document's
+    /// vector is in it.
+    fn compacted_beside(db: Database, before: Vec<(DocId, Vec<f32>)>) {
         let lock = Arc::new(RwLock::new(db));
-        let written = written_beside(&lock, &Statement::Compact(None));
+        let (written, holds) = written_beside(&lock, &Statement::Compact(None));
         let db = lock.read().expect("lock");
         let ix = &db.collection("g").expect("g").vectors["v"];
         assert_eq!(
             ix.serialize_graph(),
             locked(&db, &before, &written, true).serialize_graph()
         );
-        let mut rebuilt = VectorIndex::with_precision(2, spec(&db), VecPrec::F32);
-        rebuilt.insert_batch(&vectors(&db));
-        assert_eq!(ix.dump(1..=400), rebuilt.dump(1..=400));
+        assert_eq!(ix.dump(1..=400), rebuilt(&db).dump(1..=400));
         assert_eq!(ix.len(), 300);
         // Each write meanwhile a tombstone, for the next compact.
         assert_eq!(ix.dead(), 101);
-        let holds = db.last_holds();
         assert!(holds.swap > Duration::ZERO && holds.longest() >= holds.swap);
+    }
+
+    /// The graph a rebuild at the end holds: every live document's vector.
+    fn rebuilt(db: &Database) -> VectorIndex {
+        let mut ix = VectorIndex::with_precision(2, spec(db), VecPrec::F32);
+        ix.insert_batch(&vectors(db));
+        ix
     }
 
     /// `create index` reads its field with no lock held too, and links the
@@ -2096,16 +2283,7 @@ mod tests {
         let db = graphed(300, false);
         let before = vectors(&db);
         let lock = Arc::new(RwLock::new(db));
-        let spec = VectorIndexSpec::default().resolved();
-        let written = written_beside(
-            &lock,
-            &Statement::CreateIndex {
-                collection: "g".into(),
-                field: "v".into(),
-                kind: IndexKind::Vector(spec),
-                if_not_exists: false,
-            },
-        );
+        let (written, holds) = written_beside(&lock, &create_index("v"));
         let db = lock.read().expect("lock");
         let ix = &db.collection("g").expect("g").vectors["v"];
         assert_eq!(
@@ -2113,7 +2291,21 @@ mod tests {
             locked(&db, &before, &written, false).serialize_graph()
         );
         assert_eq!(ix.len(), 300);
-        assert!(db.last_holds().put > Duration::ZERO);
+        assert!(holds.put > Duration::ZERO);
+    }
+
+    /// `create index` on `g`'s `field`: a graph on `v`, a hash on `tag`.
+    fn create_index(field: &str) -> Statement {
+        let kind = match field {
+            "v" => IndexKind::Vector(VectorIndexSpec::default().resolved()),
+            _ => IndexKind::Hash { unique: false },
+        };
+        Statement::CreateIndex {
+            collection: "g".into(),
+            field: field.into(),
+            kind,
+            if_not_exists: false,
+        }
     }
 
     /// With no write beside it, a compact beside the database rebuilds the
@@ -2170,5 +2362,285 @@ mod tests {
         let db = lock.read().expect("lock");
         let ix = &db.collection("g").expect("g").vectors["v"];
         assert_eq!((ix.len(), ix.dead(), ix.serialize_graph()), stood);
+    }
+
+    /// [`a_compact_reads_its_graphs_with_no_lock_held`] over a mapped file:
+    /// the documents the copy reads in the file, every tenth written over
+    /// since and held in memory, and the rewrite written beside it.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    #[test]
+    fn a_compact_of_a_mapped_file_reads_its_graphs_with_no_lock_held() {
+        let scratch = crate::engine::unwinding::Scratch::new("fennecdb-graphs-beside");
+        let path = scratch.0.join("g.fennec");
+        {
+            let mut db = crate::fs::open(&path).expect("open");
+            made(&mut db, "g", true);
+            filled(&mut db, "g", 300);
+            db.sync().expect("sync");
+        }
+        let mut db = crate::fs::open(&path).expect("open again");
+        assert!(db.mapped, "a mapped file");
+        written_over(&mut db, "g", 300);
+        assert_eq!(db.collection("g").expect("g").vectors["v"].dead(), 30);
+        let before = vectors(&db);
+        compacted_beside(db, before);
+    }
+
+    /// A compact of several collections, one of them changed while its
+    /// graphs were built -- dropped, altered, or given another index by a
+    /// second `create index` beside it -- is refused, and places no graph:
+    /// each stands as the writes left it. Asked one at a time, the first's
+    /// rebuilt graph went in place before the second's change refused the
+    /// compact, without the write a round had drained for it -- document
+    /// 200's old vector, which the graph keeper would then have saved.
+    #[test]
+    fn a_compact_of_several_collections_places_no_graph_where_one_changed() {
+        for change in ["drop", "alter", "index"] {
+            let twin = || {
+                let mut db = graphed(300, true);
+                made(&mut db, "h", true);
+                filled(&mut db, "h", 50);
+                written_over(&mut db, "h", 50);
+                db
+            };
+            let changed = move |g: &mut Database| match change {
+                "drop" => g.execute(&Statement::DropCollection {
+                    name: "h".into(),
+                    if_exists: false,
+                }),
+                "alter" => g.execute(&Statement::AlterCollection {
+                    collection: "h".into(),
+                    change: crate::query::Alter::AddField(Field::new("more", DataType::Text)),
+                }),
+                _ => unreachable!("beside"),
+            };
+            let lock = Arc::new(RwLock::new(twin()));
+            let (r, _) = beside(&lock, &Statement::Compact(None), move |point, met, l| {
+                if (point, met) != ("read", 0) {
+                    return;
+                }
+                put(&mut writer(l), 200, vec_of(200, 2));
+                match change {
+                    "index" => {
+                        let mut index = create_index("tag");
+                        if let Statement::CreateIndex { collection, .. } = &mut index {
+                            *collection = "h".into();
+                        }
+                        Database::maintain(l, &index)
+                            .expect("a maintenance")
+                            .expect("the second index");
+                    }
+                    _ => {
+                        changed(&mut writer(l)).expect("the change");
+                    }
+                }
+            });
+            assert!(
+                matches!(&r, Err(Error::Query(m)) if m.starts_with("`h` changed while it was compacted")),
+                "{change}: {r:?}"
+            );
+            let mut want = twin();
+            put(&mut want, 200, vec_of(200, 2));
+            let db = lock.read().expect("lock");
+            let graph = |db: &Database, name: &str| {
+                let ix = &db.collection(name).expect("the collection").vectors["v"];
+                (ix.dead(), ix.serialize_graph())
+            };
+            assert_eq!(graph(&db, "g"), graph(&want, "g"), "{change}");
+            assert_eq!(graph(&db, "g").0, 31, "{change}: no graph placed");
+            if change != "drop" {
+                assert_eq!(graph(&db, "h"), graph(&want, "h"), "{change}");
+            }
+        }
+    }
+
+    /// A document written in one round and again in the next is caught up
+    /// with twice, and the graph holds its last vector: every live
+    /// document's, as a rebuild at the end does -- for a compact, a
+    /// tombstone more than the read lock would have left, for the next.
+    #[test]
+    fn a_document_written_across_rounds_holds_its_last_vector() {
+        for stmt in [Statement::Compact(None), create_index("v")] {
+            let indexed = matches!(stmt, Statement::Compact(_));
+            let lock = Arc::new(RwLock::new(graphed(300, indexed)));
+            let (r, _) = beside(&lock, &stmt, |point, met, l| match (point, met) {
+                // A round of 100, then one of the second write alone.
+                ("read", 0) => {
+                    for id in 1..=100 {
+                        put(&mut writer(l), id, vec_of(id, 2));
+                    }
+                }
+                ("round", 0) => put(&mut writer(l), 7, vec_of(7, 3)),
+                _ => {}
+            });
+            r.expect("it ran");
+            let db = lock.read().expect("lock");
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            assert_eq!(ix.dump(1..=300), rebuilt(&db).dump(1..=300), "{stmt:?}");
+            // Each of the 100 a tombstone, and the 7th's node of the first
+            // round another.
+            assert_eq!(ix.dead(), 101, "{stmt:?}");
+        }
+    }
+
+    /// A vector written again unchanged, and one another document's node
+    /// holds, are each one node ("a vector written again is one node"):
+    /// the graph is the one the read lock built, node for node, and holds
+    /// what a rebuild at the end holds.
+    #[test]
+    fn a_vector_written_unchanged_or_another_s_is_one_node() {
+        for stmt in [Statement::Compact(None), create_index("v")] {
+            let compact = matches!(stmt, Statement::Compact(_));
+            let db = graphed(300, compact);
+            let before = vectors(&db);
+            let lock = Arc::new(RwLock::new(db));
+            let (r, _) = beside(&lock, &stmt, |point, met, l| {
+                if (point, met) == ("read", 0) {
+                    let mut g = writer(l);
+                    // As it stands, and document 5's.
+                    put(&mut g, 3, vec_of(3, 0));
+                    put(&mut g, 4, vec_of(5, 0));
+                }
+            });
+            r.expect("it ran");
+            let db = lock.read().expect("lock");
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            assert_eq!(
+                ix.serialize_graph(),
+                locked(&db, &before, &[3, 4], compact).serialize_graph(),
+                "{stmt:?}"
+            );
+            assert_eq!(ix.dump(1..=300), rebuilt(&db).dump(1..=300), "{stmt:?}");
+            assert_eq!(ix.len(), 300, "{stmt:?}");
+        }
+    }
+
+    /// A block put back while the graph is built leaves nothing to catch up
+    /// with: its writes are noted only as it lands. The graph holds the
+    /// document as it stood, and the write landed beside it.
+    #[test]
+    fn a_block_put_back_during_the_build_reaches_no_graph() {
+        for stmt in [Statement::Compact(None), create_index("v")] {
+            let compact = matches!(stmt, Statement::Compact(_));
+            let db = graphed(300, compact);
+            let before = vectors(&db);
+            let lock = Arc::new(RwLock::new(db));
+            let (r, _) = beside(&lock, &stmt, |point, met, l| {
+                if (point, met) == ("read", 0) {
+                    let mut g = writer(l);
+                    g.begin().expect("begin");
+                    put(&mut g, 8, vec_of(8, 5));
+                    del(&mut g, 12);
+                    g.rollback();
+                    put(&mut g, 9, vec_of(9, 2));
+                }
+            });
+            r.expect("it ran");
+            let db = lock.read().expect("lock");
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            assert_eq!(
+                ix.serialize_graph(),
+                locked(&db, &before, &[9], compact).serialize_graph(),
+                "{stmt:?}"
+            );
+            assert_eq!(ix.dump(1..=300), rebuilt(&db).dump(1..=300), "{stmt:?}");
+            assert_eq!(ix.len(), 300, "{stmt:?}");
+        }
+    }
+
+    /// A second `create index` on the collection while a first builds its
+    /// graph beside it: the second lands, and the first is refused, placing
+    /// nothing.
+    #[test]
+    fn a_second_create_index_during_the_build_refuses_the_first() {
+        let lock = Arc::new(RwLock::new(graphed(300, false)));
+        let (r, _) = beside(&lock, &create_index("v"), |point, met, l| {
+            if (point, met) == ("read", 0) {
+                Database::maintain(l, &create_index("tag"))
+                    .expect("a maintenance")
+                    .expect("the second index");
+            }
+        });
+        assert!(
+            matches!(&r, Err(Error::Query(m)) if m.starts_with("`g` changed while the index was built")),
+            "{r:?}"
+        );
+        let db = lock.read().expect("lock");
+        let g = db.collection("g").expect("g");
+        assert!(g.vectors.is_empty());
+        assert!(matches!(g.schema.fields[1].index, IndexKind::None));
+        assert!(matches!(
+            g.schema.fields[2].index,
+            IndexKind::Hash { unique: false }
+        ));
+    }
+
+    /// What the last round leaves is linked under the write lock up to
+    /// `GRAPH_HELD`; past it a compact keeps the graph the writes left, and
+    /// `create index` is refused saying why, rather than every writer held
+    /// out while it links them.
+    #[test]
+    fn past_the_last_hold_a_compact_keeps_its_graph_and_create_index_is_refused() {
+        for left in [GRAPH_HELD, GRAPH_HELD + 1] {
+            // Ten in the first round, which ends the rounds, and `left`
+            // written during it, for the write lock.
+            let writes = move |point: &str, met: usize, l: &RwLock<Database>| match (point, met) {
+                ("read", 0) => {
+                    for id in 1..=10 {
+                        put(&mut writer(l), id, vec_of(id, 2));
+                    }
+                }
+                ("round", 0) => {
+                    for id in 11..11 + left as i64 {
+                        put(&mut writer(l), id, vec_of(id, 3));
+                    }
+                }
+                _ => {}
+            };
+            let lock = Arc::new(RwLock::new(graphed(300, true)));
+            let (r, holds) = beside(&lock, &Statement::Compact(None), writes);
+            r.expect("the compact");
+            let mut want = graphed(300, true);
+            for id in 1..=10 {
+                put(&mut want, id, vec_of(id, 2));
+            }
+            for id in 11..11 + left as i64 {
+                put(&mut want, id, vec_of(id, 3));
+            }
+            let db = lock.read().expect("lock");
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            let stood = &want.collection("g").expect("g").vectors["v"];
+            assert_eq!(ix.dump(1..=300), stood.dump(1..=300), "{left}");
+            match left > GRAPH_HELD {
+                // As the writes left it: 30 tombstones, and one each.
+                true => assert_eq!(ix.serialize_graph(), stood.serialize_graph(), "{left}"),
+                // Rebuilt, a tombstone each write meanwhile.
+                false => assert_eq!(ix.dead(), 10 + left, "{left}"),
+            }
+            assert!(holds.put > Duration::ZERO);
+            drop(db);
+
+            let lock = Arc::new(RwLock::new(graphed(300, false)));
+            let (r, _) = beside(&lock, &create_index("v"), writes);
+            let db = lock.read().expect("lock");
+            let g = db.collection("g").expect("g");
+            match left > GRAPH_HELD {
+                true => {
+                    let says = format!(
+                        "the graph of `g.v` fell behind its writes: {left} documents were written"
+                    );
+                    assert!(
+                        matches!(&r, Err(Error::Query(m)) if m.starts_with(&says)),
+                        "{r:?}"
+                    );
+                    assert!(g.vectors.is_empty());
+                    assert!(matches!(g.schema.fields[1].index, IndexKind::None));
+                }
+                false => {
+                    r.expect("the index");
+                    assert_eq!(g.vectors["v"].dump(1..=300), rebuilt(&db).dump(1..=300));
+                }
+            }
+        }
     }
 }
