@@ -16,9 +16,9 @@ operator act on it. The check refuses, naming each:
   of a site page -- that is not there;
 - a primitive of its list of in-tree cryptography (PRIMITIVES) whose
   function is gone (each needle is the item itself, `pub fn sha256(`, found
-  outside the file's test module, so a test of the same name does not hold
-  it up), one the list does not hold named in the file, or one the file
-  does not name that the list holds;
+  in code outside every `#[cfg(test)]` item, so neither a comment nor a
+  test of the same name holds it up), one the list does not hold named in
+  the file, or one the file does not name that the list holds;
 - a stale claim, found by phrase (STALE, case-insensitive) in SECURITY.md,
   `crates/*/src` and `site/content/docs`, outside ALLOWED. `no TLS` was true
   until fennec-tls and went on being written -- in a code comment, a help
@@ -42,11 +42,18 @@ column -- is read row by row, and the check refuses:
   links no heading of the file, where its section is;
 - an enforcing item, `path::item` in backticks (`path::Type::method`), that
   is not defined at that path: in a Rust file a `fn`, `struct`, `enum`,
-  `trait`, `type`, `const`, `static` or `mod` of that name outside the
-  file's test module, a method's type a definition or an `impl` there; in a
-  script a function, a class or a binding; in a workflow a job or a step;
+  `trait`, `type`, `const`, `static`, `mod` or `macro_rules!` of that name
+  where Rust's grammar puts an item (ITEM_HEAD), in code -- its comments,
+  strings and characters blanked by secret_eq_check.py's reader, nested
+  block comments, raw strings and lifetimes read as Rust reads them -- and
+  outside every item a `#[cfg(test)]` is on, a method's type a definition
+  or an `impl` there: a name left in a comment, a string or a type (`*const
+  T`, `&'static T`, `-> impl T`) once its item is renamed holds nothing up;
+  in a script a function, a class or a binding; in a workflow a job or a
+  step;
 - a cited test, `path::name`, that is not a test there: a Rust `#[test] fn`
-  (never one `#[ignore]`d, which CI does not run), its file under
+  in code, as an item is read (never one `#[ignore]`d, which CI does not
+  run), its file under
   `crates/*/tests/` a `mod` of the crate's `tests/all.rs` or a `[[test]]`
   of its Cargo.toml, else it is never built; a JS `test('<name>'` or
   `it(`; a Python function; a shell function, or the title a shell suite's
@@ -64,23 +71,30 @@ A pattern that stopped matching would otherwise pass for ever. The rows
 saying "no test" are named on a line of their own: each is a finding still
 open, not a pass.
 
-What a line scan cannot tell, and this does not claim to: a flag read by a
-helper called from a parser rather than named in an arm (it is not found, so
-it is reported -- add the arm's spelling or the flag's use); a comment it
-does not see as one (a block comment, a `//` inside a string, a raw string);
-test code outside a `#[cfg(test)] mod` at the start of a line; and which
-binary a sentence means where no name is near its flag. Nor whether a cited
-test would fail with its enforcement taken away: that is the row's claim,
-made by reading the test, and a reviewer's to try; this holds only that the
-test and the item are still there by the names the row gives.
+What the flags' line scan cannot tell, and this does not claim to: a flag
+read by a helper called from a parser rather than named in an arm (it is
+not found, so it is reported -- add the arm's spelling or the flag's use);
+a comment it does not see as one (a block comment, a `//` inside a string,
+a raw string); test code outside a `#[cfg(test)] mod` at the start of a
+line; and which binary a sentence means where no name is near its flag.
+Rust's items and tests, and the primitives' needles, are read as code
+instead. Nor does any of it prove that a cited test exercises its
+boundary, or would fail with its enforcement taken away: that is the row's
+claim, made by reading the test, and the reviewers' to try; this holds
+only that the test and the item are still there, where the row cites
+them, by the names it gives.
 
     python3 tools/security_md_check.py
 """
 
 import functools
+import os
 import pathlib
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secret_eq_check as reader  # noqa: E402  (the Rust source reader, shared)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -177,6 +191,22 @@ def untested(text):
     """A source file's text before its `#[cfg(test)] mod`."""
     m = TESTS.search(text)
     return text[:m.start()] if m else text
+
+
+@functools.lru_cache(maxsize=None)
+def rust_lexed(path):
+    """A Rust file's code, its comments made spaces and each string or
+    character literal a literal of its length -- secret_eq_check.py's
+    reader, which knows nested block comments, raw strings and a lifetime
+    from a character -- every newline kept."""
+    return reader.blank(read(path))
+
+
+@functools.lru_cache(maxsize=None)
+def rust_code(path):
+    """`rust_lexed` with every item a `#[cfg(test)]` is on blanked too: the
+    code a build that is no test's compiles."""
+    return reader.without_tests(rust_lexed(path))
 
 
 def code_lines(text):
@@ -318,7 +348,7 @@ def check_primitives(root, text):
             problems.append(f"SECURITY.md does not name {name}, which PRIMITIVES lists: "
                             "the list of what is written in-tree and the file must agree")
         path = root / file
-        if not path.exists() or needle not in untested(path.read_text(errors="replace")):
+        if not path.exists() or needle not in rust_code(path):
             problems.append(f"SECURITY.md names {name}, but `{needle}` is not in {file}")
     return problems, len(PRIMITIVES)
 
@@ -440,16 +470,28 @@ def boundary_rows(text):
     return None
 
 
-def rust_items(text, name):
-    """Where `name` is declared in Rust source `text`."""
-    return re.search(r"\b(?:fn|struct|enum|trait|type|const|static|mod|union)\s+" + re.escape(name)
-                     + r"\b|\bmacro_rules!\s*" + re.escape(name) + r"\b", text)
+# Where Rust's grammar puts an item: at the file's start or after an edge
+# -- a `{`, a `}`, a `;` or an attribute's `]` -- then its visibility and
+# its qualifiers (`pub(crate) const unsafe extern "C" fn`). Read over code
+# whose comments and literals are blank (`rust_code`), so `// fn ghost`, a
+# `/* .. */` and `"struct ghost"` declare nothing; anchored there, neither
+# do the types `*const T`, `&'static T` and `-> impl T`.
+ITEM_HEAD = (r"(?:\A|(?<=[{};\]]))\s*(?:pub(?:\s*\([^()]*\))?\s+)?"
+             r"(?:(?:const|async|unsafe|safe|default|extern(?:\s*\"[^\"\n]*\")?)\s+)*")
 
 
-def rust_owner(text, name):
-    """Whether `text` defines the type or module `name`, or implements it."""
-    return rust_items(text, name) or re.search(
-        r"\bimpl\b(?:\s*<[^{;]*?>)?\s+(?:[\w:<>, ]+\s+for\s+)?(?:\w+::)*" + re.escape(name) + r"\b", text)
+def rust_items(code, name):
+    """Where `name` is declared in Rust `code` (`rust_code`'s)."""
+    n = re.escape(name)
+    return re.search(ITEM_HEAD + r"(?:(?:fn|struct|enum|trait|type|const|mod|union)\s+|static\s+(?:mut\s+)?"
+                     r"|macro_rules!\s*)" + n + r"\b", code)
+
+
+def rust_owner(code, name):
+    """Whether `code` defines the type or module `name`, or implements it."""
+    return rust_items(code, name) or re.search(
+        ITEM_HEAD + r"impl\b(?:\s*<[^{;]*?>)?\s+(?:[\w:<>, &']+\s+for\s+)?(?:\w+::)*" + re.escape(name)
+        + r"\b", code)
 
 
 def script_item(text, name):
@@ -470,25 +512,27 @@ def declared(root, ref, test):
     what = "test" if test else "item"
     if not path.is_file():
         return f"{THREAT} cites `{ref}`: {rel} is not in the repository"
-    text = read(path)
     gone = f"{THREAT} cites `{ref}`: no {what} `{item}` in {rel}"
     if ext == "rs":
         *owners, name = item.split("::")
         if test:
-            found = re.search(r"#\[test\]\s*((?:#\[[^\]]*\]\s*|//[^\n]*\n\s*)*)(?:pub\s+)?(?:async\s+)?fn\s+"
-                              + re.escape(name) + r"\s*\(", text)
+            # Over the code alone: a `#[test]` or an `fn` in a comment or a
+            # string is none (a comment between attributes is spaces now).
+            found = re.search(r"#\[test\]\s*((?:#\[[^\]]*\]\s*)*)(?:pub\s+)?(?:async\s+)?fn\s+"
+                              + re.escape(name) + r"\s*\(", rust_lexed(path))
             if not found:
                 return gone
             if "#[ignore" in found.group(1):
                 return f"{THREAT} cites `{ref}`, an #[ignore]d test: CI does not run it"
             return unbuilt(root, rel, ref)
-        code = untested(text)
+        code = rust_code(path)
         if not rust_items(code, name):
             return gone + " (outside its test module)"
         for owner in owners:
             if not rust_owner(code, owner):
                 return f"{THREAT} cites `{ref}`: {rel} defines no `{owner}`"
         return None
+    text = read(path)
     if ext in SCRIPTS:
         if test:
             titled = re.search(r"\b(?:test|it)\(\s*(['\"`])" + re.escape(item) + r"\1", text)
@@ -584,7 +628,7 @@ KINDS = ("flags", "paths and anchors", "primitives", "files searched", "promises
 def run(root, allowed=ALLOWED, notes=None):
     """The problems, and how many things of each kind were checked. `notes`,
     a list, is given the boundaries whose rows say "no test"."""
-    for cached in (read, anchors, parser_flags):
+    for cached in (read, rust_lexed, rust_code, anchors, parser_flags):
         cached.cache_clear()
     text = (root / "SECURITY.md").read_text()
     threat = (root / THREAT).read_text(errors="replace") if (root / THREAT).is_file() else ""

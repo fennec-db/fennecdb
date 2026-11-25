@@ -259,6 +259,74 @@ class ThreatModel(unittest.TestCase):
         self.wrong("(outside its test module)",
                    {1: row(1, "`crates/fennec-http/src/guard.rs::only_in_tests`")})
 
+    def test_a_function_a_cfg_test_is_on_outside_the_test_module(self):
+        guard = GUARD.replace("pub fn refuse() {}", "#[cfg(test)]\npub fn refuse() {}")
+        self.wrong("(outside its test module)", {1: row(1, "`crates/fennec-http/src/guard.rs::refuse`")},
+                   **{"crates/fennec-http/src/guard.rs": guard})
+
+    def ghost(self, text, cite="`crates/fennec-http/src/guard.rs::ghost`", owner=False):
+        """`text` in guard.rs, its only mention of the cited name: refused."""
+        guard = GUARD.replace("pub fn refuse() {}", "pub fn refuse() {}\n" + text)
+        self.wrong("defines no" if owner else "no item", {1: row(1, cite)},
+                   **{"crates/fennec-http/src/guard.rs": guard})
+
+    def test_a_name_only_in_a_line_comment_is_no_declaration(self):
+        self.ghost("// fn ghost(x) {}\n")
+        self.ghost("/// ```\n/// pub struct ghost;\n/// ```\npub fn documented() {}\n")
+        # The comment a declaration once was, renamed below it.
+        self.ghost("// fn ghost(x) {}\nfn real(x) {}\n")
+
+    def test_a_name_only_in_a_block_comment_is_no_declaration(self):
+        self.ghost("/*\n}\nfn ghost() {}\n*/\n")
+        # Nested, as Rust's are: the first `*/` does not end it.
+        self.ghost("/* outer /* inner */\n}\npub fn ghost() {}\n*/\n")
+
+    def test_a_name_only_in_a_string_is_no_declaration(self):
+        self.ghost('pub fn f() { let s = "struct ghost"; }\n')
+        self.ghost('pub const T: &str = "x;\\nfn ghost() {}";\n')
+        self.ghost('pub const R: &str = r#"\n";\nfn ghost() {} "\n"#;\n')
+        self.ghost("pub fn c() -> char { '\"' }\npub const S: &str = \"\n}\nfn ghost() {}\n\";\n")
+
+    def test_a_name_only_in_a_type_is_no_declaration(self):
+        self.ghost("pub fn p(x: *const ghost, y: &'static ghost) {}\n")
+        self.ghost("pub fn n<const ghost: usize>() {}\n")
+        self.ghost("pub fn g() -> impl Ghost {}\npub fn h(x: &mut impl Ghost) {}\n",
+                   cite="`crates/fennec-http/src/guard.rs::Ghost::check`", owner=True)
+
+    def test_a_real_declaration_passes_with_its_attributes_and_visibility(self):
+        decls = (
+            "#[inline]\n#[must_use = \"its answer ] is the point\"]\npub(crate) const unsafe fn real_fn() {}\n"
+            "/// Its doc.\n#[derive(Debug)]\npub(in crate::guard) struct RealStruct;\n"
+            "pub(crate) static mut REAL_STATIC: u8 = 0;\n"
+            "pub unsafe extern \"C\" fn real_extern() {}\n"
+            "impl<'a> From<&'a str> for RealStruct { fn from(_: &'a str) -> Self { RealStruct } }\n"
+            # A lifetime is not a character: read as one, `'a>(s: &'` would
+            # be a literal, and the `\"` of `'\"'` would open a string over
+            # the declaration after it.
+            "pub fn life<'a>(s: &'a str) -> &'a str { s }\npub fn quote() -> char { '\"' }\n"
+            "pub fn after_lifetimes() {}\n"
+            "macro_rules! real_macro { () => {} }\n")
+        guard = GUARD.replace("pub fn refuse() {}", "pub fn refuse() {}\n// fn ghost()\n" + decls)
+        cites = ", ".join(f"`crates/fennec-http/src/guard.rs::{n}`" for n in (
+            "real_fn", "RealStruct", "REAL_STATIC", "real_extern", "after_lifetimes", "real_macro",
+            "RealStruct::from"))
+        problems, _ = run(**{"crates/fennec-http/src/guard.rs": guard,
+                             "docs/design/security.md": threat({1: row(1, cites)})})
+        self.assertEqual(problems, [])
+
+    def test_a_test_only_in_a_comment_or_a_string_is_none(self):
+        tests = GUARD_TESTS.replace("#[test]\nfn a_guard_refuses() {}\n",
+                                    "// #[test]\n// fn a_guard_refuses() {}\n"
+                                    "const T: &str = \"#[test]\nfn a_guard_refuses() {}\";\n")
+        self.wrong("no test `a_guard_refuses`", **{"crates/fennec-http/tests/guard.rs": tests})
+
+    def test_a_test_whose_attribute_holds_a_bracket_in_a_string(self):
+        tests = GUARD_TESTS + '\n#[test]\n#[should_panic(expected = "index [0] ]")]\nfn a_bracket() {}\n'
+        problems, _ = run(**{"crates/fennec-http/tests/guard.rs": tests,
+                             "docs/design/security.md": threat(
+                                 {1: row(1, proved="`crates/fennec-http/tests/guard.rs::a_bracket`")})})
+        self.assertEqual(problems, [])
+
     def test_a_method_of_a_type_the_file_does_not_have(self):
         self.wrong("defines no `Other`", {1: row(1, "`crates/fennec-http/src/guard.rs::Other::check`")})
 

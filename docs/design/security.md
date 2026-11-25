@@ -21,13 +21,21 @@ there that CI builds and runs (a Rust `#[test]` not `#[ignore]`d, in a
 file its crate's `tests/all.rs` or Cargo.toml names; a JS `test(` by its
 title; a Python or shell test by its name); a row cites a test or says "no
 test", never neither; there are 15 rows at the least; and every path,
-link, anchor and flag of this file resolves. A function renamed or a test
-deleted fails the check, naming the row. What it cannot hold is the claim
-each row makes: that the test cited would fail with the enforcement taken
-away. That was read, not run -- each test's deciding assertion against the
-item it stands for -- and a reviewer's first check is to try some; the
-tests the internal review's fixes added (#677, #678, #679) were each run
-against the code before their fix, and failed there.
+link, anchor and flag of this file resolves. A Rust item or test is found
+in code alone, where Rust's grammar puts an item: its comments, strings
+and characters blanked by `tools/secret_eq_check.py`'s reader, every item
+a `#[cfg(test)]` is on left out, so a name surviving in a comment, a
+string or a type (`&'static T`, `*const T`) once its item is renamed or
+deleted holds the row up no longer. A function renamed or a test deleted
+fails the check, naming the row.
+
+What the check proves is that each name exists where the row cites it,
+and no more: not that the test exercises the boundary, nor that it would
+fail with the enforcement taken away. That is the claim each row makes,
+and the reviewers' to judge. It was read, not run -- each test's deciding
+assertion against the item it stands for -- and a reviewer's first check
+is to try some; the tests the internal review's fixes added (#677, #678,
+#679) were each run against the code before their fix, and failed there.
 
 **How a row reads.** *Enforced by* names the items that decide, not every
 item on the path. *Proved by* names the tests whose assertions fail

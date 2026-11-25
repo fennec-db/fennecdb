@@ -1258,6 +1258,24 @@ CI builds and runs -- a Rust `#[test]`, never `#[ignore]`d, its file a
 `mod` of `tests/all.rs` or a `[[test]]`, a JS `test(` by its title, a
 Python or shell test by its name; each row a test or the words "no test";
 15 rows at the least, the plan's G2; every link read from `docs/design/`.
+A Rust item or test, and a primitive's needle, is found in code alone:
+`tools/secret_eq_check.py`'s reader blanks the comments, strings and
+characters (nested block comments, raw strings and a lifetime told from a
+character, as Rust reads them) and every item a `#[cfg(test)]` is on, and
+the declaration is anchored where Rust's grammar puts an item -- after a
+`{`, `}`, `;` or an attribute's `]`, then its visibility and qualifiers.
+Until then it matched `fn|struct|... <name>` anywhere before the test
+module: a row citing a renamed item passed while a comment or a string
+named it, and in the 102 Rust files the table cites that pattern matched
+189 places in comments, strings and test-only items and 155 in types and
+generics (`&'static str`, `*const T`, `<const N: bool>`), none of them a
+cited item's only mention, so the counts are unchanged; and it missed a
+`static mut`. Lexing alone would leave the types, and anchoring alone a
+block comment or a raw string spanning lines; the reader was there,
+tested by its own self-test. What the check proves is that each name
+exists where its row cites it, not that the test exercises the boundary
+or would fail without its enforcement: that is the row's claim, and the
+reviewers' to judge ([security.md](security.md)).
 It runs in the one step it ran in, a sibling program buying nothing but a
 second line in CI: the threat model's paths, anchors and flags are read
 by SECURITY.md's own functions. When the table was written it counted 825
