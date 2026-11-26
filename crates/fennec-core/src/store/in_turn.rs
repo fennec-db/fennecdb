@@ -1085,6 +1085,32 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// A sparse id in the room before the id index's first held slot goes
+    /// to its place before the array's: rows 100 000 to 108 999, the first
+    /// 5 000 deleted -- the room a cut waits past -- and 100 005 written,
+    /// more than the gap below the first held id. Read from the floor, the
+    /// array's slots went in before it.
+    #[test]
+    fn a_sparse_id_in_the_room_goes_to_its_place() {
+        let mut st = Store::new();
+        for id in 100_000..109_000u64 {
+            st.append(OP_PUT, id, &vec![b'd'; 20 + (id % 40) as usize]);
+        }
+        for id in 100_000..105_000u64 {
+            st.append(OP_DEL, id, &[]);
+        }
+        st.append(OP_PUT, 100_005, &[b'r'; 33]);
+        let st = mapped(&st);
+        assert_eq!((st.index.floor, st.index.lead), (100_000, 5_000));
+        assert_eq!(st.index.sparse.keys().collect::<Vec<_>>(), [&100_005]);
+        let (_dir, path) = temp("room");
+        // Past a thousand buckets, the unit tests' most, it walks by id.
+        for budget in [300, 900, 3_000, 1 << 20] {
+            same_in_turn(&st, budget, &path);
+        }
+        assert!(!path.exists());
+    }
+
     /// Past [`BUCKETS_MOST`] buckets the records are walked by id, nothing
     /// written and no scratch file made: the buffers would hold more than
     /// their bound.

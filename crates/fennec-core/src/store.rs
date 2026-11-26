@@ -352,9 +352,13 @@ fn adopt_shares(
     // SAFETY: every share wrote each of its slots -- its documents' and
     // the gaps between them -- or said it had not, which returned above.
     unsafe { dense.set_len(span as usize) };
+    // The span ends at the last document's id, `top`.
+    let last = span as usize - 1;
     let fresh = IdIndex {
         dense,
         floor,
+        last,
+        before: last,
         count: count as usize,
         ..IdIndex::default()
     };
@@ -378,11 +382,13 @@ fn adopt_shares(
 /// gap below the first held id takes one and moves nothing, and where the
 /// room is spent the array is copied with a quarter of its span more of it
 /// ([`Self::lower`]), so the array grows down as it grows up, by doubling.
-/// They are cut, some kept, once they are more than the span from the
-/// first held slot to the end ([`Self::past_lead`]), all of them at a
-/// compact's or a checkpoint's relocation ([`Self::relocate`]),
-/// and an open's array starts at the first id it reads. An id below the
-/// floor reads as absent.
+/// The empty runs at either end -- before the first held slot, and past the
+/// last, which deletes of the highest ids leave -- are cut once one is more
+/// than the span from the first held slot to the last ([`Self::past_edge`],
+/// one walk and one rule for both ends), all of them at a compact's or a
+/// checkpoint's relocation ([`Self::relocate`]), and an open's array starts
+/// at the first id it reads and ends at the last. An id below the floor
+/// reads as absent.
 ///
 /// Invariant: no sparse id is inside the held range, the first held slot
 /// to the end. `get` looks only at the dense slot for an id in that range,
@@ -410,7 +416,7 @@ struct IdIndex {
     floor: DocId,
     /// The first slot of `dense` holding a location, or `dense.len()`,
     /// which is only where the array is empty: an array left with no
-    /// location is let go of ([`Self::past_lead`]). The slots before it are
+    /// location is let go of ([`Self::past_edge`]). The slots before it are
     /// the room.
     lead: usize,
     /// Every slot strictly between `lead` and this one is empty: where the
@@ -418,6 +424,18 @@ struct IdIndex {
     /// so an id deleted and written again at the front does not walk the
     /// empty run behind it each time. `lead` where nothing is known.
     after: usize,
+    /// The last slot of `dense` holding a location, 0 where the array is
+    /// empty: `lead` at the other end. The slots past it are empty, cut as
+    /// the room is. Without it the array's end never moved down, and ids
+    /// written downward while the highest go -- reverse timestamps under
+    /// `@ttl` -- held 12 bytes for every id they ever gave, as the array
+    /// from 1 did for ids climbing.
+    last: usize,
+    /// Every slot strictly between this one and `last` is empty: `after`
+    /// at the other end, so an id deleted and written again at the end
+    /// does not walk the empty run before it each time. `last` where
+    /// nothing is known.
+    before: usize,
     /// A `HashMap` rather than an ordered map: a `BTreeMap` here made the
     /// browser module 4.4 KB larger and its HNSW build 15% slower, the whole
     /// id index no longer inlining into the hot paths at `opt-level = "z"`.
@@ -445,13 +463,18 @@ struct IdIndex {
     /// twice the writes since the last, and a delete from the array asks
     /// one too: following the map's growth alone, a rebase undone -- a
     /// block put back, its far rows deleted -- left the rows it had moved
-    /// into the map there.
+    /// into the map there. Never more than the map holds ([`Self::trim`]):
+    /// left where a look set it while the map emptied -- its ids deleted,
+    /// or taken into the array -- the count outlived them, and the next
+    /// far run waited for it, sparse, where a run that outnumbered the
+    /// array would have taken it at once.
     rebase_in: usize,
     /// The slots a cut, a lowering or a rebase copied, the rebases that
-    /// looked and the sparse ids lowerings sorted: what the amortised
-    /// bounds are held to.
+    /// looked, the sparse ids lowerings sorted, and the empty slots the
+    /// walks past an emptied end stepped over: what the amortised bounds
+    /// are held to.
     #[cfg(test)]
-    moved: (usize, usize, usize),
+    moved: (usize, usize, usize, usize),
 }
 
 impl Default for IdIndex {
@@ -461,13 +484,15 @@ impl Default for IdIndex {
             floor: 1,
             lead: 0,
             after: 0,
+            last: 0,
+            before: 0,
             sparse: HashMap::new(),
             sparse_floor: DocId::MAX,
             sparse_ceil: 0,
             count: 0,
             rebase_in: 0,
             #[cfg(test)]
-            moved: (0, 0, 0),
+            moved: (0, 0, 0, 0),
         }
     }
 }
@@ -475,9 +500,9 @@ impl Default for IdIndex {
 /// The largest gap still considered worth extending the dense array for.
 const MAX_DENSE_GAP: u64 = 4096;
 
-/// The fewest empty slots before the first held one that a write cuts,
-/// beside half the array ([`IdIndex::past_lead`]): below it, 48 KB, a cut
-/// would move the array for less than it gives back.
+/// The fewest empty slots at either end that a write cuts, beside a quarter
+/// of the span ([`IdIndex::past_edge`]): below it, 48 KB, a cut would move
+/// the array for less than it gives back.
 const CUT_FROM: usize = MAX_DENSE_GAP as usize;
 
 /// The fewest sparse ids, outnumbering the array's, that a write looks
@@ -530,24 +555,34 @@ impl IdIndex {
             if i - len >= MAX_DENSE_GAP || id < self.floor {
                 return self.insert_apart(id, loc);
             }
+            let i = i as usize;
             if len == 0 {
-                (self.lead, self.after) = (i as usize, i as usize);
+                (self.lead, self.after, self.last, self.before) = (i, i, i, i);
             }
-            self.dense.resize(i as usize + 1, Loc::EMPTY);
+            self.dense.resize(i + 1, Loc::EMPTY);
             // Keep the invariant: the sparse ids the array now covers move
-            // into it, `id` itself included when this overwrites it. Moving
-            // them does not change the count.
+            // into it, and the slot is filled below once they are placed.
+            // Moving them does not change the count.
             if self.sparse_floor <= id {
                 self.take_over_sparse(id);
+            } else {
+                // The new last held slot, the slots between it and the
+                // last one empty: filled here, where the path below asked
+                // whether the slot was empty and whether it was before
+                // `after`.
+                self.dense[i] = loc;
+                self.count += 1;
+                (self.before, self.last) = (self.last, i);
+                return;
             }
         }
         let i = i as usize;
         let slot = &mut self.dense[i];
         if slot.is_empty() {
-            // Before `after`: in the room, or the run known empty past
-            // `lead`. The comparison `placed` made here, its two cases out
-            // of line.
-            if i < self.after {
+            // Before `after` or past `before`: in the room or past the last
+            // held slot, or in a run known empty at either end. The
+            // comparisons `placed` makes here, its cases out of line.
+            if i < self.after || i > self.before {
                 return self.insert_gap(id, loc);
             }
             *slot = loc;
@@ -557,9 +592,9 @@ impl IdIndex {
         }
     }
 
-    /// [`Self::insert`] of an id into an empty slot before `after`: past
-    /// `lead` it is placed there, and in the room it is taken as one below
-    /// the first held id is ([`Self::insert_apart`]).
+    /// [`Self::insert`] of an id into an empty slot before `after` or past
+    /// `before`: from `lead` on it is placed there, and in the room it is
+    /// taken as one below the first held id is ([`Self::insert_apart`]).
     #[inline(never)]
     fn insert_gap(&mut self, id: DocId, loc: Loc) {
         let i = (id - self.floor) as usize;
@@ -568,7 +603,7 @@ impl IdIndex {
         }
         self.dense[i] = loc;
         self.count += 1;
-        self.after = i;
+        self.placed(i);
     }
 
     /// [`Self::insert`] of an id neither in the held range nor within the
@@ -616,17 +651,18 @@ impl IdIndex {
     /// moving them in. Into the room before the first held slot, where it
     /// reaches that far, moving nothing; else into a copy of the array from
     /// it with room of a quarter of the slots from the first held one to
-    /// the end below the lowest id it takes, never below 1 -- so ids written
-    /// downward copy the array as ids written upward do, once its span
-    /// grows by a part of itself, rather than once a gap: by the gap alone,
-    /// ids each the gap below the last copied the array at every write,
-    /// 2.05e9 slots for 1 000 of them. The room is no part of the gap's
-    /// reach: an id more than the gap below the first held one is sparse
-    /// wherever it is, so writes each just below the room leave the array
-    /// where it is, where room counted from the floor grew it by a quarter
-    /// a write, 2^40 slots in 85. Of the sparse ids, only those below the
-    /// first held one are sorted, and only where `sparse_ceil` says one may
-    /// be in reach.
+    /// the last below the lowest id it takes, never below 1 -- so ids
+    /// written downward copy the array as ids written upward do, once its
+    /// span grows by a part of itself, rather than once a gap: by the gap
+    /// alone, ids each the gap below the last copied the array at every
+    /// write, 2.05e9 slots for 1 000 of them. The copy leaves out the empty
+    /// slots past the last held one, as a cut drops them. The room is no
+    /// part of the gap's reach: an id more than the gap below the first
+    /// held one is sparse wherever it is, so writes each just below the
+    /// room leave the array where it is, where room counted from the floor
+    /// grew it by a quarter a write, 2^40 slots in 85. Of the sparse ids,
+    /// only those below the first held one are sorted, and only where
+    /// `sparse_ceil` says one may be in reach.
     fn lower(&mut self, id: DocId) {
         let first = self.floor + self.lead as u64;
         let mut low = id;
@@ -646,21 +682,35 @@ impl IdIndex {
             taken.drain(..n);
         }
         if low < self.floor {
-            let (len, lead) = (self.dense.len(), self.lead);
-            let to = low.saturating_sub((len - lead) as u64 / 4).max(1);
+            let lead = self.lead;
+            // None held where the array's ids are gone and the map's kept.
+            let held = match lead < self.dense.len() {
+                true => self.last + 1 - lead,
+                false => 0,
+            };
+            let to = low.saturating_sub(held as u64 / 4).max(1);
             let by = (self.floor - to) as usize;
             // Into an array of its own, the empty slots first: shifting the
             // slots in place took a copy and a fill of the browser module's
             // own. Those before `lead` are empty, and are not copied.
-            let mut dense = Vec::with_capacity(len + by);
+            let mut dense = Vec::with_capacity(lead + by + held);
             dense.resize(lead + by, Loc::EMPTY);
-            dense.extend_from_slice(&self.dense[lead..]);
+            dense.extend_from_slice(&self.dense[lead..lead + held]);
+            let len = dense.len();
             self.dense = dense;
             self.floor = to;
-            (self.lead, self.after) = (lead + by, self.after + by);
+            match held {
+                // `placed` takes the first id it is given as both ends.
+                0 => (self.lead, self.after, self.last, self.before) = (len, len, 0, 0),
+                _ => {
+                    (self.lead, self.last) = (lead + by, self.last + by);
+                    self.after = (self.after + by).min(len);
+                    self.before += by;
+                }
+            }
             #[cfg(test)]
             {
-                self.moved.0 += len - lead;
+                self.moved.0 += held;
             }
         }
         for k in taken {
@@ -673,8 +723,9 @@ impl IdIndex {
         self.trim();
     }
 
-    /// Keeps `lead` and `after` saying what they say once slot `i`, empty,
-    /// was given a location.
+    /// Keeps `lead` and `after`, and `last` and `before`, saying what they
+    /// say once slot `i`, empty, was given a location: each end as the
+    /// other's mirror.
     #[inline]
     fn placed(&mut self, i: usize) {
         if i < self.after {
@@ -682,6 +733,13 @@ impl IdIndex {
                 (self.lead, self.after) = (i, self.lead);
             } else {
                 self.after = i;
+            }
+        }
+        if i > self.before {
+            if i > self.last {
+                (self.last, self.before) = (i, self.last);
+            } else {
+                self.before = i;
             }
         }
     }
@@ -724,11 +782,14 @@ impl IdIndex {
         self.trim();
     }
 
-    /// Lets go of the sparse map once it holds no id, the array having
-    /// taken them or their rows gone: the room of each id it held stayed
-    /// until the next open. One still holding ids keeps its room: shrinking
-    /// it took the table's resize into the browser module, 700 bytes.
+    /// After the sparse map lost ids -- deleted, or taken into the array --
+    /// the look's count is held to what it now holds ([`Self::rebase_in`]),
+    /// and the map is let go of once it holds none: the room of each id it
+    /// held stayed until the next open. One still holding ids keeps its
+    /// room: shrinking it took the table's resize into the browser module,
+    /// 700 bytes.
     fn trim(&mut self) {
+        self.rebase_in = self.rebase_in.min(self.sparse.len());
         if self.sparse.is_empty() {
             self.sparse = HashMap::new();
             (self.sparse_floor, self.sparse_ceil) = (DocId::MAX, 0);
@@ -784,13 +845,14 @@ impl IdIndex {
                 }
             }
             (self.floor, self.lead, self.after) = (keys[run.start], 0, 0);
+            (self.last, self.before) = (0, 0);
             // The ids below the run, the array's among them, may be within
             // the gap of where a write takes it down next: the first such
             // write looks, and sets the bound.
             self.sparse_ceil = DocId::MAX;
             self.take_over_sparse(self.floor);
         }
-        self.rebase_in = keys.len();
+        self.rebase_in = keys.len().min(self.sparse.len());
     }
 
     fn remove(&mut self, id: DocId) -> Option<Loc> {
@@ -802,8 +864,8 @@ impl IdIndex {
                 let old = *slot;
                 *slot = Loc::EMPTY;
                 self.count -= 1;
-                if i == self.lead {
-                    self.past_lead();
+                if i == self.lead || i == self.last {
+                    self.past_edge(i);
                 }
                 // A delete from the array counts toward the next look while
                 // the map holds enough ids to be looked among: where it
@@ -829,58 +891,102 @@ impl IdIndex {
         old
     }
 
-    /// The first held slot was just emptied: `lead` goes on to the next
-    /// held one, looked for from `after`, and the empty slots before it are
-    /// cut ([`Self::cut`]), room kept -- a quarter of the span, the slots
-    /// from it to the end, and [`CUT_FROM`] at most -- once they are more
-    /// than the span and that room, so a cut moves fewer slots than it
+    /// Slot `i`, the first held one or the last, was just emptied: that
+    /// end goes on to the next held slot inward, looked for from where its
+    /// last look stopped (`after`, `before`), and the empty run at either
+    /// end is cut ([`Self::cut`]) once it is more than the span from the
+    /// first held slot to the last and the room a cut keeps -- a quarter of
+    /// the span, [`CUT_FROM`] at most -- so a cut moves fewer slots than it
     /// drops, each slot moved a constant number of times however long ids
-    /// climb, and the array spans about twice the ids between the first
-    /// held one and the last; and more than [`CUT_FROM`] and a quarter of
-    /// the span, the most a lowering leaves ([`Self::lower`]: the gap, and
-    /// a quarter of the span below it), so an id written below the first
-    /// held one and deleted brings no cut, and the next takes the room.
-    /// Cut to the first held slot once the run was half the array, the
-    /// lowering and the cut took turns, 169 000 slots a pair beside 100 000
-    /// rows. An array left with no location is let go of whatever its
-    /// length, moving nothing. A write's own, under the write lock: a
-    /// compact may never come, as below 64 MB or in the browser, where only
-    /// the page asks one.
+    /// climb or fall, and each run is at most about the span; and more than
+    /// [`CUT_FROM`] and a quarter of the span, the most a lowering leaves
+    /// ([`Self::lower`]: the gap, and a quarter of the span below it), or a
+    /// write within the gap past the last held id and its delete, so such a
+    /// write and its delete bring no cut, and the next takes the room. Cut
+    /// to the first held slot once the run was half the array, the lowering
+    /// and the cut took turns, 169 000 slots a pair beside 100 000 rows. An
+    /// array left with no location is let go of whatever its length, moving
+    /// nothing. A write's own, under the write lock: a compact may never
+    /// come, as below 64 MB or in the browser, where only the page asks one.
+    ///
+    /// One walk and one rule for both ends, each walked in its own order --
+    /// the end's slots counted from the last -- so neither end can be left
+    /// out of a rule the other keeps: the first form moved the front alone,
+    /// and ids written downward while the highest went kept every slot
+    /// past the last held one, 26.3 MB for 3 000 rows after 2 million ids.
+    /// Only the cut differs by end, as a `Vec`'s two ends do.
     #[inline(never)]
-    fn past_lead(&mut self) {
+    fn past_edge(&mut self, i: usize) {
         let len = self.dense.len();
-        let mut k = (self.lead + 1).max(self.after);
-        while self.dense.get(k).is_some_and(|l| l.is_empty()) {
+        let end = i != self.lead;
+        let side = |p: usize| if end { len - 1 - p } else { p };
+        let (edge, known) = match end {
+            false => (self.lead, self.after),
+            true => (self.last, self.before),
+        };
+        let mut k = (side(edge) + 1).max(side(known));
+        #[cfg(test)]
+        let from = k;
+        while k < len && self.dense[side(k)].is_empty() {
             k += 1;
         }
-        (self.lead, self.after) = (k, k);
-        let span = len - k;
+        #[cfg(test)]
+        {
+            self.moved.3 += k - from;
+        }
+        // Past the last slot only from the front, the array then empty: the
+        // end's walk stops at the first held slot at the latest.
+        if k == len {
+            self.lead = len;
+            return self.cut(0);
+        }
+        match end {
+            false => (self.lead, self.after) = (k, k),
+            true => (self.last, self.before) = (side(k), side(k)),
+        }
+        let span = self.last + 1 - self.lead;
         let room = (span / 4).min(CUT_FROM);
-        if k == len || k > (span + room).max(CUT_FROM + span / 4) {
+        let most = (span + room).max(CUT_FROM + span / 4);
+        if self.lead > most {
             self.cut(room);
+        } else if len - 1 - self.last > most {
+            self.cut(self.lead);
         }
     }
 
-    /// Cuts the empty slots before `lead` but the last `room`, the floor
-    /// moved past them, and gives back the allocation past four times what
-    /// is left -- never below [`CUT_FROM`]'s, so a queue that empties and
-    /// fills again keeps its allocation.
-    fn cut(&mut self, room: usize) {
-        let k = self.lead;
-        let room = room.min(k);
-        if k == room {
-            return;
+    /// Cuts every empty slot past the last held one, and those before the
+    /// first held one but the last `keep`, the floor moved past them, and
+    /// gives back the allocation past four times what is left -- never
+    /// below [`CUT_FROM`]'s, so a queue that empties and fills again keeps
+    /// its allocation. The end's slots go with no move, a `Vec` shortened,
+    /// and keep no room: the allocation is the end's room, as an array
+    /// grows there without moving what it holds. The front's move the held
+    /// span down. An array holding nothing is let go of whole.
+    fn cut(&mut self, keep: usize) {
+        let (lead, len) = (self.lead, self.dense.len());
+        if lead == len {
+            self.floor += len as u64;
+            self.dense.clear();
+            (self.lead, self.after, self.last, self.before) = (0, 0, 0, 0);
+        } else {
+            let end = self.last + 1;
+            self.dense.truncate(end);
+            self.after = self.after.min(end);
+            let by = lead - keep.min(lead);
+            if by > 0 {
+                self.dense.copy_within(lead.., lead - by);
+                self.dense.truncate(end - by);
+                #[cfg(test)]
+                {
+                    self.moved.0 += end - lead;
+                }
+                self.floor += by as u64;
+                (self.lead, self.after, self.last) = (lead - by, self.after - by, end - 1 - by);
+                // Below `lead` only where it is `last`, the one held slot.
+                self.before = self.before.saturating_sub(by);
+            }
         }
-        let (left, by) = (self.dense.len() - k, k - room);
-        self.dense.copy_within(k.., room);
-        self.dense.truncate(room + left);
-        #[cfg(test)]
-        {
-            self.moved.0 += left;
-        }
-        self.floor += by as u64;
-        (self.lead, self.after) = (room, self.after - by);
-        let keep = (room + left).max(CUT_FROM);
+        let keep = self.dense.len().max(CUT_FROM);
         if self.dense.capacity() / 4 > keep {
             self.dense.shrink_to(2 * keep);
         }
@@ -909,7 +1015,9 @@ impl IdIndex {
     #[cfg(not(target_arch = "wasm32"))]
     #[inline(always)]
     fn push_above(&mut self, id: DocId, loc: Loc) {
-        if id.wrapping_sub(self.floor) == self.dense.len() as u64 && self.sparse.is_empty() {
+        let len = self.dense.len();
+        if id.wrapping_sub(self.floor) == len as u64 && self.sparse.is_empty() {
+            (self.before, self.last) = (self.last, len);
             self.dense.push(loc);
             self.count += 1;
         } else {
@@ -996,8 +1104,11 @@ impl IdIndex {
     }
 
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
-    /// order, the empty slots before the first held one cut first, the room
-    /// with them: a compact or a checkpoint walks the array anyway.
+    /// order, the empty slots before the first held one and past the last
+    /// cut first, the room with them: a compact or a checkpoint walks the
+    /// array anyway. The sparse ids below the floor so cut are those below
+    /// the first held id, and come first; a sparse id in the room, left
+    /// uncut, would come after the array.
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
         self.cut(0);
         let ids = self.sparse_in(0, DocId::MAX);
@@ -3260,6 +3371,7 @@ mod tests {
             walked.replay_mapped(&base, at, len, &mut |_| {}).unwrap();
             let mut taken = Store::new();
             assert!(taken.adopt_index(&base, at, len, &index), "live {live}");
+            held_shape(&taken.index, &format!("live {live}"));
             assert_eq!(taken.ids(), walked.ids(), "live {live}");
             for id in walked.ids() {
                 assert_eq!(
@@ -3448,6 +3560,7 @@ mod tests {
                     if !took {
                         continue;
                     }
+                    held_shape(&taken.index, &what);
                     assert_eq!(taken.ids(), walked.ids(), "{what}");
                     for id in walked.ids() {
                         assert_eq!(
@@ -3919,13 +4032,14 @@ mod tests {
     }
 
     /// What an id index says of itself whatever was written to it: `lead`
-    /// its first held slot, nothing held between it and `after`, an array
-    /// holding nothing let go, the room before the first held slot no more
-    /// than a cut leaves below its trigger, no sparse id in the held range
-    /// nor within the gap of it, either side, nor one above it within the
-    /// gap of `sparse_floor` or below it within the gap of `sparse_ceil`,
-    /// and the ids and the count `model`'s.
-    fn held_as(ix: &IdIndex, model: &std::collections::BTreeMap<DocId, Loc>, what: &str) {
+    /// its first held slot and `last` its last, nothing held between `lead`
+    /// and `after` nor between `before` and `last`, an array holding
+    /// nothing let go, the empty runs before the first held slot and past
+    /// the last no more than a cut leaves below its trigger, no sparse id
+    /// in the held range nor within the gap of it, either side, nor one
+    /// above it within the gap of `sparse_floor` or below it within the gap
+    /// of `sparse_ceil`, and the look's count no more than the map holds.
+    fn held_shape(ix: &IdIndex, what: &str) {
         let len = ix.dense.len();
         assert!(ix.floor >= 1, "{what}: floor {}", ix.floor);
         let first = ix.dense.iter().position(|l| !l.is_empty()).unwrap_or(len);
@@ -3936,11 +4050,30 @@ mod tests {
             let between = &ix.dense[ix.lead + 1..ix.after];
             assert!(between.iter().all(Loc::is_empty), "{what}: after");
         }
-        let span = len - ix.lead;
+        match ix.dense.iter().rposition(|l| !l.is_empty()) {
+            None => assert_eq!((ix.last, ix.before), (0, 0), "{what}: last"),
+            Some(last) => {
+                assert_eq!(ix.last, last, "{what}: last");
+                assert!(ix.before <= last, "{what}: before");
+                if last > ix.before + 1 {
+                    let between = &ix.dense[ix.before + 1..last];
+                    assert!(between.iter().all(Loc::is_empty), "{what}: before");
+                }
+                let span = last + 1 - first;
+                let most = (span + (span / 4).min(CUT_FROM)).max(CUT_FROM + span / 4);
+                assert!(
+                    ix.lead <= most && len - 1 - last <= most,
+                    "{what}: {} slots of room before {span} and {} past them",
+                    ix.lead,
+                    len - 1 - last
+                );
+            }
+        }
         assert!(
-            ix.lead <= (span + (span / 4).min(CUT_FROM)).max(CUT_FROM + span / 4),
-            "{what}: {} slots of room before {span}",
-            ix.lead
+            ix.rebase_in <= ix.sparse.len(),
+            "{what}: a look {} writes away, {} sparse",
+            ix.rebase_in,
+            ix.sparse.len()
         );
         let (low, end) = (ix.floor + ix.lead as u64, ix.floor + len as u64);
         for &k in ix.sparse.keys() {
@@ -3958,6 +4091,11 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// [`held_shape`], and the ids and the count `model`'s.
+    fn held_as(ix: &IdIndex, model: &std::collections::BTreeMap<DocId, Loc>, what: &str) {
+        held_shape(ix, what);
         assert_eq!(ix.len(), model.len(), "{what}: count");
         let ids: Vec<DocId> = model.keys().copied().collect();
         assert_eq!(ix.ids(), ids, "{what}: ids");
@@ -3967,12 +4105,13 @@ mod tests {
     }
 
     /// The id index against a map of what it was given, through every way
-    /// a write reaches it: ids climbing while the oldest go, ids written
-    /// below the first held one -- near it, into the room or a copy below
-    /// the floor, and far, which go to the sparse map -- ids far past the end, deletes anywhere, ids deleted
-    /// and written again as a block put back does, and a compact's or a
-    /// checkpoint's relocation, which visits them in order; and a clone
-    /// taken before the floor moves, as a pin takes it, reads as it was.
+    /// a write reaches it: ids climbing while the lowest or the highest go,
+    /// ids written below the first held one -- near it, into the room or a
+    /// copy below the floor, and far, which go to the sparse map -- ids far
+    /// past the end, deletes anywhere, ids deleted and written again as a
+    /// block put back does, and a compact's or a checkpoint's relocation,
+    /// which visits them in order; and a clone taken before the floor
+    /// moves, as a pin takes it, reads as it was.
     #[test]
     fn the_id_index_answers_as_a_map_while_its_floor_moves() {
         use std::collections::BTreeMap;
@@ -4004,8 +4143,14 @@ mod tests {
                     put(&mut ix, &mut model, next);
                     next += 1 + draw(3) / 2;
                 }
-                40..=63 => {
+                40..=55 => {
                     if let Some(id) = lowest {
+                        assert_eq!(ix.remove(id), model.remove(&id), "{step}");
+                        gone.push(id);
+                    }
+                }
+                56..=63 => {
+                    if let Some(id) = model.keys().next_back().copied() {
                         assert_eq!(ix.remove(id), model.remove(&id), "{step}");
                         gone.push(id);
                     }
@@ -4496,5 +4641,281 @@ mod tests {
         written(&mut ix, &mut model, [low - 1]);
         held_as(&ix, &model, "in reach");
         assert_eq!((ix.moved.2, ix.sparse.len()), (100, 10_099));
+    }
+
+    /// A collection whose ids fall while its highest rows go -- reverse
+    /// timestamps under `@ttl` -- holds an index of about its live span,
+    /// as ids climbing do: 3 000 live rows from 2^40 downward through 200
+    /// 000 ids held 2.8 MB while the array's end was never cut, and 26.3
+    /// MB through 2 million. The end's cut moves nothing.
+    #[test]
+    fn ids_falling_through_deletes_hold_the_index_to_their_span() {
+        let mut st = Store::new();
+        let (live, top) = (3_000u64, 1u64 << 40);
+        let mut most = 0;
+        for k in 0..200_000u64 {
+            st.append(OP_PUT, top - k, b"a session");
+            if k >= live {
+                st.append(OP_DEL, top - k + live, &[]);
+            }
+            most = most.max(st.index.bytes());
+        }
+        let bound = 4 * (live as usize + CUT_FROM) * std::mem::size_of::<Loc>();
+        assert!(most <= bound, "{most} bytes, past {bound}");
+        let ids: Vec<DocId> = (top - 199_999..top - 199_999 + live).collect();
+        assert_eq!(st.ids(), ids);
+        let ix = &st.index;
+        assert!(ix.dense.len() - 1 - ix.last <= live as usize + CUT_FROM);
+        assert_eq!(ix.sparse.len(), 0);
+    }
+
+    /// One row moved a gap at a time, the one before it deleted, holds the
+    /// array to about the gap, down as up: moved down 10 000 times, the
+    /// array's end never cut, it reached 532 MB.
+    #[test]
+    fn a_row_moved_a_gap_at_a_time_holds_the_array_to_the_gap() {
+        use std::collections::BTreeMap;
+        for down in [true, false] {
+            let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+            let mut id = 1u64 << 40;
+            written(&mut ix, &mut model, [id]);
+            let mut most = 0;
+            for _ in 0..10_000 {
+                let next = match down {
+                    true => id - MAX_DENSE_GAP,
+                    false => id + MAX_DENSE_GAP,
+                };
+                written(&mut ix, &mut model, [next]);
+                deleted(&mut ix, &mut model, [id]);
+                id = next;
+                most = most.max(ix.dense.capacity());
+            }
+            held_as(&ix, &model, &format!("down: {down}"));
+            let bound = 4 * (MAX_DENSE_GAP as usize + 1);
+            assert!(most <= bound, "down: {down}, {most} slots");
+        }
+    }
+
+    /// An id written within the gap past the last held one and deleted,
+    /// again and again, beside 100 000 rows copies nothing and walks
+    /// nothing, as one written below the first held one does: the end's
+    /// cut waits for more than the span, and `before` remembers where the
+    /// held slots stop.
+    #[test]
+    fn an_id_written_past_the_last_and_deleted_moves_nothing() {
+        use std::collections::BTreeMap;
+        let (from, rows) = (1_000_000u64, 100_000u64);
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, from..from + rows);
+        let past = from + rows - 1 + MAX_DENSE_GAP;
+        let cap = ix.dense.capacity();
+        for k in 0..1_000 {
+            written(&mut ix, &mut model, [past - k % 2]);
+            deleted(&mut ix, &mut model, [past - k % 2]);
+        }
+        held_as(&ix, &model, "the pairs");
+        assert_eq!((ix.moved.0, ix.moved.3), (0, 0), "slots copied and walked");
+        assert_eq!(ix.dense.capacity(), cap);
+    }
+
+    /// A relocation visits the ids in order with a sparse id in the room
+    /// before the first held slot -- rows 100 000 to 108 999, the first 5
+    /// 000 deleted and the last 300, then 100 005 written, more than the
+    /// gap below the first held id -- and leaves the array the held span
+    /// alone, both ends cut: the room uncut, the sparse id came after the
+    /// array.
+    #[test]
+    fn a_relocation_visits_a_sparse_id_in_the_room_first() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 100_000..109_000);
+        deleted(&mut ix, &mut model, 100_000..105_000);
+        deleted(&mut ix, &mut model, (108_700..109_000).rev());
+        written(&mut ix, &mut model, [100_005]);
+        assert_eq!((ix.floor, ix.lead), (100_000, 5_000));
+        assert_eq!(ix.dense.len() - 1 - ix.last, 300);
+        assert!(ix.sparse.contains_key(&100_005));
+        let mut seen = Vec::new();
+        ix.relocate(|id, l| {
+            seen.push(id);
+            l
+        });
+        assert_eq!(seen, model.keys().copied().collect::<Vec<_>>());
+        held_as(&ix, &model, "relocated");
+        assert_eq!((ix.floor, ix.lead, ix.dense.len()), (105_000, 0, 3_700));
+    }
+
+    /// The look's count is held to what the sparse map holds: 1 000 rows
+    /// from 1, 10 000 ids a million apart written and deleted, and 5 000
+    /// rows from 2^45 -- whose run takes the array at its 1 001st row, as
+    /// without the far ids before. Left at the 6 016 writes the last look
+    /// set, the count outlived the ids it counted, and all 5 000 stayed
+    /// sparse, 1 016 writes short of a look.
+    #[test]
+    fn the_looks_count_is_held_to_what_the_map_holds() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=1_000);
+        let apart: Vec<DocId> = (1..=10_000u64).map(|k| k * 1_000_000).collect();
+        written(&mut ix, &mut model, apart.iter().copied());
+        deleted(&mut ix, &mut model, apart);
+        assert_eq!((ix.sparse.len(), ix.rebase_in), (0, 0));
+        let far = 1u64 << 45;
+        written(&mut ix, &mut model, far..far + 1_001);
+        assert_eq!((ix.floor, ix.sparse.len()), (far, 1_000));
+        written(&mut ix, &mut model, far + 1_001..far + 5_000);
+        held_as(&ix, &model, "far");
+        assert_eq!((ix.floor, ix.sparse.len()), (far, 1_000));
+    }
+
+    /// Memory held to the live span whatever the order of writes: phases
+    /// drawn from a seed -- ids climbing while the lowest go, falling while
+    /// the highest go, a sawtooth past either end, a row moved a gap at a
+    /// time either way, writes and deletes anywhere in the range, far runs
+    /// written and deleted from either end or kept, a relocation -- after
+    /// each of which the array is no longer than the span from the model's
+    /// first id in it to its last and the empty runs a cut leaves at each
+    /// end, its allocation no more than four times that, and the index
+    /// answers as the model. The bound is the model's, not the index's own
+    /// account: the array's end left uncut, as the first form left it,
+    /// falling ids pass it within a phase.
+    #[test]
+    fn the_id_index_holds_its_memory_to_the_live_span_in_any_order() {
+        use std::collections::BTreeMap;
+        let mut seed = 0x5851_f42d_4c95_7f2du64;
+        let mut draw = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let at = |id: DocId| Loc {
+            seg: 0,
+            off: id as u32,
+            len: (id >> 32) as u32,
+        };
+        let put = |ix: &mut IdIndex, model: &mut BTreeMap<DocId, Loc>, id: DocId| {
+            ix.insert(id, at(id));
+            model.insert(id, at(id));
+        };
+        let del = |ix: &mut IdIndex, model: &mut BTreeMap<DocId, Loc>, id: DocId| {
+            assert_eq!(ix.remove(id), model.remove(&id), "{id}");
+        };
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        let gap = MAX_DENSE_GAP;
+        let mut kinds = [0usize; 9];
+        for phase in 0..240 {
+            // The array's first and last held ids, where it holds any.
+            let (lo, hi) = match ix.lead < ix.dense.len() {
+                true => (ix.floor + ix.lead as u64, ix.floor + ix.last as u64),
+                false => (1 << 32, 1 << 32),
+            };
+            let (n, live) = (200 + draw(1_500), 1 + draw(2_000) as usize);
+            let kind = draw(9) as usize;
+            kinds[kind] += 1;
+            match kind {
+                0 | 1 => {
+                    let mut id = [hi, lo][kind];
+                    for _ in 0..2_000 + draw(14_000) {
+                        id = match kind {
+                            0 => id + 1 + draw(3),
+                            _ => id.saturating_sub(1 + draw(3)).max(1),
+                        };
+                        put(&mut ix, &mut model, id);
+                        while model.len() > live {
+                            let id = match kind {
+                                0 => model.keys().next().copied(),
+                                _ => model.keys().next_back().copied(),
+                            };
+                            del(&mut ix, &mut model, id.unwrap());
+                        }
+                    }
+                }
+                2 | 3 => {
+                    let (mut id, mut ids) = ([hi, lo][kind - 2], Vec::new());
+                    for _ in 0..1 + draw(60) {
+                        id = match kind {
+                            2 => id + 1 + draw(gap),
+                            _ => id.saturating_sub(1 + draw(gap)).max(1),
+                        };
+                        put(&mut ix, &mut model, id);
+                        ids.push(id);
+                    }
+                    if draw(2) == 0 {
+                        ids.reverse();
+                    }
+                    for id in ids {
+                        del(&mut ix, &mut model, id);
+                    }
+                }
+                4 | 5 => {
+                    let mut id = [hi, lo][kind - 4];
+                    put(&mut ix, &mut model, id);
+                    for _ in 0..n / 4 {
+                        let next = match kind {
+                            4 => id + 1 + draw(gap),
+                            _ => id.saturating_sub(1 + draw(gap)).max(1),
+                        };
+                        put(&mut ix, &mut model, next);
+                        if next != id {
+                            del(&mut ix, &mut model, id);
+                        }
+                        id = next;
+                    }
+                }
+                6 => {
+                    for _ in 0..n {
+                        let id = (lo + draw(hi - lo + 1 + 2 * gap))
+                            .saturating_sub(gap)
+                            .max(1);
+                        match draw(2) {
+                            0 => put(&mut ix, &mut model, id),
+                            _ => del(&mut ix, &mut model, id),
+                        }
+                    }
+                }
+                7 => {
+                    let far = (1 << 44) + draw(1 << 40);
+                    let m = draw(3_000);
+                    for k in 0..m {
+                        put(&mut ix, &mut model, far + k);
+                    }
+                    match draw(3) {
+                        0 => (0..m).rev().for_each(|k| del(&mut ix, &mut model, far + k)),
+                        1 => (0..m).for_each(|k| del(&mut ix, &mut model, far + k)),
+                        _ => {}
+                    }
+                }
+                _ => {
+                    let mut seen = Vec::new();
+                    ix.relocate(|id, l| {
+                        seen.push(id);
+                        l
+                    });
+                    assert!(seen.iter().eq(model.keys()), "phase {phase}: relocated");
+                }
+            }
+            let what = format!("phase {phase}, kind {kind}");
+            held_as(&ix, &model, &what);
+            let mut dense = model.keys().filter(|k| !ix.sparse.contains_key(k));
+            let span = match (dense.next(), dense.next_back()) {
+                (Some(a), Some(b)) => (b - a + 1) as usize,
+                (Some(_), None) => 1,
+                _ => 0,
+            };
+            let most = (span + (span / 4).min(CUT_FROM)).max(CUT_FROM + span / 4);
+            let len = span + 2 * most;
+            assert!(
+                ix.dense.len() <= len,
+                "{what}: {} slots for a span of {span}",
+                ix.dense.len()
+            );
+            let cap = ix.dense.capacity();
+            assert!(
+                cap <= 4 * len.max(CUT_FROM),
+                "{what}: {cap} slots for a span of {span}"
+            );
+        }
+        assert!(kinds.iter().all(|&k| k >= 15), "{kinds:?}");
     }
 }

@@ -1,8 +1,9 @@
 //! A collection whose ids climb while its oldest rows go -- sessions under
-//! `@ttl`, a queue -- holds an id index of the ids it holds, not a slot of
-//! 12 bytes for every id it ever gave: the index starts at a floor its
-//! writes move up as the oldest rows go, and a compact and an open cut
-//! (docs/design/storage.md#the-id-indexs-floor). An id below the floor reads
+//! `@ttl`, a queue -- or fall while its highest go -- reverse timestamps --
+//! holds an id index of the ids it holds, not a slot of 12 bytes for every
+//! id it ever gave: the index starts at a floor its writes move up as the
+//! oldest rows go, its end moves down as the highest go, and a compact and
+//! an open cut (docs/design/storage.md#the-id-indexs-floor). An id below the floor reads
 //! as absent and takes a write; a block put back across the floor's move,
 //! a pin taken before it and a replica applying the writes read as the
 //! rows say.
@@ -17,10 +18,11 @@ use std::sync::{Arc, Mutex};
 /// after it was made.
 const LIVE: u64 = 500;
 
-/// What the id index may hold for `LIVE` rows whose ids climb: about
-/// twice the span its first held id to its last, cut once its empty front
-/// is 4 096 slots and half of it, the room past four times that given back
-/// -- under 200 KB, where from 1 it held 12 bytes for each of 100 000 ids.
+/// What the id index may hold for `LIVE` rows whose ids climb or fall: the
+/// span from its first held id to its last, and an empty run at either end
+/// cut once it is past 4 096 slots and the span, the allocation past four
+/// times what is left given back -- 220 KB, where from 1 it held 12 bytes
+/// for each of 100 000 ids.
 const BOUND: usize = 4 * (LIVE as usize + 4_096) * 12;
 
 fn stmt(sql: &str) -> Statement {
@@ -131,6 +133,79 @@ fn ids_climbing_through_deletes_hold_the_index_through_a_compact_and_an_open() {
     drop(db);
     let db = fennec_core::fs::open(&path).unwrap();
     assert_eq!(rows(&db), churned(120_000));
+    drop(db);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The highest id a falling collection starts from: a reverse timestamp's
+/// first, far past 1.
+const TOP: u64 = 1 << 40;
+
+/// Sessions made newest first, ids falling from `TOP - from` to `TOP - to`,
+/// each deleted -- the highest left -- `LIVE` writes after it was made;
+/// the most the id index held on the way.
+fn fall(db: &mut Database, from: u64, to: u64) -> usize {
+    let put = stmt("put s {id: $1, k: $1}");
+    let del = stmt("del s where id = $1");
+    let mut most = 0;
+    db.begin().unwrap();
+    for k in from..=to {
+        db.execute_with(&put, &[Value::Int((TOP - k) as i64)])
+            .unwrap();
+        if k > LIVE {
+            db.execute_with(&del, &[Value::Int((TOP - k + LIVE) as i64)])
+                .unwrap();
+        }
+        if k % 1_000 == 0 {
+            db.commit().unwrap();
+            most = most.max(index_bytes(db));
+            db.begin().unwrap();
+        }
+    }
+    db.commit().unwrap();
+    most.max(index_bytes(db))
+}
+
+/// The rows `fall` leaves at `to`.
+fn fallen(to: u64) -> Vec<(u64, Value)> {
+    (TOP - to..TOP - to + LIVE)
+        .map(|id| (id, Value::Int(id as i64)))
+        .collect()
+}
+
+/// 100 000 sessions made newest first, their ids falling, 500 live: the
+/// index stays under `BOUND` as the highest go, as it does for ids
+/// climbing, and a compact and an open leave it the live rows' span.
+/// While the array's end was never cut, 3 000 such rows held 2.8 MB after
+/// 200 000 ids, and a compact gave none of it back.
+#[test]
+fn ids_falling_through_deletes_hold_the_index_through_a_compact_and_an_open() {
+    let path = tmp("fall");
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    exec(&mut db, "create collection s (k int)");
+    let most = fall(&mut db, 1, 100_000);
+    assert!(most <= BOUND, "{most} bytes, past {BOUND}");
+    assert_eq!(rows(&db), fallen(100_000));
+
+    exec(&mut db, "compact");
+    let compacted = index_bytes(&db);
+    assert!(compacted <= BOUND / 2, "{compacted} bytes after a compact");
+    assert_eq!(rows(&db), fallen(100_000));
+    drop(db);
+
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    let opened = index_bytes(&db);
+    assert!(
+        opened <= 2 * LIVE as usize * 12,
+        "{opened} bytes after an open"
+    );
+    assert_eq!(rows(&db), fallen(100_000));
+    let most = fall(&mut db, 100_001, 120_000);
+    assert!(most <= BOUND, "{most} bytes, past {BOUND}");
+    assert_eq!(rows(&db), fallen(120_000));
+    drop(db);
+    let db = fennec_core::fs::open(&path).unwrap();
+    assert_eq!(rows(&db), fallen(120_000));
     drop(db);
     let _ = std::fs::remove_file(&path);
 }
