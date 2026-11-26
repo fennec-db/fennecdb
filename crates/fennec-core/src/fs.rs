@@ -2089,28 +2089,64 @@ extern "C" {
     fn fdatasync(fd: i32) -> i32;
 }
 
-/// A step's thread: the fdatasync of the descriptor it is handed, and the
-/// error number it failed with, 0 for none. A thread of the system's
+/// A step's thread: the fdatasync of the descriptor it is handed, made
+/// again where a signal cut it short ([`sync_failure`]), and the error
+/// number it failed with, 0 for none. A thread of the system's
 /// (`pthread_create`) running no Rust but this, rather than std's, whose
 /// packet, spawn hooks, name and output capture no fdatasync uses: the
 /// steps with std's grew the shell's code 3 264 bytes and took its binary
 /// a page past its budget, with this one and their functions each kept
-/// once 1 280 (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
+/// once 1 280, 1 344 with the call made again
+/// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
 #[cfg(all(
     unix,
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "android")
 ))]
 extern "C" fn sync_step(fd: *mut u8) -> *mut u8 {
-    // SAFETY: `fd` is the number of a descriptor `Steps::step` keeps open
-    // in `Steps::on` until this thread is joined; fdatasync takes it by
-    // value and touches no memory of ours.
-    if unsafe { fdatasync(fd.addr() as i32) } == 0 {
-        return std::ptr::null_mut();
+    loop {
+        // SAFETY: `fd` is the number of a descriptor `Steps::step` keeps
+        // open in `Steps::on` until this thread is joined; fdatasync takes
+        // it by value and touches no memory of ours.
+        if unsafe { fdatasync(fd.addr() as i32) } == 0 {
+            return std::ptr::null_mut();
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        if let Some(e) = sync_failure(errno.unwrap_or(0)) {
+            return std::ptr::without_provenance_mut(e);
+        }
     }
-    // A failing fdatasync sets errno, never to 0; EIO where none is read.
-    let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(5);
-    std::ptr::without_provenance_mut(e as usize)
+}
+
+/// What a step's thread ends with once its fdatasync failed leaving
+/// `errno`: `None` where a signal cut it short, EINTR (4), to call it
+/// again, as std's `sync_data` does (`cvt_r`) for a step synced where it
+/// ends: a sync over NFS or FUSE is long enough to meet one, and the
+/// compact would fail where an inline step goes on. Else the error number,
+/// and EIO (5) where it reads 0, never a success.
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+fn sync_failure(errno: i32) -> Option<usize> {
+    match errno {
+        4 => None,
+        e @ 1.. => Some(e as usize),
+        _ => Some(5),
+    }
+}
+
+#[cfg(all(
+    test,
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+thread_local! {
+    /// The step threads this thread joined ([`joined`]): a test's look at
+    /// a file dropped with a step under way.
+    static JOINED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Waits for a step's thread to end: its fdatasync's error, if it had one.
@@ -2121,6 +2157,8 @@ extern "C" fn sync_step(fd: *mut u8) -> *mut u8 {
 ))]
 #[inline(never)]
 fn joined(thread: usize) -> std::io::Result<()> {
+    #[cfg(test)]
+    JOINED.with(|j| j.set(j.get() + 1));
     let mut out = std::ptr::null_mut();
     // SAFETY: `thread` is one `pthread_create` made joinable, joined once:
     // its only holder, `Steps::on`, gives it up to be joined; `out` is
@@ -2681,6 +2719,8 @@ impl ImageOut for SideFile {
                 self.out.write(&rest[..n])?;
                 rest = &rest[n..];
                 if self.steps.wrote(n) {
+                    // The buffer's bytes are the step's too: unflushed, up
+                    // to `WRITE_BUF` of them would wait for the next.
                     self.out.w.flush()?;
                     self.steps.step(self.out.w.get_ref())?;
                 }
@@ -4824,6 +4864,9 @@ mod tests {
         /// compact copies in turn is, in pieces -- fewer than a step's bytes
         /// ever left since the last, and holds what was written; what it took
         /// before it was asked, through the cache, counts toward no step.
+        /// A step ended has every byte it counted in the file, those its
+        /// buffer held too: a step filled by writes shorter than the buffer,
+        /// as most records are, unflushed, would sync up to `WRITE_BUF` less.
         /// Settled, as a compact settles it before a deal, none are left and
         /// no step is under way.
         #[test]
@@ -4835,16 +4878,24 @@ mod tests {
             let step = side.steps.step;
             assert_eq!((step, side.steps.since), (4 << 20, 0));
             let mut want = b"through the cache".to_vec();
-            for (seed, len) in [
+            let long = [
                 (1, 1000),
                 (2, (16 << 20) + 5),
                 (3, 3),
                 (4, (4 << 20) - 1008),
-            ] {
+            ];
+            // A step of writes a quarter of the buffer each, the last
+            // ending it with the buffer full.
+            let short = (5..21).map(|seed| (seed, WRITE_BUF / 4));
+            for (seed, len) in long.into_iter().chain(short) {
                 let bytes = pattern(seed, len);
                 ImageOut::write(&mut side, &bytes).unwrap();
                 want.extend_from_slice(&bytes);
                 assert_eq!(side.steps.since, (want.len() as u64 - 17) % step);
+                if side.steps.since == 0 {
+                    let on_file = side.out.w.get_ref().metadata().unwrap().len();
+                    assert_eq!(on_file, want.len() as u64, "a step ended by write {seed}");
+                }
             }
             assert_eq!(side.steps.since, 0);
             assert!(side.steps.on.is_some());
@@ -4902,6 +4953,40 @@ mod tests {
             steps.step(&file).unwrap();
             assert!(steps.wait(&file).is_err());
             assert!(steps.on.is_none());
+        }
+
+        /// A step's fdatasync a signal cut short is called again, as std's
+        /// `sync_data` calls it; one failing with no error number fails
+        /// with EIO, never as a success; any other error is its own.
+        #[test]
+        fn a_step_cut_short_by_a_signal_is_synced_again() {
+            assert_eq!(sync_failure(4), None);
+            assert_eq!(sync_failure(0), Some(5));
+            assert_eq!(sync_failure(-1), Some(5));
+            assert_eq!(sync_failure(5), Some(5));
+            assert_eq!(sync_failure(22), Some(22));
+        }
+
+        /// A file dropped with a step's fdatasync under way -- a compact that
+        /// failed, its scratch file or its new file -- joins the step's
+        /// thread: one left unjoined keeps its stack until the process ends,
+        /// one more with each compact that fails.
+        #[test]
+        fn a_file_dropped_with_a_step_under_way_joins_its_thread() {
+            let joined = || JOINED.with(|j| j.get());
+            let dir = TestDir::new("dropped");
+            let mut s = Scratch::create(&dir.0.join("db.fennec.sorting"), 0, 4096).unwrap();
+            s.write_at(0, &pattern(7, 4096 + 1)).unwrap();
+            assert!(s.steps.on.is_some());
+            let before = joined();
+            drop(s);
+            assert_eq!(joined(), before + 1);
+            let mut side = SideFile::create(&dir.0.join("db.fennec.beside")).unwrap();
+            side.past_cache(Some(64 << 20));
+            ImageOut::write(&mut side, &pattern(8, (4 << 20) + 1)).unwrap();
+            assert!(side.steps.on.is_some());
+            drop(side);
+            assert_eq!(joined(), before + 2);
         }
 
         /// The writes a sync follows at once -- a rewrite's last, under the

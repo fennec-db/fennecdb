@@ -1005,7 +1005,16 @@ and output capture no sync uses: the steps on std's grew the shell's code 3
 sizes](benchmarks.md#binary-sizes)); on the system's, each step function
 kept once and their io errors made the crate's in one place (`fs::failed`),
 1 280, and no binary a release ships grew a byte (x86_64 musl, built as CI
-builds them). The writes a rewrite beside the database makes under the
+builds them). The thread makes its fdatasync again where a signal cuts it
+short (EINTR), as std's `sync_data` does for a step synced where it ends
+(`cvt_r`): a sync over NFS or FUSE is long enough to meet one, and the
+compact failed with it where an inline step went on. One failing with no
+error number fails with EIO, never as a success (`fs::sync_failure`). That
+took the shell's code 64 bytes more, 1 344 in all, and its binary and
+every other a release ships none (x86_64 musl, as above). A
+file dropped with a step under way -- a failed compact's -- joins the
+step's thread first (`Steps`' drop), so none outlives the compact. The
+writes a rewrite beside the database makes under the
 write lock, the last round's (`Database::finish_beside`), end no step
 (`SideFile::unstepped`): the sync after them puts them on disk at once,
 where each step past the first waited for the one before it under the lock,
