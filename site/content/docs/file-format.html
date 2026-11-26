@@ -488,8 +488,10 @@ leaves one. A graph without them is kept as it is. A server and the native
 library also rebuild a graph whose tombstones outnumber its live nodes, 10
 000 of them at least, beside the queries without rewriting the file: the
 graph record a server appends after it holds no tombstone, and the record
-the last compact wrote of the graph counts as dead from then, for the
-file's own compaction.</p>
+a compact run beside the queries wrote of the graph counts as dead from
+then, for the file's own compaction. One a compact under the lock wrote --
+an embedding program's <code>execute</code>, the browser module's -- stays
+counted with what the file keeps until the next compact.</p>
 
 <p><code>compact</code> writes each collection's live documents in id order,
 each a put framed afresh. Where the file is larger than the memory the

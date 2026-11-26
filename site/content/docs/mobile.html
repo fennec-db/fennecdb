@@ -790,7 +790,10 @@ keeps <code>&lt;name&gt;.lock</code> while it is open.</p>
     the memory the device has for its pages, so its reads stay in
     memory. The same thread rebuilds a vector index once the entries
     updates and deletes left in it outnumber its live ones, beside your
-    calls, so a collection whose vectors change keeps its memory. Open
+    calls, so a collection whose vectors change keeps its memory; closing
+    the database stops a rebuild under way rather than wait for it, so a
+    close as the app goes to the background waits a fraction of a second
+    at most, not the seconds a rebuild takes. Open
     with <code>.noAutoCompact</code>
     (<code>NO_AUTO_COMPACT</code>, <code>noAutoCompact</code>) to compact,
     and rebuild, only when you run <code>compact</code>.</li>
