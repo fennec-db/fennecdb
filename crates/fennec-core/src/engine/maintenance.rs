@@ -5075,4 +5075,41 @@ mod tests {
         let ix = &db.collection("g").expect("g").vectors["v"];
         assert!(ix.persisted().kept.load(Relaxed) > 0);
     }
+
+    /// A compact beside the database tells each graph what a node took in
+    /// the record it wrote (`Persisted::node_bytes`), as a keeper's save
+    /// and an open do: the keeper's next save of the graph is due by it
+    /// (`graph_due`), where 0 left it to `GRAPH_NODE_BYTES`' guess. The
+    /// record's length is kept as the record is let go of in the side file
+    /// (`Beside::write`); read after, it was 0.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    #[test]
+    fn a_compact_beside_tells_each_graph_what_a_node_took() {
+        let scratch = crate::engine::unwinding::Scratch::new("fennecdb-beside-node-bytes");
+        let path = scratch.0.join("g.fennec");
+        let mut db = crate::fs::open(&path).expect("open");
+        made(&mut db, "g", true);
+        filled(&mut db, "g", 300);
+        db.sync().expect("sync");
+        let node_bytes = |db: &Database| {
+            db.collection("g").expect("g").vectors["v"]
+                .persisted()
+                .node_bytes
+                .load(Relaxed)
+        };
+        // No record of the graph written yet.
+        assert_eq!(node_bytes(&db), 0);
+        let lock = RwLock::new(db);
+        Database::maintain(&lock, &Statement::Compact(None))
+            .expect("a maintenance")
+            .expect("compact");
+        let db = lock.read().expect("lock");
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        // Beside the database: one under the lock counts nothing kept.
+        assert!(ix.persisted().kept.load(Relaxed) > 0);
+        // No write since: the graph is the one its record holds.
+        let took = (ix.serialize_graph().len() / ix.len()) as u64;
+        assert!(took > 0);
+        assert_eq!(node_bytes(&db), took);
+    }
 }

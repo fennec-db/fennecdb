@@ -256,7 +256,11 @@ the record was held twice until then -- 75 MB more for the P6 soak's worn
 once, and hold the lock as above. Only the bytes appended count against
 the sink's buffer, so an append past it writes a record ahead of itself as
 before, and a write behind the lock leaves one for the durability rather
-than take its megabytes past `WRITE_HELD` and write them under the lock.
+than take its megabytes past `WRITE_HELD` and write them under the lock --
+once a handover is due too, which waits for that durability, run by the
+keeper as it lets the read lock go, rather than have a buffered write's
+write behind put the record's megabytes before its answer
+(`FileSink::write_behind`).
 The record's room is made once, to the byte: the nodes' arrays first, then
 the lists, each tombstone's vector, the aliases and the halves once the
 lists' parts are written (`put_all_lists`). The 140 bytes a node reserved

@@ -2951,7 +2951,10 @@ pub trait Sink: Send {
     ///
     /// `all` asks for every append it holds, however few: a handover is
     /// due, which takes the records in from the file, and finds them there
-    /// rather than write them under the lock ([`Self::written_all`]).
+    /// rather than write them under the lock ([`Self::written_all`]). A
+    /// record handed over for its durability ([`Self::append_deferred`])
+    /// may be left to it: its caller runs it as it lets its lock go, and
+    /// the handover waits for that.
     #[cfg(not(target_arch = "wasm32"))]
     fn write_behind(&mut self, _all: bool) -> Option<Durability> {
         None

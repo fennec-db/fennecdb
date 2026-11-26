@@ -97,6 +97,9 @@ struct Pending {
 }
 
 impl Pending {
+    /// Gated as its one caller is ([`Sink::written_all`]): the browser
+    /// module's clippy refuses a method it never calls.
+    #[cfg(not(target_arch = "wasm32"))]
     fn is_empty(&self) -> bool {
         self.handed.is_empty() && self.bytes.is_empty()
     }
@@ -859,8 +862,13 @@ impl Disk {
             return Err(e.clone());
         }
         let Pending { handed, bytes } = std::mem::take(&mut *lock(pending));
-        for (buf, from) in &handed {
-            self.put(&buf[*from..])?;
+        // By value, each buffer let go of once it is written: borrowed, a
+        // graph's record stayed in memory until the last one was. Nothing
+        // needs them after a failed write: it fails the sink, which writes
+        // nothing more until the file is opened again, and the bytes
+        // appended are dropped with them, as they always were.
+        for (buf, from) in handed {
+            self.put(&buf[from..])?;
         }
         self.put(&bytes)
     }
@@ -1568,6 +1576,15 @@ impl Sink for FileSink {
         lock(&self.disk).write_pending(&self.pending)
     }
 
+    /// Counts the bytes appended alone, `all` set or not: a record handed
+    /// over ([`Sink::append_deferred`]) is left to the durability its
+    /// caller, the keeper, runs as it lets the read lock go, and with only
+    /// records pending this is `None` and a handover due waits for that
+    /// durability ([`Sink::written_all`]). Counted, the write behind of
+    /// whichever buffered write landed first after the keeper let go of the
+    /// lock would write the graph's megabytes before that request was
+    /// answered, which the keeper's durability writes a moment later
+    /// anyway.
     #[cfg(not(target_arch = "wasm32"))]
     fn write_behind(&mut self, all: bool) -> Option<Durability> {
         self.behind = true;
