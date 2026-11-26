@@ -2004,7 +2004,9 @@ async function openFileNow(fennec, name, opts) {
 /// Identity base for optimistic rows. Server ids run consecutively from 1;
 /// 2^52 is both far away from them and below `Number.MAX_SAFE_INTEGER`, so
 /// it survives JSON intact. Ids in this range land in a sparse map in the
-/// store -- the right trade for a handful of pending rows.
+/// store -- the right trade for a handful of pending rows. One written into
+/// an empty collection starts the store's array there, and the server's
+/// rows after it, once 64 outnumber it, take the array from it.
 const TEMP_BASE = 2 ** 52;
 
 // A read's `require n` as the builder writes it: after its clauses, before
