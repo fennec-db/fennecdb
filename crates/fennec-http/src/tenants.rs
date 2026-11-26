@@ -2965,9 +2965,18 @@ impl Tenants {
         // The flag first, the snapshot after: an open that got past the flag
         // inserted its slot before the snapshot, and is waited for below.
         self.shutting_down.store(true, Ordering::SeqCst);
-        // Every rebuild beside a tenant gives up at its next step, before
-        // the syncs and checkpoints below: one goes on with every core
-        // while they run, and waits for the lock kept below for good.
+        // Every rebuild beside a tenant gives up at its next step, a
+        // compact's graph phase too, before the syncs and checkpoints
+        // below: one goes on with every core while they run, and waits for
+        // the lock kept below for good. A look, not a wait: `open_tenants`
+        // passes over a slot busy opening, closing or releasing, and a
+        // release refused meanwhile takes its tenant's let-go back
+        // (`held::taken_back`). Neither escapes: the loop below takes every
+        // slot's lock, and marks its tenant kept to the exit before it
+        // takes the write lock, which `held::stops` reads as it reads a
+        // let-go -- such a rebuild gives up there, having run on only
+        // through the syncs of the tenants before it. Waited for here, a
+        // release's `RELEASE_WAIT` held every other tenant's let-go back.
         for t in self.open_tenants() {
             crate::held::let_go(&t.db);
         }
@@ -3238,7 +3247,8 @@ pub mod refusals {
 /// subscription does, and is ended for the same reason. 409 when something
 /// does not let go, with everything started again: left ended, the tenant
 /// took writes its replicas were never sent. A rebuild of a worn graph
-/// beside the database gives up at its next step (`held::let_go`): let run,
+/// beside the database, and a compact rebuilding its graphs, give up at
+/// their next step (`held::let_go`): let run,
 /// it held the database, and its file's lock, through a build of up to a
 /// minute, and the delete or the open after the release waited
 /// [`RELEASE_WAIT`] for the lock and answered 500.
@@ -4406,44 +4416,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A delete while a rebuild of a worn graph runs beside the tenant's
-    /// database stops it rather than wait it out: the rebuild places no
-    /// graph, lets the database go, and the delete -- and a create of the
-    /// name after it -- go on. Let run, the rebuild held the database, and
-    /// its file's lock, through the whole build, and the delete waited
-    /// `RELEASE_WAIT` for the lock and answered 500. The read lock is held
-    /// from before the rebuild until the release has said to stop, so the
-    /// rebuild, which takes the write lock only to place its graph, is
-    /// under way and has placed none when it is told.
-    #[test]
-    fn a_delete_stops_a_rebuild_under_way_rather_than_wait_it_out() {
-        let dir = scratch("worn-delete");
-        let reg = Arc::new(Tenants::new(&dir).unwrap());
-        let t = reg.create("worn").unwrap();
+    /// `name` of `reg`, given the identity `id` where one is named
+    /// (`create_as`): a `docs` graph worn at a floor of 10, its 300 rows
+    /// written three times, a statement each -- 600 tombstones beside 300
+    /// live nodes.
+    fn worn_tenant(reg: &Tenants, name: &str, id: Option<u64>) -> Arc<Tenant> {
+        let (t, _) = reg.create_as(name, id).unwrap();
         run(&t, "create collection docs (v vector<8> @hnsw(cosine))");
-        {
-            let mut db = t.db.write().unwrap();
-            db.set_worn_floor(10);
-            for gen in 0..3 {
-                let rows: Vec<String> = (1..=300)
-                    .map(|id| {
-                        // A hash of the row, its write and the place: no
-                        // two vectors alike, none another's alias.
-                        let v: Vec<String> = (0..8u64)
-                            .map(|k| {
-                                let x = ((id as u64) << 32 | (gen as u64) << 8 | k)
-                                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                                ((x >> 40) % 10_000).to_string()
-                            })
-                            .collect();
-                        format!("{{id: {id}, v: [{}]}}", v.join(", "))
-                    })
-                    .collect();
-                let put = format!("put docs [{}]", rows.join(", "));
-                db.execute(&fennec_ql::parse_one(&put).unwrap()).unwrap();
-            }
-            assert!(db.rebuild_due());
+        let mut db = t.db.write().unwrap();
+        db.set_worn_floor(10);
+        for gen in 0..3 {
+            let rows: Vec<String> = (1..=300)
+                .map(|id| {
+                    // A hash of the row, its write and the place: no two
+                    // vectors alike, none another's alias.
+                    let v: Vec<String> = (0..8u64)
+                        .map(|k| {
+                            let x = ((id as u64) << 32 | (gen as u64) << 8 | k)
+                                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                            ((x >> 40) % 10_000).to_string()
+                        })
+                        .collect();
+                    format!("{{id: {id}, v: [{}]}}", v.join(", "))
+                })
+                .collect();
+            let put = format!("put docs [{}]", rows.join(", "));
+            db.execute(&fennec_ql::parse_one(&put).unwrap()).unwrap();
         }
+        assert!(db.rebuild_due());
+        drop(db);
+        t
+    }
+
+    /// A rebuild of `t`'s worn graph under way beside it, and `stop` --
+    /// what lets the tenant go -- run on a thread of its own once it is:
+    /// the rebuild gives up, places no graph and lets the database go,
+    /// rather than hold it and its file's lock through the build. The read
+    /// lock is held from before the rebuild until the stop is said, so the
+    /// rebuild, which takes the write lock only to place its graph, is
+    /// under way and has placed none when it is told. Whether a let-go told
+    /// it (`held::let_go`) -- a shutdown's lock kept to the exit
+    /// (`held::kept_to_exit`) tells it too, later -- and `stop`'s thread.
+    fn stopping_a_rebuild<R: Send + 'static>(
+        t: Arc<Tenant>,
+        stop: impl FnOnce() -> R + Send + 'static,
+    ) -> (bool, std::thread::JoinHandle<R>) {
         let graph = |db: &Database| {
             let ix = &db.collection("docs").unwrap().vectors["v"];
             (ix.len(), ix.dead(), ix.serialize_graph())
@@ -4461,26 +4478,115 @@ mod tests {
                 after
             })
         };
-        let until = |what: &str, ok: &dyn Fn() -> bool| {
-            let end = Instant::now() + Duration::from_secs(60);
-            while !ok() {
-                assert!(Instant::now() < end, "never {what}");
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        };
         until("rebuilt beside", &|| held.maintaining());
-        let deleting = {
-            let reg = Arc::clone(&reg);
-            std::thread::spawn(move || reg.delete("worn"))
-        };
+        let stopping = std::thread::spawn(stop);
         until("told the rebuild to stop", &|| crate::held::stops(&db));
+        let let_go = crate::held::beside(&Arc::downgrade(&db)).is_some();
         drop(held);
         drop(db);
         let after = rebuilding.join().unwrap();
         assert_eq!(after, before, "the rebuild placed a graph");
+        (let_go, stopping)
+    }
+
+    /// A delete while a rebuild of a worn graph runs beside the tenant's
+    /// database stops it rather than wait it out: the rebuild places no
+    /// graph, lets the database go, and the delete -- and a create of the
+    /// name after it -- go on. Let run, the rebuild held the database, and
+    /// its file's lock, through the whole build, and the delete waited
+    /// `RELEASE_WAIT` for the lock and answered 500.
+    #[test]
+    fn a_delete_stops_a_rebuild_under_way_rather_than_wait_it_out() {
+        let dir = scratch("worn-delete");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let t = worn_tenant(&reg, "worn", None);
+        let deleting = {
+            let reg = Arc::clone(&reg);
+            move || reg.delete("worn")
+        };
+        let (let_go, deleting) = stopping_a_rebuild(t, deleting);
+        assert!(let_go);
         deleting.join().unwrap().expect("deleted");
         assert!(!dir.join("worn.fennec").exists());
         reg.create("worn").expect("made again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A follow -- a primary's file made a replica's -- stops a rebuild
+    /// under way as a delete does, and the file is opened again, following:
+    /// waited out, the open after the release waited `RELEASE_WAIT` for the
+    /// file's lock and answered 500.
+    #[test]
+    fn a_follow_stops_a_rebuild_under_way_rather_than_wait_it_out() {
+        let dir = scratch("worn-follow");
+        let reg = Arc::new(replicating(&dir));
+        let t = worn_tenant(&reg, "worn", None);
+        let following = {
+            let reg = Arc::clone(&reg);
+            move || reg.follow("worn", Some("http://127.0.0.1:9"))
+        };
+        let (let_go, following) = stopping_a_rebuild(t, following);
+        assert!(let_go);
+        following.join().unwrap().expect("following");
+        let t = reg.get("worn").unwrap();
+        assert!(t.read().history().following);
+        if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+            f.halt();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A take-back of a file a router left (`reclaim`) stops a rebuild
+    /// under way as a delete does, and the file goes.
+    #[test]
+    fn a_take_back_stops_a_rebuild_under_way_rather_than_wait_it_out() {
+        let dir = scratch("worn-take-back");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let noted = 0x5eed_0ff1_ce00;
+        let t = worn_tenant(&reg, "worn", Some(noted));
+        let taking = {
+            let reg = Arc::clone(&reg);
+            move || reg.reclaim("worn", &[noted]).map_err(|e| format!("{e:?}"))
+        };
+        let (let_go, taking) = stopping_a_rebuild(t, taking);
+        assert!(let_go);
+        assert_eq!(taking.join().unwrap(), Ok(true), "taken back");
+        assert!(!dir.join("worn.fennec").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shutdown stops a rebuild under way before it syncs a tenant:
+    /// held here in its wait for the node's syncs to end -- another
+    /// tenant's sync held between its flush and its fsync -- it has told
+    /// the rebuild, by its let-go, not by the lock it keeps to the exit,
+    /// which it takes after. Let run, a rebuild spent every core through
+    /// the syncs and checkpoints, then waited for that lock for good.
+    #[test]
+    fn a_shutdown_stops_a_rebuild_under_way_before_its_syncs() {
+        let dir = scratch("worn-shutdown");
+        let reg = Arc::new(synced_later(&dir));
+        // A name of this test's own: the hold is the process's.
+        let other = "worn-shutdown-synced";
+        let synced = reg.create(other).unwrap();
+        run(&synced, "create collection n (i int)");
+        let t = worn_tenant(&reg, "worn", None);
+        reg.sync_dirty();
+        syncs::held::hold(other);
+        run(&synced, "put n {i: 1}");
+        reg.sync_each();
+        assert!(
+            syncs::held::waiting(other, Duration::from_secs(30)),
+            "the other tenant's sync never came to its fsync"
+        );
+        let shutting = {
+            let reg = Arc::clone(&reg);
+            move || reg.shutdown()
+        };
+        let (let_go, shutting) = stopping_a_rebuild(t, shutting);
+        assert!(let_go, "told only by the lock kept to the exit");
+        syncs::held::release(other);
+        assert_eq!(shutting.join().unwrap(), 2);
+        drop(synced);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

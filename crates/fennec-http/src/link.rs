@@ -17,7 +17,7 @@
 //! its graph's heap and record bounded.
 
 use fennec_core::engine::{
-    compact_when_due_in, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
+    compact_when_due_until, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
 };
 use fennec_core::prelude::{Database, Response};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -359,11 +359,15 @@ pub(crate) fn said_beside(what: &str, done: std::fmt::Arguments, took: Duration,
 /// following tenant compact too -- a compact changes no document, and
 /// their files grow with every update their primary sends -- and an image
 /// a replica adopts meanwhile fails the compact rather than be written
-/// over.
-fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Memory) {
+/// over. Its graph phase gives up at its next step once the database is
+/// let go of, as a rebuild does (`held::stops`), and the compact ends
+/// there, nothing written and nothing said: it rebuilds every worn graph,
+/// and a delete or the shutdown otherwise waited the build out.
+fn compact(what: &str, db: &Arc<RwLock<Database>>, policy: &CompactPolicy, memory: Memory) {
     let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
     let t = Instant::now();
-    let Some((r, holds)) = compact_when_due_in(db, policy, memory) else {
+    let stop = || crate::held::stops(db);
+    let Some((r, holds)) = compact_when_due_until(db, policy, memory, &stop) else {
         return;
     };
     let took = t.elapsed();
