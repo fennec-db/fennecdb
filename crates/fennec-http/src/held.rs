@@ -30,6 +30,56 @@ pub(crate) fn kept_to_exit(db: &Arc<RwLock<Database>>) {
     ANY_KEPT.store(true, Ordering::Release);
 }
 
+/// The databases their holder let go of -- a tenant released for a delete,
+/// a follow or a take-back, a server shutting down -- whose rebuild beside
+/// them, or compact in its graph phase, gives up at its next step
+/// ([`stops`]) rather than hold them, and their files' locks, for the whole
+/// build: a delete then waited `RELEASE_WAIT` for the lock and answered
+/// 500, and a create of the name after it too. As [`KEPT`], `Weak`s.
+static LET_GO: Mutex<Vec<Weak<RwLock<Database>>>> = Mutex::new(Vec::new());
+/// Whether [`LET_GO`] holds any: a process that let none go takes no lock
+/// to look.
+static ANY_LET_GO: AtomicBool = AtomicBool::new(false);
+
+/// Notes that `db`'s holder lets it go: a rebuild under way beside it, or
+/// a compact's graph phase, gives up at its next step, and none begins.
+pub fn let_go(db: &Arc<RwLock<Database>>) {
+    let mut gone = LET_GO.lock().unwrap_or_else(|e| e.into_inner());
+    gone.retain(|w| w.strong_count() > 0);
+    gone.push(Arc::downgrade(db));
+    ANY_LET_GO.store(true, Ordering::Release);
+}
+
+/// Takes [`let_go`]'s note back: a release refused, the database goes on.
+/// A shutdown's note goes with it, which the shutdown's [`kept_to_exit`]
+/// gives again before it takes the database's lock (`Tenants::shutdown_with`).
+pub fn taken_back(db: &Arc<RwLock<Database>>) {
+    let mut gone = LET_GO.lock().unwrap_or_else(|e| e.into_inner());
+    gone.retain(|w| w.strong_count() > 0 && !std::ptr::eq(w.as_ptr(), Arc::as_ptr(db)));
+}
+
+/// Whether a rebuild beside `db`, or a compact's graph phase, gives up:
+/// its holder let it go ([`let_go`]), or the shutdown keeps its lock to the
+/// exit ([`kept_to_exit`]), where the rebuild would wait for that lock for
+/// good.
+pub fn stops(db: &Arc<RwLock<Database>>) -> bool {
+    listed(&LET_GO, &ANY_LET_GO, db) || listed(&KEPT, &ANY_KEPT, db)
+}
+
+/// Whether `list`, written once `any` is, holds `db`.
+fn listed(
+    list: &Mutex<Vec<Weak<RwLock<Database>>>>,
+    any: &AtomicBool,
+    db: &Arc<RwLock<Database>>,
+) -> bool {
+    any.load(Ordering::Acquire)
+        && list
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(db)))
+}
+
 /// `db` for a thread working beside the queries -- the compacter, the graph
 /// keeper, the sweeper, a linking or warming thread -- unless it is gone or
 /// its lock is kept to the exit ([`kept_to_exit`]). That lock is never let
@@ -41,16 +91,7 @@ pub(crate) fn kept_to_exit(db: &Arc<RwLock<Database>>) {
 /// write after the final sync.
 pub fn beside(db: &Weak<RwLock<Database>>) -> Option<Arc<RwLock<Database>>> {
     let db = db.upgrade()?;
-    if ANY_KEPT.load(Ordering::Acquire) {
-        let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-        if kept
-            .iter()
-            .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&db)))
-        {
-            return None;
-        }
-    }
-    Some(db)
+    (!listed(&KEPT, &ANY_KEPT, &db)).then_some(db)
 }
 
 /// The database to read: whatever a read lock finds has landed, since a

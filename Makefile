@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench churn-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
@@ -1269,6 +1269,18 @@ compact-bench:
 ## running database: under the write lock, then beside it.
 maintenance-bench:
 	$(CARGO) run --release -p fennec-core --example maintenance -- 100000 128
+
+## A vector collection written over -- 20 000 x 16 updated 500 000 times, the
+## P6 soak's `docs` -- with nothing rebuilding its graph, then with a keeper
+## rebuilding it beside the writer once its tombstones outnumber its live
+## nodes: the graph's nodes, heap and record, and each rebuild's time and
+## holds of the lock (crates/fennec-core/examples/churn.rs; CHURN_RATE
+## updates a second, 2 000 unless set; about five minutes).
+CHURN_RATE ?= 2000
+churn-bench:
+	$(CARGO) build --release -p fennec-core --example churn
+	./target/release/examples/churn 20000 500000 16 none 0
+	./target/release/examples/churn 20000 500000 16 rebuild $(CHURN_RATE)
 
 ## `highlight()`, `snippet()` and `facet` over 100 000 documents: a row's
 ## marks against `match` alone, a facet by the buckets and by the scan, and

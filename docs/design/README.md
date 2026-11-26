@@ -17,7 +17,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, a token past its `exp`, empty tokens and short ones
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
 - [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, seeds in parts, connections no thread is made for, a body's ceiling, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
-- [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
+- [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, vectors written again, and a worn graph rebuilt
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, how two builds' instruction counts are read on macOS, the gate every pull request's instructions and heap bytes are held to, its workloads and the claims they stand for, and how the binaries a release ships are measured and held to their budgets
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
@@ -220,3 +220,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 171. [The Flutter plugin ships each platform's library once, and no symbolic link](integrations.md#flutter-plugin) (added after the move, under *Integrations and deploy*)
 172. [A node syncs each tenant on a thread of its own](durability.md#a-nodes-syncs) (added after the move, under *Durability*)
 173. [A sealed chunk opens only after its own, and a replica keeps a store it cannot restore](js-client.md#sealed-chunks-in-a-chain) (added after the move, under *The JS client and Cloudflare*)
+174. [A worn graph is rebuilt](hnsw.md#worn-graphs) (added after the move, under *Storage*)

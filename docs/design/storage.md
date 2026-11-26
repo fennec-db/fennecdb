@@ -499,12 +499,16 @@ what the last compact kept besides the documents (`kept`: schemas,
 counters, graphs, the file less every record the stores hold -- the
 versions a compact beside the writes copied and saw written over are dead,
 and counted as kept they left a 307 KB file of 53 KB of rows not due
-again) -- a sum over the collections, nothing added to the write
+again; and a graph's record leaves it once a rebuild drops the graph it
+holds, [worn graphs](hnsw.md#worn-graphs)) -- a sum over the collections, nothing added to the write
 path: a lone put, put over and del measured 570/700/532 ns in memory either
 way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
 build's own spread. `CompactPolicy` is the one rule (half the file dead and
 64 MB, `compact_due`), `compact_when_due` a look under the read lock and a
-compact beside the database, `Compactor` a thread that looks every 5 s. The
+compact beside the database, `Compactor` a thread that looks every 5 s;
+what lets the database go -- the `Compactor`'s drop, a tenant's release, a
+shutdown -- stops a host's compact in its graph phase, writing nothing
+(`compact_when_due_until`, [worn graphs](hnsw.md#worn-graphs)). The
 look waits for a write under way: under `try_read` 10 looks in 12 runs of
 `make compact-bench` found the lock taken and put a due compact off 5 s,
 the file growing 100-160 MB a second meanwhile.
