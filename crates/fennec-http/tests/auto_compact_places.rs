@@ -156,6 +156,22 @@ fn the_servers_compaction_compacts_once_past_a_document_it_cannot_read() {
     ];
     assert_eq!(xs(&db.read().unwrap()), want);
     link::auto_compact(None);
+    // Let go -- once the compacter and the keeper let go of it too -- and
+    // opened again. Each holds the database for its look (`held::beside`),
+    // the compacter past the count this test waited for: dropped while one
+    // did, the database and its sink's buffer, the second row's record in
+    // it, outlived this handle, and the file opened below lacked the row
+    // until that thread let go (macOS CI; a 300 ms pause after the count
+    // failed every run).
+    let mut db = db;
+    let db = loop {
+        match Arc::try_unwrap(db) {
+            Ok(db) => break db,
+            Err(held) => db = held,
+        }
+        assert!(Instant::now() < deadline, "the server held the database");
+        std::thread::sleep(Duration::from_millis(1));
+    };
     drop(db);
     let db = fennec_core::fs::open(&path).unwrap();
     assert_eq!(xs(&db), want);
