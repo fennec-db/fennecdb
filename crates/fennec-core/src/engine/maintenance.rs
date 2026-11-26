@@ -1394,7 +1394,10 @@ impl Database {
             ));
         }
         // What was written since the last round of catching up: the rest of
-        // the image.
+        // the image, in no step past the cache -- the sync below puts it on
+        // disk at once, where each step past the first would wait for the
+        // one before it under the lock (`SideFile::unstepped`).
+        b.side.unstepped();
         let mut docs = crate::store::Snapshot::default();
         for (p, t) in b.parts.iter_mut().zip(tails) {
             let live = &self.collections[&p.name];
@@ -2629,7 +2632,7 @@ fn rewrite_beside(
             // or the old file alone, where the process waits for the disk.
             if b.mapped && room.is_some_and(|r| need > r || crate::cache::faulting()) {
                 b.past = true;
-                b.side.past_cache();
+                b.side.past_cache(room);
             }
             // Past the room, the old file read from its start to its end
             // rather than at random by id (`store::InTurn`).

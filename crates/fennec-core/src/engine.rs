@@ -1409,6 +1409,10 @@ impl ImageOut for Summed<'_> {
     fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
         self.out.in_turn(file, live)
     }
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn settle(&mut self) -> Result<()> {
+        self.out.settle()
+    }
     fn write_kept(&mut self, kept: Kept) -> Result<()> {
         self.sum = crc32c(self.sum, kept.bytes());
         self.out.write_kept(kept)
@@ -2732,6 +2736,16 @@ pub trait ImageOut {
     fn in_turn(&self, file: u64, live: u64) -> Option<crate::store::InTurn> {
         let _ = (file, live);
         None
+    }
+    /// What it has written put on disk and its pages let go of, before a
+    /// compact deals a store's records into a scratch file
+    /// ([`crate::store::InTurn`]): a side file past the page cache, whose
+    /// last step left dirty beside the scratch file's two would hold three
+    /// sixteenths of the room a cgroup cannot reclaim
+    /// ([`crate::fs::SideFile::past_cache`]). Nothing for every other.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    fn settle(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 
