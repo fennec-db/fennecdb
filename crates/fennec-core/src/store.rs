@@ -4587,6 +4587,39 @@ mod tests {
             written(&mut ix, &mut model, 10_001..=15_000);
             assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "{from_the_last}");
         }
+        // Undone in part, 4 500 of the far rows left: the deletes from the
+        // array count from the first, while the map holds 64 ids or more,
+        // and the 10 000 rows outnumber what is left after as many deletes
+        // as the look sorted. Counted only once the map outnumbered the
+        // array, the deletes before -- 5 000 of them -- counted for
+        // nothing, and the rows stayed sparse.
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=10_000);
+        written(&mut ix, &mut model, far..far + 15_000);
+        deleted(&mut ix, &mut model, (far + 4_500..far + 15_000).rev());
+        held_as(&ix, &model, "in part");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 4_500), "in part");
+    }
+
+    /// A lowering copies the span from the first held slot to the last
+    /// alone, with room of a quarter of it: 5 000 rows, the highest 4 000
+    /// deleted -- the slots past the last held one fewer than a cut waits
+    /// for -- and one written just below copy the 1 000 left, with 250
+    /// slots of room. Counted to the array's end, the room was 1 250, past
+    /// what the cut's bound allows once that row is deleted with a gap
+    /// below it.
+    #[test]
+    fn a_lowering_copies_the_held_span_alone() {
+        use std::collections::BTreeMap;
+        let (from, rows) = (1_000_000u64, 5_000u64);
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, from..from + rows);
+        deleted(&mut ix, &mut model, (from + 1_000..from + rows).rev());
+        assert_eq!((ix.dense.len(), ix.last), (rows as usize, 999));
+        written(&mut ix, &mut model, [from - 1]);
+        held_as(&ix, &model, "lowered");
+        let shape = (ix.lead, ix.dense.len(), ix.moved.0);
+        assert_eq!(shape, (250, 250 + 1 + 1_000, 1_000));
     }
 
     /// An id the gap from the held range is in the array, either side,
