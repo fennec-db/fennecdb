@@ -485,9 +485,21 @@ struct BesidePart {
     store: Store,
     /// Whether its dead records are left out.
     compact: bool,
-    /// Each graph's field, record, and changes when it was written, and
-    /// the bytes its record took in the side file once it is.
-    graphs: Vec<(String, Vec<u8>, u64, u64)>,
+    graphs: Vec<BesideGraph>,
+}
+
+/// One graph of a [`BesidePart`], its record taken under the read lock.
+#[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+struct BesideGraph {
+    field: String,
+    /// The graph's record as it stood, held until it is in the side file
+    /// ([`Beside::write`]), and its length after.
+    record: Vec<u8>,
+    len: usize,
+    /// The graph's changes when the record was taken.
+    changes: u64,
+    /// The bytes its record took in the side file once it is.
+    written: u64,
 }
 
 /// Lets the next rewrite beside the database go ahead however this one
@@ -1312,7 +1324,13 @@ impl Database {
                 .vectors
                 .iter()
                 .filter(|(_, ix)| !ix.is_empty())
-                .map(|(f, ix)| (f.clone(), ix.serialize_graph(), ix.changes(), 0))
+                .map(|(f, ix)| BesideGraph {
+                    field: f.clone(),
+                    record: ix.serialize_graph(),
+                    len: 0,
+                    changes: ix.changes(),
+                    written: 0,
+                })
                 .collect();
             parts.push(BesidePart {
                 token: 0,
@@ -1454,15 +1472,15 @@ impl Database {
             for ix in c.vectors.values() {
                 ix.persisted().kept.store(0, Relaxed);
             }
-            for (field, graph, changes, written) in &p.graphs {
-                if let Some(ix) = c.vectors.get(field) {
+            for g in &p.graphs {
+                if let Some(ix) = c.vectors.get(&g.field) {
                     let saved = ix.persisted();
-                    saved.changes.store(*changes, Relaxed);
+                    saved.changes.store(g.changes, Relaxed);
                     saved.at.store(len, Relaxed);
                     saved
                         .node_bytes
-                        .store((graph.len() / ix.len().max(1)) as u64, Relaxed);
-                    saved.kept.store(*written, Relaxed);
+                        .store((g.len / ix.len().max(1)) as u64, Relaxed);
+                    saved.kept.store(g.written, Relaxed);
                 }
             }
         }
@@ -1852,13 +1870,24 @@ impl Beside {
             } else {
                 placed.push(None);
             }
-            for (field, graph, _, written) in &mut p.graphs {
-                let mut payload = Vec::with_capacity(field.len() + 9 + graph.len());
-                crate::codec::encode_str(&mut payload, field);
-                payload.extend_from_slice(graph);
+            for g in &mut p.graphs {
+                // The field's name, then the graph, streamed into one
+                // record: the bytes `put_record` writes of the two laid end
+                // to end. Copied into one payload first, the graph was held
+                // twice while it was written -- 75 MB more of the P6 soak's
+                // worn graph. Let go of once it is in the side file, its
+                // length kept for the swap.
+                let mut name = Vec::with_capacity(g.field.len() + 9);
+                crate::codec::encode_str(&mut name, &g.field);
                 let at = side.at();
-                put_record(side, REC_GRAPH, p.cid, &payload)?;
-                *written = side.at() - at;
+                let mut record =
+                    Summed::begin(side, REC_GRAPH, p.cid, name.len() + g.record.len())?;
+                record.write(&name)?;
+                record.write(&g.record)?;
+                record.end()?;
+                g.written = side.at() - at;
+                g.len = g.record.len();
+                g.record = Vec::new();
             }
         }
         for st in self.statements.iter() {
@@ -2401,10 +2430,10 @@ impl Database {
     /// `stop` says so, where [`Self::rebuild_worn_until`] asks it: then it
     /// has written nothing and placed no graph, and answers `None`. What a
     /// host's compact runs ([`super::compact_when_due_until`]): the
-    /// graph phase rebuilds every worn graph, as long as a rebuild takes --
-    /// 50 s at 100 000 x 768 -- which a close, a release or a shutdown
-    /// would otherwise wait out. A rewrite begun runs to its end, its file
-    /// in place or none.
+    /// graph phase rebuilds every graph with a tombstone, worn or not,
+    /// each as long as a rebuild takes -- 50 s at 100 000 x 768 -- which a
+    /// close, a release or a shutdown would otherwise wait out. A rewrite
+    /// begun runs to its end, its file in place or none.
     pub(crate) fn compact_beside_until(
         db: &RwLock<Database>,
         stop: &dyn Fn() -> bool,
@@ -4869,15 +4898,15 @@ mod tests {
         assert_eq!((ix.len(), ix.dead(), ix.worn_after()), (300, 600, 0));
     }
 
-    /// Dropped while its compact rebuilds the graphs -- every worn one, as
-    /// long as a rebuild takes -- the `Compactor` gives up there rather
-    /// than build on: the drop returns with the graph as it stood and the
-    /// file not rewritten, its dead records where they were, no tail left.
-    /// The read lock is held from before the look until the stop is said,
-    /// so the compact, which takes the write lock only to place its graphs
-    /// and then for its rewrite, is in its graph phase when it is told. A
-    /// drop that waited the compact out would find the graph placed and
-    /// the file compacted.
+    /// Dropped while its compact rebuilds the graphs -- every one with a
+    /// tombstone, each as long as a rebuild takes -- the `Compactor` gives
+    /// up there rather than build on: the drop returns with the graph as
+    /// it stood and the file not rewritten, its dead records where they
+    /// were, no tail left. The read lock is held from before the look
+    /// until the stop is said, so the compact, which takes the write lock
+    /// only to place its graphs and then for its rewrite, is in its graph
+    /// phase when it is told. A drop that waited the compact out would
+    /// find the graph placed and the file compacted.
     #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
     #[test]
     fn a_compactor_dropped_in_its_compacts_graph_phase_leaves_file_and_graph() {

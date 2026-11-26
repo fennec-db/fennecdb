@@ -5707,7 +5707,27 @@ impl VectorIndex {
 
     fn serialize_into(&self, kept: bool, out: &mut Vec<u8>) {
         let n = self.doc_ids.len();
-        out.reserve(64 + n * (12 + 4 * self.m0));
+        // A list's first link is as many bytes as the node count needs, its
+        // steps as many as its widest, a document id 4 where every one fits:
+        // links and ids written 4 and 8 whatever, a 100 000 x 128 graph took
+        // 12.4 MB against the varint deltas' 6.2, a file 5% larger.
+        let (lw, dw) = (link_width(n), doc_width(&self.doc_ids));
+        // What follows the lists -- each tombstone's vector, the aliases
+        // and their count, the halves, and the eight bytes a link is written
+        // whole in before its cut (`put_le`), where a kept record's claim
+        // and sum go after -- has its room made with the lists' once their
+        // length is known (`put_all_lists`); the nodes' arrays have theirs
+        // here. Room for 140 bytes a node up front was twice a clean
+        // graph's record and short of a worn one's, whose tombstones'
+        // vectors doubled the buffer as they went in, the record held twice
+        // while it moved: 71 MB of room for the P6 soak's 75 MB.
+        let after = self.deleted_count * self.data.stored_len(self.dim)
+            + 8
+            + self.aliases.len() * (lw + 8)
+            + 1
+            + 4 * n
+            + 8;
+        out.reserve(64 + n * (dw + 4));
         out.push(match kept {
             true => GRAPH_VERSION_ALIASED_KEPT,
             false => GRAPH_VERSION_ALIASED,
@@ -5716,11 +5736,6 @@ impl VectorIndex {
         put_uvarint(out, n as u64);
         put_uvarint(out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
         put_uvarint(out, self.max_level as u64);
-        // A list's first link is as many bytes as the node count needs, its
-        // steps as many as its widest, a document id 4 where every one fits:
-        // links and ids written 4 and 8 whatever, a 100 000 x 128 graph took
-        // 12.4 MB against the varint deltas' 6.2, a file 5% larger.
-        let (lw, dw) = (link_width(n), doc_width(&self.doc_ids));
         out.extend_from_slice(&[lw as u8, dw as u8]);
         // The nodes still to be linked, flagged as such: written as nodes
         // with no links they would come back unreachable.
@@ -5745,7 +5760,7 @@ impl VectorIndex {
         for &k in &self.l0_len {
             out.extend_from_slice(&k.to_le_bytes());
         }
-        let read = self.put_all_lists(n, lw, out);
+        let read = self.put_all_lists(n, lw, after, out);
         // A tombstone still routes searches, but its document may be gone
         // or hold another vector by now: the vector it was linked with
         // travels with it.
@@ -5828,13 +5843,28 @@ impl VectorIndex {
         }
     }
 
-    /// Every node's level-0 list, then every list above, in node order.
+    /// Every node's level-0 list, then every list above, in node order, and
+    /// room for `after` bytes behind them ([`Self::in_turn_lists`]).
     #[cfg(target_family = "wasm")]
-    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) -> Option<Vec<u32>> {
+    fn put_all_lists(
+        &self,
+        n: usize,
+        lw: usize,
+        after: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<Vec<u32>> {
+        self.in_turn_lists(n, lw, after, out);
+        None
+    }
+
+    /// The lists written into `out` in turn, room made for level 0's at
+    /// their longest, as many links as a list holds at its width and its
+    /// steps' byte, and for `after`; the lists above grow it as they go.
+    fn in_turn_lists(&self, n: usize, lw: usize, after: usize, out: &mut Vec<u8>) {
+        out.reserve(n * (1 + lw * self.m0) + after);
         let mut sorted = Vec::with_capacity(self.m0);
         self.put_lists(0..n as u32, true, lw, &mut sorted, out);
         self.put_lists(0..n as u32, false, lw, &mut sorted, out);
-        None
     }
 
     /// Every node's level-0 list, then every list above, in node order:
@@ -5851,13 +5881,17 @@ impl VectorIndex {
     /// a server's read lock over a graph of 110 000 nodes 6.07-6.34 ms p50
     /// against 5.85-5.88 without them; beside the lists, 5.83-5.98.
     #[cfg(not(target_family = "wasm"))]
-    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) -> Option<Vec<u32>> {
+    fn put_all_lists(
+        &self,
+        n: usize,
+        lw: usize,
+        after: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<Vec<u32>> {
         let parts = n.div_ceil(LIST_PART);
         let threads = Self::threads().min(parts);
         if threads < 2 {
-            let mut sorted = Vec::with_capacity(self.m0);
-            self.put_lists(0..n as u32, true, lw, &mut sorted, out);
-            self.put_lists(0..n as u32, false, lw, &mut sorted, out);
+            self.in_turn_lists(n, lw, after, out);
             return None;
         }
         let shards = &self.same.shards;
@@ -5887,11 +5921,17 @@ impl VectorIndex {
                 done[p] = (level0, above);
             }
         }
-        for (level0, _) in &done {
+        // The record's room made once, to the byte, now the lists' length
+        // is known: each part let go of as it goes in.
+        let lists: usize = done.iter().map(|(l0, up)| l0.len() + up.len()).sum();
+        out.reserve_exact(lists + after);
+        for (level0, _) in &mut done {
             out.extend_from_slice(level0);
+            *level0 = Vec::new();
         }
-        for (_, above) in &done {
+        for (_, above) in &mut done {
             out.extend_from_slice(above);
+            *above = Vec::new();
         }
         read.then(|| halves.into_iter().map(AtomicU32::into_inner).collect())
     }
@@ -7476,12 +7516,48 @@ mod tests {
         ix.insert_batch(&items);
         let lw = link_width(n);
         let mut parts = Vec::new();
-        ix.put_all_lists(n, lw, &mut parts);
+        ix.put_all_lists(n, lw, 0, &mut parts);
         let (mut turn, mut sorted) = (Vec::new(), Vec::new());
         ix.put_lists(0..n as u32, true, lw, &mut sorted, &mut turn);
         ix.put_lists(0..n as u32, false, lw, &mut sorted, &mut turn);
         assert_eq!(parts.len(), turn.len());
         assert!(parts == turn, "the lists written in parts differ");
+    }
+
+    /// A graph's record is written into room made once, to the byte: the
+    /// lists', and what follows them -- each tombstone's vector, the
+    /// aliases, the halves -- made once the lists' parts are written, so
+    /// the buffer never doubles as a worn graph's tombstones go in, the
+    /// record held twice while it moved. It ends 8 bytes short of its
+    /// room: the eight a link is written whole in before its cut, where a
+    /// kept record's claim and sum go, which `save_graphs` adds after it.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn a_graph_record_is_written_into_room_made_once() {
+        if VectorIndex::threads() < 2 {
+            return;
+        }
+        let n = 2 * LIST_PART + 1_000;
+        let mut rng = Rng(31);
+        let items: Vec<(u64, Vec<f32>)> = (0..n as u64)
+            .map(|i| (i, (0..16).map(|_| rng.next_f32()).collect()))
+            .collect();
+        let spec = VectorIndexSpec {
+            m: 4,
+            ef_construction: 16,
+            ..spec()
+        };
+        let mut ix = VectorIndex::new(16, spec);
+        ix.insert_batch(&items);
+        // Half the documents deleted: as many tombstones, each carrying its
+        // 64-byte vector, past the room once made up front (`12 + 4 * m0`
+        // bytes a node, 44 here), which then doubled.
+        for i in (0..n as u64).step_by(2) {
+            ix.remove(i);
+        }
+        assert_eq!(ix.dead(), n.div_ceil(2));
+        let record = ix.serialize_graph();
+        assert_eq!(record.capacity() - record.len(), 8);
     }
 
     /// The lists a batch joins are pruned in parallel, grouped by list, and

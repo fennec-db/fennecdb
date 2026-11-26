@@ -2842,9 +2842,13 @@ pub trait Sink: Send {
     /// caller runs as soon as it lets its lock go -- a graph a server keeps
     /// ([`Database::save_graphs`]): a file's sink leaves it to that
     /// durability rather than writing what outgrew its buffer there and
-    /// then, which put megabytes into the file under the read lock.
-    fn append_deferred(&mut self, bytes: &[u8]) -> Result<()> {
-        self.append(bytes)
+    /// then, which put megabytes into the file under the read lock. The
+    /// record is `record[from..]`, the bytes before `from` room its writer
+    /// left for its head, and the buffer is handed over: a file's sink
+    /// keeps it until the durability writes it, where a copy held a graph
+    /// of gigabytes twice.
+    fn append_deferred(&mut self, record: Vec<u8>, from: usize) -> Result<()> {
+        self.append(&record[from..])
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
     /// [`Self::rewrite`] with the image written into the file as it is
@@ -7604,15 +7608,19 @@ impl Database {
                 let (h, hn) = head(checked_kind(REC_GRAPH, 1), c.id, body + 1 + SUM);
                 buf[HEAD_ROOM - hn..HEAD_ROOM].copy_from_slice(&h[..hn]);
                 buf.push(0);
-                let sum = crc32c(0, &buf[HEAD_ROOM - hn..]);
+                let from = HEAD_ROOM - hn;
+                let sum = crc32c(0, &buf[from..]);
                 buf.extend_from_slice(&sum.to_le_bytes());
-                let record = &buf[HEAD_ROOM - hn..];
+                let len = (buf.len() - from) as u64;
+                // Handed over, not copied: the file's sink keeps the buffer
+                // until the durability writes it, where a copy into its
+                // own held the record twice until then -- 75 MB more at
+                // the P6 soak's worn graph.
                 self.sink
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .append_deferred(record)?;
-                let end =
-                    self.appended.fetch_add(record.len() as u64, Relaxed) + record.len() as u64;
+                    .append_deferred(buf, from)?;
+                let end = self.appended.fetch_add(len, Relaxed) + len;
                 let p = ix.persisted();
                 p.changes.store(ix.changes(), Relaxed);
                 p.at.store(end, Relaxed);

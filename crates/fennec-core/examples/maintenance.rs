@@ -8,7 +8,8 @@
 //! and write is timed from the moment it asked for the lock. With `compact`
 //! the index is left out and the compact alone is run, over a file of any
 //! size: 1 800 000 x 128 is a gigabyte. The heap the statement took at its
-//! peak is counted by the allocator.
+//! peak is counted by the allocator, and so is a server's graph keeper's
+//! save of the graph the index built, which writes its record into the file.
 
 use fennec_core::prelude::*;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -81,17 +82,23 @@ fn database(n: usize, dim: usize, path: &std::path::Path) -> Database {
         &mut db,
         &format!("create collection c (n int, v vector<{dim}>)"),
     );
-    let mut rng = Rng(3);
+    put_vectors(&mut db, n, dim, 3);
+    db
+}
+
+/// Rows 1 to `n`, each a vector drawn from `seed`'s sequence: made, or
+/// written again with another seed.
+fn put_vectors(db: &mut Database, n: usize, dim: usize, seed: u64) {
+    let mut rng = Rng(seed);
     let mut batch = Vec::with_capacity(1_000);
     for i in 0..n {
         let v: Vec<String> = (0..dim).map(|_| format!("{:.4}", rng.next())).collect();
-        batch.push(format!("{{n: {i}, v: [{}]}}", v.join(",")));
+        batch.push(format!("{{id: {}, n: {i}, v: [{}]}}", i + 1, v.join(",")));
         if batch.len() == 1_000 || i == n - 1 {
-            exec(&mut db, &format!("put c [{}]", batch.join(",")));
+            exec(db, &format!("put c [{}]", batch.join(",")));
             batch.clear();
         }
     }
-    db
 }
 
 fn percentiles(label: &str, mut ms: Vec<f64>) -> String {
@@ -178,6 +185,35 @@ fn under_load(db: &Arc<RwLock<Database>>, sql: &str, beside: bool, n: usize) {
     );
 }
 
+/// A server's graph keeper's save of the graph the index built
+/// (`Database::save_graphs`, as `fennec_http::link::keep` runs it): how
+/// long it held the read lock, the bytes it appended, and the heap it took
+/// at its peak -- the record, and what held it until the durability after
+/// the lock wrote it -- with nothing else running, the heap being the
+/// process's.
+fn keeper_save(db: &Arc<RwLock<Database>>, path: &std::path::Path) {
+    db.write().unwrap().set_graph_saves(1, 0);
+    let len = || std::fs::metadata(path).map_or(0, |m| m.len());
+    let before = len();
+    let base = HEAP.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    let g = db.read().unwrap();
+    let t = Instant::now();
+    let (n, durable) = g.save_graphs().unwrap();
+    let held = t.elapsed();
+    drop(g);
+    if let Some(d) = durable {
+        d().unwrap();
+    }
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    println!(
+        "the keeper's save, {n} graph of {:.1} MB: the read lock held {:.1} ms, heap +{:.1} MB at its peak",
+        (len() - before) as f64 / 1e6,
+        held.as_secs_f64() * 1e3,
+        peak as f64 / 1e6,
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(100_000);
@@ -193,6 +229,7 @@ fn main() {
         println!("{n} x {dim} in a file of {:.1} MB", len as f64 / 1e6);
         if !compact_only {
             under_load(&db, "create index on c (v) @hnsw(cosine)", beside, n);
+            keeper_save(&db, &path);
         }
         // A fifth of the documents rewritten, so compact has dead bytes to
         // drop and the graph tombstones to leave behind.
@@ -201,6 +238,12 @@ fn main() {
             exec(&mut g, &format!("set c {{n: 0}} where n < {}", n / 5));
         }
         under_load(&db, "compact", beside, n);
+        if !compact_only {
+            // A fifth of the vectors written again: as many tombstones in
+            // the graph, each carrying its vector into the record.
+            put_vectors(&mut db.write().unwrap(), n / 5, dim, 5);
+            keeper_save(&db, &path);
+        }
     }
     let _ = std::fs::remove_file(&path);
 }

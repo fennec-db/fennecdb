@@ -203,8 +203,8 @@ impl Sink for Wrapped {
     fn record(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
         self.inner.record(seq, bytes)
     }
-    fn append_deferred(&mut self, bytes: &[u8]) -> Result<()> {
-        self.inner.append_deferred(bytes)
+    fn append_deferred(&mut self, record: Vec<u8>, from: usize) -> Result<()> {
+        self.inner.append_deferred(record, from)
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
         self.inner.rewrite(bytes)

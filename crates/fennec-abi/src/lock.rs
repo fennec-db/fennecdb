@@ -90,8 +90,8 @@ impl Sink for Holding {
     fn set_durable(&mut self, at: u64) {
         self.sink.set_durable(at)
     }
-    fn append_deferred(&mut self, bytes: &[u8]) -> CoreResult<()> {
-        self.sink.append_deferred(bytes)
+    fn append_deferred(&mut self, record: Vec<u8>, from: usize) -> CoreResult<()> {
+        self.sink.append_deferred(record, from)
     }
     fn rewrite(&mut self, bytes: &[u8]) -> CoreResult<()> {
         self.sink.rewrite(bytes)
@@ -1315,7 +1315,7 @@ mod tests {
             fn record(&mut self, _: u64, _: &[u8]) -> CoreResult<()> {
                 self.ok("record")
             }
-            fn append_deferred(&mut self, _: &[u8]) -> CoreResult<()> {
+            fn append_deferred(&mut self, _: Vec<u8>, _: usize) -> CoreResult<()> {
                 self.ok("append_deferred")
             }
             fn rewrite(&mut self, _: &[u8]) -> CoreResult<()> {
@@ -1380,7 +1380,7 @@ mod tests {
         let mut s = holding(hold(&p).unwrap())(Box::new(Rec(Arc::clone(&seen)))).unwrap();
         s.append(b"").unwrap();
         s.record(1, b"").unwrap();
-        s.append_deferred(b"").unwrap();
+        s.append_deferred(Vec::new(), 0).unwrap();
         s.rewrite(b"").unwrap();
         s.rewrite_with(&mut |_| Ok(())).unwrap();
         s.remapped();

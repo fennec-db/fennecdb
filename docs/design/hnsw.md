@@ -246,6 +246,54 @@ than write its megabytes under it: a record held the lock 5.0 ms p50 and
 7.9 at most, against 18.3 and 33.3, the same bytes (`make reopen-bench`,
 in turns).
 
+**The record is held once.** The keeper writes it into the buffer it
+hands the sink, its head in room left before it, and the file's sink keeps
+that buffer as it came (`Sink::append_deferred`, `fs::Pending`): behind
+the bytes appended before it, ahead of those appended after, until the
+durability writes it. It copied the record into its own buffer before, so
+the record was held twice until then -- 75 MB more for the P6 soak's worn
+`docs` graph; written through the sink under the lock it would be held
+once, and hold the lock as above. Only the bytes appended count against
+the sink's buffer, so an append past it writes a record ahead of itself as
+before, and a write behind the lock leaves one for the durability rather
+than take its megabytes past `WRITE_HELD` and write them under the lock.
+The record's room is made once, to the byte: the nodes' arrays first, then
+the lists, each tombstone's vector, the aliases and the halves once the
+lists' parts are written (`put_all_lists`). The 140 bytes a node reserved
+up front were twice a clean graph's record and short of a worn one's,
+whose tombstones' vectors outgrew the room and doubled the buffer as they
+went in, the record copied while it moved: 71 MB of room for the P6 soak's
+75 MB. A compact's record is held once too (`Beside::write`): taken under
+the read lock, it is streamed into the side file after its field's name,
+where both were copied into one payload first, and let go of there rather
+than at the swap. At 100 000 x 128 (`make maintenance-bench`, the heap the
+allocator counts), the keeper's save of a 6.7 MB record peaked at 17.5 MB
+against 24.1, and of an 18.7 MB one, a fifth of the rows' vectors written
+again, at 30.2 against 52.3; a compact beside the database at 18.5 against
+25.1, and one under the lock, whose image takes the same room, at 19.1
+against 25.7. What a save's peak still holds past its record is the
+lists' parts, written on every core and copied into the record as it is
+made (`put_all_lists`), the lists twice for those few milliseconds; and a
+graph written in turn -- `LIST_PART` nodes or fewer natively, or on one
+core, and the browser module's -- makes room up front for its level-0 lists at their longest and
+what follows them, its upper lists taking what level 0 left
+(`in_turn_lists`). The save holds the read lock less, the copy gone and
+the room made once: 40 saves of the clean graph held it 5.8 ms p50 against
+7.1, and of the one with 20 000 tombstones 8.9 against 15.3 to 15.6 (two
+rounds in turns, each begun with the load under 4, a scratch program of
+the keeper's saves). It cost `fennec-server` 1 728 bytes
+of code on aarch64 macOS, its `__TEXT` a 16 KB page more, the native
+library 896 and `fennec` 1 024, their `__TEXT` the pages it was; the
+browser module 209 bytes, 102 fewer brotli. The file is the same byte for byte:
+`tests/maintenance.rs`' `a_compact_beside_writes_the_file_the_lock_writes`
+holds a compact beside the database, whose records are streamed, to one
+under the lock, whose `image_into` writes them from one payload, and a
+keeper's saves after either, writes pending before and after them;
+`fs::tests::handed_records_keep_their_place_among_the_appends` holds
+records handed over to the bytes appended in turn; and a file written
+through two keeper's saves and a compact beside the database by this build
+and by the one before (2 811 714 and 847 955 bytes) compared equal.
+
 ## Aliases
 
 **A vector written again is one node** (`VectorIndex::place`,
@@ -536,18 +584,23 @@ under way.
 A host's compact asks the same stop in its graph phase
 (`compact_when_due_until`, `Database::compact_beside_until`): the
 `Compactor` and a server's compacter run a compact due before a rebuild,
-and its graph phase rebuilds every worn graph, as long as a rebuild takes.
+and its graph phase rebuilds every graph with a tombstone, worn or not
+(`graphs_rebuilt`: a compact of every collection targets them all), each
+as long as a rebuild takes.
 The first build passed it a stop that never said so, so a close during a
 compact's graph phase waited the whole build out, as long as the rebuild
-it was there to stop. Told there, the compact ends rather than go on to
+it was there to stop; and once the server's compacter asked its stop, no
+test held it there -- a stop that never says so passed every one -- until
+`tenants::tests::a_delete_stops_the_compacters_compact_in_its_graph_phase`
+ran `link::compact` under a delete. Told there, the compact ends rather than go on to
 its rewrite, and answers `None`: nothing is written before the rewrite --
 the side file is the rewrite's own -- and no graph is placed, so the file
 and the graphs stand as the writes left them, as a stopped rebuild leaves
 them, and the compact is due again at the next look. Going on to the
 rewrite with the graphs kept as they stood was the other way: a close
 would then wait the rewrite out, 2.1 s a gigabyte, and the rewrite would
-write each worn graph's record, tombstones and all, which the graph phase
-is there to drop. A rewrite begun runs to its end, its file in place or
+write each graph's record, tombstones and all, which the graph phase is
+there to drop. A rewrite begun runs to its end, its file in place or
 none, as before; a `compact` statement is never told. The compact's stop,
 and the latch moved, cost `fennec-server` 896 bytes of code and the
 native library 704, each `__TEXT` the pages it was, on aarch64 macOS; the

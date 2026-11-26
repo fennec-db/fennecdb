@@ -4461,6 +4461,16 @@ mod tests {
         t: Arc<Tenant>,
         stop: impl FnOnce() -> R + Send + 'static,
     ) -> (bool, std::thread::JoinHandle<R>) {
+        stopping_beside(t, |db| crate::link::rebuild("worn", db), stop)
+    }
+
+    /// [`stopping_a_rebuild`] of what `run` runs beside the database: a
+    /// rebuild, or the compacter's compact in its graph phase.
+    fn stopping_beside<R: Send + 'static>(
+        t: Arc<Tenant>,
+        run: fn(&Arc<RwLock<Database>>),
+        stop: impl FnOnce() -> R + Send + 'static,
+    ) -> (bool, std::thread::JoinHandle<R>) {
         let graph = |db: &Database| {
             let ix = &db.collection("docs").unwrap().vectors["v"];
             (ix.len(), ix.dead(), ix.serialize_graph())
@@ -4473,7 +4483,7 @@ mod tests {
         let rebuilding = {
             let db = Arc::clone(&db);
             std::thread::spawn(move || {
-                crate::link::rebuild("worn", &db);
+                run(&db);
                 let after = graph(&db.read().unwrap());
                 after
             })
@@ -4509,6 +4519,46 @@ mod tests {
         deleting.join().unwrap().expect("deleted");
         assert!(!dir.join("worn.fennec").exists());
         reg.create("worn").expect("made again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The node's compacter's compact (`link::compact`), in its graph phase
+    /// -- every graph with a tombstone rebuilt, the worn one here -- stops
+    /// at a delete as a rebuild does: it places no graph, writes no file
+    /// and lets the database go. Asked a stop that never says so, it went
+    /// on to place the rebuilt graph and rewrite the file, and the delete
+    /// waited it out, a build of up to a minute.
+    #[test]
+    fn a_delete_stops_the_compacters_compact_in_its_graph_phase() {
+        let dir = scratch("worn-compact");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let t = worn_tenant(&reg, "worn", None);
+        let dead = t.db.read().unwrap().garbage().dead();
+        assert!(dead > 0);
+        let compacting = |db: &Arc<RwLock<Database>>| {
+            // Due whatever is dead, as a quota's policy is.
+            let policy = fennec_core::engine::CompactPolicy {
+                ratio: f64::MIN_POSITIVE,
+                floor: 1,
+                memory: false,
+            };
+            let memory = fennec_core::engine::Memory {
+                room: None,
+                faulting: false,
+            };
+            crate::link::compact("worn", db, &policy, memory);
+            // Nothing written: its dead records where they were.
+            let dead = db.read().unwrap().garbage().dead();
+            assert!(dead > 0, "the file was compacted");
+        };
+        let deleting = {
+            let reg = Arc::clone(&reg);
+            move || reg.delete("worn")
+        };
+        let (let_go, deleting) = stopping_beside(t, compacting, deleting);
+        assert!(let_go);
+        deleting.join().unwrap().expect("deleted");
+        assert!(!dir.join("worn.fennec").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
