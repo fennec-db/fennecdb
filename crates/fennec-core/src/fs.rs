@@ -2076,13 +2076,14 @@ struct Steps(Option<std::thread::JoinHandle<std::io::Result<()>>>);
 impl Steps {
     /// A step of `file` written: the step before's fdatasync waited for and
     /// its pages let go of, and this one's begun on a thread of its own --
-    /// or here, where no thread can be had.
+    /// or here, where no thread or descriptor can be had.
     fn step(&mut self, file: &File) -> Result<()> {
         self.wait(file)?;
-        let own = file.try_clone()?;
-        let spawned = std::thread::Builder::new()
-            .name("fennec-step".into())
-            .spawn(move || own.sync_data());
+        let spawned = file.try_clone().and_then(|own| {
+            std::thread::Builder::new()
+                .name("fennec-step".into())
+                .spawn(move || own.sync_data())
+        });
         match spawned {
             Ok(h) => self.0 = Some(h),
             Err(_) => {
@@ -2109,6 +2110,21 @@ impl Steps {
         file.sync_data()?;
         let_go_pages(file, 0, 0);
         Ok(())
+    }
+}
+
+/// A file dropped with a step's fdatasync under way -- a compact that
+/// failed -- waits it out, so no thread of the compact's outlives it.
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+impl Drop for Steps {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -4657,8 +4673,11 @@ mod tests {
                 written += len as u64;
                 assert_eq!(s.unsynced, written % step, "after {len} bytes at {at}");
             }
+            // The last step's fdatasync under way on a thread of its own.
+            assert!(s.steps.0.is_some());
             s.settle().unwrap();
             assert_eq!(s.unsynced, 0);
+            assert!(s.steps.0.is_none());
             let mut back = vec![0u8; 20_000 + 2 * 4096 + 9];
             s.read_at(0, &mut back).unwrap();
             assert!(back == want[..back.len()]);
@@ -4690,10 +4709,12 @@ mod tests {
                 assert_eq!(side.out.at - side.stepped, (want.len() as u64 - 17) % step);
             }
             assert_eq!(side.stepped, side.out.at);
+            assert!(side.steps.0.is_some());
             ImageOut::write(&mut side, b"after").unwrap();
             want.extend_from_slice(b"after");
             side.sync().unwrap();
             assert_eq!(side.stepped, side.out.at);
+            assert!(side.steps.0.is_none());
             assert!(side.read_back().unwrap() == want);
         }
     }
