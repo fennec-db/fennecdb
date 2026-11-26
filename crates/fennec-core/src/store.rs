@@ -581,16 +581,18 @@ impl IdIndex {
             false => 0,
         };
         let mut to = was - (was - id).max(MAX_DENSE_GAP).max(quarter).min(was - 1);
-        let mut below: Vec<DocId> = Vec::new();
-        if !self.sparse.is_empty() {
-            below.extend(self.sparse.keys().copied().filter(|&k| k < was));
-            below.sort_unstable();
-            for &k in below.iter().rev() {
-                if k < to && to - k > MAX_DENSE_GAP {
-                    break;
-                }
-                to = to.min(k);
+        // The sparse ids below the old floor, the highest first: each within
+        // the gap below the new one takes it down to it. Collected and sorted
+        // as a walk does, nothing where the map is empty: filters of the
+        // map's keys of their own, here and in the rebase, were 400 bytes of
+        // the browser module.
+        let keys = self.sparse_from(0);
+        let below = &keys[..keys.partition_point(|&k| k < was)];
+        for &k in below.iter().rev() {
+            if k < to && to - k > MAX_DENSE_GAP {
+                break;
             }
+            to = to.min(k);
         }
         let by = (was - to) as usize;
         // Into an array of its own, the empty slots first: shifting the
@@ -606,7 +608,7 @@ impl IdIndex {
             self.moved.0 += len;
         }
         // Every sparse id from the new floor up to the old one.
-        for &k in below.iter().filter(|&&k| k >= to) {
+        for &k in &below[below.partition_point(|&k| k < to)..] {
             if let Some(l) = self.sparse.remove(&k) {
                 let i = (k - to) as usize;
                 self.dense[i] = l;
@@ -666,12 +668,13 @@ impl IdIndex {
         self.trim();
     }
 
-    /// Gives back the sparse map's room once it holds a quarter of it or
-    /// less: a run taken into the array left the map at its largest, 5.5
-    /// MB where the array was 3.1, until the next open.
+    /// Lets go of the sparse map once the array took every id of it: the
+    /// room of each id it held stayed until the next open. One still
+    /// holding ids keeps its room: shrinking it took the table's resize
+    /// into the browser module, 700 bytes.
     fn trim(&mut self) {
-        if 4 * self.sparse.len() <= self.sparse.capacity() {
-            self.sparse.shrink_to(2 * self.sparse.len());
+        if self.sparse.is_empty() {
+            self.sparse = HashMap::new();
         }
     }
 
@@ -705,29 +708,22 @@ impl IdIndex {
             }
         }
         if run.len() > self.count - self.sparse.len() {
-            let (lo, hi) = (keys[run.start], keys[run.end - 1]);
-            let mut dense = vec![Loc::EMPTY; (hi - lo + 1) as usize];
-            for &k in &keys[run.clone()] {
-                if let Some(l) = self.sparse.remove(&k) {
-                    dense[(k - lo) as usize] = l;
-                }
-            }
-            let was = std::mem::replace(&mut self.dense, dense);
+            // The array's ids into the sparse map, and an empty array from
+            // the run's first id, which the take-over grows over the run
+            // and no further: the next sparse id is more than the gap past
+            // it.
+            let was = std::mem::take(&mut self.dense);
             #[cfg(test)]
             {
-                self.moved.0 += was.len() + self.dense.len();
+                self.moved.0 += was.len();
             }
             for (i, &l) in was.iter().enumerate().skip(self.lead) {
                 if !l.is_empty() {
                     self.sparse.insert(self.floor + i as u64, l);
                 }
             }
-            (self.floor, self.lead, self.after) = (lo, 0, 0);
-            self.sparse_floor = match self.sparse.keys().filter(|&&k| k > hi).min() {
-                Some(&k) => k - MAX_DENSE_GAP,
-                None => DocId::MAX,
-            };
-            self.trim();
+            (self.floor, self.lead, self.after) = (keys[run.start], 0, 0);
+            self.take_over_sparse(self.floor);
         }
         self.rebase_at = (2 * self.sparse.len()).max(REBASE_FROM);
     }
@@ -4079,7 +4075,8 @@ mod tests {
     /// Every order of writes ends with the rows dense, as an array from 1
     /// holds them, and the sparse map holding only the ids the gap keeps
     /// apart: a block's deletes from the highest id down put back from the
-    /// lowest up, under the floor the deletes cut up; rows written below a
+    /// lowest up, under the floor the deletes cut up, outnumbering the rows
+    /// left or not; rows written below a
     /// replica's pending one, which came first, before it goes; the rows of
     /// an array emptied below a pending one written again, as a reseed
     /// does; and a load whose first id is its last, the rest in turn --
@@ -4099,6 +4096,15 @@ mod tests {
         assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "put back");
         // No more than the array from 1 held, 262 144 slots.
         assert!(ix.bytes() <= 3_145_728, "{} bytes", ix.bytes());
+
+        // Half the rows so, the deletes' put-back never outnumbering the
+        // array: the floor lowered within the gap of them takes them all.
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=200_000);
+        deleted(&mut ix, &mut model, (1..=100_000).rev());
+        written(&mut ix, &mut model, 1..=100_000);
+        held_as(&ix, &model, "half put back");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "half put back");
 
         let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
         written(&mut ix, &mut model, [pending]);

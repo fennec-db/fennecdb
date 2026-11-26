@@ -324,9 +324,9 @@ fn each(from: u64, to: u64) -> Vec<(u64, Value)> {
 }
 
 /// The most an array from 1 to `last` holds, grown by doubling, and the
-/// room of a sparse map that held a few ids.
+/// room of a sparse map that held the 64 ids a run takes the array at.
 fn as_from_one(last: u64) -> usize {
-    (last as usize).next_power_of_two() * 12 + 1_024
+    (last as usize).next_power_of_two() * 12 + 4_096
 }
 
 /// A delete from the highest id down that its `require` refuses is put
