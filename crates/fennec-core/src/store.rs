@@ -4706,6 +4706,25 @@ mod tests {
         assert_eq!(ix.sparse.len(), 0);
     }
 
+    /// Rows deleted from the highest down, nothing written below them, give
+    /// their slots back as they go, moving none: 100 000 rows deleted down
+    /// to the lowest 1 000 leave an array of at most the span and the run
+    /// a cut waits for, and an allocation of four times that. A lowering
+    /// drops the run too, so ids falling cut it either way; here only the
+    /// end's own cut does.
+    #[test]
+    fn rows_deleted_from_the_highest_down_give_their_slots_back() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=100_000);
+        deleted(&mut ix, &mut model, (1_001..=100_000).rev());
+        held_as(&ix, &model, "deleted");
+        let most = 1_000 + CUT_FROM + 1_000 / 4;
+        let (len, cap) = (ix.dense.len(), ix.dense.capacity());
+        assert!(len <= most && cap <= 4 * most, "{len} slots, {cap} held");
+        assert_eq!(ix.moved.0, 0, "slots moved");
+    }
+
     /// One row moved a gap at a time, the one before it deleted, holds the
     /// array to about the gap, down as up: moved down 10 000 times, the
     /// array's end never cut, it reached 532 MB.
