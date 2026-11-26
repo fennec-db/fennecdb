@@ -293,10 +293,10 @@ fn adopt_shares(
     }
     let shares = marks.len() - 1;
     let [stop, top, _] = marks[shares];
-    // The array's floor, the first document's id, read ahead: the ids an
-    // image no longer holds below it take no slot.
-    let (mut q, mut floor, mut e) = (from, 0, 0);
-    index_entry(docs, &mut q, &mut floor, &mut e, len)?;
+    // The array's floor, the first document's id -- its step from 0, which
+    // its share reads again in full -- read ahead: the ids an image no
+    // longer holds below it take no slot.
+    let floor = uvarint(docs, &mut { from }).filter(|&f| f > 0)?;
     let span = top.checked_sub(floor - 1)?;
     if shares as u64 != count.div_ceil(INDEX_SHARE as u64)
         || count > docs.len() as u64 / 3
@@ -308,14 +308,14 @@ fn adopt_shares(
     {
         return None;
     }
-    // The id before each share's first slot: the one before its first
+    // The id before a share's first slot: the one before its first
     // document, the floor's for the first share, whose ids count from 0.
-    let below: Vec<DocId> = marks.iter().map(|m| m[1].max(floor - 1)).collect();
+    let below = |m: [u64; 3]| m[1].max(floor - 1);
     let mut dense: Vec<Loc> = Vec::with_capacity(span as usize);
     let mut parts = Vec::with_capacity(shares);
     let mut rest = &mut dense.spare_capacity_mut()[..span as usize];
-    for w in below.windows(2) {
-        let (part, after) = rest.split_at_mut(w[1].checked_sub(w[0])? as usize);
+    for w in marks.windows(2) {
+        let (part, after) = rest.split_at_mut(below(w[1]).checked_sub(below(w[0]))? as usize);
         parts.push(Mutex::new(part));
         rest = after;
     }
@@ -324,7 +324,8 @@ fn adopt_shares(
     let done = crate::vector::spread(shares, &mut states, |_, i| {
         let mut part = parts[i].lock().unwrap_or_else(|e| e.into_inner());
         let ([p, first, mut end], next) = (marks[i], marks[i + 1]);
-        let (mut p, mut id, mut was, mut filled) = (p as usize, first, below[i], 0);
+        let base = below(marks[i]);
+        let (mut p, mut id, mut was, mut filled) = (p as usize, first, base, 0);
         let docs_here = (count - (i * INDEX_SHARE) as u64).min(INDEX_SHARE as u64);
         for _ in 0..docs_here {
             let (pos, n) = index_entry(docs, &mut p, &mut id, &mut end, len)?;
@@ -334,7 +335,7 @@ fn adopt_shares(
                 return None;
             }
             was = id;
-            let slot = (id - below[i] - 1) as usize;
+            let slot = (id - base - 1) as usize;
             for gap in part.get_mut(filled..slot)? {
                 gap.write(Loc::EMPTY);
             }
@@ -464,22 +465,14 @@ impl IdIndex {
     fn insert(&mut self, id: DocId, loc: Loc) {
         let i = id.wrapping_sub(self.floor);
         let len = self.dense.len() as u64;
-        if i < len {
-            let i = i as usize;
-            let slot = &mut self.dense[i];
-            if slot.is_empty() {
-                *slot = loc;
-                self.count += 1;
-                self.placed(i);
-            } else {
-                *slot = loc;
+        if i >= len {
+            // Within the gap past the range's last id, the array grows to
+            // it. An id below the floor wrapped to near 2^64, past the gap
+            // but for a range ending within it of 2^64, which `id >= floor`
+            // tells apart.
+            if i - len >= MAX_DENSE_GAP || id < self.floor {
+                return self.insert_apart(id, loc);
             }
-            return;
-        }
-        // Within the gap past the range's last id, the array grows to it.
-        // An id below the floor wrapped to near 2^64, past the gap but for a
-        // range ending within it of 2^64, which `id >= floor` tells apart.
-        if i - len < MAX_DENSE_GAP && id >= self.floor {
             if len == 0 {
                 (self.lead, self.after) = (i as usize, i as usize);
             }
@@ -490,14 +483,16 @@ impl IdIndex {
             if self.sparse_floor <= id {
                 self.take_over_sparse(id);
             }
-            let slot = &mut self.dense[i as usize];
-            if slot.is_empty() {
-                self.count += 1;
-            }
-            *slot = loc;
-            return;
         }
-        self.insert_apart(id, loc);
+        let i = i as usize;
+        let slot = &mut self.dense[i];
+        if slot.is_empty() {
+            *slot = loc;
+            self.count += 1;
+            self.placed(i);
+        } else {
+            *slot = loc;
+        }
     }
 
     /// [`Self::insert`] of an id neither in the dense range nor within the
@@ -508,27 +503,19 @@ impl IdIndex {
     /// and any other into the sparse map. Apart, as it is the rare one.
     #[inline(never)]
     fn insert_apart(&mut self, id: DocId, loc: Loc) {
-        if id >= 1 && self.count == 0 {
-            // No location anywhere, so no sparse id either: the array may
-            // start wherever its first id is.
-            self.dense.clear();
-            self.dense.push(loc);
-            (self.floor, self.lead, self.after, self.count) = (id, 0, 0, 1);
-            self.sparse_floor = DocId::MAX;
-            return;
-        }
-        if id >= 1 && id < self.floor && self.floor - id <= MAX_DENSE_GAP {
-            self.lower(id);
-            let i = (id - self.floor) as usize;
-            let slot = &mut self.dense[i];
-            if slot.is_empty() {
-                *slot = loc;
-                self.count += 1;
-                self.placed(i);
-            } else {
-                *slot = loc;
+        if id >= 1 && (self.count == 0 || id < self.floor && self.floor - id <= MAX_DENSE_GAP) {
+            match self.count {
+                // No location anywhere, so no sparse id either: the array
+                // may start wherever its first id is.
+                0 => {
+                    self.dense.clear();
+                    (self.floor, self.lead, self.after) = (id, 0, 0);
+                    self.sparse_floor = DocId::MAX;
+                }
+                _ => self.lower(id),
             }
-            return;
+            // At the range's start, or in it: `insert`'s own paths place it.
+            return self.insert(id, loc);
         }
         if id >= self.floor && id < self.sparse_floor {
             self.sparse_floor = id;
@@ -552,10 +539,12 @@ impl IdIndex {
             .max(MAX_DENSE_GAP)
             .max(len as u64 / 4)
             .min(was - 1) as usize;
-        self.dense.reserve_exact(by);
-        self.dense.resize(len + by, Loc::EMPTY);
-        self.dense.copy_within(0..len, by);
-        self.dense[..by].fill(Loc::EMPTY);
+        // Into an array of its own, the empty slots first: shifting the
+        // slots in place took a copy and a fill of the browser module's own.
+        let mut dense = Vec::with_capacity(len + by);
+        dense.resize(by, Loc::EMPTY);
+        dense.extend_from_slice(&self.dense);
+        self.dense = dense;
         self.floor = was - by as u64;
         (self.lead, self.after) = (self.lead + by, self.after + by);
         // Every sparse id from the new floor up to the old one, which the
@@ -587,13 +576,7 @@ impl IdIndex {
     /// stay.
     fn take_over_sparse(&mut self, upto: DocId) {
         let floor = self.floor;
-        let mut keys: Vec<DocId> = self
-            .sparse
-            .keys()
-            .copied()
-            .filter(|&k| k >= floor)
-            .collect();
-        keys.sort_unstable();
+        let keys = self.sparse_from(floor);
         let mut end = upto;
         let mut taken = 0;
         for &k in &keys {
@@ -653,7 +636,7 @@ impl IdIndex {
     fn past_lead(&mut self) {
         let len = self.dense.len();
         let mut k = (self.lead + 1).max(self.after);
-        while k < len && self.dense[k].is_empty() {
+        while self.dense.get(k).is_some_and(|l| l.is_empty()) {
             k += 1;
         }
         (self.lead, self.after) = (k, k);
@@ -720,60 +703,59 @@ impl IdIndex {
         out
     }
 
-    /// The sparse ids from `from` on, ascending, apart: those below the
-    /// dense range, then those above it. Usually none, and nothing
-    /// allocated; those below are rarer still, the second `Vec` made only
-    /// for them.
-    fn sparse_apart(&self, from: DocId) -> (Vec<DocId>, Vec<DocId>) {
-        let mut below: Vec<DocId> = self.sparse.keys().copied().filter(|&k| k >= from).collect();
-        below.sort_unstable();
-        match below.partition_point(|&k| k < self.floor) {
-            0 => (Vec::new(), below),
-            k => {
-                let above = below.split_off(k);
-                (below, above)
-            }
-        }
+    /// The sparse ids from `from` on, ascending. Usually none, and nothing
+    /// allocated. Ids alone: sorted with their locations, the module held a
+    /// sort of its own for the pairs, 3.4 KB.
+    fn sparse_from(&self, from: DocId) -> Vec<DocId> {
+        let mut ids: Vec<DocId> = self.sparse.keys().copied().filter(|&k| k >= from).collect();
+        ids.sort_unstable();
+        ids
     }
 
-    /// The ids in ascending order, lazily: the sparse ones below the floor,
-    /// the dense part sorted by position from its first held slot, and the
-    /// sparse ones above it (see the invariant). Only the sparse ids,
-    /// usually none, are collected and sorted up front.
+    /// The ids in ascending order, lazily: [`Self::walk`]'s.
+    #[inline]
     fn iter(&self) -> impl Iterator<Item = DocId> + '_ {
-        let (below, above) = self.sparse_apart(0);
-        let (floor, lead) = (self.floor, self.lead);
-        below
-            .into_iter()
-            .chain(
-                self.dense[lead..]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| !l.is_empty())
-                    .map(move |(i, _)| floor + (lead + i) as u64),
-            )
-            .chain(above)
+        self.walk(0).map(|(id, _)| id)
     }
 
-    /// [`Self::iter`] from `from` on: the dense part from its slot, the
-    /// sparse ids at or above it. Only a native scan starts from an id
-    /// (`Expr::conjunct_id_floor`); `iter` keeps its own walk, which as
-    /// this one from 1 was 75 bytes brotli of the browser module.
+    /// [`Self::iter`] from `from` on. Only a native scan starts from an id
+    /// (`Expr::conjunct_id_floor`).
+    #[inline]
     fn iter_from(&self, from: DocId) -> impl Iterator<Item = DocId> + '_ {
-        let (below, above) = self.sparse_apart(from);
-        let floor = self.floor;
+        self.walk(from).map(|(id, _)| id)
+    }
+
+    /// The ids from `from` on and their locations, ascending: the sparse
+    /// ones below the floor, the dense part from its first held slot or
+    /// `from`'s, and the sparse ones above it (see the invariant). Only the
+    /// sparse ids, usually none, are collected and sorted up front. One
+    /// constructor out of line, and one `next` for every walk.
+    #[inline(never)]
+    fn walk(&self, from: DocId) -> Walk<'_> {
+        let ids = self.sparse_from(from);
+        let mut below = 0;
+        while ids.get(below).is_some_and(|&id| id < self.floor) {
+            below += 1;
+        }
         let skip =
-            (from.saturating_sub(floor).min(self.dense.len() as u64) as usize).max(self.lead);
-        below
-            .into_iter()
-            .chain(
-                self.dense[skip..]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| !l.is_empty())
-                    .map(move |(i, _)| floor + (skip + i) as u64),
-            )
-            .chain(above)
+            (from.saturating_sub(self.floor).min(self.dense.len() as u64) as usize).max(self.lead);
+        let slots = self.dense.get(skip..).unwrap_or_default();
+        // The slots wait while the sparse ids below them are given.
+        let (dense, rest) = match below {
+            0 => (slots, &[][..]),
+            _ => (&[][..], slots),
+        };
+        Walk {
+            dense: dense.iter(),
+            id: self.floor + skip as u64,
+            apart: Apart {
+                rest,
+                map: &self.sparse,
+                ids,
+                at: 0,
+                below,
+            },
+        }
     }
 
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
@@ -781,23 +763,103 @@ impl IdIndex {
     /// compact or a checkpoint walks the array anyway.
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
         self.cut();
-        let (below, above) = self.sparse_apart(0);
-        for id in below {
-            if let Some(l) = self.sparse.get_mut(&id) {
-                *l = f(id, *l);
-            }
-        }
+        let ids = self.sparse_from(0);
         let floor = self.floor;
+        relocate_sparse(&mut self.sparse, &ids, (floor, true), &mut f);
         for (i, l) in self.dense.iter_mut().enumerate() {
             if !l.is_empty() {
                 *l = f(floor + i as u64, *l);
             }
         }
-        for id in above {
-            if let Some(l) = self.sparse.get_mut(&id) {
-                *l = f(id, *l);
+        relocate_sparse(&mut self.sparse, &ids, (floor, false), &mut f);
+    }
+}
+
+/// [`IdIndex::relocate`] of the sparse ids of `ids` below `floor`, or
+/// those at or past it: apart, as they are usually none, and called on
+/// both sides of the dense walk.
+#[inline(never)]
+fn relocate_sparse(
+    sparse: &mut HashMap<DocId, Loc>,
+    ids: &[DocId],
+    (floor, below): (DocId, bool),
+    f: &mut impl FnMut(DocId, Loc) -> Loc,
+) {
+    for &id in ids {
+        if let Some(l) = sparse.get_mut(&id).filter(|_| (id < floor) == below) {
+            *l = f(id, *l);
+        }
+    }
+}
+
+/// [`IdIndex::walk`]: the sparse ids below the dense range, then the
+/// dense slots that hold a location, then the sparse ids above it, each id
+/// with its location. A `next` walks the dense slots and nothing else while
+/// they last: they wait in [`Apart`] while the ids below them are given,
+/// and the sparse ids are asked for out of line, so none of their state is
+/// carried through a caller's loop. As a `Chain` of the three parts each id
+/// went through two `Chain`s, and a compact of 10 000 rows, whose walks go
+/// through them four times, counted 6.5% more instructions under CI's gate.
+/// The location comes with the id, so a walk that reads it -- a compact's,
+/// an image's -- does not look the id up again.
+pub(crate) struct Walk<'a> {
+    /// The dense slots in hand, not walked yet.
+    dense: std::slice::Iter<'a, Loc>,
+    /// The id of the next of them.
+    id: DocId,
+    apart: Apart<'a>,
+}
+
+/// What a [`Walk`] gives apart from the dense slots in hand.
+struct Apart<'a> {
+    /// The dense slots, while the sparse ids below them are given.
+    rest: &'a [Loc],
+    /// The sparse map, and the ids of it the walk lists, ascending.
+    map: &'a HashMap<DocId, Loc>,
+    ids: Vec<DocId>,
+    /// The next of them to give.
+    at: usize,
+    /// How many of them are below the dense slots.
+    below: usize,
+}
+
+impl<'a> Apart<'a> {
+    /// The next sparse id and its location, and the dense slots once the
+    /// last id below them was given. A pair, and the caller's `next`
+    /// returning what came back: a loop there to walk the slots handed over
+    /// kept the walk's place in memory, 5 instructions an id more in a
+    /// compact's walks.
+    #[inline(never)]
+    fn next(&mut self) -> (Option<(DocId, Loc)>, Option<&'a [Loc]>) {
+        let next = self
+            .ids
+            .get(self.at)
+            .and_then(|&id| Some((id, *self.map.get(&id)?)));
+        self.at += 1;
+        match self.at == self.below {
+            true => (next, Some(std::mem::take(&mut self.rest))),
+            false => (next, None),
+        }
+    }
+}
+
+impl Iterator for Walk<'_> {
+    type Item = (DocId, Loc);
+
+    #[inline]
+    fn next(&mut self) -> Option<(DocId, Loc)> {
+        for &l in self.dense.by_ref() {
+            let id = self.id;
+            self.id += 1;
+            if !l.is_empty() {
+                return Some((id, l));
             }
         }
+        let (next, dense) = self.apart.next();
+        if let Some(dense) = dense {
+            self.dense = dense.iter();
+        }
+        next
     }
 }
 
@@ -821,7 +883,7 @@ pub(crate) struct DocMap {
 
 #[cfg_attr(not(any(feature = "text", feature = "vector")), allow(dead_code))]
 impl DocMap {
-    /// On the `u64` side, as [`IdIndex::in_dense`].
+    /// On the `u64` side, as [`IdIndex::get`] asks its range.
     #[inline]
     fn in_dense(&self, id: DocId) -> bool {
         id >= 1 && id <= self.dense.len() as u64
@@ -2151,15 +2213,10 @@ impl Store {
         let mut head = Vec::with_capacity(16);
         let (mut id_was, mut pos_was, mut to) = (0, 0, 0);
         let mut ends = Vec::with_capacity(self.index.len().div_ceil(INDEX_SHARE));
-        let mut written = 0;
-        for id in self.index.iter() {
-            let Some(l) = self.index.get(id) else {
-                continue;
-            };
+        for (written, (id, l)) in self.index.walk(0).enumerate() {
             if written > 0 && written % INDEX_SHARE == 0 {
                 ends.push([(out.len() - from) as u64, id_was, pos_was]);
             }
-            written += 1;
             let pos = match live {
                 true => {
                     head.clear();
@@ -2507,10 +2564,7 @@ impl Store {
     pub fn live_len(&self) -> usize {
         let mut head = Vec::with_capacity(16);
         let mut total = 0usize;
-        for id in self.index.iter() {
-            let Some(loc) = self.index.get(id) else {
-                continue;
-            };
+        for (id, loc) in self.index.walk(0) {
             head.clear();
             head.push(OP_PUT);
             put_uvarint(&mut head, id);
@@ -2525,10 +2579,7 @@ impl Store {
     /// gathered in memory on the way.
     pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
         let mut head = Vec::with_capacity(16);
-        for id in self.index.iter() {
-            let Some(loc) = self.index.get(id) else {
-                continue;
-            };
+        for (id, loc) in self.index.walk(0) {
             let payload = self.payload(loc)?;
             head.clear();
             head.push(OP_PUT);

@@ -319,10 +319,7 @@ impl Store {
             len: 0,
             n: 0,
         };
-        for id in self.index.iter() {
-            let Some(l) = self.index.get(id) else {
-                continue;
-            };
+        for (id, l) in self.index.walk(0) {
             let framed = after(0, id, l.len as u64) + l.len as u64;
             if b.n > 0 && b.len + framed > cap as u64 {
                 if all.len() + 1 >= most {
@@ -366,20 +363,24 @@ impl Store {
         };
         let from = sparse.partition_point(|e| e.0 < first);
         let to = sparse.partition_point(|e| e.0 < end);
-        let under = sparse.partition_point(|e| e.0 < floor).clamp(from, to);
         let mut s = Vec::with_capacity(to - from);
-        for &(id, len) in &sparse[from..under] {
-            s.push((id, placed(id, len)));
-        }
         let mut d = Vec::with_capacity(hi - lo);
-        for (i, l) in dense[lo..hi].iter().enumerate() {
-            d.push(match l.is_empty() {
-                true => TAKEN,
-                false => placed(floor + (lo + i) as u64, l.len),
-            });
-        }
-        for &(id, len) in &sparse[under..to] {
-            s.push((id, placed(id, len)));
+        let mut slots = dense[lo..hi].iter().enumerate();
+        // The dense slots go in before the first sparse id past the floor,
+        // or after the last: one loop of each, where a loop of the ids
+        // below and one of those above held the sparse one twice.
+        for e in sparse[from..to].iter().map(Some).chain([None]) {
+            if e.is_none_or(|e| e.0 >= floor) {
+                for (i, l) in slots.by_ref() {
+                    d.push(match l.is_empty() {
+                        true => TAKEN,
+                        false => placed(floor + (lo + i) as u64, l.len),
+                    });
+                }
+            }
+            if let Some(&(id, len)) = e {
+                s.push((id, placed(id, len)));
+            }
         }
         Places {
             first: floor + lo as u64,
