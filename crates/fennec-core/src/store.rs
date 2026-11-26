@@ -635,7 +635,10 @@ impl IdIndex {
     /// sorted once, so a run of sparse ids is taken in one pass: taking
     /// only those at or below `upto` meant one scan of the whole map per
     /// insert while the array grew through the run. Those below the floor
-    /// stay.
+    /// stay. Out of line: called from `insert` alone, it was inlined there,
+    /// and a new id at the end, the open's and every insert's path, took 10
+    /// instructions more (gate's `file-open` +0.69%, `core-insert` +0.11%).
+    #[inline(never)]
     fn take_over_sparse(&mut self, upto: DocId) {
         let floor = self.floor;
         let keys = self.sparse_from(floor);
