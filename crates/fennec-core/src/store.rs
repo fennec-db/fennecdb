@@ -383,9 +383,10 @@ fn adopt_shares(
 /// room is spent the array is copied with a quarter of its span more of it
 /// ([`Self::lower`]), so the array grows down as it grows up, by doubling.
 /// The empty runs at either end -- before the first held slot, and past the
-/// last, which deletes of the highest ids leave -- are cut once one is more
-/// than the span from the first held slot to the last ([`Self::past_edge`],
-/// one walk and one rule for both ends), all of them at a compact's or a
+/// last, which deletes of the highest ids leave -- are cut, the front's
+/// once it is more than the span from the first held slot to the last, the
+/// end's past the gap ([`Self::past_edge`], one walk for both ends and both
+/// runs held to their bounds at either's move), all of them at a compact's or a
 /// checkpoint's relocation ([`Self::relocate`]), and an open's array starts
 /// at the first id it reads and ends at the last. An id below the floor
 /// reads as absent.
@@ -425,8 +426,8 @@ struct IdIndex {
     /// empty run behind it each time. `lead` where nothing is known.
     after: usize,
     /// The last slot of `dense` holding a location, 0 where the array is
-    /// empty: `lead` at the other end. The slots past it are empty, cut as
-    /// the room is. Without it the array's end never moved down, and ids
+    /// empty: `lead` at the other end. The slots past it are empty, cut
+    /// once they are more than [`CUT_FROM`]. Without it the array's end never moved down, and ids
     /// written downward while the highest go -- reverse timestamps under
     /// `@ttl` -- held 12 bytes for every id they ever gave, as the array
     /// from 1 did for ids climbing.
@@ -500,9 +501,11 @@ impl Default for IdIndex {
 /// The largest gap still considered worth extending the dense array for.
 const MAX_DENSE_GAP: u64 = 4096;
 
-/// The fewest empty slots at either end that a write cuts, beside a quarter
-/// of the span ([`IdIndex::past_edge`]): below it, 48 KB, a cut would move
-/// the array for less than it gives back.
+/// The fewest empty slots before the first held one that a write cuts,
+/// beside a quarter of the span ([`IdIndex::past_edge`]): below it, 48 KB,
+/// a cut would move the array for less than it gives back. And the most
+/// past the last held one a write leaves uncut: what an id written within
+/// the gap past it and deleted leaves.
 const CUT_FROM: usize = MAX_DENSE_GAP as usize;
 
 /// The fewest sparse ids, outnumbering the array's, that a write looks
@@ -895,31 +898,40 @@ impl IdIndex {
 
     /// The first held slot or, `END`, the last was just emptied: that end
     /// goes on to the next held slot inward, looked for from where its
-    /// last look stopped (`after`, `before`), and the empty run at either
-    /// end is cut ([`Self::cut`]) once it is more than the span from the
+    /// last look stopped (`after`, `before`), and the empty runs are cut
+    /// ([`Self::cut`]). The front's once it is more than the span from the
     /// first held slot to the last and the room a cut keeps -- a quarter of
     /// the span, [`CUT_FROM`] at most -- so a cut moves fewer slots than it
     /// drops, each slot moved a constant number of times however long ids
-    /// climb or fall, and each run is at most about the span; and more than
+    /// climb, and the run is at most about the span; and more than
     /// [`CUT_FROM`] and a quarter of the span, the most a lowering leaves
-    /// ([`Self::lower`]: the gap, and a quarter of the span below it), or a
-    /// write within the gap past the last held id and its delete, so such a
-    /// write and its delete bring no cut, and the next takes the room. Cut
-    /// to the first held slot once the run was half the array, the lowering
-    /// and the cut took turns, 169 000 slots a pair beside 100 000 rows. An
-    /// array left with no location is let go of whatever its length, moving
-    /// nothing. A write's own, under the write lock: a compact may never
-    /// come, as below 64 MB or in the browser, where only the page asks one.
+    /// ([`Self::lower`]: the gap, and a quarter of the span below it), so
+    /// an id written below the first held one and deleted brings no cut,
+    /// and the next takes the room. Cut to the first held slot once the run
+    /// was half the array, the lowering and the cut took turns, 169 000
+    /// slots a pair beside 100 000 rows. The end's once it is more than
+    /// [`CUT_FROM`], what an id written within the gap past the last held
+    /// one and deleted leaves: its cut moves nothing and nothing lowers
+    /// into it, so it waits for no more. So every write that moves `last`
+    /// up moves it two gaps at most, and a walk back over them costs each
+    /// write that much once: held to the span as the front is, ids written
+    /// into the run as far as the span past the last held one and deleted
+    /// from the inside out walked the span back for every write. The array
+    /// spans about twice the ids between the first held one and the last.
+    /// An array left with no location is let go of whatever its length,
+    /// moving nothing. A write's own, under the write lock: a compact may
+    /// never come, as below 64 MB or in the browser, where only the page
+    /// asks one.
     ///
-    /// One walk and one rule for both ends, each walked in its own order --
-    /// the end's slots counted from the last -- so neither end can be left
-    /// out of a rule the other keeps: the first form moved the front alone,
-    /// and ids written downward while the highest went kept every slot
-    /// past the last held one, 26.3 MB for 3 000 rows after 2 million ids.
-    /// Only the cut differs by end, as a `Vec`'s two ends do. One source,
-    /// a copy for each end (`END`): asked which end at run time, an id
-    /// written and the first held one deleted took 7.8 ns where the front's
-    /// walk alone took 6.5, and 6.8 so (the index alone, release, aarch64).
+    /// One walk for both ends, each walked in its own order -- the end's
+    /// slots counted from the last -- and both runs held to their bounds at
+    /// every move of either, so neither end can be left out of what the
+    /// other keeps: the first form moved the front alone, and ids written
+    /// downward while the highest went kept every slot past the last held
+    /// one, 26.3 MB for 3 000 rows after 2 million ids. One source, a copy
+    /// for each end (`END`): asked which end at run time, an id written and
+    /// the first held one deleted took 7.8 ns where the front's walk alone
+    /// took 6.5, and 6.8 so (the index alone, release, aarch64).
     #[inline(never)]
     fn past_edge<const END: bool>(&mut self) {
         let len = self.dense.len();
@@ -953,7 +965,7 @@ impl IdIndex {
         let most = (span + room).max(CUT_FROM + span / 4);
         if self.lead > most {
             self.cut(room);
-        } else if len - 1 - self.last > most {
+        } else if len - 1 - self.last > CUT_FROM {
             self.cut(self.lead);
         }
     }
@@ -4066,7 +4078,7 @@ mod tests {
                 let span = last + 1 - first;
                 let most = (span + (span / 4).min(CUT_FROM)).max(CUT_FROM + span / 4);
                 assert!(
-                    ix.lead <= most && len - 1 - last <= most,
+                    ix.lead <= most && len - 1 - last <= CUT_FROM,
                     "{what}: {} slots of room before {span} and {} past them",
                     ix.lead,
                     len - 1 - last
@@ -4753,10 +4765,11 @@ mod tests {
     }
 
     /// An id written within the gap past the last held one and deleted,
-    /// again and again, beside 100 000 rows copies nothing and walks
+    /// again and again, beside 100 000 rows copies, fills and walks
     /// nothing, as one written below the first held one does: the end's
-    /// cut waits for more than the span, and `before` remembers where the
-    /// held slots stop.
+    /// cut waits for more than the gap, and `before` remembers where the
+    /// held slots stop. Cut at every delete of the last held slot, the run
+    /// was filled again at every pair.
     #[test]
     fn an_id_written_past_the_last_and_deleted_moves_nothing() {
         use std::collections::BTreeMap;
@@ -4772,6 +4785,49 @@ mod tests {
         held_as(&ix, &model, "the pairs");
         assert_eq!((ix.moved.0, ix.moved.3), (0, 0), "slots copied and walked");
         assert_eq!(ix.dense.capacity(), cap);
+        // The run past the last held slot kept, not filled again a pair.
+        assert_eq!(ix.dense.len() as u64, rows + MAX_DENSE_GAP, "slots");
+    }
+
+    /// Ids written past the last held one and deleted from the inside out
+    /// walk back at most two gaps a write: every write that moves `last`
+    /// moves it that far at most, the run past it held to the gap. 20 ids
+    /// each a gap past the one before, deleted in the order written, round
+    /// after round beside 100 000 rows; and two ids 20 000 and 40 000 past
+    /// the last held one after the highest 50 000 rows were deleted. With
+    /// the run past the last held slot held to the span, as the front's
+    /// is, those two were written into it and walked back 40 000 slots a
+    /// round; held to the gap, they are sparse.
+    #[test]
+    fn ids_deleted_from_the_inside_out_walk_back_two_gaps_a_write() {
+        use std::collections::BTreeMap;
+        let (from, rows) = (1_000_000u64, 100_000u64);
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, from..from + rows);
+        let mut writes = 0;
+        for _ in 0..50 {
+            let ids: Vec<DocId> = (1..=20)
+                .map(|k| from + rows - 1 + k * MAX_DENSE_GAP)
+                .collect();
+            written(&mut ix, &mut model, ids.iter().copied());
+            deleted(&mut ix, &mut model, ids);
+            writes += 20;
+        }
+        deleted(&mut ix, &mut model, (from + rows / 2..from + rows).rev());
+        let last = from + rows / 2 - 1;
+        for _ in 0..100 {
+            let ids = [last + 20_000, last + 40_000];
+            written(&mut ix, &mut model, ids);
+            deleted(&mut ix, &mut model, ids);
+            writes += 2;
+        }
+        held_as(&ix, &model, "inside out");
+        let bound = 2 * MAX_DENSE_GAP as usize * writes;
+        assert!(
+            ix.moved.3 <= bound,
+            "{} slots walked, past {bound}",
+            ix.moved.3
+        );
     }
 
     /// A relocation visits the ids in order with a sparse id in the room
@@ -4833,8 +4889,9 @@ mod tests {
     /// first id in it to its last and the empty runs a cut leaves at each
     /// end, its allocation no more than four times that, and the index
     /// answers as the model. The bound is the model's, not the index's own
-    /// account: the array's end left uncut, as the first form left it,
-    /// falling ids pass it within a phase.
+    /// account: the array's end left uncut, as the first form left it, a
+    /// sawtooth past the end left 70 000 slots there, and the climb after
+    /// it passed the bound at the fifth phase.
     #[test]
     fn the_id_index_holds_its_memory_to_the_live_span_in_any_order() {
         use std::collections::BTreeMap;
@@ -4960,7 +5017,7 @@ mod tests {
                 _ => 0,
             };
             let most = (span + (span / 4).min(CUT_FROM)).max(CUT_FROM + span / 4);
-            let len = span + 2 * most;
+            let len = span + most + CUT_FROM;
             assert!(
                 ix.dense.len() <= len,
                 "{what}: {} slots for a span of {span}",
