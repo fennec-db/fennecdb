@@ -116,11 +116,15 @@ byte for byte. [What it writes past the
 cache](../../../../docs/design/storage.md#a-compacts-pages-on-their-way-to-disk)
 -- the side file, the scratch file -- goes to disk a step at a time, a
 sixteenth of the room, 4 to 64 MiB (`fs::past_step`), a write longer than
-a step in pieces, each step its own fdatasync on a thread while the next
-is written (`fs::Steps`), never `sync_file_range`, whose writes the
-database's next fsync flushed; the scratch file is settled as its deal
-ends (`Scratch::settle`). A cgroup reclaims no dirty page: two files' 64
-MiB steps held 84 MB dirty in a 512 MB container OOM-killed in a compact.
+a step in pieces, each step its own fdatasync (`fs::Steps`): below the
+ceiling on a thread of the system's while the next is written, at it
+where the step ends; never `sync_file_range`, whose writes the database's
+next fsync flushed. One file's steps at a time: the scratch file is
+settled as its deal ends (`Scratch::settle`), the new file before each
+deal (`ImageOut::settle`), and the writes under the write lock end no
+step (`SideFile::unstepped`). A cgroup reclaims no dirty page: two files'
+64 MiB steps held 84 MB dirty in a 512 MB container OOM-killed in a
+compact.
 
 **[Dead bytes are whole frames](../../../../docs/design/storage.md#dead-bytes-are-whole-frames)**
 Live bytes are the live frames to the byte: a version written over or deleted adds its head and its payload to

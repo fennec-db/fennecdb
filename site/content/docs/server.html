@@ -803,18 +803,21 @@ leaves nothing beside the database, or an empty one the next open removes.</p>
 a program writes stays in memory until it is on disk, and a container cannot
 give it back before, so a compact writing past the page cache sends its
 scratch file and its new file to the disk a sixteenth of the memory the
-system has for the file at a time, between 4 and 64 MB: at most an eighth of
-that memory waits for the disk. It sent each 64 MB at a time before, and in
+system has for the file at a time, between 4 and 64 MB, and one file's at a
+time: at most an eighth of that memory waits for the disk, and from 1 GB of
+it up, where each 64 MB is synced as soon as it is written, a sixteenth. It sent
+each 64 MB at a time before, whatever the memory, and in
 a container of 512 MB holding 417 MB of its own a compact left 84 MB of
 written pages there at once, and the container was killed. Compacting a 2
 GB file of 1 GB live in a container of 512 MB, with 300 MB of it the
 server's own, the written pages waiting for the disk now peak at 15 to 23
 MB against 33 to 41 before, and with the server's 11 MB alone at 34 to 37
-against 80. Each step is the compact's own <code>fdatasync</code>, so the
+against 80; in a container of 1.5 GB, at 64 against 88 to 90. Each step is the compact's own <code>fdatasync</code>, so the
 server's own syncs are not left to flush the compact's writes: beside it,
 writes synced every 250 ms took 1.5 to 3.3 ms at the median, against 1.1 to
-17.8 before. The compact itself takes a few percent longer for it, 2 to 5%
-on the disk it was measured on.</p>
+17.8 before. Where memory is that tight, the compact itself takes a few
+percent longer for it, 2 to 5% on the disk it was measured on; from 1 GB of
+it up it takes as long as before.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
@@ -962,8 +965,9 @@ cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
 one sync interval is lost. Set <code>--max-memory</code> to a third of the
 container limit to bring that forward. What a compact of a file past the
 page cache writes waits for the disk an eighth of the memory left to the
-file at most, since the container cannot give such a page back before it is
-written (<a href="#compaction">Compaction</a>).</p>
+file at most, a sixteenth from 1 GB of it up, since the container cannot
+give such a page back before it is written (<a
+href="#compaction">Compaction</a>).</p>
 
 <p><b>The restart cost depends on how it stopped.</b>
 <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is

@@ -985,21 +985,41 @@ file pages -- between 4 and 64 MiB; a write longer than a step, a bucket
 copied in turn among them (16 MiB), goes in pieces; and the scratch file is
 settled -- every page on disk and dropped -- as its deal ends
 (`Scratch::settle`), before the side file takes a byte of the bucket read
-back. On Linux and Android each step's fdatasync runs on a thread of its
-own while the compact writes the next, and is waited for as that one ends,
-the pages then on disk dropped (`POSIX_FADV_DONTNEED`): a step dirty and
-one on its way at most, an eighth of the room, the disk writing one while
-the compact fills the next. The in-turn copy's buffers take a quarter of
-the same room at most (`in_turn::budget`), so from 64 MiB of room up its
-buffers and its pages on their way together stay under half of it, the
-rest left to the old file's pages, which the reads need until the swap.
-The floor keeps a step a run of large requests the disk takes whole and
-the steps few, 256 a GiB, a thread and an fdatasync each; the ceiling is
-the step as it was, reached from a GiB of room. Where no thread or
-descriptor can be had, a step is synced where it ends, and a file dropped
-mid-step -- a compact that failed -- waits its fdatasync out. macOS writes
-both files past the cache (`F_NOCACHE`) and Windows through it, as before:
-neither steps.
+back, and the side file before each deal (`ImageOut::settle`), before the
+scratch file takes a byte: one file's steps at a time. Left, the side
+file's last step stood dirty beside the scratch file's two where two
+collections past the in-turn floor were copied, three sixteenths of the
+room. On Linux and Android, below the ceiling, each step's fdatasync runs
+on a thread of its own while the compact writes the next, and is waited for
+as that one ends, the pages then on disk dropped (`POSIX_FADV_DONTNEED`): a
+step dirty and one on its way at most, an eighth of the room, the disk
+writing one while the compact fills the next. At the ceiling, from a GiB of
+room or with none known, each step is synced where it ends, as every 64 MiB
+step was before the steps followed the room: a step dirty at most, a
+sixteenth of the room or less, and the compact as fast as it was (below) --
+on a thread it took 4% longer there, for a bound that room does not need.
+The thread is the system's (`pthread_create`), running the fdatasync alone,
+rather than std's (`std::thread::Builder`), whose packet, spawn hooks, name
+and output capture no sync uses: the steps on std's grew the shell's code 3
+264 bytes and took the binary a page past its budget ([binary
+sizes](benchmarks.md#binary-sizes)); on the system's, each step function
+kept once and their io errors made the crate's in one place (`fs::failed`),
+1 280, and no binary a release ships grew a byte (x86_64 musl, built as CI
+builds them). The writes a rewrite beside the database makes under the
+write lock, the last round's (`Database::finish_beside`), end no step
+(`SideFile::unstepped`): the sync after them puts them on disk at once,
+where each step past the first waited for the one before it under the lock,
+sixteen fdatasyncs at the 4 MiB floor where 64 MiB took one. The in-turn
+copy's buffers take a quarter of the same room at most (`in_turn::budget`),
+so from 64 MiB of room up its buffers and its pages on their way together
+stay under half of it, the rest left to the old file's pages, which the
+reads need until the swap. The floor keeps a step a run of large requests
+the disk takes whole and the steps few, 256 a GiB, a thread and an
+fdatasync each; the ceiling is the step as it was, reached from a GiB of
+room. Where no thread or descriptor can be had, a step is synced where it
+ends, and a file dropped mid-step -- a compact that failed -- waits its
+fdatasync out. macOS writes both files past the cache (`F_NOCACHE`) and
+Windows through it, as before: neither steps.
 
 *Not a write's durability.* None of these files is the sink's -- the side
 file is synced whole before its swap, under no lock (`SideFile::sync`), and
@@ -1041,6 +1061,21 @@ fdatasync where each step ends pays several times over (below). On macOS,
 whose files are written past the cache as before and step nowhere, the
 code is main's: 4.2-11.2 s on main and 8.2-12.1 with this change, six runs
 each, the spread of a laptop's disk.
+
+Every step above ran on a thread, as this change first had them at every
+room; from a GiB of room up a step is synced where it ends. Measured again
+so, in the same container and data, main and this change in ABBA and BAAB
+turns, a run whose 1-minute load was 5 or more at its start or its end
+left out: with 1536 MiB, 11 of them held -- `cache::room` 1495-1504 MB, a
+step of 64 MiB -- the compact took 6.77 s at the median with this change
+and 6.89 on main, twelve runs each (5.93-9.38 and 5.72-8.86), the pages
+waiting for the disk peaking at 64 MiB against main's 88-90, main's
+scratch file's last stretch dirty beside the side file's first step. With
+512 MiB, 300 of them held -- 190 MB of room, a step of 11.9 MiB, on the
+system's thread -- 5.57 s against main's 5.27, thirteen and twelve runs
+(4.93-7.75 and 4.77-7.13; in the quietest of three rounds, 5.27 against
+5.19), the peak 13-22 MiB against 35-48: the price of the bound where
+memory is tight, as above.
 
 The writes beside it. With a write made durable every 2 ms (`--sync
 always`, a kilobyte a write into [the sync log](durability.md#the-sync-log)),
