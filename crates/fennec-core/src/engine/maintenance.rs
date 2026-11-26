@@ -1376,7 +1376,10 @@ impl Database {
             ));
         }
         // What was written since the last round of catching up: the rest of
-        // the image.
+        // the image, in no step past the cache -- the sync below puts it on
+        // disk at once, where each step past the first would wait for the
+        // one before it under the lock (`SideFile::unstepped`).
+        b.side.unstepped();
         let mut docs = crate::store::Snapshot::default();
         for (p, t) in b.parts.iter_mut().zip(tails) {
             let live = &self.collections[&p.name];

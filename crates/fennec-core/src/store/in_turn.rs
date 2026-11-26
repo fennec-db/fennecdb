@@ -483,6 +483,12 @@ impl Store {
         let Some(mut scratch) = Scratch::create(&t.temp, 2 * total + MARGIN, t.step) else {
             return Ok(false);
         };
+        // The new file's last step on disk and let go of before the deal
+        // fills the scratch file's two: a collection's read back before
+        // this one left up to a step of it dirty, three sixteenths of the
+        // room together, where a step dirty and one on its way are the
+        // bound. Its error is the new file's, which fails the copy.
+        out.settle()?;
         let broken = BROKEN.with(|b| b.take());
         let sums = match self.deal(t, buckets, &mut scratch, broken) {
             Ok(Some(sums)) => sums,
@@ -827,11 +833,14 @@ mod tests {
     const STEP: u64 = 1_000;
 
     /// An out that asks for the records in turn, through a scratch file at
-    /// `temp` written [`STEP`] at a time, in `budget` bytes.
+    /// `temp` written [`STEP`] at a time, in `budget` bytes; `settled` the
+    /// bytes it held and the scratch files settled so far
+    /// (`fs::scratch_settled`) as each settle of its own came.
     struct Asking {
         bytes: Vec<u8>,
         temp: PathBuf,
         budget: usize,
+        settled: Vec<(usize, u32)>,
     }
 
     impl ImageOut for Asking {
@@ -851,6 +860,11 @@ mod tests {
                 budget: self.budget,
                 step: STEP,
             })
+        }
+        fn settle(&mut self) -> Result<()> {
+            let scratch = crate::fs::scratch_settled();
+            self.settled.push((self.bytes.len(), scratch));
+            Ok(())
         }
     }
 
@@ -951,6 +965,7 @@ mod tests {
                 bytes: Vec::new(),
                 temp: path.clone(),
                 budget,
+                settled: Vec::new(),
             };
             assert!(st.wrote_in_turn(&mut out).unwrap(), "{budget}");
             assert!(out.bytes == by_id, "budget {budget}");
@@ -959,6 +974,40 @@ mod tests {
         let (s, m) = copied();
         assert_eq!((s - before.0, m - before.1), (4, 1));
         assert_eq!(crate::fs::scratch_settled() - settled, 4);
+    }
+
+    /// Two collections copied in turn into one new file, as a compact past
+    /// the page cache copies each: the new file is settled before each deal
+    /// -- the second after the first's read back wrote its bytes, before
+    /// the second's scratch file is -- so its last step is not left dirty
+    /// beside a scratch file's two.
+    #[test]
+    fn the_new_file_is_settled_before_each_deal() {
+        let st = scattered();
+        let mut by_id = Vec::new();
+        st.write_live(&mut by_id).unwrap();
+        let (_dir, path) = temp("two");
+        let mut out = Asking {
+            bytes: Vec::new(),
+            temp: path.clone(),
+            budget: 4_000,
+            settled: Vec::new(),
+        };
+        let scratch = crate::fs::scratch_settled();
+        assert!(st.wrote_in_turn(&mut out).unwrap());
+        assert!(st.wrote_in_turn(&mut out).unwrap());
+        assert_eq!(out.settled, [(0, scratch), (by_id.len(), scratch + 1)]);
+        assert_eq!(crate::fs::scratch_settled(), scratch + 2);
+        assert!(out.bytes == [&by_id[..], &by_id[..]].concat());
+        // One bucket's copy, in memory, deals nothing and settles nothing.
+        let mut out = Asking {
+            bytes: Vec::new(),
+            temp: path.clone(),
+            budget: 1 << 20,
+            settled: Vec::new(),
+        };
+        assert!(st.wrote_in_turn(&mut out).unwrap());
+        assert!(out.settled.is_empty());
     }
 
     /// A scratch file that refuses a write, or reads the first bucket back
@@ -985,6 +1034,7 @@ mod tests {
                 bytes: Vec::new(),
                 temp: path.clone(),
                 budget: 4_000,
+                settled: Vec::new(),
             };
             match what {
                 Broken::Byte(1) | Broken::Length(1) => {
@@ -1022,6 +1072,7 @@ mod tests {
             bytes: Vec::new(),
             temp: path.to_path_buf(),
             budget,
+            settled: Vec::new(),
         };
         assert!(st.wrote_in_turn(&mut out).unwrap(), "{budget}");
         assert!(out.bytes == by_id, "budget {budget}");
@@ -1091,6 +1142,7 @@ mod tests {
             bytes: Vec::new(),
             temp: path.clone(),
             budget: 1,
+            settled: Vec::new(),
         };
         assert!(!st.wrote_in_turn(&mut out).unwrap());
         assert!(out.bytes.is_empty());
@@ -1112,6 +1164,7 @@ mod tests {
                 bytes: Vec::new(),
                 temp: path.clone(),
                 budget,
+                settled: Vec::new(),
             };
             assert!(!st.wrote_in_turn(&mut out).unwrap(), "{budget}");
             assert!(out.bytes.is_empty(), "{budget}");
@@ -1143,6 +1196,7 @@ mod tests {
                 bytes: Vec::new(),
                 temp: path.clone(),
                 budget: 4_000,
+                settled: Vec::new(),
             };
             assert!(!st.wrote_in_turn(&mut out).unwrap(), "{standing}");
             assert!(out.bytes.is_empty(), "{standing}");

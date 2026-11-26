@@ -1987,15 +1987,9 @@ pub struct SideFile {
     /// page cache ([`Self::copies_in_turn`]).
     in_turn: bool,
     /// On Linux, whether the file is written past the page cache
-    /// ([`Self::past_cache`]), its step ([`past_step`]), where the last
-    /// step ended -- `out.at` is less than a step past it -- and that
-    /// step's fdatasync ([`Steps`]).
+    /// ([`Self::past_cache`]), and its steps there ([`Steps`]).
     #[cfg(any(target_os = "linux", target_os = "android"))]
     past: bool,
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    step: u64,
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    stepped: u64,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     steps: Steps,
 }
@@ -2006,14 +2000,15 @@ pub struct SideFile {
 /// sixteenth of `room`, the memory the page cache has (`cache::room`),
 /// between 4 and 64 MiB. A written page stays in the cache until it is on
 /// disk, and a cgroup cannot reclaim it before: a step dirty and the one
-/// before it on its way to disk at most, an eighth of the room, where 64 MiB
-/// a file -- the scratch file's last step left dirty as the side file took
-/// its first -- held 84 MB dirty in a 512 MB container that was then
-/// OOM-killed (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk;
-/// the rule is src/engine/CLAUDE.md's, a file compacted before it outgrows
-/// the page cache). The floor keeps the steps few, 256 a GiB, and each a
-/// write the disk takes whole; the ceiling is what a step was before it
-/// followed the room.
+/// before it on its way to disk at most, an eighth of the room -- one file's
+/// at a time, the other settled first -- where 64 MiB a file -- the scratch
+/// file's last step left dirty as the side file took its first -- held 84
+/// MB dirty in a 512 MB container that was then OOM-killed
+/// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk; the rule
+/// is src/engine/CLAUDE.md's, a file compacted before it outgrows the page
+/// cache). The floor keeps the steps few, 256 a GiB, and each a write the
+/// disk takes whole; the ceiling is what a step was before it followed the
+/// room, reached from a GiB of it, where a step is synced where it ends.
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub(crate) fn past_step(room: Option<u64>) -> u64 {
     room.map_or(PAST_STEP_MOST, |r| {
@@ -2051,22 +2046,92 @@ fn let_go_pages(file: &File, at: u64, len: u64) {
 }
 
 /// The steps of a file written past the page cache, on Linux and Android
-/// ([`past_step`]): each step's fdatasync runs on a thread of its own while
-/// the compact writes the next, and is waited for as that one ends, its
-/// pages then let go of -- a step dirty and the one before it on its way to
-/// disk at most, the disk writing one while the compact fills the next.
-/// The compact's own fdatasync, never `sync_file_range` alone: that puts
-/// the pages on the disk and leaves the disk's cache to the next fsync of
-/// the volume, the database's own -- whose syncs, every 250 ms beside a
-/// compact, then took 53-64 ms at the median against 3-5
+/// ([`past_step`]): its step, the bytes written since the last one ended --
+/// fewer than a step -- and, below the ceiling, the last one's fdatasync on
+/// a thread of its own while the compact writes the next, waited for as
+/// that one ends and its pages then let go of: a step dirty and the one
+/// before it on its way to disk at most, an eighth of the room, the disk
+/// writing one while the compact fills the next. At the ceiling -- a GiB of
+/// room or more, or a room not known -- each step is synced where it ends,
+/// as every step was before steps followed the room: a step dirty at most,
+/// and on a thread the compact took 4% longer there for a bound its room
+/// does not need. The compact's own fdatasync, never `sync_file_range`
+/// alone: that puts the pages on the disk and leaves the disk's cache to
+/// the next fsync of the volume, the database's own -- whose syncs, every
+/// 250 ms beside a compact, then took 53-64 ms at the median against 3-5
 /// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
 #[cfg(all(
     unix,
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "android")
 ))]
-#[derive(Default)]
-struct Steps(Option<std::thread::JoinHandle<std::io::Result<()>>>);
+struct Steps {
+    step: u64,
+    since: u64,
+    /// The thread of the step on its way (a `pthread_t`) and the copy of
+    /// the file's descriptor it syncs, closed once it is joined.
+    on: Option<(usize, File)>,
+}
+
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+extern "C" {
+    fn pthread_create(
+        thread: *mut usize,
+        attr: *const u8,
+        start: extern "C" fn(*mut u8) -> *mut u8,
+        arg: *mut u8,
+    ) -> i32;
+    fn pthread_join(thread: usize, out: *mut *mut u8) -> i32;
+    fn fdatasync(fd: i32) -> i32;
+}
+
+/// A step's thread: the fdatasync of the descriptor it is handed, and the
+/// error number it failed with, 0 for none. A thread of the system's
+/// (`pthread_create`) running no Rust but this, rather than std's, whose
+/// packet, spawn hooks, name and output capture no fdatasync uses: the
+/// steps with std's grew the shell's code 3 264 bytes and took its binary
+/// a page past its budget, with this one and their functions each kept
+/// once 1 280 (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+extern "C" fn sync_step(fd: *mut u8) -> *mut u8 {
+    // SAFETY: `fd` is the number of a descriptor `Steps::step` keeps open
+    // in `Steps::on` until this thread is joined; fdatasync takes it by
+    // value and touches no memory of ours.
+    if unsafe { fdatasync(fd.addr() as i32) } == 0 {
+        return std::ptr::null_mut();
+    }
+    // A failing fdatasync sets errno, never to 0; EIO where none is read.
+    let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(5);
+    std::ptr::without_provenance_mut(e as usize)
+}
+
+/// Waits for a step's thread to end: its fdatasync's error, if it had one.
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+#[inline(never)]
+fn joined(thread: usize) -> std::io::Result<()> {
+    let mut out = std::ptr::null_mut();
+    // SAFETY: `thread` is one `pthread_create` made joinable, joined once:
+    // its only holder, `Steps::on`, gives it up to be joined; `out` is
+    // written by the call.
+    let r = unsafe { pthread_join(thread, &mut out) };
+    match (r, out.addr()) {
+        (0, 0) => Ok(()),
+        (0, e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+        (r, _) => Err(std::io::Error::from_raw_os_error(r)),
+    }
+}
 
 #[cfg(all(
     unix,
@@ -2074,43 +2139,117 @@ struct Steps(Option<std::thread::JoinHandle<std::io::Result<()>>>);
     any(target_os = "linux", target_os = "android")
 ))]
 impl Steps {
-    /// A step of `file` written: the step before's fdatasync waited for and
-    /// its pages let go of, and this one's begun on a thread of its own --
-    /// or here, where no thread or descriptor can be had.
-    fn step(&mut self, file: &File) -> Result<()> {
-        self.wait(file)?;
-        let spawned = file.try_clone().and_then(|own| {
-            std::thread::Builder::new()
-                .name("fennec-step".into())
-                .spawn(move || own.sync_data())
-        });
-        match spawned {
-            Ok(h) => self.0 = Some(h),
-            Err(_) => {
-                file.sync_data()?;
-                let_go_pages(file, 0, 0);
-            }
+    /// Steps of `step` bytes, never 0 whatever a caller passes: a write
+    /// goes a step at a time.
+    fn new(step: u64) -> Steps {
+        Steps {
+            step: step.max(1),
+            since: 0,
+            on: None,
         }
-        Ok(())
     }
 
-    /// The step under way, if any, on disk, and what is on disk let go of.
+    /// How many of `len` bytes the step under way takes.
+    fn fits(&self, len: usize) -> usize {
+        len.min((self.step - self.since) as usize)
+    }
+
+    /// `n` bytes of the step under way written: whether they ended it.
+    fn wrote(&mut self, n: usize) -> bool {
+        self.since += n as u64;
+        let ended = self.since >= self.step;
+        if ended {
+            self.since = 0;
+        }
+        ended
+    }
+
+    /// The writes from here on end no step: those a sync follows at once,
+    /// under the write lock (`SideFile::unstepped`).
+    fn stop(&mut self) {
+        self.step = u64::MAX;
+    }
+
+    /// A step of `file` written: the step before's fdatasync waited for and
+    /// its pages let go of, and this one's begun on a thread of its own --
+    /// or synced here, at the ceiling or where no thread or descriptor can
+    /// be had.
+    #[inline(never)]
+    fn step(&mut self, file: &File) -> Result<()> {
+        self.wait(file)?;
+        if self.step < PAST_STEP_MOST {
+            if let Ok(own) = file.try_clone() {
+                use std::os::fd::AsRawFd;
+                let mut thread = 0usize;
+                // SAFETY: `thread` is written by the call; a null `attr` is
+                // the default, a joinable thread; `sync_step` reads only
+                // the descriptor's number, which `own`, kept in `self.on`
+                // until the thread is joined (`Self::wait`, the drop),
+                // keeps open.
+                let made = unsafe {
+                    pthread_create(
+                        &mut thread,
+                        std::ptr::null(),
+                        sync_step,
+                        std::ptr::without_provenance_mut(own.as_raw_fd() as usize),
+                    )
+                };
+                if made == 0 {
+                    self.on = Some((thread, own));
+                    return Ok(());
+                }
+            }
+        }
+        synced(file)
+    }
+
+    /// The step under way, if any, on disk -- its fdatasync's error this
+    /// one's -- and what is on disk let go of.
+    #[inline(never)]
     fn wait(&mut self, file: &File) -> Result<()> {
-        if let Some(h) = self.0.take() {
-            h.join()
-                .map_err(|_| crate::error::Error::Io("a compact's fdatasync panicked".into()))??;
+        // Its descriptor closed once the thread is joined, as the block ends.
+        if let Some((thread, _own)) = self.on.take() {
+            joined(thread).map_err(failed)?;
             let_go_pages(file, 0, 0);
         }
         Ok(())
     }
 
-    /// Every page of `file` on disk and let go of.
+    /// Every page of `file` on disk and let go of, and the next step begun.
     fn settle(&mut self, file: &File) -> Result<()> {
+        self.since = 0;
         self.wait(file)?;
-        file.sync_data()?;
-        let_go_pages(file, 0, 0);
-        Ok(())
+        synced(file)
     }
+}
+
+/// Every page of `file` on disk, here, and let go of: a step at the
+/// ceiling, or the last of a file.
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+#[inline(never)]
+fn synced(file: &File) -> Result<()> {
+    file.sync_data().map_err(failed)?;
+    let_go_pages(file, 0, 0);
+    Ok(())
+}
+
+/// A step's io error as the crate's, made here alone: the conversion, its
+/// `to_string`, inlined at each `?` of the steps' functions took a few
+/// hundred bytes of the shell's code, whose budget had no room for them
+/// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+#[cold]
+#[inline(never)]
+fn failed(e: std::io::Error) -> crate::error::Error {
+    e.into()
 }
 
 /// A file dropped with a step's fdatasync under way -- a compact that
@@ -2121,9 +2260,11 @@ impl Steps {
     any(target_os = "linux", target_os = "android")
 ))]
 impl Drop for Steps {
+    // Once, not at each of a compact's ways out past a scratch file.
+    #[inline(never)]
     fn drop(&mut self) {
-        if let Some(h) = self.0.take() {
-            let _ = h.join();
+        if let Some((thread, _own)) = self.on.take() {
+            let _ = joined(thread);
         }
     }
 }
@@ -2148,11 +2289,7 @@ impl SideFile {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             past: false,
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            step: PAST_STEP_MOST,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            stepped: 0,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            steps: Steps::default(),
+            steps: Steps::new(PAST_STEP_MOST),
         })
     }
 
@@ -2178,11 +2315,11 @@ impl SideFile {
     /// (`POSIX_FADV_DONTNEED`) every [`past_step`] of `room`, the memory
     /// the page cache has ([`Steps`]).
     pub fn past_cache(&mut self, room: Option<u64>) {
+        // What it took before, through the cache, counts toward no step.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             self.past = true;
-            self.step = past_step(room);
-            self.stepped = self.out.at;
+            self.steps = Steps::new(past_step(room));
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let _ = room;
@@ -2205,12 +2342,21 @@ impl SideFile {
         // the pages on disk let go of, which is advice too.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         if self.past {
-            self.steps.settle(self.out.w.get_ref())?;
-            self.stepped = self.out.at;
-            return Ok(());
+            return self.steps.settle(self.out.w.get_ref());
         }
         self.out.w.get_ref().sync_data()?;
         Ok(())
+    }
+
+    /// The writes from here to the next [`Self::sync`] end no step: those
+    /// a rewrite beside the database makes under the write lock
+    /// (`Database::finish_beside`), which that sync puts on disk at once --
+    /// each step past the first would wait for the one before it under the
+    /// lock, sixteen fdatasyncs where 64 MiB took one at the 4 MiB floor.
+    /// What they leave dirty is the last round's few writes.
+    pub fn unstepped(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        self.steps.stop();
     }
 
     /// The file as written so far, mapped: where the stores of the image
@@ -2264,12 +2410,7 @@ impl SideFile {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub struct Scratch {
     file: File,
-    /// On Linux, its step ([`past_step`]), the bytes written since the last
-    /// step ended, fewer than a step, and that step's fdatasync ([`Steps`]).
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    step: u64,
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    unsynced: u64,
+    /// On Linux, its steps ([`Steps`]).
     #[cfg(any(target_os = "linux", target_os = "android"))]
     steps: Steps,
 }
@@ -2338,14 +2479,8 @@ impl Scratch {
         let _ = step;
         Some(Scratch {
             file,
-            // Never 0, whatever a caller passes: a write goes a step at a
-            // time.
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            step: step.max(1),
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            unsynced: 0,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            steps: Steps::default(),
+            steps: Steps::new(step),
         })
     }
 
@@ -2359,13 +2494,11 @@ impl Scratch {
         {
             let (mut at, mut rest) = (at, bytes);
             while !rest.is_empty() {
-                let n = rest.len().min((self.step - self.unsynced) as usize);
+                let n = self.steps.fits(rest.len());
                 self.put(at, &rest[..n])?;
                 (at, rest) = (at + n as u64, &rest[n..]);
-                self.unsynced += n as u64;
-                if self.unsynced >= self.step {
+                if self.steps.wrote(n) {
                     self.steps.step(&self.file)?;
-                    self.unsynced = 0;
                 }
             }
             Ok(())
@@ -2387,10 +2520,7 @@ impl Scratch {
         #[cfg(test)]
         SETTLED.with(|s| s.set(s.get() + 1));
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            self.steps.settle(&self.file)?;
-            self.unsynced = 0;
-        }
+        self.steps.settle(&self.file)?;
         Ok(())
     }
 
@@ -2547,15 +2677,12 @@ impl ImageOut for SideFile {
         if self.past {
             let mut rest = bytes;
             while !rest.is_empty() {
-                let n = rest
-                    .len()
-                    .min((self.stepped + self.step - self.out.at) as usize);
+                let n = self.steps.fits(rest.len());
                 self.out.write(&rest[..n])?;
                 rest = &rest[n..];
-                if self.out.at - self.stepped >= self.step {
+                if self.steps.wrote(n) {
                     self.out.w.flush()?;
                     self.steps.step(self.out.w.get_ref())?;
-                    self.stepped = self.out.at;
                 }
             }
             return Ok(());
@@ -2573,6 +2700,15 @@ impl ImageOut for SideFile {
             true => crate::store::InTurn::at(file, live, || self.path.with_extension("sorting")),
             false => None,
         }
+    }
+    /// Past the cache, its last step on disk and let go of before a deal
+    /// fills the scratch file's first ([`Self::sync`]).
+    fn settle(&mut self) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if self.past {
+            return self.sync();
+        }
+        Ok(())
     }
 }
 
@@ -4671,13 +4807,13 @@ mod tests {
                 s.write_at(at as u64, &bytes).unwrap();
                 want[at..at + len].copy_from_slice(&bytes);
                 written += len as u64;
-                assert_eq!(s.unsynced, written % step, "after {len} bytes at {at}");
+                assert_eq!(s.steps.since, written % step, "after {len} bytes at {at}");
             }
             // The last step's fdatasync under way on a thread of its own.
-            assert!(s.steps.0.is_some());
+            assert!(s.steps.on.is_some());
             s.settle().unwrap();
-            assert_eq!(s.unsynced, 0);
-            assert!(s.steps.0.is_none());
+            assert_eq!(s.steps.since, 0);
+            assert!(s.steps.on.is_none());
             let mut back = vec![0u8; 20_000 + 2 * 4096 + 9];
             s.read_at(0, &mut back).unwrap();
             assert!(back == want[..back.len()]);
@@ -4688,14 +4824,16 @@ mod tests {
         /// compact copies in turn is, in pieces -- fewer than a step's bytes
         /// ever left since the last, and holds what was written; what it took
         /// before it was asked, through the cache, counts toward no step.
+        /// Settled, as a compact settles it before a deal, none are left and
+        /// no step is under way.
         #[test]
         fn a_side_file_past_the_cache_goes_to_disk_a_step_at_a_time() {
             let dir = TestDir::new("side-steps");
             let mut side = SideFile::create(&dir.0.join("db.fennec.beside")).unwrap();
             ImageOut::write(&mut side, b"through the cache").unwrap();
             side.past_cache(Some(64 << 20));
-            let step = side.step;
-            assert_eq!((step, side.stepped), (4 << 20, 17));
+            let step = side.steps.step;
+            assert_eq!((step, side.steps.since), (4 << 20, 0));
             let mut want = b"through the cache".to_vec();
             for (seed, len) in [
                 (1, 1000),
@@ -4706,16 +4844,84 @@ mod tests {
                 let bytes = pattern(seed, len);
                 ImageOut::write(&mut side, &bytes).unwrap();
                 want.extend_from_slice(&bytes);
-                assert_eq!(side.out.at - side.stepped, (want.len() as u64 - 17) % step);
+                assert_eq!(side.steps.since, (want.len() as u64 - 17) % step);
             }
-            assert_eq!(side.stepped, side.out.at);
-            assert!(side.steps.0.is_some());
+            assert_eq!(side.steps.since, 0);
+            assert!(side.steps.on.is_some());
+            ImageOut::write(&mut side, b"before a deal").unwrap();
+            want.extend_from_slice(b"before a deal");
+            ImageOut::settle(&mut side).unwrap();
+            assert_eq!(side.steps.since, 0);
+            assert!(side.steps.on.is_none());
             ImageOut::write(&mut side, b"after").unwrap();
             want.extend_from_slice(b"after");
             side.sync().unwrap();
-            assert_eq!(side.stepped, side.out.at);
-            assert!(side.steps.0.is_none());
+            assert_eq!(side.steps.since, 0);
+            assert!(side.steps.on.is_none());
             assert!(side.read_back().unwrap() == want);
+        }
+
+        /// At the ceiling -- a GiB of room or more, or a room not known -- a
+        /// step is synced where it ends, no thread under way after it; below
+        /// it, its fdatasync runs on a thread of its own.
+        #[test]
+        fn at_the_ceiling_a_step_is_synced_where_it_ends() {
+            let dir = TestDir::new("ceiling");
+            let file = create_private(&dir.0.join("steps")).unwrap();
+            let mut steps = Steps::new(past_step(Some(1 << 30)));
+            assert_eq!(steps.step, PAST_STEP_MOST);
+            steps.step(&file).unwrap();
+            assert!(steps.on.is_none());
+            let mut side = SideFile::create(&dir.0.join("db.fennec.beside")).unwrap();
+            side.past_cache(None);
+            assert_eq!(side.steps.step, PAST_STEP_MOST);
+            let mut steps = Steps::new(PAST_STEP_MOST - 1);
+            steps.step(&file).unwrap();
+            assert!(steps.on.is_some());
+            steps.settle(&file).unwrap();
+            assert!(steps.on.is_none());
+        }
+
+        /// A step waits for the fdatasync of the one before it -- one on its
+        /// way to disk at most -- and fails with its error: a pipe, which no
+        /// fdatasync takes. A step whose fdatasync was let go of unwaited, or
+        /// whose error was dropped, would go on.
+        #[test]
+        fn a_step_waits_for_the_one_before_it_and_fails_with_its_error() {
+            let (_read, write) = std::io::pipe().unwrap();
+            let file = File::from(std::os::fd::OwnedFd::from(write));
+            assert!(file.sync_data().is_err());
+            let mut steps = Steps::new(4096);
+            // Its fdatasync on its thread: the error not known yet.
+            steps.step(&file).unwrap();
+            assert!(steps.on.is_some());
+            let e = steps.step(&file).unwrap_err();
+            assert!(matches!(e, crate::error::Error::Io(_)), "{e}");
+            assert!(steps.on.is_none());
+            // Waited for by itself, as a settle and the next step do.
+            steps.step(&file).unwrap();
+            assert!(steps.wait(&file).is_err());
+            assert!(steps.on.is_none());
+        }
+
+        /// The writes a sync follows at once -- a rewrite's last, under the
+        /// write lock -- end no step, however many steps they are; the sync
+        /// then puts them on disk.
+        #[test]
+        fn the_writes_a_sync_follows_at_once_end_no_step() {
+            let dir = TestDir::new("unstepped");
+            let mut side = SideFile::create(&dir.0.join("db.fennec.beside")).unwrap();
+            side.past_cache(Some(64 << 20));
+            ImageOut::write(&mut side, &pattern(5, (4 << 20) + 1)).unwrap();
+            assert!(side.steps.on.is_some());
+            side.unstepped();
+            let bytes = pattern(6, 3 * (4 << 20) + 7);
+            ImageOut::write(&mut side, &bytes).unwrap();
+            assert_eq!(side.steps.since, 1 + bytes.len() as u64);
+            side.sync().unwrap();
+            assert_eq!(side.steps.since, 0);
+            assert!(side.steps.on.is_none());
+            assert_eq!(side.read_back().unwrap().len(), (4 << 20) + 1 + bytes.len());
         }
     }
 }
