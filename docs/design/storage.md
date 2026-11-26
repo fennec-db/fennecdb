@@ -1188,50 +1188,94 @@ again, and an open of a compacted one, whose first id was past
 `MAX_DENSE_GAP`, put every row in the sparse map, a hash lookup each from
 then on.
 
-**What moves the floor up**, only ever past empty slots:
+**What cuts the array**, only ever empty slots, at either end -- the
+floor moving up past those before the first held slot, the end down
+past those after the last:
 
-- *A delete.* `lead` is the first held slot. A delete of it looks for
-  the next held one (`IdIndex::past_lead`) and cuts the empty run before
-  it (`cut`), keeping room -- a quarter of the span, the slots from it
-  to the end, and `CUT_FROM` (4 096 slots, 48 KB) at most -- once the
-  run is more than the span and that room, and more than `CUT_FROM` and
-  a quarter of the span: the rest moves to the room's end, the floor
-  past the rest of the run, and the allocation past four times what is
-  left is given back, never below `CUT_FROM`'s. More than the span and
-  the room: a cut moves fewer slots than it drops, so however long the
-  ids climb a slot is moved a bounded number of times, and the array
-  spans at most about twice its first held id to its last. More than
-  `CUT_FROM` and a quarter of the span: that is the most a lowering
-  (below) leaves before the first held slot, the gap and the room below
-  it, so an id written below the first held one and deleted brings no
-  cut; and the room a cut keeps takes the next such write without a
-  lowering. Cut to the first held slot whenever the run was half the
-  array, as the first form was, the lowering and the cut took turns,
-  each copying the array: `floor - 1` written and deleted beside 100 000
-  rows copied 169 000 slots a pair (92 µs). `CUT_FROM`: under it a cut
-  would move a large array to give back less than one gap's growth. An
-  array left with no location is let go of at once whatever its length,
-  nothing to move, so a queue that empties at every write keeps no slot.
-  It is a write's own, under the write lock, because a compact may never
-  come: a file under 64 MB, `--auto-compact` off, an app's native
-  library, the browser module, where only the page asks one.
+- *A delete.* `lead` is the first held slot and `last` the last. A
+  delete of either looks for the next held one inward
+  (`IdIndex::past_edge`) and cuts the empty runs (`cut`). The front's
+  once it is more than the span from the first held slot to the last and
+  the room a cut keeps -- a quarter of the span, `CUT_FROM` (4 096 slots,
+  48 KB) at most -- and more than `CUT_FROM` and a quarter of the span;
+  that room kept, the held span moves to the room's end and the floor
+  past the rest of the run. More than the span and the room: a cut moves
+  fewer slots than it drops, so however long the ids climb a slot is
+  moved a bounded number of times, and the run is at most about the
+  span. More than `CUT_FROM` and a quarter of the span: that is the most
+  a lowering (below) leaves before the first held slot, the gap and the
+  room below it, so an id written below the first held one and deleted
+  brings no cut; and the room a cut keeps takes the next such write
+  without a lowering. The end's once it is more than `CUT_FROM`, what an
+  id written within the gap past the last held one and deleted leaves:
+  its cut keeps nothing and moves nothing, the array shortened, as a
+  `Vec` gives its end back by its length, the allocation the end's room
+  since an array grows at its end without moving what it holds; and
+  nothing lowers into it. So every write that moves `last` up moves it
+  two gaps at most -- the run past it a gap at most, and a new id a gap
+  at most past the array's end -- and a walk back over the run costs
+  each write that much once, as the gap counted from the first held id bounds the front's
+  walk. A cut of the front takes the end's run with it. The array is at
+  most about twice its first held id to its last, and two gaps. Either
+  way the allocation past four times what is left is given back, never
+  below `CUT_FROM`'s. Cut to the first held slot whenever the run was
+  half the array, as the first form was, the lowering and the cut took
+  turns, each copying the array: `floor - 1` written and deleted beside
+  100 000 rows copied 169 000 slots a pair (92 µs). `CUT_FROM`: under it
+  a cut would move a large array to give back less than one gap's
+  growth. An array left with no location is let go of at once whatever
+  its length, nothing to move, so a queue that empties at every write
+  keeps no slot. It is a write's own, under the write lock, because a
+  compact may never come: a file under 64 MB, `--auto-compact` off, an
+  app's native library, the browser module, where only the page asks
+  one.
 - *A compact's or a checkpoint's relocation* (`IdIndex::relocate`), which
-  walks the array anyway: every empty slot before the first held one, the
-  room with them.
+  walks the array anyway: every empty slot before the first held one,
+  the room with them, and every one past the last.
 - *An open.* An image's index lists the live ids in order, and the open
-  starts the array at the first: in shares (`adopt_shares`, the first
-  document read ahead and each share's stretch counted from it -- an image
-  whose ids from there leave the array a quarter empty read in turn, as
-  before), or in turn, where an index holding nothing takes its first id
-  as its floor (`insert_apart`), as a store compacted in memory
-  (`Store::compacted`) does. The writes the open walks after the image go
-  through the delete's rule.
+  starts the array at the first and ends it at the last: in shares
+  (`adopt_shares`, the first document read ahead and each share's
+  stretch counted from it -- an image whose ids from there leave the
+  array a quarter empty read in turn, as before), or in turn, where an
+  index holding nothing takes its first id as its floor (`insert_apart`),
+  as a store compacted in memory (`Store::compacted`) does. The writes
+  the open walks after the image go through the delete's rule.
+
+**The end, as the front.** The first form cut the front alone: a delete
+of the last held slot left it empty in the array, which shrank only from
+the front, and no relocation dropped it. Ids climbing while the lowest
+go never leave one, but ids falling while the highest go -- reverse
+timestamps under `@ttl`, newest first -- leave one at every delete:
+3 000 live rows from 2^40 downward held 2.8 MB of index after 200 000
+ids and 26.3 MB after 2 million (98 KB climbing), a compact's relocation
+gave none of it back, and one row moved down a gap at a time, the one
+before it deleted, held 508.6 MB after 10 000 moves. On main the same
+ids, their first above 4 096, all went to the sparse map, a hash lookup
+each. Now `last` mirrors `lead` and `before` mirrors `after`, and the
+two ends are one walk: `past_edge` walks either end in its own order,
+the end's slots counted from the last, and holds both runs to their
+bounds whichever end moved -- the span the front's is held to shrinks as
+the end comes down -- so neither end can be left out of what the other
+keeps; the cut, and with it the bound, differs as a `Vec`'s two ends do.
+The same ids now hold 45 012 bytes, at the end and at most, through 200
+000 ids and through 2 million, and a relocation leaves the 3 000 slots
+of the held span (the index alone, release, aarch64 macOS); through a
+database on a file, a million sessions so, 3 000 live, held 13 466 844
+bytes at the end, after an open of the file and after a compact, and
+hold 45 012 at each. The row moved down a gap at a time holds 49 164
+bytes, 3.5 µs a move where it took 24 to 71, as moved up it holds 98
+328, 2.7 µs a move. A new id at the end, the writes' usual path, sets
+`last` where it asked whether its slot was empty and before `after`; a
+delete asks whether its slot is `last` once it is not `lead`; a write
+into an empty slot asks whether it is past `before` as it asks whether
+it is before `after`.
 
 **What moves it down** is a write within `MAX_DENSE_GAP` below the first
 held id (`IdIndex::lower`). Where the room before the first held slot
 reaches it, the id takes its slot, and nothing moves. Where it does not,
-the array is copied from its first held slot into one with room below
-the id of a quarter of the slots from there to the end, never below 1 --
+the array is copied from its first held slot to its last -- the empty
+slots past the last left out, as a cut drops them -- into one with room
+below the id of a quarter of the slots between them, never below 1 --
 so ids written downward copy the array once its span has grown by a
 quarter of itself, as ids written upward reallocate it once it has
 doubled, and one id written just below a large array adds a quarter at
@@ -1285,7 +1329,17 @@ delete from the array while the map holds `REBASE_FROM` ids or more --
 reach the ids it sorted (`rebase_in`): those writes brought at most as
 many ids again, so each look sorts at most twice the writes since the
 last, and a delete from the array asks one in a call where the map holds
-that many, one comparison where it does not. The first form followed the
+that many, one comparison where it does not. The count is never more
+than the map holds: wherever the map loses ids without a write counting
+-- a sparse id deleted, ids taken into the array, a rebase -- it is held
+to what is left (`trim`). Left where a look set it, the count outlived
+the ids it counted: 1 000 rows from 1, 10 000 ids a million apart
+written and deleted -- the map empty, the count at 6 016 -- and 5 000
+rows from 2^45 stayed sparse, all of them, 1 016 writes short of a look,
+where without the far ids the run took the array at its 1 001st row. Now
+it does so too (`store::tests::the_looks_count_is_held_to_what_the_map_holds`):
+held to what is left, a look sorts at most twice the writes since, as
+before. The first form followed the
 map's growth alone, looking once the ids had doubled past what the last
 look left, and a rebase undone left the rows it had moved into the map
 there: 10 000 rows from 1 and a block writing 15 000 from 5 000 000 --
@@ -1340,8 +1394,18 @@ image's index and the frames say ids, never slots.
 `store::tests::the_id_index_answers_as_a_map_while_its_floor_moves`
 holds the index to a map through 150 000 writes of every kind, its floor
 moved hundreds of times either way, a clone taken before each run of
-front deletes read after it, and the gap's rule and the room's bound
+front deletes read after it, and the gap's rule and both runs' bound
 kept at each step;
+`the_id_index_holds_its_memory_to_the_live_span_in_any_order` draws 240
+phases from a seed -- ids climbing while the lowest go, falling while
+the highest go, a sawtooth past either end, a row moved a gap at a time
+either way, writes and deletes anywhere in the range, far runs written
+and deleted from either end or kept, a relocation -- and after each
+holds the array to the span the model's ids in it cover, and the runs a
+cut leaves at each end, and its allocation to four times that: the
+bound is the model's, not the index's own account, so a leak at either
+end fails it whatever order brings it (on 3edf5df5, the end left uncut,
+its fifth phase, 73 544 slots for a span of 3 491);
 `an_id_the_gap_from_the_held_range_is_taken_in_either_side` holds each
 bound of the gap to the slot, either side. The bounds are counted: a cut
 moves fewer slots than it drops (60 000 live rows climbing to 300 000
@@ -1358,15 +1422,21 @@ beside 100 000 ids written downward), and a look comes once the writes
 since reach what the last sorted (5 000 ids apart beside 100 rows: 6
 looks, not 4 900; a rebase undone: one).
 
-**`lead` and `after`.** `lead` is exact -- the first held slot, or the
-array's length where it is empty -- since a cut drops what is before it:
-an insert into an empty slot before it moves it there. `after` says the
-slots strictly between `lead` and it are empty, and the look for the next
-held slot goes on from there: without it an id deleted and written again
-at the front walked the empty run behind it at every delete, however long,
-where the array from 1 did nothing. A write keeps both in a comparison or
-two: a new id at the end, the ids' usual climb, in one; a delete of any
-but the first held id in one.
+**`lead` and `after`, `last` and `before`.** `lead` is exact -- the
+first held slot, or the array's length where it is empty -- since a cut
+drops what is before it: an insert into an empty slot before it moves it
+there. `after` says the slots strictly between `lead` and it are empty,
+and the look for the next held slot goes on from there: without it an id
+deleted and written again at the front walked the empty run behind it at
+every delete, however long, where the array from 1 did nothing. `last`
+and `before` are the same at the end: the last held slot, and the slots
+strictly between `before` and it empty, so an id within the gap past the
+last held one, written and deleted 1 000 times beside 100 000 rows,
+walks and copies nothing (`an_id_written_past_the_last_and_deleted_moves_nothing`).
+A new id at the end leaves `before` at the last held slot before it. A
+write keeps them in a comparison or two: a new id at the end, the ids'
+usual climb, in the one it took; a delete of any but the first or the
+last held id in two.
 
 **The walk.** Every walk in id order is one iterator, `store::Walk`,
 which gives each id with its location. Its `next` walks the dense slots
@@ -1394,7 +1464,7 @@ ids sorted with their locations held a sort of the pairs of their own,
 **Rejected.**
 
 - *Cutting at a compact and an open alone.* No cost on a write, and no
-  bound where no compact comes (above).
+  bound where no compact comes (above), at either end.
 - *A ring (`VecDeque`).* Gives the front back with no move, but every
   lookup wraps its index, a comparison and a subtraction more than the
   floor's one load.
@@ -1440,6 +1510,31 @@ ids sorted with their locations held a sort of the pairs of their own,
   again would reallocate its array at every write.
 - *Following the sparse map's growth alone to look again.* A rebase
   undone left its rows there (above).
+- *Cutting the end at every delete of the last held slot*, a `Vec`'s
+  end being free to give back. An id written within the gap past the
+  last held one and deleted, again and again, would fill and walk the
+  gap at each pair, 4 095 slots filled and walked back each, where the
+  hysteresis costs nothing after the first.
+- *The end's run held to the span, as the front's is.* The first form
+  of this round. The end's cut moves nothing, so the span bought it no
+  amortisation, only reach: an id written into the run as far as the
+  span past the last held one was taken in, and ids so written and
+  deleted from the inside out walked the span back for every write --
+  two ids 20 000 and 40 000 past the last held one, beside 50 000 rows,
+  walked 40 000 slots a round -- and 20 ids each a gap past the one
+  before, deleted in the order written, walked 81 920 a round, 1.9 to 2.3
+  µs a write, where 3edf5df5, never walking its end, took 0.02. The
+  array was at most about three times its span.
+- *One bound over both runs together*, the end's cut first as it moves
+  nothing. The end's band would shrink as the front's run grew, and a
+  write past the last held id and its delete would fill and walk the
+  gap at each pair whenever the front's run was near its bound.
+- *Room kept past the last held slot, as at the front.* A new id at the
+  end would land in an empty slot of it, out of line, where the
+  allocation's spare capacity takes it on the usual path.
+- *Two walks, one an end's.* What the review found was a rule one end
+  kept and the other did not; one walk in each end's order, both runs
+  held to their bounds at either's move, leave no rule to keep twice.
 
 **What it costs.** A million sessions made one after another, each
 deleted 3 000 writes after it was made, through `put` and `del ... where
@@ -1455,7 +1550,7 @@ delete one, and CI's perf job holds the instructions an op (the walk,
 above). The browser module grew 1 152 bytes raw, 775 gzip and 179 brotli
 (844.4 KB, `make size-report BASE=main`), the module without the indexes
 1 213, 696 and 374: the cut and the look for the next held slot
-(`past_lead`, `cut`, the room given back), the lowering and the first id's
+(`past_lead`, which `past_edge` became, `cut`, the room given back), the lowering and the first id's
 start in `insert_apart`, and the walk's out-of-line half. On aarch64 macOS
 fennec-server's code grew 960 bytes and the native library's 1 344,
 neither file by a page. The first form grew the module 2 423 bytes raw
@@ -1516,6 +1611,58 @@ the last two within the report's noise), the module without the indexes
 lowering and its look below, `insert_gap`, the room a cut keeps, the
 look's count. On aarch64 macOS fennec-server's code shrank 448 bytes and
 the native library's grew 256, neither file by a page.
+
+**What the end costs.** Against 3edf5df5, the floor whose end was never
+cut: a new id at the end sets `last` where it asked whether its slot was
+empty and whether it was before `after`, five instructions fewer an
+insert (the gate's `core-insert` 0.05% under, and `file-open`, which
+inserts 100 000 ids through the same path, 0.34% under); a delete asks
+whether its slot is `last` after whether it is `lead`. A write and the
+delete of the first held id -- the sessions' and the queue's path --
+take 6.8 ns where they took 6.5 (the index alone, release, aarch64
+macOS, best of nine through 2 million): the bound on the end's run,
+checked where the front moves since the front's bound shrinks then. One
+source walking either end, asking which at run time, took 7.8 ns; a copy
+of it for each end (`past_edge::<END>`) is the 6.8, for 180 bytes of
+the browser module. Counted as the gate counts, against main (c2e27c6d,
+aarch64 musl in Docker, five runs a side): `file-compact` 7.40% under
+(6 888 114 to 6 378 405), `file-open` 0.41% under, `core-lookup` 0.14%
+under, `core-get-id` 0.04% under, `core-insert` main's (8 821); the
+heap's calls and bytes main's but `file-open`'s, 224 bytes an op more
+of 3 778 831, the words each store's index holds more. Against
+3edf5df5 the browser module grew 814 bytes raw, 316 gzip and 116 brotli
+(847.1 KB, `make size-report`, brotli within its noise), the module
+without the indexes 741, 260 and 229, without any feature 727, 286 and
+386: `past_edge`'s two copies where `past_lead` was one, the cut's end,
+`placed`'s end and the append's `last`. On aarch64 macOS fennec-server's
+code and the native library's grew 896 bytes each, neither file by a
+page.
+
+**A sawtooth past the runs a cut waits for.** Writes that reach past
+either end further than a cut waits for, deleted again, then again, pay
+for the slots they reach each time, as memory held to the span must. 50
+ids each a gap below the first held one, then deleted in the order
+written, round after round beside 100 000 rows, copy 19 864 slots a
+write (9.1 µs; 3edf5df5 the same) -- the lowerings' quarter at a time
+from the span to the span and the reach, and the cut back -- and 20
+such copy 25 325 (10.2 µs), where 10, within the run the front keeps,
+copy nothing after the first round and walk their gaps back, 1.2 µs a
+write, as on 3edf5df5. Past the last held id the run kept is the gap's,
+so 10, 20 or 50 such ids fill their gaps a write and walk them back once
+a round, no slot copied, 3.3 to 3.5 µs a write, where with the end never
+cut it was 0.02 µs and the slots stayed: 3.1, 3.1 and 6.3 MB of
+allocation beside the rows' 1.2 MB, where they now hold 3.1, 3.1 and
+4.8 between rounds (the allocation four times the rows at most, so the
+cut gives none of it back below that). A single id within the gap past
+the last held one, written and deleted, costs nothing after the first
+(`an_id_written_past_the_last_and_deleted_moves_nothing`). Either way
+the cost a write is about the gap's slots times a small constant
+whatever the array's size, and memory stays within its bound. No
+hysteresis makes these cheaper without a cost elsewhere: a front cut
+keeping more room, or a lowering leaving more, is memory every
+collection whose ids climb would hold for nothing; a run past the last
+held slot kept to the span let writes land as far as the span past it
+and walk all of it back (above, rejected).
 
 **Left as it was.** The text and vector indexes' per-document numbers
 (`DocMap`, 4 bytes a slot) span the ids from 1 too; they are derived,

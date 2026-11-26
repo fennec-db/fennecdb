@@ -205,10 +205,12 @@ they amount to 16 MB and are handed over to the file — a large
     about 9 ms, which a single vector query makes up against SQLite's 30 ms
     scan.</li>
   <li><b>The offset index spans the ids a collection holds.</b> It is 12
-    bytes an id, from the oldest row's to the newest's: a collection whose
-    ids climb as its oldest rows go — sessions under <code>@ttl</code>, a
-    queue — lets go of the slots of the rows gone as it passes them, and so
-    do a <code>compact</code> and an open. A million sessions made one after
+    bytes an id, from the lowest id it holds to the highest: a collection
+    whose ids climb as its oldest rows go — sessions under
+    <code>@ttl</code>, a queue — or fall as its highest go — ids from a
+    reverse timestamp, the newest row the lowest — lets go of the slots of
+    the rows gone as it passes them, at either end, and so do a
+    <code>compact</code> and an open. A million sessions made one after
     another, 3 000 of them live, hold 98 KB of it (36 KB after an open),
     where they held 12.6 MB, growing by 12 bytes a session.</li>
 </ul>

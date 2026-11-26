@@ -550,9 +550,10 @@ never sweeps — its writes are its primary's, the sweep's among them — and
 neither does a tenant that follows another node. The server's
 <code>Idempotency-Key</code>s are kept this way.</p>
 
-<p>A swept collection's ids climb as its rows go, and its id index, 12
-bytes an id, spans only its oldest row's id to its newest's: the slots of
-the rows swept away are let go of as the sweep passes them. A million
+<p>A swept collection's ids climb as its rows go — or fall, where an app
+gives its newest row the lowest id — and its id index, 12 bytes an id,
+spans only its lowest row's id to its highest: the slots of the rows swept
+away are let go of as the sweep passes them, at either end. A million
 sessions made one after another, 3 000 of them live, hold 98 KB of it;
 before, the index kept a slot for every session ever made, 57 MB more a
 day at 55 a second, which a <code>compact</code> did not give back.</p>
