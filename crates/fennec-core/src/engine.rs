@@ -77,8 +77,9 @@ pub use wake::{placeable, Moments};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use garbage::{
-    compact_when_due, compact_when_due_in, memory, CompactPolicy, Compactor, Garbage, Memory,
-    AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO, ROOM_SHARE,
+    compact_when_due, compact_when_due_in, compact_when_due_until, memory, CompactPolicy,
+    Compactor, Garbage, Memory, AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
+    ROOM_SHARE,
 };
 pub use maintenance::{Holds, KeptFor, KeptGraph};
 
@@ -6330,6 +6331,10 @@ pub struct Database {
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
+    /// The tombstones a graph holds at least before it is worn
+    /// (`VectorIndex::worn`): [`GRAPH_WORN_FLOOR`] unless
+    /// [`Database::set_worn_floor`] says.
+    worn_floor: usize,
     /// Where the records appended since the file was read or rewritten hold
     /// each collection's frames, and how many bytes they are: what
     /// [`Database::hand_over`] points the stores at, once they amount to
@@ -6511,6 +6516,22 @@ pub const GRAPH_SAVE_CHANGES: u64 = 10_000;
 /// would write the graph over and over for a little of it.
 pub const GRAPH_SAVE_GROWTH: u64 = 3;
 
+/// A graph is worn -- rebuilt beside the database without its tombstones
+/// (`Database::rebuild_worn`) -- once they outnumber its live nodes and
+/// number this many at least. The ratio bounds what a rebuild costs: it
+/// links each live node once, and each tombstone it drops was left by a
+/// write that linked a node of its own, so the rebuilds link no more than
+/// the writes did -- and the graph holds at most twice the nodes it reads,
+/// its heap and its record with it. The floor is [`GRAPH_SAVE_CHANGES`]:
+/// what a rebuild costs whatever the graph's size -- its holds of the lock,
+/// a log line, and the graph's record written again, which a server
+/// writes every 10 000 changes -- is paid once in as many tombstones as a
+/// record waits for, and the rebuilt graph's record is due at once, never
+/// the one before it restored, tombstones and all, by an open after a
+/// crash. Below it a small graph keeps up to that many: 2.3 MB of heap at
+/// 16 dimensions, 32 MB at 768.
+pub const GRAPH_WORN_FLOOR: usize = GRAPH_SAVE_CHANGES as usize;
+
 /// What a node takes in a graph record, before one was written: measured
 /// at 100 000 x 768, m 16.
 const GRAPH_NODE_BYTES: u64 = 72;
@@ -6575,6 +6596,7 @@ impl Database {
             #[cfg(feature = "std-fs")]
             swept: Vec::new(),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
+            worn_floor: GRAPH_WORN_FLOOR,
             statements: Arc::default(),
             #[cfg(feature = "statements")]
             marks: Vec::new(),
@@ -7530,6 +7552,12 @@ impl Database {
     /// by `growth` times its record.
     pub fn set_graph_saves(&mut self, changes: u64, growth: u64) {
         self.graph_saves = (changes, growth);
+    }
+
+    /// How many tombstones a graph holds at least before it is worn and
+    /// rebuilt ([`GRAPH_WORN_FLOOR`] unless set): a test's small graphs.
+    pub fn set_worn_floor(&mut self, floor: usize) {
+        self.worn_floor = floor;
     }
 
     /// Appends to the file, as a record of its own, each graph that changed
@@ -15926,9 +15954,10 @@ impl Database {
     }
 
     /// Drops the dead records of `which` (every collection when `None`) and
-    /// rewrites the file. `graphs`: whether a graph holding tombstones is
-    /// rebuilt here -- a compact beside the database has rebuilt them
-    /// already, without the lock.
+    /// rewrites the file. `graphs`: whether a graph of them holding
+    /// tombstones, and every worn one whatever `which` names, is rebuilt
+    /// here -- a compact beside the database has rebuilt them already,
+    /// without the lock.
     fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
         let targets: Vec<String> = match which {
             Some(n) => {
@@ -16008,23 +16037,7 @@ impl Database {
         // document with a vector leaves one, and they crowd the beam `near`
         // walks (a `limit 10` answered 4 rows once enough had gathered).
         if graphs {
-            for name in targets {
-                let c = self.collections.get_mut(name).unwrap();
-                // By position, not by collecting the names: the list of
-                // strings was 440 bytes of the browser module.
-                for pos in 0..c.schema.fields.len() {
-                    let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
-                        continue;
-                    };
-                    let field = &c.schema.fields[pos].name;
-                    // A document it cannot read leaves the graph as it
-                    // stands, tombstones and all, and answering as it did:
-                    // one built without it would not.
-                    if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
-                        let _ = build_graph(c, pos, spec);
-                    }
-                }
-            }
+            self.rebuild_graphs_here(targets);
         }
         // After compaction the persisted image is rewritten from scratch.
         let compacting: &[String] = if mapped { targets } else { &[] };
@@ -16050,6 +16063,44 @@ impl Database {
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))
+    }
+}
+
+impl Database {
+    /// Builds again, under the lock, each graph of `targets` holding
+    /// tombstones and every worn one whichever collection holds it
+    /// (`VectorIndex::worn`): what a compact under the lock rebuilds, and
+    /// the browser module's [`Database::rebuild_worn`]. How many graphs,
+    /// and the tombstones they dropped.
+    fn rebuild_graphs_here(&mut self, targets: &[String]) -> (usize, usize) {
+        let floor = self.worn_floor;
+        let mut done = (0, 0);
+        for name in &self.order {
+            let target = targets.contains(name);
+            let c = self.collections.get_mut(name).unwrap();
+            // By position, not by collecting the names: the list of
+            // strings was 440 bytes of the browser module.
+            for pos in 0..c.schema.fields.len() {
+                let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+                    continue;
+                };
+                let field = &c.schema.fields[pos].name;
+                let dead = c.vectors.get(field).map_or(0, |ix| {
+                    if target || ix.worn(floor) {
+                        ix.dead()
+                    } else {
+                        0
+                    }
+                });
+                // A document it cannot read leaves the graph as it stands,
+                // tombstones and all, and answering as it did: one built
+                // without it would not.
+                if dead > 0 && build_graph(c, pos, spec).is_ok() {
+                    done = (done.0 + 1, done.1 + dead);
+                }
+            }
+        }
+        done
     }
 }
 

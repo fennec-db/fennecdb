@@ -11,12 +11,15 @@
 //! on its way down: without them a crash after a long run left every vector
 //! written since the start to link again. The same databases are looked at
 //! for dead records past the policy ([`auto_compact`]), and compacted
-//! beside the queries, since nothing else ever gives them back.
+//! beside the queries, since nothing else ever gives them back -- and for
+//! graphs whose tombstones outnumber their live nodes, built again without
+//! them ([`rebuild`]), so a collection whose vectors are written over keeps
+//! its graph's heap and record bounded.
 
 use fennec_core::engine::{
-    compact_when_due_in, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
+    compact_when_due_until, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
 };
-use fennec_core::prelude::Database;
+use fennec_core::prelude::{Database, Response};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -95,7 +98,10 @@ static KEEPER: Once = Once::new();
 /// enough since it last reached the file (`Database::save_graphs`), under
 /// the read lock. A crash then links only what was written after it. The
 /// thread holds a database only while it looks, so a tenant closed
-/// meanwhile is let go of.
+/// meanwhile is let go of. Another compacts each where the policy says
+/// ([`auto_compact`]) and builds again each graph whose tombstones
+/// outnumber its live nodes ([`rebuild`]), whose record the keeper's next
+/// look appends.
 pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
     keep_held(what, db, None);
 }
@@ -114,20 +120,25 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
             .name("fennec-compact".into())
             .spawn(|| loop {
                 std::thread::sleep(fennec_core::engine::AUTO_COMPACT_EVERY);
-                let Some(policy) = *POLICY.lock().unwrap_or_else(|e| e.into_inner()) else {
-                    continue;
-                };
+                let policy = *POLICY.lock().unwrap_or_else(|e| e.into_inner());
                 let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 // Asked of the system once a pass: on Linux a few files of
                 // /proc and the cgroup's read, for every database a node
                 // serves.
-                let memory = fennec_core::engine::memory(&policy);
+                let memory = policy.map(|p| fennec_core::engine::memory(&p));
                 let mut looked = Vec::with_capacity(kept.len());
                 for (what, db, bytes) in kept {
                     if let Some(db) = crate::held::beside(&db) {
-                        let quota = bytes.map_or(0, |b| b());
-                        let policy = quota_policy(&db, quota).unwrap_or(policy);
-                        compact(&what, &db, &policy, memory);
+                        if let (Some(policy), Some(memory)) = (policy, memory) {
+                            let quota = bytes.map_or(0, |b| b());
+                            let policy = quota_policy(&db, quota).unwrap_or(policy);
+                            compact(&what, &db, &policy, memory);
+                        }
+                        // After the compact, on its thread: a compact due
+                        // rebuilds every worn graph itself, and a rebuild
+                        // running beside it would hold off a quota's
+                        // compact (`maintaining`) for its whole build.
+                        rebuild(&what, &db);
                         looked.push(what);
                     }
                 }
@@ -162,6 +173,44 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
             crate::log!("could not start keeping the graphs in the files: {e}");
         }
     });
+}
+
+/// Builds again beside the queries each graph of `db` whose tombstones
+/// outnumber its live nodes, without them (`Database::rebuild_worn`), and
+/// says so: on the compacter's thread, one database at a time as its
+/// compacts are -- a rebuild takes as long as a graph's build, 50 s at
+/// 100 000 x 768, and on the keeper's thread it held every other
+/// database's graph saves back as long -- and on a replica as on its
+/// primary: a replica applies every write its primary takes, each vector
+/// written over a tombstone in its graph too, which is its own and sent to
+/// none, as it compacts its own file. Looked at as `save` looks, a database
+/// whose lock is taken passed over until the next look. It gives up at its
+/// next step once the database is let go of -- a tenant released for a
+/// delete or a follow, the shutdown -- rather than hold it, and its file's
+/// lock, for the whole build (`held::stops`); the graph stands as the
+/// writes left it, and nothing is said.
+pub(crate) fn rebuild(what: &str, db: &Arc<RwLock<Database>>) {
+    let due = match db.try_read() {
+        Ok(g) => g.rebuild_due(),
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().rebuild_due(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if !due {
+        return;
+    }
+    let t = Instant::now();
+    let stop = || crate::held::stops(db);
+    let Some((r, holds)) = Database::rebuild_worn_until(db, &stop) else {
+        return;
+    };
+    match r {
+        Ok(Response::Ok(done)) => said_beside(what, format_args!("{done}"), t.elapsed(), &holds),
+        Ok(_) => {}
+        // Refused -- a collection changed while its graph was built, a
+        // storage error meanwhile -- it placed no graph: each stands as the
+        // writes left it, and the next look tries again.
+        Err(e) => crate::log!("{what}: could not rebuild the graphs: {e}"),
+    }
 }
 
 /// Appends what of `db`'s graphs is due, and pushes it to disk once the
@@ -305,15 +354,20 @@ pub(crate) fn said_beside(what: &str, done: std::fmt::Arguments, took: Duration,
 /// Compacts `db` beside the queries if its dead records are past the
 /// policy: one database at a time, on a thread of its own rather than the
 /// graph keeper's, since a compact of a gigabyte takes seconds and the
-/// graphs of every other database would wait them out. A replica and a
+/// graphs of every other database would wait them out -- as a rebuild of
+/// a worn graph would, which runs here too ([`rebuild`]). A replica and a
 /// following tenant compact too -- a compact changes no document, and
 /// their files grow with every update their primary sends -- and an image
 /// a replica adopts meanwhile fails the compact rather than be written
-/// over.
-fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Memory) {
+/// over. Its graph phase gives up at its next step once the database is
+/// let go of, as a rebuild does (`held::stops`), and the compact ends
+/// there, nothing written and nothing said: it rebuilds every worn graph,
+/// and a delete or the shutdown otherwise waited the build out.
+fn compact(what: &str, db: &Arc<RwLock<Database>>, policy: &CompactPolicy, memory: Memory) {
     let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
     let t = Instant::now();
-    let Some((r, holds)) = compact_when_due_in(db, policy, memory) else {
+    let stop = || crate::held::stops(db);
+    let Some((r, holds)) = compact_when_due_until(db, policy, memory, &stop) else {
         return;
     };
     let took = t.elapsed();

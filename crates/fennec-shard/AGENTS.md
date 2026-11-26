@@ -11,7 +11,10 @@ each.](../../docs/design/tenants.md#scaling-out-by-tenant)** The tenant comes fr
 the path, never the query; the router forwards bytes, parsing none; the
 registry opens a file under its lock and closes it on its last `Arc` alone,
 never while its follower or anything beside it holds the database: no two
-`Database`s share a file. A copy a failover may promote stays open once
+`Database`s share a file. A release, and the shutdown, let the database go
+first (`held::let_go`): a rebuild of a worn graph beside it, and a
+compact rebuilding its graphs, give up rather than hold the file's lock
+past it. A copy a failover may promote stays open once
 opened, its follower running or not, and the node's scrape counts it
 (`fennec_copies_disconnected`). A tenant's role is its file's, not the node's
 `--replica-of`; a move is `freeze` (an exclusive gate: no write lands after

@@ -85,7 +85,15 @@ the next instance. Nor is one whose database anything else holds beside the
 queries -- a compact or a warm-up for its whole run (`Tenant::db_in_use`):
 the database holds the file's `<file>.lock`, let go only as it drops, and a
 close meanwhile had every request's open wait 5 s for it and answer 500
-(`docs/design/engine.md`, single writer). The router cannot tell a node that is gone from one it cannot reach,
+(`docs/design/engine.md`, single writer). A rebuild of a worn graph puts
+off a close as a compact does, but a release -- a delete, a follow, a
+take-back -- and the shutdown let the database go first (`held::let_go`),
+and the rebuild gives up at its next step rather than hold the file's lock
+through a build of up to a minute, where the delete waited the 5 s for the
+lock and answered 500, and a create of the name after it with it
+([hnsw.md](hnsw.md#worn-graphs)). So does the node's own compact while it
+rebuilds its graphs, every worn one, before it writes the file: it then
+writes nothing; one writing the file finishes, as before. The router cannot tell a node that is gone from one it cannot reach,
 and guessing makes two primaries, so it promotes on its own only under a
 lease (`fennec-shard --auto-failover`, nodes `fennec-server --dir --lease`;
 `fennec-shard/src/lease.rs`, `fennec-http/src/lease.rs`): a node stops

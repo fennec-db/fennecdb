@@ -333,10 +333,11 @@ Covers `crates/fennec-core/src/engine/`.
 *Storage*
 - Writes are handed over to the mapped file.
 - A lone `create index` or `compact` runs beside the database
+- A worn graph is rebuilt.
 - A file compacts itself once half of it is dead
 - A file is compacted before it outgrows the page cache
 - Dead bytes are whole frames
-- The id floor
+- An id floor
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 

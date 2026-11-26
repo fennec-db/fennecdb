@@ -300,6 +300,23 @@ pub fn compact_when_due_in(
     policy: &CompactPolicy,
     m: Memory,
 ) -> Option<(Result<Response>, super::Holds)> {
+    compact_when_due_until(db, policy, m, &|| false)
+}
+
+/// [`compact_when_due_in`], the compact giving up in its graph phase once
+/// `stop` says so -- asked as [`Database::rebuild_worn_until`] asks it,
+/// and what it said held for the rest -- with nothing written and no graph
+/// placed: `None` then, as when nothing was due. Its graph phase rebuilds
+/// every worn graph, as long as a rebuild takes, which a close let go of a
+/// host's compact would otherwise wait out; a rewrite begun runs to its
+/// end, its file in place or none. What the [`Compactor`] runs, and a
+/// server's compacter, told by what lets a tenant go.
+pub fn compact_when_due_until(
+    db: &RwLock<Database>,
+    policy: &CompactPolicy,
+    m: Memory,
+    stop: &dyn Fn() -> bool,
+) -> Option<(Result<Response>, super::Holds)> {
     let due = db
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -307,14 +324,20 @@ pub fn compact_when_due_in(
     if !due {
         return None;
     }
-    Database::maintain_held(db, &Statement::Compact(None))
+    Database::compact_beside_until(db, stop)
 }
 
 /// A thread that compacts one database when it is due, looking every
-/// [`AUTO_COMPACT_EVERY`]: what the native library starts for each file it
-/// opens, and what an app embedding the engine may start for its own. It
-/// holds the database only while it looks, and stops when dropped or once
-/// the database is.
+/// [`AUTO_COMPACT_EVERY`], and builds again each graph of it whose
+/// tombstones outnumber its live nodes ([`Database::rebuild_worn`]): what
+/// the native library starts for each file it opens, and what an app
+/// embedding the engine may start for its own. It holds the database only
+/// while it looks, and stops when dropped or once the database is: a
+/// rebuild under way, and a compact still rebuilding its graphs, give up
+/// at their next step, the graphs and the file as they stood, and a
+/// compact rewriting the file finishes first, its file in place -- the
+/// drop is a close's, on an app's UI thread as it goes to the background,
+/// and a rebuild of 20 000 x 768 takes seconds on a phone.
 pub struct Compactor {
     stop: Arc<(Mutex<bool>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -350,9 +373,16 @@ impl Compactor {
                     return;
                 };
                 // An error leaves the database as it was -- a compact that
-                // fails is put back -- and the next look tries again; a
-                // storage error stops the looks, since `compact_due` asks.
-                let _ = compact_when_due(&db, &policy);
+                // fails is put back, a rebuild refused places no graph --
+                // and the next look tries again; a storage error stops the
+                // looks, since `compact_due` and the rebuild's look ask.
+                // A compact due first: it rebuilds every worn graph itself,
+                // and a rebuild before it built a graph the compact then
+                // built again. Each gives up once the drop says to stop.
+                let stopped = || *s.0.lock().unwrap_or_else(|e| e.into_inner());
+                if compact_when_due_until(&db, &policy, memory(&policy), &stopped).is_none() {
+                    let _ = Database::rebuild_worn_until(&db, &stopped);
+                }
             })?;
         Ok(Compactor {
             stop,
@@ -361,11 +391,19 @@ impl Compactor {
     }
 }
 
-impl Drop for Compactor {
-    fn drop(&mut self) {
+impl Compactor {
+    /// Tells the thread to stop -- a rebuild under way gives up at its
+    /// next step -- without waiting for it: the drop waits.
+    pub(crate) fn stop_looking(&self) {
         let (lock, cv) = &*self.stop;
         *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
         cv.notify_all();
+    }
+}
+
+impl Drop for Compactor {
+    fn drop(&mut self) {
+        self.stop_looking();
         if let Some(t) = self.thread.take() {
             // Dropped on the thread itself -- its last strong reference to
             // the database let go there -- it cannot join itself.
