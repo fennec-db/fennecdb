@@ -11,12 +11,84 @@
 //! before it. The writer puts RATE updates a second (0: as fast as it can).
 //! Said at the end, and at the most during the run: the graph's nodes and
 //! tombstones, its heap (`graph_bytes` and `arena_bytes`) and its record's
-//! length (`serialize_graph`).
+//! length (`serialize_graph`); and of each rebuild, the most the heap grew
+//! by while it ran -- the old graph, the vectors copied out of the
+//! documents and the new graph held at once -- counted by the allocator
+//! below on every thread but the writer's, whose writes grow the old graph
+//! and the store meanwhile.
 
 use fennec_core::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+struct Counting;
+
+/// The bytes the threads but the writer's allocated and did not free, and
+/// the most of them since [`PEAK`] was last set.
+static BESIDE: AtomicIsize = AtomicIsize::new(0);
+static PEAK: AtomicIsize = AtomicIsize::new(0);
+
+thread_local! {
+    /// Whether this thread is the writer, left out of [`BESIDE`].
+    static WRITER: Cell<bool> = const { Cell::new(false) };
+}
+
+fn counted() -> bool {
+    !WRITER.try_with(Cell::get).unwrap_or(false)
+}
+
+fn grew(by: usize) {
+    if counted() {
+        let now = BESIDE.fetch_add(by as isize, Ordering::Relaxed) + by as isize;
+        PEAK.fetch_max(now, Ordering::Relaxed);
+    }
+}
+
+fn shrank(by: usize) {
+    if counted() {
+        BESIDE.fetch_sub(by as isize, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: each call is handed on to `System` with the arguments it was given,
+// so every block is `System`'s and `GlobalAlloc`'s contract holds as `System`
+// keeps it; the counting beside is atomics and a thread-local `Cell`,
+// allocating nothing.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees.
+        let p = unsafe { System.alloc(l) };
+        if !p.is_null() {
+            grew(l.size());
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: `p` is `System`'s, made with `l` -- `alloc` and `realloc`
+        // hand on nothing else -- as `GlobalAlloc::dealloc`'s caller
+        // guarantees.
+        unsafe { System.dealloc(p, l) };
+        shrank(l.size());
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // SAFETY: `p` is `System`'s with layout `l`, as for `dealloc`, and
+        // `new` is nonzero and fits `isize` once rounded to `l.align()`, as
+        // `GlobalAlloc::realloc`'s caller guarantees.
+        let q = unsafe { System.realloc(p, l, new) };
+        if !q.is_null() {
+            grew(new);
+            shrank(l.size());
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 /// A row's vector, the `gen`th written: a hash of the two, in [-1, 1).
 fn vector(id: u64, gen: u64, dim: usize) -> Vec<f32> {
@@ -140,8 +212,11 @@ fn main() {
                     continue;
                 }
                 let t = Instant::now();
+                let began = BESIDE.load(Ordering::Relaxed);
+                PEAK.store(began, Ordering::Relaxed);
                 if let Some((r, holds)) = Database::rebuild_worn(&db) {
                     let took = t.elapsed();
+                    let peak = PEAK.load(Ordering::Relaxed) - began;
                     let r = r.expect("rebuilt");
                     let after = graph(&db.read().expect("lock"), false);
                     let kept: String = holds.kept.iter().map(|k| format!("; {k}")).collect();
@@ -149,6 +224,11 @@ fn main() {
                     println!(
                         "  {r:?} in {:.0} ms, the lock held {held:.2} ms at most ({holds}){kept}",
                         ms(took)
+                    );
+                    println!(
+                        "    the heap {:.1} MB over its start at the most, the graph before {:.1} MB",
+                        peak as f64 / 1e6,
+                        now.heap as f64 / 1e6
                     );
                     println!("    now {}", said(after));
                     rebuilds.lock().expect("rebuilds").push((took, holds));
@@ -158,6 +238,7 @@ fn main() {
     };
     let t0 = Instant::now();
     let mut slowest = Duration::ZERO;
+    WRITER.with(|w| w.set(true));
     for n in 0..updates {
         let id = 1 + n % rows;
         let stmt = put(id, vector(id, 1 + n / rows, dim));

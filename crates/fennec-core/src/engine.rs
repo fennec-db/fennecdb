@@ -6334,12 +6334,6 @@ pub struct Database {
     /// (`VectorIndex::worn`): [`GRAPH_WORN_FLOOR`] unless
     /// [`Database::set_worn_floor`] says.
     worn_floor: usize,
-    /// The change before which no worn graph is rebuilt beside the
-    /// database: one kept as it stood -- behind its writes, a document
-    /// unread, past its nodes -- is tried again only once as many writes
-    /// as its tombstones have landed (`Database::rebuild_worn`).
-    #[cfg(not(target_arch = "wasm32"))]
-    worn_after: u64,
     /// Where the records appended since the file was read or rewritten hold
     /// each collection's frames, and how many bytes they are: what
     /// [`Database::hand_over`] points the stores at, once they amount to
@@ -6602,8 +6596,6 @@ impl Database {
             swept: Vec::new(),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
             worn_floor: GRAPH_WORN_FLOOR,
-            #[cfg(not(target_arch = "wasm32"))]
-            worn_after: 0,
             statements: Arc::default(),
             #[cfg(feature = "statements")]
             marks: Vec::new(),
@@ -9651,7 +9643,6 @@ impl Database {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.kept = 0;
-            self.worn_after = 0;
         }
     }
 

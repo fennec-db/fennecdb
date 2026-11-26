@@ -315,7 +315,11 @@ pub fn compact_when_due_in(
 /// tombstones outnumber its live nodes ([`Database::rebuild_worn`]): what
 /// the native library starts for each file it opens, and what an app
 /// embedding the engine may start for its own. It holds the database only
-/// while it looks, and stops when dropped or once the database is.
+/// while it looks, and stops when dropped or once the database is: a
+/// compact under way finishes first, its file in place, and a rebuild under
+/// way gives up at its next step, its graph as it stood -- the drop is a
+/// close's, on an app's UI thread as it goes to the background, and a
+/// rebuild of 20 000 x 768 takes seconds on a phone.
 pub struct Compactor {
     stop: Arc<(Mutex<bool>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -354,10 +358,13 @@ impl Compactor {
                 // fails is put back, a rebuild refused places no graph --
                 // and the next look tries again; a storage error stops the
                 // looks, since `compact_due` and the rebuild's look ask.
-                // The rebuild first: a compact due at the same look writes
-                // the graph without its tombstones.
-                let _ = Database::rebuild_worn(&db);
-                let _ = compact_when_due(&db, &policy);
+                // A compact due first: it rebuilds every worn graph itself,
+                // and a rebuild before it built a graph the compact then
+                // built again.
+                if compact_when_due(&db, &policy).is_none() {
+                    let stopped = || *s.0.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = Database::rebuild_worn_until(&db, &stopped);
+                }
             })?;
         Ok(Compactor {
             stop,
@@ -366,11 +373,19 @@ impl Compactor {
     }
 }
 
-impl Drop for Compactor {
-    fn drop(&mut self) {
+impl Compactor {
+    /// Tells the thread to stop -- a rebuild under way gives up at its
+    /// next step -- without waiting for it: the drop waits.
+    pub(crate) fn stop_looking(&self) {
         let (lock, cv) = &*self.stop;
         *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
         cv.notify_all();
+    }
+}
+
+impl Drop for Compactor {
+    fn drop(&mut self) {
+        self.stop_looking();
         if let Some(t) = self.thread.take() {
             // Dropped on the thread itself -- its last strong reference to
             // the database let go there -- it cannot join itself.

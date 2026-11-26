@@ -3203,6 +3203,13 @@ pub struct VectorIndex {
     /// these would be linked again after a crash.
     changes: u64,
     persisted: Persisted,
+    /// The database's change from which a rebuild beside it tries this
+    /// graph again (`Database::rebuild_worn`), once one kept it as it
+    /// stood -- behind its writes, a document unread, past its nodes: 0
+    /// where none did. The graph's own, so one kept graph puts off no
+    /// other's rebuild.
+    #[cfg(not(target_arch = "wasm32"))]
+    worn_after: u64,
     /// Documents holding the vector of another document's node, as
     /// `(node, doc)` in order: a vector written again and again is one node
     /// ([`VectorIndex::place`]). A node each, a vector written hundreds of
@@ -3657,6 +3664,8 @@ impl VectorIndex {
             pending: Vec::new(),
             changes: 0,
             persisted: Persisted::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            worn_after: 0,
             aliases: Vec::new(),
             same: Same::default(),
             stored_buf: Vec::new(),
@@ -3730,6 +3739,27 @@ impl VectorIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn changed_by(&mut self, n: u64) {
         self.changes = self.changes.saturating_add(n);
+    }
+
+    /// Whether a rebuild beside the database builds it again at the
+    /// database's change `seq`: worn, and past the change a rebuild that
+    /// kept it put it off to ([`Self::put_off`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn worn_due(&self, floor: usize, seq: u64) -> bool {
+        self.worn(floor) && seq >= self.worn_after
+    }
+
+    /// Puts off its next rebuild beside the database to the database's
+    /// change `seq`: a rebuild kept it as it stood.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn put_off(&mut self, seq: u64) {
+        self.worn_after = seq;
+    }
+
+    /// The change [`Self::put_off`] put its rebuild off to, for a test.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn worn_after(&self) -> u64 {
+        self.worn_after
     }
 
     #[inline]
@@ -4563,7 +4593,7 @@ impl VectorIndex {
     /// thread count does not change the output. (It is not the same graph as
     /// serial insertion -- there every node sees the ones before it.)
     pub fn insert_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
-        self.insert_batch_by(items, Self::link_batch)
+        self.insert_batch_by(items, Self::link_batch, &|| false);
     }
 
     /// `raw` as a `vector<N, f16>` field holds it, each component rounded
@@ -4583,16 +4613,26 @@ impl VectorIndex {
 
     /// [`Self::insert_batch`], linking each batch with `link`: the tests
     /// hold [`Self::link_batch`] to [`Self::link_serially`] through it.
+    /// `stop` is asked before each node while the graph is small and each
+    /// batch after, a few hundred nodes apart at most, and once it says so
+    /// the rest goes in by none: whether every vector went in. A rebuild
+    /// beside the database gives up there once its database is let go of
+    /// ([`Self::insert_held_until`]) -- a batch at 100 000 x 768 links in
+    /// about a quarter of a second, where the whole build takes 50 s.
     fn insert_batch_by(
         &mut self,
         items: &[(DocId, Vec<f32>)],
         link: fn(&mut Self, Candidates, usize),
-    ) {
+        stop: &dyn Fn() -> bool,
+    ) -> bool {
         let threads = Self::threads();
         let mut scratch = Vec::new();
 
         let mut rest = items;
         while !rest.is_empty() {
+            if stop() {
+                return false;
+            }
             // The parallelism decision is made **per batch**. Made per call,
             // inserting 100k into an empty index in one go would drop the
             // whole batch onto the serial path -- exactly when it should
@@ -4602,6 +4642,10 @@ impl VectorIndex {
                     .len()
                     .min(PARALLEL_FROM.saturating_sub(self.doc_ids.len()).max(1));
                 for (doc, v) in &rest[..take] {
+                    // A node at a time: on one thread every node is.
+                    if stop() {
+                        return false;
+                    }
                     self.insert(*doc, v);
                 }
                 rest = &rest[take..];
@@ -4645,6 +4689,7 @@ impl VectorIndex {
             // 3) Write the links; the lists they join are pruned in parallel.
             link(self, computed, threads);
         }
+        true
     }
 
     /// Puts `items` in the arena as [`Self::insert_batch`] would, and links
@@ -5372,6 +5417,23 @@ impl VectorIndex {
         later: bool,
         field: &str,
     ) -> crate::error::Result<()> {
+        self.insert_held_until(items, later, field, &|| false)
+            .map(drop)
+    }
+
+    /// [`Self::insert_held`], `stop` asked between its batches
+    /// ([`Self::insert_batch_by`]): whether every vector went in, none
+    /// going in once `stop` said to give up. What a rebuild beside the
+    /// database builds its graph with (`Database::rebuild_worn_until`), the
+    /// graph it gave up on let go of.
+    #[cfg(target_pointer_width = "64")]
+    pub(crate) fn insert_held_until(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+        stop: &dyn Fn() -> bool,
+    ) -> crate::error::Result<bool> {
         let mut rest = items;
         while !rest.is_empty() {
             let take = match MAX_NODES.saturating_sub(self.nodes()) {
@@ -5384,11 +5446,15 @@ impl VectorIndex {
                 true => {
                     self.defer_batch(now);
                 }
-                false => self.insert_batch(now),
+                false => {
+                    if !self.insert_batch_by(now, Self::link_batch, stop) {
+                        return Ok(false);
+                    }
+                }
             }
             rest = next;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// [`Self::insert_held`] where no node can pass the bound: a 32-bit
@@ -5408,6 +5474,25 @@ impl VectorIndex {
             false => self.insert_batch(items),
         }
         Ok(())
+    }
+
+    /// [`Self::insert_held_until`] where no node can pass the bound. The
+    /// browser module rebuilds no graph beside the page, and has none.
+    #[cfg(all(not(target_pointer_width = "64"), not(target_arch = "wasm32")))]
+    pub(crate) fn insert_held_until(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        _field: &str,
+        stop: &dyn Fn() -> bool,
+    ) -> crate::error::Result<bool> {
+        Ok(match later {
+            true => {
+                self.defer_batch(items);
+                true
+            }
+            false => self.insert_batch_by(items, Self::link_batch, stop),
+        })
     }
 
     /// Whether [`Self::place`] would place a node for `doc`'s `raw`: its
@@ -6551,16 +6636,49 @@ mod tests {
             .map(|i| (i, vec![(i % 97) as f32, (i / 97) as f32]))
             .collect();
         let mut ix = VectorIndex::new(2, spec());
-        ix.insert_batch_by(&items[..PARALLEL_FROM], counted);
+        ix.insert_batch_by(&items[..PARALLEL_FROM], counted, &|| false);
         assert_eq!(ix.len(), PARALLEL_FROM);
         assert!(LINKED.with(|l| l.borrow().is_empty()), "in turn below it");
-        ix.insert_batch_by(&items[PARALLEL_FROM..], counted);
+        ix.insert_batch_by(&items[PARALLEL_FROM..], counted, &|| false);
         assert_eq!(ix.len(), items.len());
         let batches = LINKED.with(|l| l.take());
         match VectorIndex::threads() {
             // One thread links every node in turn, whatever the graph.
             1 => assert!(batches.is_empty(), "{batches:?}"),
             _ => assert_eq!(batches, [64, 68, 68], "from it, a sixteenth at a time"),
+        }
+    }
+
+    /// A build a rebuild beside the database makes asks its stop before
+    /// each node while the graph is small and each batch after, and once
+    /// told goes on with none: it asks no more, and what it placed is fewer
+    /// than its vectors. Never told, it builds the graph `insert_batch`
+    /// builds, to the byte.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_build_told_to_stop_gives_up_between_its_batches() {
+        let items: Vec<(DocId, Vec<f32>)> = (0..PARALLEL_FROM as u64 + 600)
+            .map(|i| (i, vec![(i % 97) as f32, (i / 97) as f32]))
+            .collect();
+        let mut whole = VectorIndex::new(2, spec());
+        whole.insert_batch(&items);
+        let mut ix = VectorIndex::new(2, spec());
+        let all = ix.insert_held_until(&items, false, "v", &|| false);
+        assert!(all.expect("built"));
+        assert_eq!(ix.serialize_graph(), whole.serialize_graph());
+        // At the first look, in the nodes in turn, at the first batch's look
+        // and at a later one's.
+        for stop_at in [1, 500, PARALLEL_FROM + 1, PARALLEL_FROM + 3] {
+            let looks = std::cell::Cell::new(0);
+            let stop = || {
+                looks.set(looks.get() + 1);
+                looks.get() >= stop_at
+            };
+            let mut ix = VectorIndex::new(2, spec());
+            let all = ix.insert_held_until(&items, false, "v", &stop);
+            assert!(!all.expect("given up"), "{stop_at}");
+            assert_eq!(looks.get(), stop_at, "asked no more after");
+            assert!(ix.len() < items.len(), "{stop_at}: {}", ix.len());
         }
     }
 
@@ -7407,8 +7525,8 @@ mod tests {
             let build = |link: fn(&mut VectorIndex, Candidates, usize)| {
                 let mut ix = VectorIndex::with_precision(dim, spec, prec);
                 // Two calls, so the second starts over a graph of its own.
-                ix.insert_batch_by(&items[..n / 3], link);
-                ix.insert_batch_by(&items[n / 3..], link);
+                ix.insert_batch_by(&items[..n / 3], link, &|| false);
+                ix.insert_batch_by(&items[n / 3..], link, &|| false);
                 ix
             };
             let (a, b) = (

@@ -2965,6 +2965,12 @@ impl Tenants {
         // The flag first, the snapshot after: an open that got past the flag
         // inserted its slot before the snapshot, and is waited for below.
         self.shutting_down.store(true, Ordering::SeqCst);
+        // Every rebuild beside a tenant gives up at its next step, before
+        // the syncs and checkpoints below: one goes on with every core
+        // while they run, and waits for the lock kept below for good.
+        for t in self.open_tenants() {
+            crate::held::let_go(&t.db);
+        }
         // Before any lock is kept: a sync thread reaching for one after
         // waited for it for good.
         self.syncs.close();
@@ -3231,8 +3237,13 @@ pub mod refusals {
 /// for a request still running. A replica's stream holds the tenant as a
 /// subscription does, and is ended for the same reason. 409 when something
 /// does not let go, with everything started again: left ended, the tenant
-/// took writes its replicas were never sent.
+/// took writes its replicas were never sent. A rebuild of a worn graph
+/// beside the database gives up at its next step (`held::let_go`): let run,
+/// it held the database, and its file's lock, through a build of up to a
+/// minute, and the delete or the open after the release waited
+/// [`RELEASE_WAIT`] for the lock and answered 500.
 fn release(t: &Arc<Tenant>, name: &str) -> std::result::Result<(), Refused> {
+    crate::held::let_go(&t.db);
     t.hub.close();
     if let Some(repl) = &t.repl {
         repl.close_streams();
@@ -3244,6 +3255,7 @@ fn release(t: &Arc<Tenant>, name: &str) -> std::result::Result<(), Refused> {
             if let Some(repl) = &t.repl {
                 repl.reopen_streams(format!("fennec-replica-{name}"));
             }
+            crate::held::taken_back(&t.db);
             return Err(Refused(409, format!("tenant `{name}` is still in use")));
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -4391,6 +4403,84 @@ mod tests {
             "the tenant's drop synced nothing"
         );
         assert_eq!(said(&dropped_after_shutdown(&dir)), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A delete while a rebuild of a worn graph runs beside the tenant's
+    /// database stops it rather than wait it out: the rebuild places no
+    /// graph, lets the database go, and the delete -- and a create of the
+    /// name after it -- go on. Let run, the rebuild held the database, and
+    /// its file's lock, through the whole build, and the delete waited
+    /// `RELEASE_WAIT` for the lock and answered 500. The read lock is held
+    /// from before the rebuild until the release has said to stop, so the
+    /// rebuild, which takes the write lock only to place its graph, is
+    /// under way and has placed none when it is told.
+    #[test]
+    fn a_delete_stops_a_rebuild_under_way_rather_than_wait_it_out() {
+        let dir = scratch("worn-delete");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let t = reg.create("worn").unwrap();
+        run(&t, "create collection docs (v vector<8> @hnsw(cosine))");
+        {
+            let mut db = t.db.write().unwrap();
+            db.set_worn_floor(10);
+            for gen in 0..3 {
+                let rows: Vec<String> = (1..=300)
+                    .map(|id| {
+                        // A hash of the row, its write and the place: no
+                        // two vectors alike, none another's alias.
+                        let v: Vec<String> = (0..8u64)
+                            .map(|k| {
+                                let x = ((id as u64) << 32 | (gen as u64) << 8 | k)
+                                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                                ((x >> 40) % 10_000).to_string()
+                            })
+                            .collect();
+                        format!("{{id: {id}, v: [{}]}}", v.join(", "))
+                    })
+                    .collect();
+                let put = format!("put docs [{}]", rows.join(", "));
+                db.execute(&fennec_ql::parse_one(&put).unwrap()).unwrap();
+            }
+            assert!(db.rebuild_due());
+        }
+        let graph = |db: &Database| {
+            let ix = &db.collection("docs").unwrap().vectors["v"];
+            (ix.len(), ix.dead(), ix.serialize_graph())
+        };
+        let db = Arc::clone(&t.db);
+        drop(t);
+        let before = graph(&db.read().unwrap());
+        assert_eq!((before.0, before.1), (300, 600));
+        let held = db.read().unwrap();
+        let rebuilding = {
+            let db = Arc::clone(&db);
+            std::thread::spawn(move || {
+                crate::link::rebuild("worn", &db);
+                let after = graph(&db.read().unwrap());
+                after
+            })
+        };
+        let until = |what: &str, ok: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(60);
+            while !ok() {
+                assert!(Instant::now() < end, "never {what}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        until("rebuilt beside", &|| held.maintaining());
+        let deleting = {
+            let reg = Arc::clone(&reg);
+            std::thread::spawn(move || reg.delete("worn"))
+        };
+        until("told the rebuild to stop", &|| crate::held::stops(&db));
+        drop(held);
+        drop(db);
+        let after = rebuilding.join().unwrap();
+        assert_eq!(after, before, "the rebuild placed a graph");
+        deleting.join().unwrap().expect("deleted");
+        assert!(!dir.join("worn.fennec").exists());
+        reg.create("worn").expect("made again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

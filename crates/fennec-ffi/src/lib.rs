@@ -573,7 +573,11 @@ pub unsafe extern "C" fn fennec_close(
         };
         drop(n.sync_lock().take());
         // Stopped before the lock is taken: a compact under way finishes
-        // first, its file in place, rather than be cut off.
+        // first, its file in place, rather than be cut off; a rebuild of a
+        // worn graph gives up at its next step, a fraction of a second, its
+        // graph as it stood -- waited out, a close on an app's UI thread as
+        // it went to the background waited the seconds a rebuild of 20 000
+        // x 768 takes on a phone.
         drop(n.compactor.lock().unwrap_or_else(|e| e.into_inner()).take());
         let mut db = n.db.write().unwrap_or_else(|e| e.into_inner());
         n.closed.store(true, Ordering::Release);

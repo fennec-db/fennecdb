@@ -334,8 +334,13 @@ pub fn run_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: boo
 /// The exclusive lock is *held until exit*. Releasing it before exiting
 /// meant a write accepted between `sync` and `exit` could look successful to
 /// the client and never reach the disk; the window was small but silent.
-fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+fn shutdown(db: &Arc<RwLock<Database>>, checkpoint: bool) -> ! {
     let began = Instant::now();
+    // A rebuild of a worn graph beside the queries gives up at its next
+    // step: let run, it spent every core through the grace periods, the
+    // sync and the checkpoint below, and then waited for the lock kept to
+    // the exit for good.
+    fennec_http::held::let_go(db);
     // On Windows, where a close, a user's logoff or the system's shutdown
     // ends the process 5 s after, what was acknowledged is synced before
     // each wait below (`windows::sync_first`, docs/design/windows.md, 4).

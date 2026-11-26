@@ -72,6 +72,14 @@ impl VectorIndex {
     pub(crate) fn changed_by(&mut self, n: u64) {
         match self.never {}
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn worn_due(&self, floor: usize, seq: u64) -> bool {
+        match self.never {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn put_off(&mut self, seq: u64) {
+        match self.never {}
+    }
     pub fn arena_bytes(&self) -> usize {
         match self.never {}
     }
@@ -145,6 +153,16 @@ impl VectorIndex {
         later: bool,
         field: &str,
     ) -> crate::error::Result<()> {
+        match self.never {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn insert_held_until(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        later: bool,
+        field: &str,
+        stop: &dyn Fn() -> bool,
+    ) -> crate::error::Result<bool> {
         match self.never {}
     }
     #[cfg(test)]

@@ -64,12 +64,18 @@ Once its tombstones outnumber its live nodes, `GRAPH_WORN_FLOOR` of them
 at least (`VectorIndex::worn`: two counts, no node read),
 `Database::rebuild_worn` builds it again as a compact's graph phase does
 (`graphs_online`), without the rewrite and within its bounds: a graph
-behind its writes, unread or past its nodes is kept, tried again only
-once as many writes as its tombstones have landed (`worn_after`), and a
-refusal places none. The record a compact wrote of the graph it replaces
-is dead from then (`Persisted::kept`). A server's keeper runs it before
-each save, a replica's too, the native library's `Compactor` before each
-compact; every `compact` rebuilds each worn graph, whatever it names.
+behind its writes, unread or past its nodes is kept, and it alone tried
+again only once as many writes as its tombstones have landed
+(`VectorIndex::worn_due`); a refusal places none. The record a compact
+beside the database wrote of the graph it replaces is dead from then
+(`Persisted::kept`); one under the lock notes none. It runs where
+compacts run, never on the graph keeper's thread: a server's compacter
+after each compact look, a replica's too, the native library's
+`Compactor` where no compact is due; every `compact` rebuilds each worn
+graph, whatever it names. Whatever lets the database go stops a rebuild
+at its next step, placing no graph (`rebuild_worn_until`, its stop
+latched): the `Compactor`'s drop, a tenant's release, a shutdown
+(`held::let_go`, `held::stops`).
 
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by
