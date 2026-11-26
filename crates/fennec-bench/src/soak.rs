@@ -46,7 +46,7 @@
 //! A server that dies on its own -- the kernel's OOM kill under its
 //! `--memory`, an exit -- is found as Docker says it (`follow_events`) or
 //! by its state at a minute's end or a kill, named on a line of its own,
-//! timed by the first connection it closed (`death_time`), the writes a
+//! timed by the burst of closes its exit made (`death_time`), the writes a
 //! read then shows gone judged from that time, and started again; each
 //! server's cgroup is read a second (`watch_memory`) and the open loop's
 //! lag too (`seconds`), the minute's line taking their most.
@@ -260,18 +260,47 @@ const MAX_CONNECTIONS: u64 = 320;
 /// forwarding on a relay of its own, and the thread holding it waits for
 /// a core among the harness's 250 -- but within milliseconds: the dry run
 /// of 2026-11-26's three deaths had their first close 9-10 ms after the
-/// last answer before it. A close the server answered past is no death's
-/// -- a client's refused connect, a subscription's, a connection thread's
-/// panic -- and is let go at the next close. Kept longer, it stands for a
-/// death that came after it: a slop of a second took a close 0.9 s before
-/// a server that then hung 30 s and was OOM-killed for its time, and
-/// excused writes answered half a minute before it went. Too short a slop
-/// only moves a death's time to the next close, later: the judge stricter
-/// by an answer's few ms, never more lenient (the writes a read shows
-/// gone are excused from the death's time back, and `death_time` never
-/// takes one before the last answer). 50 ms is five times the gap the dry
-/// run measured, and a twentieth of the second.
+/// last answer before it. A burst of closes the server answered past is no
+/// death's -- a stream's end or a refused connect beside others -- and is
+/// let go at the next close. Kept longer, it stands for a death that came
+/// after it: a slop of a second took a close 0.9 s before a server that
+/// then hung 30 s and was OOM-killed for its time, and excused writes
+/// answered half a minute before it went. Too short a slop only moves a
+/// death's time to the next burst, later: the judge stricter by an
+/// answer's few ms, never more lenient (the writes a read shows gone are
+/// excused from the death's time back, and `death_time` never takes one
+/// before the last answer). 50 ms is five times the gap the dry run
+/// measured, and a twentieth of the second.
 const CLOSE_SLOP: u64 = 50_000_000;
+
+/// The closes, within how long of the first of them, that are a death's
+/// rather than one connection's (`Shared::closed`). A process's exit
+/// closes every socket it holds in the kernel's one teardown, so a death
+/// cuts the 64 streams, each blocked in its read, and the workers'
+/// requests under way at once, and the harness reads them as fast as its
+/// threads wake; a close that was no death's -- a stream the server ended,
+/// a connection thread's panic, a refused connect -- is one connection's,
+/// and the next close of a living server comes as another connection
+/// happens to end, not within the span. One close timed a death that came
+/// later where the server stopped answering between them: a stream ended
+/// by the server, then a hang and an OOM kill, its writes excused from the
+/// stream's end. Three within 20 ms, ten times the widest the dry runs of
+/// 2026-11-26 through `run-soak.sh` measured: an OOM kill's three came
+/// within 0.1 ms, an outside `docker kill`'s within 1.2, the planned
+/// kill's within 2.1. A run whose death closes fewer -- no streams, an
+/// idle pool -- is timed by Docker's own times, later, as before the
+/// closes were read.
+const BURST_CLOSES: u32 = 3;
+const BURST_SPAN: u64 = 20_000_000;
+
+/// How fast this process's clock (`Shared::ns`, macOS's `CLOCK_UPTIME_RAW`,
+/// never slewed) and Docker's VM's, which follows the host's wall clock,
+/// may part between two probes, in parts per million: NTP slews the wall
+/// clock at 500 at the most. Measured on this Mac at -43 over three
+/// minutes and +5.6 over two -- some 60 ms by the 90th minute of a run had
+/// Docker's times been read through the wall clock at `t0`, which put a
+/// planned kill's end, 20-200 ms after its send, before it.
+const CLOCK_DRIFT_PPM: u64 = 500;
 
 /// How long a side job that failed waits for a death to be found before it
 /// counts its failure as its own (`cut_by`): the death is found from
@@ -1225,10 +1254,11 @@ fn utc(ns: u64) -> String {
 /// `death_source`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Source {
-    /// The first connection the server closed after its last answer, on
-    /// this process's clock -- the one every write's answer is timed on.
+    /// The burst of closes its exit made after its last answer
+    /// (`BURST_CLOSES`), on this process's clock -- the one every write's
+    /// answer is timed on.
     Close = 1,
-    /// Docker's `die` event, on the VM's clock, by the minute's probe.
+    /// Docker's `die` event, on the VM's clock, by the latest probe.
     Event = 2,
     /// Docker's `State.FinishedAt`, likewise.
     Finished = 3,
@@ -1239,7 +1269,7 @@ enum Source {
 impl Source {
     fn said(self) -> &'static str {
         match self {
-            Source::Close => "the first connection it closed",
+            Source::Close => "the burst of closes its exit made",
             Source::Event => "Docker's die event",
             Source::Finished => "Docker's FinishedAt",
             Source::Look => "the minute's look before it, nothing closing or Docker's times read",
@@ -1251,22 +1281,24 @@ impl Source {
 /// run's start, where it was read from, and the last answer read before
 /// that time.
 ///
-/// The first connection the server closed after its last answer, where
-/// there is one: the process's sockets close in its exit, before Docker
-/// reaps it, and the soak holds 64 streams and its workers' connections
-/// open, so it is the death to a few ms -- on the clock every write's
-/// answer is timed on. `closed` is that close (`Shared::closed`),
-/// `answered` the last answer read at all: a server read answering more
-/// than `CLOSE_SLOP` after a close was alive then, and that close no
-/// death; one read within it was written before the death, which is
-/// taken at that answer where it came after the close -- never before the
-/// last answer, as a time before the real death excuses writes the server
-/// held for longer than `--loss-ms`. Docker's times (`docker`: its `die`
-/// event, or `FinishedAt`) are the VM's clock, which this process knows
-/// only by the minute's probe, to its round trip and between steps; and
-/// they are the reap, after the process's teardown, its sockets' close
-/// among it: taken where nothing closed, and said beside the close where
-/// something did. With neither, the minute's look before it (`look`).
+/// The burst of closes the server's exit made after its last answer,
+/// where there is one: the process's sockets close in its exit, before
+/// Docker reaps it, and the soak holds 64 streams and its workers'
+/// connections open, so it is the death to a few ms -- on the clock every
+/// write's answer is timed on. `closed` is the burst's first close
+/// (`Shared::closed`; one close alone is none), `answered` the last answer
+/// read at all: a server read answering more than `CLOSE_SLOP` after a
+/// burst was alive then, and that burst no death; one read within it was
+/// written before the death, which is taken at that answer where it came
+/// after the burst -- never before the last answer, as a time before the
+/// real death excuses writes the server held for longer than
+/// `--loss-ms`. Docker's times (`docker`: its `die` event, or
+/// `FinishedAt`) are the VM's clock, which this process knows only by the
+/// latest probe, to its round trip, the drift since and between steps;
+/// and they are the reap, after the process's teardown, its sockets'
+/// close among it: taken where no burst was read, and said beside the
+/// burst where one was. With neither, the minute's look before it
+/// (`look`).
 fn death_time(
     closed: u64,
     answered: u64,
@@ -3098,6 +3130,50 @@ struct Stream {
     seen: AtomicU64,
 }
 
+/// The primary's closes as they come (`Shared::closed`): the run of them
+/// under way -- its first and last close, how many, each within
+/// `BURST_SPAN` of the first -- and, once it is a burst, how far apart its
+/// `BURST_CLOSES` came, ns.
+#[derive(Clone, Copy, Debug, Default)]
+struct Closes {
+    first: u64,
+    last: u64,
+    n: u32,
+    spread: u64,
+}
+
+/// The VM's clock as a probe read it (`clock_probe`, `CLOCK_PROBE`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Probe {
+    /// The VM's clock less this host's wall clock, ms, from the middle of
+    /// the request: the minute's `clock_off_ms`, and what a step is told
+    /// by (`clock_stepped`).
+    off_ms: f64,
+    /// The request's round trip, ms and ns: what bounds the offsets' error.
+    rtt_ms: f64,
+    rtt_ns: u64,
+    /// The VM's clock, unix ns, less this process's (`Shared::ns`) at the
+    /// middle of the request, and that middle: what Docker's times are
+    /// read on this process's clock by (`Shared::vm_ns`).
+    vm_less_ns: i64,
+    at: u64,
+}
+
+impl Probe {
+    /// The VM's `now()`, `t_ms`, read between `wall` (ms, this host's wall
+    /// clock) and `ns` (this process's clock) before and after.
+    fn read(t_ms: i64, wall: (f64, f64), ns: (u64, u64)) -> Probe {
+        let mid = ns.0 + (ns.1 - ns.0) / 2;
+        Probe {
+            off_ms: t_ms as f64 - (wall.0 + wall.1) / 2.0,
+            rtt_ms: wall.1 - wall.0,
+            rtt_ns: ns.1 - ns.0,
+            vm_less_ns: (t_ms as i128 * 1_000_000 - mid as i128) as i64,
+            at: mid,
+        }
+    }
+}
+
 /// What the workers, the subscribers and the minute's look share.
 struct Shared {
     t0: Instant,
@@ -3260,18 +3336,25 @@ struct Shared {
     /// behind, the reads it skips never sent (`work`).
     lane_ops: AtomicU64,
     lane_dropped_milli: AtomicU64,
-    /// `t0` on the wall clock, unix ns, and the VM's clock less this host's
-    /// at the latest probe (`clock_probe`), ns: what Docker's times, the
-    /// VM's, are read on this process's clock by (`vm_ns`).
+    /// `t0` on the wall clock, unix ns: what a time of the run's is named
+    /// by on a line (`utc`), never what Docker's are read by -- the wall
+    /// clock is slewed, `t0`'s `Instant` is not.
     t0_wall: u64,
-    clock_off: std::sync::atomic::AtomicI64,
-    /// That probe's round trip, ns: what bounds the offset's error.
+    /// The VM's clock less this process's (`ns`) at the latest probe
+    /// (`Probe`), ns, that probe's round trip and when it was taken: what
+    /// Docker's times, the VM's, are read on this process's clock by
+    /// (`vm_ns`), and the error that reading carries (`clock_err`).
+    clock_vm: std::sync::atomic::AtomicI64,
     clock_rtt: AtomicU64,
+    clock_at: AtomicU64,
     /// The latest a primary's connection was read answering -- a worker's
-    /// answer, a stream's event -- and the first close of one since
-    /// (`u64::MAX` while none): a death's time (`death_time`).
+    /// answer, a stream's event -- and the first close of the burst of
+    /// closes since (`u64::MAX` while none): a death's time (`death_time`).
+    /// The closes as they come, under way to a burst or not
+    /// (`Shared::closed`).
     answered: AtomicU64,
     closed: AtomicU64,
+    closes: Mutex<Closes>,
     /// When each connection that failed outside a restart's window failed
     /// since the minute's line took the errors: those from a death on are
     /// its, `down` and not errors, once it is found (`death_errors`).
@@ -3287,10 +3370,13 @@ struct Shared {
     /// finds it; and a death in the moment before the send, which Docker's
     /// inspect showed running, is found only after Docker's wait
     /// (`gone_before`): until the kill sent at `kill_sent` is judged
-    /// (`kill_judged`, its time once it was the kill's), a job it cut
-    /// waits to say whose (`cut_by`).
+    /// (`kill_judged`, its time once judged either way; `kill_death`, its
+    /// time once judged a death's, stored first), a job it cut waits to
+    /// say whose (`cut_by`) -- a death's timed before the job was asked
+    /// among them, which the deaths found cannot name.
     kill_sent: AtomicU64,
     kill_judged: AtomicU64,
+    kill_death: AtomicU64,
     /// Each server's cgroup a second (`watch_memory`): the primary's, then
     /// the replica's.
     mem: [Mutex<Mem>; 2],
@@ -3397,13 +3483,18 @@ impl Shared {
             lane_ops: AtomicU64::new(0),
             lane_dropped_milli: AtomicU64::new(0),
             t0_wall,
-            clock_off: std::sync::atomic::AtomicI64::new(0),
+            // Until the first probe, the wall clock at `t0`: off by the
+            // drift since, which `clock_err` counts.
+            clock_vm: std::sync::atomic::AtomicI64::new(t0_wall as i64),
             clock_rtt: AtomicU64::new(0),
+            clock_at: AtomicU64::new(0),
             answered: AtomicU64::new(0),
             closed: AtomicU64::new(u64::MAX),
+            closes: Mutex::new(Closes::default()),
             cut_errors: Mutex::new(Vec::new()),
             kill_sent: AtomicU64::new(0),
             kill_judged: AtomicU64::new(0),
+            kill_death: AtomicU64::new(0),
             deaths: Mutex::new(Vec::new()),
             mem: [Mutex::new(Mem::default()), Mutex::new(Mem::default())],
             behind: Mutex::new(Behind::default()),
@@ -3424,24 +3515,101 @@ impl Shared {
     }
 
     /// A primary's connection found closed -- cut, refused, a stream ended
-    /// -- at `t`: the first since the server was last read answering is
-    /// kept (`death_time`), and one the server was read answering past by
-    /// more than `CLOSE_SLOP` is let go for this one -- it was no death's.
+    /// -- at `t`. A death is told from a close that was no death's by how
+    /// many close together: `BURST_CLOSES` within `BURST_SPAN` of the
+    /// first of them are its exit's, and that first close is kept
+    /// (`closed`, `death_time`) while the server is not read answering
+    /// past it by more than `CLOSE_SLOP`; a close alone, or closes spread
+    /// wider, are each one connection's, and time nothing. A burst, or a
+    /// run of closes toward one, the server was read answering past by
+    /// more than the slop is let go -- it was no death's -- and the closes
+    /// from this one counted afresh.
     fn closed(&self, t: u64) {
         let a = self.answered.load(Ordering::SeqCst);
-        let _ = self
-            .closed
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
-                (c == u64::MAX || a > c.saturating_add(CLOSE_SLOP)).then_some(t)
-            });
+        let mut run = self.closes.lock().unwrap();
+        let burst = self.closed.load(Ordering::SeqCst);
+        if burst != u64::MAX {
+            if a <= burst.saturating_add(CLOSE_SLOP) {
+                return;
+            }
+            self.closed.store(u64::MAX, Ordering::SeqCst);
+        }
+        // Each close's time is taken before this lock, on its own thread:
+        // the run's first is the earliest, whichever came in first.
+        let joins = run.n > 0
+            && t.abs_diff(run.first) <= BURST_SPAN
+            && a <= run.first.saturating_add(CLOSE_SLOP);
+        match joins {
+            true => {
+                run.n += 1;
+                run.first = run.first.min(t);
+                run.last = run.last.max(t);
+            }
+            false => {
+                *run = Closes {
+                    first: t,
+                    last: t,
+                    n: 1,
+                    spread: 0,
+                }
+            }
+        }
+        if run.n >= BURST_CLOSES {
+            run.spread = run.last - run.first;
+            self.closed.store(run.first, Ordering::SeqCst);
+        }
+    }
+
+    /// The death's burst of closes (`closed`) -- `u64::MAX` where none
+    /// was read, or the server was read answering past it by more than
+    /// `CLOSE_SLOP` -- and how far apart its `BURST_CLOSES` came, ns.
+    fn burst(&self) -> (u64, u64) {
+        let run = self.closes.lock().unwrap();
+        let c = self.closed.load(Ordering::SeqCst);
+        let a = self.answered.load(Ordering::SeqCst);
+        match c != u64::MAX && a <= c.saturating_add(CLOSE_SLOP) {
+            true => (c, run.spread),
+            false => (u64::MAX, 0),
+        }
+    }
+
+    /// The server answering again at `t` after a restart: its life's
+    /// answers and closes counted from here. Without it a life that died
+    /// before a worker answered was timed by the last death's burst, or by
+    /// the refused connects of its restart's, and every failure since
+    /// moved to `down`; and its kill judged by the last life's last answer.
+    fn back(&self, t: u64) {
+        let mut run = self.closes.lock().unwrap();
+        *run = Closes::default();
+        self.closed.store(u64::MAX, Ordering::SeqCst);
+        self.answered.store(t, Ordering::SeqCst);
+    }
+
+    /// The VM's clock read by a probe: from here Docker's times are read
+    /// on this process's clock by it (`vm_ns`).
+    fn clock(&self, p: &Probe) {
+        self.clock_vm.store(p.vm_less_ns, Ordering::SeqCst);
+        self.clock_rtt.store(p.rtt_ns, Ordering::SeqCst);
+        self.clock_at.store(p.at, Ordering::SeqCst);
     }
 
     /// A time Docker gives, unix ns on the VM's clock, in ns from `t0` on
-    /// this process's, by the latest probe's offset; `None` before `t0`.
+    /// this process's, by the latest probe's offset against this process's
+    /// clock itself (`ns`) -- never through the wall clock at `t0`, which
+    /// parts from it by tens of ms an hour; `None` before `t0`.
     fn vm_ns(&self, vm: u64) -> Option<u64> {
-        let off = self.clock_off.load(Ordering::Relaxed);
-        let host = vm as i128 - off as i128;
-        u64::try_from(host - self.t0_wall as i128).ok()
+        let off = self.clock_vm.load(Ordering::SeqCst);
+        u64::try_from(vm as i128 - off as i128).ok()
+    }
+
+    /// How far a time read through `vm_ns` at `t` may be off: the latest
+    /// probe's round trip, the ms `now()` is read to, and the drift the
+    /// two clocks may have taken since (`CLOCK_DRIFT_PPM`).
+    fn clock_err(&self, t: u64) -> u64 {
+        let since = t.saturating_sub(self.clock_at.load(Ordering::SeqCst));
+        self.clock_rtt.load(Ordering::SeqCst)
+            + 1_000_000
+            + (since as u128 * CLOCK_DRIFT_PPM as u128 / 1_000_000) as u64
     }
 
     /// The failures counted as errors from `at` on -- a death's, cut by it
@@ -4863,10 +5031,12 @@ const KILL_JUDGE_WAIT: Duration = Duration::from_secs(200);
 /// What cut a side job of `[s, ...]` that failed, `close` where its
 /// connection went rather than a wait running out: a death found since
 /// `s` (`Shared::deaths`); the run's kill, sent since, once the kill's
-/// path judged it its own (`kill_judged`) -- a death in the moment before
-/// the send is found only after Docker's wait (`gone_before`), and the
-/// job, cut by it, saw its connection close after `kill_sent` was stored
-/// all the same; with no kill sent since, a closed connection and the
+/// path judged it (`judge_kill`): its own, or a death's (`kill_death`) --
+/// a death in the moment before the send is found only after Docker's
+/// wait (`gone_before`), and the job, cut by it, saw its connection close
+/// after `kill_sent` was stored all the same, the death timed before `s`
+/// where the server was gone before the job was asked; with no kill sent
+/// since, a closed connection and the
 /// server not running with no restart's window open (`stopped`: Docker's
 /// word), looked for `death_wait` at the most, as the job sees its
 /// connection close before the run finds the death; and in a restart's
@@ -4889,7 +5059,13 @@ fn cut_by(
         }
         let sent = sh.kill_sent.load(Ordering::SeqCst);
         if sent >= s {
-            if sh.kill_judged.load(Ordering::SeqCst) >= sent || t.elapsed() >= kill_wait {
+            if sh.kill_judged.load(Ordering::SeqCst) >= sent {
+                return Some(match sh.kill_death.load(Ordering::SeqCst) >= sent {
+                    true => CutBy::Death,
+                    false => CutBy::Kill,
+                });
+            }
+            if t.elapsed() >= kill_wait {
                 return Some(CutBy::Kill);
             }
         } else {
@@ -5505,31 +5681,31 @@ fn read_all(
     Some(digests)
 }
 
-/// The server's clock against this host's, by a write of `now()`
-/// (`CLOCK_PROBE`): the offset in ms from the middle of the request, and
-/// the request's round trip, which bounds the offset's error.
-fn clock_probe(addr: &str) -> Option<(f64, f64)> {
+/// The server's clock against this host's wall clock and this process's
+/// own (`sh.ns`), by a write of `now()` (`CLOCK_PROBE`), each from the
+/// middle of the request (`Probe`).
+fn clock_probe(addr: &str, sh: &Shared) -> Option<Probe> {
     let wall = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64() * 1e3)
     };
     let mut c = http::Http::try_connect(addr, Duration::from_secs(10)).ok()?;
-    let before = wall();
+    let (before, b_ns) = (wall(), sh.ns());
     let (status, body) = c.try_query(CLOCK_PROBE, "").ok()?;
-    let after = wall();
+    let (after, a_ns) = (wall(), sh.ns());
     if status != 200 {
         return None;
     }
-    let t = *http::ints(body, "t").first()? as f64;
-    Some((t - (before + after) / 2.0, after - before))
+    let t = *http::ints(body, "t").first()?;
+    Some(Probe::read(t, (before, after), (b_ns, a_ns)))
 }
 
 /// Whether the clock moved against this host's from one probe to the next
 /// by more than a probe's error can explain: a step the `@ttl` slack must
 /// take (`CLOCK_STEP_MS`).
-fn clock_stepped(prev: (f64, f64), now: (f64, f64)) -> bool {
-    (now.0 - prev.0).abs() - (prev.1 + now.1) / 2.0 > CLOCK_STEP_MS
+fn clock_stepped(prev: Probe, now: Probe) -> bool {
+    (now.off_ms - prev.off_ms).abs() - (prev.rtt_ms + now.rtt_ms) / 2.0 > CLOCK_STEP_MS
 }
 
 /// A secret of the run's: 32 bytes of the system's randomness, as hex --
@@ -6145,10 +6321,15 @@ impl DockerEv {
 
 /// `program` with `args` under a shell that ends it once this process
 /// lets go of the shell's input -- dropped, or this process gone, killed
-/// as it may be: a `docker events` follows forever and writes only on an
-/// event, so with nothing to end it, it outlived a killed `ycsb` until
-/// its next line found no reader. Only the program holds the output: it
-/// ending closes it, the reader sees the end, and the shell is let go.
+/// or interrupted as it may be: a `docker events` follows forever and
+/// writes only on an event, so with nothing to end it, it outlived a
+/// killed `ycsb` until its next line found no reader. Only the program
+/// holds the output: it ending closes it, the reader sees the end, and the
+/// shell is let go. The shell is a process group of its own: Ctrl-C in a
+/// terminal signals the foreground group, which held `ycsb`, the shell
+/// and the program -- the shell died of it before it could `kill $p`, and
+/// the program, an asynchronous list's, ignores SIGINT, so it lived on.
+/// Out of that group, the shell outlives `ycsb` and ends the program.
 fn tied(program: &str, args: &[&str]) -> std::process::Command {
     let mut c = std::process::Command::new("sh");
     c.args([
@@ -6159,6 +6340,8 @@ fn tied(program: &str, args: &[&str]) -> std::process::Command {
     ])
     .args(args)
     .stdin(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c
 }
 
@@ -6279,29 +6462,95 @@ fn send_kill(bench: &Kit, sh: &Shared, m: u64, k: u64) -> (u64, Option<Exit>, bo
 /// -- is still running to them, and `docker kill` then finds it not
 /// running, or kills nothing. So after Docker's wait: the kernel's OOM
 /// kill (`OOMKilled`, which Docker sets from the same event as its `oom`
-/// and clears at a start); `docker kill` finding it not running
-/// (`not_running`); or its end (`FinishedAt`, `finished` on this process's
-/// clock by the latest probe) before the send by more than the probe's
-/// round trip (`err`), which bounds the clock's error -- unless the server
-/// was read answering more than `CLOSE_SLOP` after the send (`answered`),
-/// alive then: a step of the VM's clock since the minute's probe would
-/// otherwise put a kill's end before its send, and the run's own kill
-/// fail it as a death.
+/// and clears at a start), or `docker kill` finding it not running
+/// (`not_running`); else on this process's own clock, the one `k` is
+/// read on, where it read the server: its last answer (`answered`) more
+/// than `CLOSE_SLOP` before the send, and its exit's burst of closes
+/// (`closed`, `u64::MAX` where none was read) after that answer and
+/// before the send. A server read answering within the slop of the send
+/// or after it is the kill's -- a planned kill's last answers come up to
+/// its landing, tens of ms after `k` -- and a burst after the send is the
+/// kill's own, a server that stopped answering before it hung, not dead.
+/// Only where neither an answer within the slop nor a burst was read,
+/// Docker's end (`FinishedAt`, `finished` on this process's clock by the
+/// latest probe's offset against it, `Shared::vm_ns`) before the send by
+/// more than that reading's error (`err`, `Shared::clock_err`). Read
+/// through the wall clock at `t0` instead, a planned kill's end, 20-200
+/// ms after its send, came before it once the two clocks had parted by
+/// more than that -- some 60 ms by the 90th minute on this Mac -- and the
+/// kill was judged a death; a death just before the send, the other way,
+/// the kill.
 fn gone_before(
     exit: &Exit,
     not_running: bool,
+    answered: u64,
+    closed: u64,
     finished: Option<u64>,
     err: u64,
-    answered: u64,
     k: u64,
 ) -> bool {
     if exit.running {
         return false;
     }
-    exit.oom
-        || not_running
-        || (finished.is_some_and(|f| f.saturating_add(err) < k)
-            && answered <= k.saturating_add(CLOSE_SLOP))
+    if exit.oom || not_running {
+        return true;
+    }
+    if answered > 0 && answered.saturating_add(CLOSE_SLOP) >= k {
+        return false;
+    }
+    if closed != u64::MAX {
+        return closed < k;
+    }
+    finished.is_some_and(|f| f.saturating_add(err) < k)
+}
+
+/// The run's kill sent at `k` judged after Docker's wait, from the
+/// server's state then (`exit`) and whether `docker kill` found it not
+/// running: the state where it was a death of the moment before the send
+/// (`gone_before`), read on what the run read of the server
+/// (`Shared::answered`, `Shared::burst`) and Docker's end by the latest
+/// probe. Stored as judged either way (`kill_judged`, a death's in
+/// `kill_death` first), so that a side job the kill's end cut says whose
+/// its cut was at once (`cut_by`): a death's timed before the job was
+/// asked, never among the deaths it looks for, waited out `KILL_JUDGE_WAIT`
+/// and was counted the kill's.
+fn judge_kill(sh: &Shared, exit: Option<Exit>, not_running: bool, k: u64) -> Option<Exit> {
+    let before = exit.filter(|x| {
+        gone_before(
+            x,
+            not_running,
+            sh.answered.load(Ordering::SeqCst),
+            sh.burst().0,
+            x.finished.and_then(|v| sh.vm_ns(v)),
+            sh.clock_err(k),
+            k,
+        )
+    });
+    if before.is_some() {
+        sh.kill_death.store(k.max(1), Ordering::SeqCst);
+    }
+    sh.kill_judged.store(k.max(1), Ordering::SeqCst);
+    before
+}
+
+/// The kill of minute `m`, sent at `k`, judged its own (`judge_kill`), in
+/// words: the server's last answer and its exit's burst of closes read
+/// against the send -- a planned kill's come after it.
+fn kill_said(sh: &Shared, m: u64, k: u64) -> String {
+    let ms = |t: u64| (t as f64 - k as f64) / 1e6;
+    let a = sh.answered.load(Ordering::SeqCst);
+    let burst = match sh.burst() {
+        (u64::MAX, _) => "no burst of closes read".to_string(),
+        (c, spread) => format!(
+            "its burst of closes {:+.0} ms ({BURST_CLOSES} within {:.1} ms)",
+            ms(c),
+            spread as f64 / 1e6
+        ),
+    };
+    format!(
+        "minute {m}: the kill judged the kill's: its server last read answering {:+.0} ms of the send, {burst}",
+        ms(a)
+    )
 }
 
 /// The first minute from `m` on with a kill on the run's schedule: the
@@ -6362,8 +6611,8 @@ fn compact_wait(
 }
 
 /// A death of the primary the run did not cause, found now: its time read
-/// (`death_time`) -- the first connection it closed, else Docker's `die`
-/// (`evs`) or `FinishedAt` by the minute's clock probe, else the minute's
+/// (`death_time`) -- the burst of closes its exit made, else Docker's
+/// `die` (`evs`) or `FinishedAt` by the latest clock probe, else the minute's
 /// look before (`look`) -- and said on a line of its own: how it ended,
 /// its minute, how long before the kill due (`kill_due`, the minute's
 /// where it was found as that kill was to be sent), and its memory at its
@@ -6425,10 +6674,10 @@ fn found_dead(
             .and_then(|v| sh.vm_ns(v))
             .map(|t| (t, Source::Finished)),
     };
-    let closed = sh.closed.load(Ordering::SeqCst);
+    let (closed, spread) = sh.burst();
     let (at, source, answered) =
         death_time(closed, sh.answered.load(Ordering::SeqCst), docker, look);
-    // An answer read after the close it is timed by, within the slop: how
+    // An answer read after the burst it is timed by, within the slop: how
     // late -- what `CLOSE_SLOP` is measured against.
     let late = match (source, answered) {
         (Source::Close, Some(a)) if a > closed => Some(a - closed),
@@ -6473,14 +6722,23 @@ fn found_dead(
     };
     let ms = |a: u64, b: u64| (a as f64 - b as f64) / 1e6;
     say(format!(
-        "the server DIED in minute {m}, at {} ({:.1} s into it): {}; {before}; its time {}{}{}{}{}{}",
+        "the server DIED in minute {m}, at {} ({:.1} s into it): {}; {before}; its time {}{}{}{}{}{}{}",
         utc(sh.t0_wall + at),
         (at % 60_000_000_000) as f64 / 1e9,
         exit.said(&o.memory),
         source.said(),
+        // How close together the burst's closes came: what `BURST_SPAN`
+        // is measured against.
+        match source {
+            Source::Close => format!(
+                " ({BURST_CLOSES} closes within {:.1} ms)",
+                spread as f64 / 1e6
+            ),
+            _ => String::new(),
+        },
         match (answered, late) {
             (Some(_), Some(l)) => format!(
-                ", its last answer read {:.0} ms after the first close",
+                ", its last answer read {:.0} ms after the burst's first close",
                 l as f64 / 1e6
             ),
             (Some(a), None) => format!(", {:.0} ms after its last answer", ms(at, a)),
@@ -7199,9 +7457,8 @@ fn run(o: &Opts) {
     let _ = sh.repl_token.set(bench.token.clone());
     // The VM's clock against this host's before the first death can need
     // it (`vm_ns`).
-    if let Some((off, rtt)) = clock_probe(&addr) {
-        sh.clock_off.store((off * 1e6) as i64, Ordering::Relaxed);
-        sh.clock_rtt.store((rtt * 1e6) as u64, Ordering::Relaxed);
+    if let Some(p) = clock_probe(&addr, &sh) {
+        sh.clock(&p);
     }
     let mut handles = Vec::new();
     for w in 0..o.threads + o.replica_threads {
@@ -7284,7 +7541,7 @@ fn run(o: &Opts) {
     let mut minutes_run = 0;
     let mut restart_ms_max = 0u64;
     let mut backup_id = 0u64;
-    let mut clock_prev: Option<(f64, f64)> = None;
+    let mut clock_prev: Option<Probe> = None;
     // The CPU the two servers' cgroups and the VM's CPUs had used at the
     // last look.
     let mut cpu_prev: Option<(u64, u64, u64)> = None;
@@ -7514,15 +7771,14 @@ fn run(o: &Opts) {
         let write_rate = ops as f64 / secs * 0.5;
         let lag_s = behind.map_or(-1.0, |b| b as f64 / write_rate.max(1.0));
         let (load1, load5) = load_average();
-        let clock = clock_probe(&addr);
+        let clock = clock_probe(&addr, &sh);
         let stepped = match (clock_prev, clock) {
             (Some(a), Some(b)) => clock_stepped(a, b),
             _ => false,
         };
-        if let Some((off, rtt)) = clock {
+        if let Some(p) = clock {
             clock_prev = clock;
-            sh.clock_off.store((off * 1e6) as i64, Ordering::Relaxed);
-            sh.clock_rtt.store((rtt * 1e6) as u64, Ordering::Relaxed);
+            sh.clock(&p);
         }
         // What the VM's CPUs did beside the two servers' cgroups -- the
         // run's own look, verify and backup containers among it -- in
@@ -7731,9 +7987,9 @@ fn run(o: &Opts) {
         if let Some(ms) = checker.lost_ms_max.take() {
             v.push(("lost_ms_max", ms.to_string()));
         }
-        if let Some((off, rtt)) = clock {
-            v.push(("clock_off_ms", format!("{off:.1}")));
-            v.push(("clock_rtt_ms", format!("{rtt:.1}")));
+        if let Some(p) = clock {
+            v.push(("clock_off_ms", format!("{:.1}", p.off_ms)));
+            v.push(("clock_rtt_ms", format!("{:.1}", p.rtt_ms)));
         }
         if let Some(s) = sample {
             v.extend([
@@ -8136,22 +8392,9 @@ fn run(o: &Opts) {
                     // Dead in the moment before the send, which Docker's
                     // state showed running to the look above: told after
                     // Docker's wait (`gone_before`), the death's, timed by
-                    // itself, the kill not counted.
-                    let finished = exit
-                        .as_ref()
-                        .and_then(|x| x.finished)
-                        .and_then(|v| sh.vm_ns(v));
-                    let before = exit.filter(|x| {
-                        gone_before(
-                            x,
-                            not_running,
-                            finished,
-                            sh.clock_rtt.load(Ordering::Relaxed),
-                            sh.answered.load(Ordering::SeqCst),
-                            k,
-                        )
-                    });
-                    if let Some(x) = before {
+                    // itself, the kill not counted -- judged either way
+                    // for the side job it cut (`judge_kill`).
+                    if let Some(x) = judge_kill(&sh, exit, not_running, k) {
                         sh.note(format!(
                             "the kill at minute {m} found its server gone before it was sent: a death"
                         ));
@@ -8178,8 +8421,8 @@ fn run(o: &Opts) {
                         continue;
                     }
                     // The kill's own: a side job it cut is the kill's
-                    // (`cut_by`).
-                    sh.kill_judged.store(k.max(1), Ordering::SeqCst);
+                    // (`cut_by`), stored so by `judge_kill`.
+                    say(kill_said(&sh, m, k));
                     let back = restart(
                         &bench,
                         &sh,
@@ -8551,6 +8794,9 @@ fn restart(
         WAIT_MAX.as_secs()
     );
     let back = sh.ns();
+    // This life's answers and closes from here: the last life's burst and
+    // its restart's refused connects time none of its deaths.
+    sh.back(back);
     sh.restart_to.store(back, Ordering::SeqCst);
     sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
     let ms = (back - k) / 1_000_000;
@@ -8984,7 +9230,9 @@ fn deaths_said(minutes: &[Line]) -> String {
                 (None, None) => String::new(),
             };
             let by = match get(m, "death_source").map(|x| x as u8) {
-                Some(1) => ", timed by the first connection it closed",
+                // A run's own closes: its first, before the bursts were
+                // told, as a line of an older run says.
+                Some(1) => ", timed by the closes its exit made",
                 Some(2) => ", timed by Docker's die event",
                 Some(3) => ", timed by Docker's FinishedAt",
                 Some(_) => ", timed by the minute's look before it",
@@ -13906,10 +14154,17 @@ mod tests {
         }]);
         c.hold(u64::MAX, 0, u64::MAX, &[]);
         assert_eq!(c.mismatches, 1);
-        assert!(!clock_stepped((3.0, 2.0), (3.5, 2.0)));
-        assert!(clock_stepped((3.0, 2.0), (400.0, 2.0)));
+        let p = |off_ms, rtt_ms| Probe {
+            off_ms,
+            rtt_ms,
+            rtt_ns: 0,
+            vm_less_ns: 0,
+            at: 0,
+        };
+        assert!(!clock_stepped(p(3.0, 2.0), p(3.5, 2.0)));
+        assert!(clock_stepped(p(3.0, 2.0), p(400.0, 2.0)));
         // A round trip as long as the move: no step it can tell.
-        assert!(!clock_stepped((3.0, 2.0), (300.0, 400.0)));
+        assert!(!clock_stepped(p(3.0, 2.0), p(300.0, 400.0)));
     }
 
     #[test]
@@ -14676,19 +14931,19 @@ mod tests {
     }
 
     #[test]
-    fn a_death_is_timed_by_the_first_connection_it_closed() {
+    fn a_death_is_timed_by_its_burst_of_closes() {
         let ms = 1_000_000u64;
         let d = 18_012_300 * ms;
         let docker = Some((d + 15 * ms, Source::Event));
-        // The long run's shape: the last answer 3 ms before the first
-        // close, nothing answered after it: the close, Docker's die a
-        // reap later beside it.
+        // The long run's shape: the last answer 3 ms before its burst's
+        // first close, nothing answered after it: the burst, Docker's die
+        // a reap later beside it.
         assert_eq!(
             death_time(d, d - 3 * ms, docker, 0),
             (d, Source::Close, Some(d - 3 * ms))
         );
         // An answer the server wrote before it died, read a few ms after
-        // another connection closed: the death taken at that answer,
+        // the burst began: the death taken at that answer,
         // never before it -- a time before the last answer would excuse
         // writes the server held longer than `--loss-ms`.
         assert_eq!(
@@ -14736,40 +14991,121 @@ mod tests {
     }
 
     #[test]
-    fn a_close_the_server_answered_past_is_let_go_for_the_next() {
+    fn a_death_is_its_burst_of_closes_and_one_close_is_none() {
         let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
         let ms = 1_000_000u64;
         let c = 60_000 * ms;
-        let closed = || sh.closed.load(Ordering::SeqCst);
-        assert_eq!(closed(), u64::MAX);
+        let burst = || sh.burst().0;
+        assert_eq!(burst(), u64::MAX);
+        // One close is no death's, nor two.
         sh.answered(c - 5 * ms);
         sh.closed(c);
-        assert_eq!(closed(), c);
+        assert_eq!(burst(), u64::MAX);
+        sh.closed(c + 2 * ms);
+        assert_eq!(burst(), u64::MAX);
+        // The third within the span: a burst, timed by its first, read
+        // in any order its threads took the lock in.
+        sh.closed(c + ms);
+        assert_eq!(sh.burst(), (c, 2 * ms));
         // An answer written before the death, read within the slop, and
         // the death's other closes: the first kept.
         sh.answered(c + 10 * ms);
         sh.closed(c + 12 * ms);
         sh.closed(c + 40 * ms);
-        assert_eq!(closed(), c);
-        // The review's case: a close that was no death's -- a refused
-        // connect, a connection thread's panic -- the server answering
-        // 0.9 s past it, then hung and OOM-killed 30 s after it: let go
-        // for the death's own close, the death timed by that.
+        assert_eq!(burst(), c);
+        // Read answering past the slop: alive then, the burst no death's,
+        // and none read -- let go at the next close.
         sh.answered(c + 900 * ms);
-        assert_eq!(closed(), c, "let go at the next close, not at an answer");
-        let death = c + 30_000 * ms;
-        sh.closed(death);
-        sh.closed(death + 3 * ms);
-        assert_eq!(closed(), death);
+        assert_eq!(burst(), u64::MAX);
+        assert_eq!(sh.closed.load(Ordering::SeqCst), c);
+
+        // The review's case: the server's last answer, a stream the
+        // server ended 100 ms after it, then a hang of 30 s and an OOM
+        // kill. The stream's close alone timed the death, and excused
+        // the writes answered 30 s before it went.
+        let last = c + 2_000 * ms;
+        sh.answered(last);
+        sh.closed(last + 100 * ms);
+        assert_eq!(burst(), u64::MAX);
+        let death = last + 30_000 * ms;
+        for t in [death, death + 3 * ms, death + 4 * ms] {
+            sh.closed(t);
+        }
+        assert_eq!(burst(), death);
         assert_eq!(
-            death_time(closed(), sh.answered.load(Ordering::SeqCst), None, 0),
-            (death, Source::Close, Some(c + 900 * ms))
+            death_time(burst(), sh.answered.load(Ordering::SeqCst), None, 0),
+            (death, Source::Close, Some(last))
         );
-        // Answered again past it after the restart: the next close the
-        // next death's.
+        // Closes spread wider than the span -- a reconnect's refusals, a
+        // stream ending now and then -- are each one connection's.
         sh.answered(death + 9_000 * ms);
-        sh.closed(death + 20_000 * ms);
-        assert_eq!(closed(), death + 20_000 * ms);
+        let mut t = death + 10_000 * ms;
+        for _ in 0..10 {
+            sh.closed(t);
+            t += BURST_SPAN + ms;
+        }
+        assert_eq!(burst(), u64::MAX);
+        // A close of the living server's just before a hang, within the
+        // span of the death's burst: the burst timed by it, but never
+        // before the last answer.
+        let a = t + 60_000 * ms;
+        sh.answered(a);
+        for t in [a + 10 * ms, a + 25 * ms, a + 26 * ms] {
+            sh.closed(t);
+        }
+        assert_eq!(burst(), a + 10 * ms);
+        assert!(death_time(burst(), a, None, 0).0 >= a);
+    }
+
+    #[test]
+    fn a_life_s_answers_and_closes_count_from_its_restart() {
+        // A death, its burst read, the restart's refused connects as it
+        // was down, the server back at `back`; then dead again 8 s after,
+        // before any worker answered, a failure past the restart's grace
+        // counted between.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let ms = 1_000_000u64;
+        let gone = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: None,
+        };
+        let death = 600_000 * ms;
+        sh.answered(death - 3 * ms);
+        for t in [death, death + ms, death + 2 * ms] {
+            sh.closed(t);
+        }
+        let (_, at, _) = found_dead(&sh, &doings, &o, gone, &mut Vec::new(), 0, None, None);
+        assert_eq!(at, death);
+        for t in [death + 1_000 * ms, death + 1_001 * ms, death + 1_002 * ms] {
+            sh.closed(t);
+        }
+        let back = death + 4_000 * ms;
+        sh.back(back);
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
+        assert_eq!(sh.burst().0, u64::MAX);
+        assert_eq!(sh.answered.load(Ordering::SeqCst), back);
+        sh.failed(back + GRACE + 1_000 * ms, true, || {
+            "a stream refused".into()
+        });
+        assert_eq!(sh.errors.load(Ordering::SeqCst), 1);
+        let again = back + GRACE + 3_000 * ms;
+        for t in [again, again + ms, again + 2 * ms] {
+            sh.closed(t);
+        }
+        // Timed by its own burst, its answer the restart's; the failure
+        // before it its own, still an error. Timed by the last death's
+        // burst it moved every failure since that death to `down`.
+        let (_, at, _) = found_dead(&sh, &doings, &o, gone, &mut Vec::new(), back, None, None);
+        assert_eq!(at, again);
+        assert_eq!(sh.errors.load(Ordering::SeqCst), 1);
+        assert_eq!(sh.down.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_close_is_a_connection_gone_not_a_wait_run_out() {
         // A connect that timed out is no close; one refused, or a
         // connection cut, is.
         use std::io::{Error, ErrorKind};
@@ -14819,8 +15155,9 @@ mod tests {
         let (look, k) = (death - 50_000 * ms, death + 1_100 * ms);
         let back = k + 4_000 * ms;
         sh.answered(death - 3 * ms);
-        sh.closed(death);
-        sh.closed(death + 2 * ms);
+        for t in [death, death + 2 * ms, death + 5 * ms] {
+            sh.closed(t);
+        }
         let exit = Exit {
             running: false,
             oom: true,
@@ -14867,7 +15204,8 @@ mod tests {
     fn a_kill_that_finds_its_server_gone_before_its_send_is_a_death() {
         let ms = 1_000_000u64;
         let k = 600_000 * ms;
-        let rtt = 3 * ms;
+        let err = 5 * ms;
+        let none = u64::MAX;
         let gone = |oom| Exit {
             running: false,
             oom,
@@ -14875,83 +15213,133 @@ mod tests {
             finished: None,
         };
         // OOM-killed in the moment before the send, Docker's state still
-        // running to the look before it: after the wait, `OOMKilled`.
+        // running to the look before it: after the wait, `OOMKilled`,
+        // whatever was read.
         assert!(gone_before(
             &gone(true),
             false,
+            k + 30 * ms,
+            k + 40 * ms,
             Some(k + 200 * ms),
-            rtt,
-            k + 100 * ms,
+            err,
             k
         ));
         // `docker kill` found it not running.
-        assert!(gone_before(&gone(false), true, None, rtt, k, k));
-        // Its end before the send by more than the probe's error, nothing
-        // answered after it.
+        assert!(gone_before(&gone(false), true, k, none, None, err, k));
+        // On this process's clock: its last answer more than the slop
+        // before the send and its exit's burst after that and before the
+        // send -- whatever Docker's end says, a step of the VM's clock
+        // putting it after the send.
         assert!(gone_before(
             &gone(false),
             false,
-            Some(k - 20 * ms),
-            rtt,
-            k - 30 * ms,
+            k - 125 * ms,
+            k - 120 * ms,
+            Some(k + 50 * ms),
+            err,
             k
         ));
-        // Within the probe's error, or after the send: the kill's.
+        // A planned kill: read answering up to its landing, after the
+        // send, its burst after -- the kill's, Docker's end before the
+        // send by a clock's step or not.
+        for finished in [Some(k + 180 * ms), Some(k - 500 * ms), None] {
+            assert!(!gone_before(
+                &gone(false),
+                false,
+                k + 20 * ms,
+                k + 40 * ms,
+                finished,
+                err,
+                k
+            ));
+        }
+        // Read answering within the slop before the send: the kill's --
+        // what the harness cannot tell from it.
         assert!(!gone_before(
             &gone(false),
             false,
-            Some(k - 2 * ms),
-            rtt,
-            k - 30 * ms,
+            k - CLOSE_SLOP,
+            k - 20 * ms,
+            Some(k - 40 * ms),
+            err,
+            k
+        ));
+        // Silent more than the slop before the send, its burst the kill's
+        // own after it: a server the kill found hung, not dead.
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            k - 300 * ms,
+            k + 40 * ms,
+            Some(k - 100 * ms),
+            err,
+            k
+        ));
+        // Silent, and no burst read: Docker's end, held to its reading's
+        // error.
+        let quiet = k - 300 * ms;
+        assert!(gone_before(
+            &gone(false),
+            false,
+            quiet,
+            none,
+            Some(k - 100 * ms),
+            err,
             k
         ));
         assert!(!gone_before(
             &gone(false),
             false,
-            Some(k + 180 * ms),
-            rtt,
-            k + 120 * ms,
+            quiet,
+            none,
+            Some(k - 4 * ms),
+            err,
             k
         ));
-        // Before the send by Docker's clock but read answering past the
-        // slop after it: alive then, the VM's clock stepped -- the kill's.
-        assert!(!gone_before(
+        assert!(!gone_before(&gone(false), false, quiet, none, None, err, k));
+        // Nothing read at all: likewise.
+        assert!(gone_before(
             &gone(false),
             false,
-            Some(k - 500 * ms),
-            rtt,
-            k + 120 * ms,
+            0,
+            none,
+            Some(k - 100 * ms),
+            err,
             k
         ));
-        // Nothing read: the kill's. Running still: no end at all.
-        assert!(!gone_before(&gone(false), false, None, rtt, 0, k));
+        assert!(!gone_before(&gone(false), false, 0, none, None, err, k));
+        // Running still: no end at all.
         let up = Exit {
             running: true,
             ..gone(true)
         };
-        assert!(!gone_before(&up, true, Some(k - 500 * ms), rtt, 0, k));
+        assert!(!gone_before(
+            &up,
+            true,
+            0,
+            k - 120 * ms,
+            Some(k - 500 * ms),
+            err,
+            k
+        ));
 
-        // The review's case through the kill's path: announced at `from`,
-        // the kill's compact asked 10 ms later, the server OOM-killed in
-        // it 950 ms in, the kill sent 50 ms after that: a death, timed by
-        // its first close, its window the announcement's.
+        // The review's case through the kill's path (`judge_kill`):
+        // announced at `from`, the kill's compact asked 10 ms later, the
+        // server OOM-killed in it 950 ms in, the kill sent 50 ms after
+        // that: a death, timed by its burst, its window the
+        // announcement's.
         let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
         let (doings, o) = (Doings::default(), opts());
         let from = k - 1_000 * ms;
         sh.windows.lock().unwrap().push((from, u64::MAX, u64::MAX));
         let death = from + 950 * ms;
         sh.answered(death - 4 * ms);
-        sh.closed(death);
+        for c in [death, death + ms, death + 2 * ms] {
+            sh.closed(c);
+        }
         sh.kill_sent.store(k, Ordering::SeqCst);
         let x = gone(true);
-        assert!(gone_before(
-            &x,
-            false,
-            None,
-            rtt,
-            sh.answered.load(Ordering::SeqCst),
-            k
-        ));
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
         let (_, at, _) = found_dead(
             &sh,
             &doings,
@@ -14970,8 +15358,119 @@ mod tests {
         // seen to close after `kill_sent` was stored: the death's, the
         // kill never judged its own.
         let quick = Duration::from_millis(20);
+        let long = Duration::from_secs(2);
         assert_eq!(
-            cut_by(&sh, from + 10 * ms, true, &|| false, quick, quick),
+            cut_by(&sh, from + 10 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+        // One asked after the death -- its connect refused -- and before
+        // the send: the death's at once, though no death found is since
+        // its ask -- the kill judged a death's (`kill_death`). Unjudged,
+        // it waited out the kill's bound and was counted the kill's.
+        assert_eq!(
+            cut_by(&sh, death + 30 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+    }
+
+    #[test]
+    fn a_kill_is_judged_on_this_process_s_clock_and_docker_s_end_through_a_probe_of_it() {
+        let ms = 1_000_000u64;
+        let min = 60_000 * ms;
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        // The review's run: this host's wall clock, which Docker's VM
+        // follows, 60 ms behind this process's by minute 90 -- some -11
+        // ppm; this Mac measured -43 over three minutes -- the minute's
+        // probe 3 s before each kill is sent, its round trip 4 ms; the
+        // planned kill sent at minute 90 and its end, Docker's FinishedAt,
+        // 30 ms after.
+        let vm = |t: u64| sh.t0_wall + t - t / 90_000;
+        let ms_of = |ns: u64| ns as f64 / 1e6;
+        let probe = |k: u64| {
+            let p = k - 3_000 * ms;
+            sh.clock(&Probe::read(
+                (vm(p) / ms) as i64,
+                (ms_of(vm(p) - 2 * ms), ms_of(vm(p) + 2 * ms)),
+                (p - 2 * ms, p + 2 * ms),
+            ));
+        };
+        let k = 90 * min;
+        probe(k);
+        let ended = |t: u64| Exit {
+            running: false,
+            oom: false,
+            code: Some(137),
+            finished: Some(vm(t)),
+        };
+        // Its end read through the probe, on this process's clock: after
+        // the send, within the reading's error -- the round trip, `now()`'s
+        // ms, 3 s of drift at 500 ppm.
+        let end = sh.vm_ns(vm(k + 30 * ms)).unwrap();
+        assert!(
+            end > k && end.abs_diff(k + 30 * ms) <= sh.clock_err(k),
+            "{end}"
+        );
+        assert!(sh.clock_err(k) <= 10 * ms);
+        // Nothing read of the server -- Docker's end is all there is --
+        // and the kill's: read through the wall clock at `t0` it was 30 ms
+        // before the send, and a death.
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        assert_eq!(judge_kill(&sh, Some(ended(k + 30 * ms)), false, k), None);
+        assert_eq!(sh.kill_judged.load(Ordering::SeqCst), k);
+        assert_eq!(sh.kill_death.load(Ordering::SeqCst), 0);
+        let quick = Duration::from_millis(20);
+        let long = Duration::from_secs(2);
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Kill)
+        );
+        // A death 200 ms before the next kill, at minute 120, nothing read
+        // either: Docker's end before the send past the error, a death's.
+        let k = 120 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        let x = ended(k - 200 * ms);
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
+        assert_eq!(sh.kill_death.load(Ordering::SeqCst), k);
+        assert_eq!(sh.kill_judged.load(Ordering::SeqCst), k);
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+        // Read of the server, its clock decides, Docker's not asked: a
+        // planned kill read answering to 20 ms after the send, its burst
+        // after -- a step of the VM's clock putting its end half a second
+        // before the send -- the kill's.
+        let k = 150 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        sh.answered(k + 20 * ms);
+        for c in [k + 40 * ms, k + 41 * ms, k + 43 * ms] {
+            sh.closed(c);
+        }
+        assert_eq!(judge_kill(&sh, Some(ended(k - 500 * ms)), false, k), None);
+        assert!(kill_said(&sh, 5, k).ends_with(
+            "its server last read answering +20 ms of the send, its burst of closes +40 ms (3 within 3.0 ms)"
+        ));
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Kill)
+        );
+        // Back, then dead 120 ms before the next send, its last answer 5
+        // ms before its burst -- Docker's end, by a step the other way,
+        // after the send: the death's.
+        sh.back(k + 4_000 * ms);
+        let k = 180 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        sh.answered(k - 125 * ms);
+        for c in [k - 120 * ms, k - 119 * ms, k - 118 * ms] {
+            sh.closed(c);
+        }
+        let x = ended(k + 50 * ms);
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
             Some(CutBy::Death)
         );
     }
@@ -15172,6 +15671,88 @@ mod tests {
         assert!(!alive(&pid), "the tied child {pid} outlived its shell");
     }
 
+    /// `ycsb` in a terminal for `a_tied_child_ends_with_the_run_on_ctrl_c`:
+    /// a tied child standing for `docker events`, its pid printed, then a
+    /// wait for the Ctrl-C. Run alone, nothing.
+    #[test]
+    #[ignore = "run by a_tied_child_ends_with_the_run_on_ctrl_c"]
+    fn tied_under_a_terminal() {
+        use std::process::Stdio;
+        if std::env::var_os("SOAK_TIED_UNDER_A_TERMINAL").is_none() {
+            return;
+        }
+        let mut c = tied("sh", &["-c", "echo $$; exec sleep 60"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(c.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        println!("tied {}", line.trim());
+        std::io::stdout().flush().unwrap();
+        // Its input held, as `ycsb` holds it the run long -- a wait lets
+        // go of it first -- until the Ctrl-C.
+        let _input = c.stdin.take();
+        let _ = c.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tied_child_ends_with_the_run_on_ctrl_c() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        // This test's binary again for `ycsb`, the foreground process
+        // group a terminal's Ctrl-C signals: a group of its own here.
+        let mut run = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "soak::tests::tied_under_a_terminal",
+                "--nocapture",
+            ])
+            .env("SOAK_TIED_UNDER_A_TERMINAL", "1")
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(run.stdout.take().unwrap());
+        let pid = out
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|l| l.strip_prefix("tied ").map(str::to_string))
+            .expect("the run's tied child");
+        let alive = |pid: &str| {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(alive(&pid));
+        // Ctrl-C: SIGINT to the run's group.
+        let group = format!("-{}", run.id());
+        assert!(Command::new("kill")
+            .args(["-INT", "--", &group])
+            .status()
+            .unwrap()
+            .success());
+        run.wait().unwrap();
+        // The child ignores SIGINT, as an asynchronous list's does: what
+        // ends it is the tied shell, which outlived the run. Waited for,
+        // bounded; let go of whatever the verdict.
+        let t = Instant::now();
+        while alive(&pid) && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outlived = alive(&pid);
+        if outlived {
+            let _ = Command::new("kill").args(["-9", &pid]).status();
+        }
+        assert!(!outlived, "the tied child {pid} outlived the run's Ctrl-C");
+    }
+
     #[test]
     fn the_run_s_open_files_are_counted_from_its_connections() {
         let with = |r: &str| {
@@ -15304,7 +15885,7 @@ mod tests {
     fn a_death_fails_its_own_criterion_and_names_what_followed_it() {
         // The long run's death, judged by the new lines: found as the kill
         // due at minute 300 was to be sent, OOM-killed 12.3 s after that
-        // kill was due, timed by the first connection it closed; the kill
+        // kill was due, timed by the closes its exit made; the kill
         // not sent, the death standing for it; the 96 connections it cut
         // counted with it; one write gone, answered 150 ms before it.
         let run = synthetic(480, &|m, x| {
@@ -15355,7 +15936,7 @@ mod tests {
         };
         assert_eq!(
             said(CRITERIA[18]),
-            "1 deaths, 1 OOM kills, the replica stopped 0 times; minutes 301; the primary's deaths, each a failure of its own: minute 301: OOM-killed, 12 s after the kill due, in the side jobs it waited for, timed by the first connection it closed; 0 mismatches and 1 writes gone with it in the 30 minutes from its line, the earliest answered 150 ms before it"
+            "1 deaths, 1 OOM kills, the replica stopped 0 times; minutes 301; the primary's deaths, each a failure of its own: minute 301: OOM-killed, 12 s after the kill due, in the side jobs it waited for, timed by the closes its exit made; 0 mismatches and 1 writes gone with it in the 30 minutes from its line, the earliest answered 150 ms before it"
         );
         assert!(
             said(CRITERIA[14]).ends_with(
@@ -15408,7 +15989,7 @@ mod tests {
             .2;
         assert!(
             v.contains(
-                "minute 301: exit 137, 0.8 s after the kill due was announced, before it was sent, timed by the first connection it closed"
+                "minute 301: exit 137, 0.8 s after the kill due was announced, before it was sent, timed by the closes its exit made"
             ),
             "{v}"
         );

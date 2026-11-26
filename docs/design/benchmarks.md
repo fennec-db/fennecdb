@@ -770,8 +770,8 @@ one never answered -- until a kill, which may take back what the first saw.
 A kill is between two reads where the server may have died after the
 first began and before the second ended: it dies somewhere in the kill's
 window, from when `docker kill` was sent (it lands a moment later; a death
-is held as a kill from its own time, the first connection it closed --
-below) to when the server answered again. So a kill sent by the second read's end lets go of
+is held as a kill from its own time, the burst of closes its exit made
+-- below) to when the server answered again. So a kill sent by the second read's end lets go of
 a first read begun before the server was back -- one begun after the kill
 was sent saw the process the kill then took, and with it a write the kill
 may take; holding it to the kill's send alone failed a right server
@@ -851,7 +851,11 @@ container -- one `docker events` process the run long, its `die` and
 `oom` (`follow_events`), on which the minute's wait wakes, under a shell
 that ends it once `ycsb` lets go of its input, a killed `ycsb` too
 (`tied`): it writes only on an event, and outlived a killed run until
-its next line found no reader -- and by the
+its next line found no reader. The shell is a process group of its own:
+a Ctrl-C in a terminal signals the foreground group, which held `ycsb`,
+the shell and `docker events` -- the shell died of it before it could
+end the events, which, an asynchronous list's, ignore SIGINT and lived
+on; out of the group the shell outlives `ycsb` and ends them -- and by the
 container's state at each minute's end and at each kill, before its
 announcement and again before `docker kill` is sent (`dead`): a kill
 that finds its server dead is not sent, the death stands for it
@@ -862,18 +866,34 @@ code, from `docker inspect`'s `OOMKilled` and `ExitCode`), its minute and
 its time of day, how long before the kill due -- or after it, in the side
 jobs that kill waited for -- what timed it, and its last look a second
 (below): anonymous memory and dirty pages, and the life's most. Its time
-is the first connection it closed after its last answer (`death_time`):
-the process's sockets close in its exit, before Docker reaps it; the soak
-holds 64 streams and its workers' connections open, so a death closes
-something within milliseconds, read on the clock every write's answer is
-timed on, the last answer before it bounding it from below
-(`death_answer_ms`). Docker's own times -- the `die` event, `FinishedAt`
--- are the reap, after the process's teardown, its sockets' close among
-it, and on the VM's clock, which the harness knows only by the minute's
-probe (`clock_off_ms`, to its round trip, between steps): they stand in
-where nothing closed and are said beside the close otherwise
-(`death_docker_ms`), and with neither the minute's look before it is
-taken, as before. On the harness's dry run of 2026-11-26 three deaths
+is the burst of closes its exit made after its last answer
+(`death_time`): the process's sockets close in its exit, before Docker
+reaps it, and the soak holds 64 streams and its workers' connections
+open, so a death closes them all within milliseconds, read on the clock
+every write's answer is timed on, the last answer before it bounding it
+from below (`death_answer_ms`). Three closes within 20 ms are a death's
+(`BURST_CLOSES`, `BURST_SPAN`, ten times the widest spread of the dry
+runs below), timed by the first of them; a close
+alone -- a stream the server ended, a connection thread's panic, a
+refused connect -- is one connection's, the next close of a living
+server coming as another connection happens to end, not within the
+span, and times nothing. One close timed a death before: a stream the
+server ended, then a hang and an OOM kill seconds later, the death timed
+at the stream's end and the writes answered from it excused. A life's
+answers and closes count from its restart's answer (`Shared::back`):
+before, a life that died before a worker answered was timed by the last
+death's burst, and every failure since moved to `down`. Docker's own
+times -- the `die` event, `FinishedAt` -- are the reap, after the
+process's teardown, its sockets' close among it, and on the VM's clock,
+which the harness reads through the latest probe's offset against its
+own clock (`Shared::ns`, macOS's `CLOCK_UPTIME_RAW`, never slewed), held
+to its round trip, `now()`'s millisecond and 500 ppm since
+(`clock_err`, NTP's most) -- never through the wall clock at the run's
+start, as before: this Mac's wall clock parted from the harness's by
+-43 ppm over three minutes and +5.6 over two, some 60 ms by the 90th
+minute of a run, of either sign. They stand in where no burst was read
+and are said beside the burst otherwise (`death_docker_ms`), and with
+neither the minute's look before it is taken, as before. On the harness's dry run of 2026-11-26 three deaths
 sent from outside (`docker kill --signal KILL`, its call's start and end
 taken on this host) -- one between minutes, one in the compact the kill
 of minute 6 waited for, one in the compact the kill of minute 3 was to
@@ -882,16 +902,27 @@ after the last answer before them, and Docker's `die` came 177-185 ms
 after; on the review round's, of the same day (six minutes at 2 000 a
 second, the host's load 15-30), one sent between minutes
 was timed 36 ms into the 0.21 s the call took, 9 ms after the last
-answer and no answer read after its close, Docker's `die` 161 ms after. A server read answering more than 50 ms after a close was alive
-then: that close is no death's, and is let go at the next close
+answer and no answer read after its close, Docker's `die` 161 ms after;
+and on the third round's, through `run-soak.sh` (1 000 000 records,
+`--memory 512m`, a peak of three minutes and six at half of it, 2 415 a
+second), the planned kill of minute 3 was judged the kill's, its server
+last read answering 88 ms after the send and its burst of closes 125 ms
+after it, three within 2.1 ms, and a `docker kill` sent from outside in
+minute 5 -- the call 1.9 s long -- a death timed by its burst 302 ms
+into the call, three within 1.2 ms, 128 ms after its last answer,
+Docker's `die` 1 553 ms after it; an attempt before it under `--memory
+128m`, its primary OOM-killed by the peak's load, had its three within
+0.1 ms, 18 ms after the last answer, Docker's `die` 151 ms after. A
+server read answering more than 50 ms after a burst was
+alive then: that burst is no death's, and is let go at the next close
 (`CLOSE_SLOP`, `Shared::closed`). With the slop at a second, a close
 that was no death's -- a client's refused connect, a subscription's, a
 connection thread's panic -- with answers to 0.9 s after it and the
 server then hung 30 s and OOM-killed, stood for the death, and the
 writes answered 29 s before it were excused; 50 ms is five times the
 gap the dry run measured, and too short a slop only moves the time to
-the next close, later -- stricter by an answer's few ms, never more
-lenient. An answer read after the close within the slop was written
+the next burst, later -- stricter by an answer's few ms, never more
+lenient. An answer read after the burst within the slop was written
 before the death, which is then taken at that answer: never before the
 last answer (`death_late_ms` how late it came). A connect that timed
 out is no close (`a_close`): the server may be alive and slow. The death's
@@ -911,15 +942,30 @@ sockets close, so a death in the moment before the send -- an OOM kill
 in the very compact the kill was to land in -- is still running to the
 looks before it: `docker kill` then finds it not running, or kills
 nothing. After Docker's wait the kill reads the server's end
-(`gone_before`): the kernel's OOM kill (`OOMKilled`, set from the same
-event as Docker's `oom`, and cleared at a start), `docker kill` finding
-it not running, or its `FinishedAt` before the send by more than the
-clock probe's round trip -- unless it was read answering more than the
-slop after the send, alive then, a step of the VM's clock otherwise
-failing the run's own kill as a death -- make it a death, timed by
-itself, the kill not counted (`kill_died`). A side job cut after
-`kill_sent` waits for that verdict (`kill_judged`, `cut_by`, 200 s at
-the most) before it says whose its cut was. The report counts it as a failure of its own,
+(`gone_before`, `judge_kill`): the kernel's OOM kill (`OOMKilled`, set
+from the same event as Docker's `oom`, and cleared at a start), or
+`docker kill` finding it not running, make it a death; else it is
+judged on the harness's own clock, the one the send is timed on: its
+last answer more than the slop before the send and its exit's burst
+after that answer and before the send make it a death, timed by itself,
+the kill not counted (`kill_died`). A server read answering within the
+slop of the send is the kill's -- a planned kill's last answers come up
+to its landing, after the send -- and a burst after the send the kill's
+own, a server that stopped answering before it hung, not dead. Only
+where neither was read is Docker's `FinishedAt` taken, through the
+probe's offset and before the send by more than its error. Read through
+the wall clock at the run's start, as it was, a planned kill's end, 20
+to 200 ms after its send, came before it once the clocks had parted by
+more, and an answer read more than the slop after the send -- which was
+to overrule it -- almost never came, the kill closing the sockets
+within some 40 ms: an 8-hour run whose wall clock was 60 ms behind by
+minute 90 would have failed "no server died" on its own kill, and a
+drift the other way let a death just before the send pass as the kill. A side job
+cut after `kill_sent` waits for that verdict (`kill_judged`, a death's
+in `kill_death` first, `cut_by`, 200 s at the most) before it says whose
+its cut was -- the death's at once, though it was timed before the
+job's ask and is not among the deaths found since, which waited out the
+200 s and counted the cut as the kill's. The report counts it as a failure of its own,
 apart from the planned kills: "no server died, none OOM-killed" names
 each death -- its minute, how it ended, the kill due, what timed it --
 with the mismatches and the writes a read showed gone from its line to
@@ -956,7 +1002,8 @@ offset from this host cancels; a drift or a step of it within the ttl is
 what the second allows for, and each minute a probe (`put clock {id: 1, t:
 now()} returning *`) reads the server's clock against this host's
 (`clock_off_ms`, `clock_rtt_ms`), marking a move past 200 ms more than the
-probes' own round trips (`clock_step`); 2% `match` on a `@text` body, 2%
+probes' own round trips (`clock_step`), and against the harness's own,
+which Docker's times of a death are read on (`Probe`); 2% `match` on a `@text` body, 2%
 `near` on a `vector<16> @hnsw(cosine)` (ten rows), 2% update of a doc. Two
 rows for one id, or a row not asked for, is a mismatch.
 
@@ -1150,10 +1197,10 @@ wait (`kill_ms`), the verify (`verify_ms`) and the server's own part,
 `kill_sync_ms` and `replica_back_ms`; `died`, `oom` and `r_died` (a server
 gone that the run did not kill, the kernel's OOM kills of it), and a
 death's own (`death_oom`, `death_exit`, `death_at_s`, `death_source` --
-1 the first connection it closed, 2 Docker's `die`, 3 its `FinishedAt`, 4
+1 its burst of closes (an older run's first close), 2 Docker's `die`, 3 its `FinishedAt`, 4
 the minute's look -- `death_kill_due_s`, `death_announced_ms` (found in
 the kill's announced second), `death_answer_ms`, `death_late_ms` (an
-answer read after the first close, within `CLOSE_SLOP`), `death_docker_ms`,
+answer read after the burst's first close, within `CLOSE_SLOP`), `death_docker_ms`,
 `death_down`, `death_anon`, `death_dirty`, `death_sync_ms`); the clock's
 `clock_off_ms`, `clock_rtt_ms` and `clock_step`; and what else used the
 machine: `load1`, `load5`, `others_host` (this host's other processes, in
