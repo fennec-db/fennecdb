@@ -1221,9 +1221,9 @@ array never holds more than it did. Further below, the id goes into the
 sparse map, which so holds ids on both sides of the dense range: the
 browser client's optimistic rows sit at 2^52, and an index that started
 there, given id 1, would otherwise ask for 2^52 slots. Every walk lists
-the sparse ids below the range first (`IdIndex::sparse_apart`: `iter`,
-`iter_from`, `relocate`; and the copy in turn's `places`, the one reader
-of the array outside `IdIndex`).
+the sparse ids below the range first (`IdIndex::walk`, whose ids `iter`
+and `iter_from` give, and `relocate`; and the copy in turn's `places`,
+the one reader of the array outside `IdIndex`).
 
 An id below the floor reads as absent: `id.wrapping_sub(floor)` passes
 every slot, as an id past the end does, and the sparse map holds it only
@@ -1255,6 +1255,29 @@ where the array from 1 did nothing. A write keeps both in a comparison or
 two: a new id at the end, the ids' usual climb, in one; a delete of any
 but the first held id in one.
 
+**The walk.** Every walk in id order is one iterator, `store::Walk`,
+which gives each id with its location. Its `next` walks the dense slots
+and nothing else while they last; the sparse ids are given out of line
+(`Apart::next`), those below the floor first while the slots wait, so
+nothing of the sparse part is carried through a caller's loop. The
+store's own walks that read the location -- a compact's `live_len` and
+`write_live`, an image's `image_index`, the copy in turn's `buckets` --
+take it from the walk, where each looked its id up again. The change's
+first form walked a `Chain` of the three parts, each id through two
+`Chain`s, and CI's gate counted `file-compact` 6.46% above main (7 744 106
+to 8 244 336 instructions, x86_64) and `core-lookup` 0.47%: a compact of
+10 000 rows walks them four times with little work an id, some 50
+instructions a row more. Counted as the gate counts, on aarch64 musl in
+Docker, one type asking a register before the slots still left
+`file-compact` 1.02% above main; handing the location out and keeping
+the sparse part apart, it counts 7.40% under main, `core-lookup` 0.21%
+under, and every other workload of the gate's under main or within
+0.05% of it. Two shapes cost more: a
+loop in `next` walking the slots handed over kept the walk's place in
+memory, 5 instructions an id more in a compact's walks, and the sparse
+ids sorted with their locations held a sort of the pairs of their own,
+3.4 KB of the browser module.
+
 **Rejected.**
 
 - *Cutting at a compact and an open alone.* No cost on a write, and no
@@ -1279,12 +1302,18 @@ after an open of one never compacted; here 98 304 at the end and at most
 compacted file (3 000 slots, the rows dense again) and 98 304 after an
 open of one never compacted. A lookup reads the floor beside the array,
 where it subtracted 1; a new id at the end asks one comparison more, a
-delete one, and CI's perf job holds the instructions an op. The browser
-module grew 2 423 bytes raw, 1 232 gzip and 948 brotli (845.7 KB, `make
-size-report BASE=main`), most of them in the rare paths kept apart
-(`insert_apart` and the take-over a lowering asks) and the walks' third
-part; on aarch64 macOS fennec-server's code grew 8 256 bytes (0.16%) and
-the native library's 9 344 (0.39%), each file one 16 KiB page.
+delete one, and CI's perf job holds the instructions an op (the walk,
+above). The browser module grew 1 152 bytes raw, 775 gzip and 179 brotli
+(844.4 KB, `make size-report BASE=main`), the module without the indexes
+1 213, 696 and 374: the cut and the look for the next held slot
+(`past_lead`, `cut`, the room given back), the lowering and the first id's
+start in `insert_apart`, and the walk's out-of-line half. On aarch64 macOS
+fennec-server's code grew 960 bytes and the native library's 1 344,
+neither file by a page. The first form grew the module 2 423 bytes raw
+and those two 8 256 and 9 344: the three-part walk inlined into every
+caller's loop, a slot's fill written out again in each of `insert`'s
+paths, and the open's first id read through a whole entry and its
+shares' first ids through a `Vec`.
 
 **Left as it was.** The text and vector indexes' per-document numbers
 (`DocMap`, 4 bytes a slot) span the ids from 1 too; they are derived,

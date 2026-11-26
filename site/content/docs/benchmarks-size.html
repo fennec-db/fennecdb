@@ -50,12 +50,12 @@ its bundle.</p>
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">5027 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">4999 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>fennec</code> with no default feature, no import, backup or MCP: <code>make small</code></td><td class="n"><b>2983 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">8375 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>842 KB</b></td><td class="n"><b>289 KB</b></td><td class="n">349 KB</td></tr>
-<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">618 KB</td><td class="n">216 KB</td><td class="n">259 KB</td></tr>
-<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">559 KB</td><td class="n">193 KB</td><td class="n">230 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">617 KB</td><td class="n">216 KB</td><td class="n">258 KB</td></tr>
+<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">557 KB</td><td class="n">193 KB</td><td class="n">230 KB</td></tr>
 <tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">284 KB</td><td class="n">74 KB</td><td class="n">88 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64: its one file, <code>fennec-server</code></td><td class="n">8.58 MB</td><td class="n">—</td><td class="n">—</td></tr>
