@@ -4737,6 +4737,25 @@ mod tests {
         assert_eq!(ix.moved.0, 0, "slots moved");
     }
 
+    /// The run past the last held slot does not hold off the front's cut:
+    /// 14 000 rows, the highest 4 000 deleted -- a run the end keeps -- and
+    /// the lowest 6 000: the front is cut once its run passes the 4 000
+    /// rows left and their room. Counted to the array's end, as 3edf5df5
+    /// counted the span, the 4 000 empty slots past the last held one
+    /// raised the bound to 10 000, and the front kept 6 000 slots for 4 000
+    /// rows.
+    #[test]
+    fn the_run_past_the_last_held_slot_does_not_hold_off_the_fronts_cut() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=14_000);
+        deleted(&mut ix, &mut model, (10_001..=14_000).rev());
+        assert_eq!(ix.dense.len() - 1 - ix.last, 4_000);
+        deleted(&mut ix, &mut model, 1..=6_000);
+        held_as(&ix, &model, "both ends");
+        assert!(ix.floor > 1, "the front cut");
+    }
+
     /// One row moved a gap at a time, the one before it deleted, holds the
     /// array to about the gap, down as up: moved down 10 000 times, the
     /// array's end never cut, it reached 532 MB.
