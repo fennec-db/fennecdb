@@ -732,8 +732,11 @@ compact articles
 <details class="deep"><summary>What compact leaves in place</summary>
 <p><code>compact</code> drops the dead records and rewrites the file. The
 indexes stand — the documents are the same ones, and every index is keyed by
-id — except a vector graph holding tombstones, which is rebuilt: nothing else
-takes a deleted or rewritten document's node out of it. A dropped field's
+id — except a vector graph holding tombstones, which is rebuilt, and a graph
+whose tombstones outnumber its live nodes, which is rebuilt whichever
+collection <code>compact</code> names. A server, or the native library,
+rebuilds such a graph on its own as well, beside the queries and writing no
+file. A dropped field's
 values become <code>null</code>s, and its place stays
 (<a href="#changing-a-collection">Changing a collection</a>). A compact is
 refused for nothing a document holds: one it cannot read is copied as it is.

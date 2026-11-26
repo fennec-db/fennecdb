@@ -65,6 +65,13 @@ impl VectorIndex {
     pub fn dead(&self) -> usize {
         match self.never {}
     }
+    pub fn worn(&self, floor: usize) -> bool {
+        match self.never {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn changed_by(&mut self, n: u64) {
+        match self.never {}
+    }
     pub fn arena_bytes(&self) -> usize {
         match self.never {}
     }

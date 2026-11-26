@@ -9,14 +9,17 @@
 //!
 //! And it keeps its graphs in the file ([`keep`]), since it checkpoints only
 //! on its way down: without them a crash after a long run left every vector
-//! written since the start to link again. The same databases are looked at
-//! for dead records past the policy ([`auto_compact`]), and compacted
-//! beside the queries, since nothing else ever gives them back.
+//! written since the start to link again -- each graph whose tombstones
+//! outnumber its live nodes built again first, without them, so a
+//! collection whose vectors are written over keeps its graph's heap and
+//! record bounded. The same databases are looked at for dead records past
+//! the policy ([`auto_compact`]), and compacted beside the queries, since
+//! nothing else ever gives them back.
 
 use fennec_core::engine::{
     compact_when_due_in, CompactPolicy, Holds, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
 };
-use fennec_core::prelude::Database;
+use fennec_core::prelude::{Database, Response};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -91,11 +94,12 @@ static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 static KEEPER: Once = Once::new();
 
 /// Keeps the database's graphs in its file: every few seconds one thread,
-/// for every database the process serves, appends each graph that changed
-/// enough since it last reached the file (`Database::save_graphs`), under
-/// the read lock. A crash then links only what was written after it. The
-/// thread holds a database only while it looks, so a tenant closed
-/// meanwhile is let go of.
+/// for every database the process serves, builds again beside the queries
+/// each graph whose tombstones outnumber its live nodes ([`rebuild`]) and
+/// appends each graph that changed enough since it last reached the file
+/// (`Database::save_graphs`), under the read lock. A crash then links only
+/// what was written after it. The thread holds a database only while it
+/// looks, so a tenant closed meanwhile is let go of.
 pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
     keep_held(what, db, None);
 }
@@ -154,6 +158,7 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
                 };
                 for (what, db, _) in kept {
                     if let Some(db) = crate::held::beside(&db) {
+                        rebuild(&what, &db);
                         save(&what, &db);
                     }
                 }
@@ -162,6 +167,40 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
             crate::log!("could not start keeping the graphs in the files: {e}");
         }
     });
+}
+
+/// Builds again beside the queries each graph of `db` whose tombstones
+/// outnumber its live nodes, without them (`Database::rebuild_worn`), and
+/// says so: on the keeper's thread, so the record it appends right after
+/// is the rebuilt graph's -- the tombstones it dropped are as many changes
+/// as a record waits for -- and on a replica as on its primary: a replica
+/// applies every write its primary takes, each vector written over a
+/// tombstone in its graph too, which is its own and sent to none, as it
+/// compacts its own file. Looked at as `save` looks, a database whose lock
+/// is taken passed over until the next look. A rebuild of seconds holds
+/// the looks at the other databases' graphs back as long: a crash then
+/// links what they wrote meanwhile again, as after any look.
+pub(crate) fn rebuild(what: &str, db: &RwLock<Database>) {
+    let worn = match db.try_read() {
+        Ok(g) => g.graphs_worn(),
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().graphs_worn(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if !worn {
+        return;
+    }
+    let t = Instant::now();
+    let Some((r, holds)) = Database::rebuild_worn(db) else {
+        return;
+    };
+    match r {
+        Ok(Response::Ok(done)) => said_beside(what, format_args!("{done}"), t.elapsed(), &holds),
+        Ok(_) => {}
+        // Refused -- a collection changed while its graph was built, a
+        // storage error meanwhile -- it placed no graph: each stands as the
+        // writes left it, and the next look tries again.
+        Err(e) => crate::log!("{what}: could not rebuild the graphs: {e}"),
+    }
 }
 
 /// Appends what of `db`'s graphs is due, and pushes it to disk once the

@@ -3144,6 +3144,12 @@ pub struct Persisted {
     pub changes: AtomicU64,
     pub at: AtomicU64,
     pub node_bytes: AtomicU64,
+    /// The bytes of the record a compact beside the database wrote of this
+    /// graph, which the database counts as kept (`Garbage::kept`): what a
+    /// rebuild makes dead, as it drops the graph the record holds. 0 for a
+    /// graph no compact wrote since the open, which counts none.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub kept: AtomicU64,
 }
 
 #[cfg(feature = "vector")]
@@ -3707,6 +3713,23 @@ impl VectorIndex {
     /// graph -- still routing a search through them -- until it is rebuilt.
     pub fn dead(&self) -> usize {
         self.deleted_count
+    }
+
+    /// Whether the tombstones outnumber the live nodes, `floor` of them at
+    /// least: a graph a rebuild beside the database makes again without
+    /// them (`Database::rebuild_worn`). Two counts kept as the writes
+    /// land, read and compared: a look costs nothing per node.
+    pub fn worn(&self, floor: usize) -> bool {
+        let dead = self.deleted_count;
+        dead >= floor && dead > self.doc_ids.len() - dead
+    }
+
+    /// Counts `n` more changes to the graph: the tombstones a rebuild
+    /// dropped, which its record must leave out too -- the record before
+    /// it holds them, and an open after a crash would restore them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn changed_by(&mut self, n: u64) {
+        self.changes = self.changes.saturating_add(n);
     }
 
     #[inline]

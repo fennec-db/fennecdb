@@ -311,10 +311,11 @@ pub fn compact_when_due_in(
 }
 
 /// A thread that compacts one database when it is due, looking every
-/// [`AUTO_COMPACT_EVERY`]: what the native library starts for each file it
-/// opens, and what an app embedding the engine may start for its own. It
-/// holds the database only while it looks, and stops when dropped or once
-/// the database is.
+/// [`AUTO_COMPACT_EVERY`], and builds again each graph of it whose
+/// tombstones outnumber its live nodes ([`Database::rebuild_worn`]): what
+/// the native library starts for each file it opens, and what an app
+/// embedding the engine may start for its own. It holds the database only
+/// while it looks, and stops when dropped or once the database is.
 pub struct Compactor {
     stop: Arc<(Mutex<bool>, std::sync::Condvar)>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -350,8 +351,12 @@ impl Compactor {
                     return;
                 };
                 // An error leaves the database as it was -- a compact that
-                // fails is put back -- and the next look tries again; a
-                // storage error stops the looks, since `compact_due` asks.
+                // fails is put back, a rebuild refused places no graph --
+                // and the next look tries again; a storage error stops the
+                // looks, since `compact_due` and the rebuild's look ask.
+                // The rebuild first: a compact due at the same look writes
+                // the graph without its tombstones.
+                let _ = Database::rebuild_worn(&db);
                 let _ = compact_when_due(&db, &policy);
             })?;
         Ok(Compactor {

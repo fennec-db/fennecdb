@@ -59,6 +59,18 @@ graph is placed. Each hold is timed and handed back
 (`Database::maintain_held`), and a server's log names the longest and
 each graph kept.
 
+**[A worn graph is rebuilt.](../../../../docs/design/hnsw.md#worn-graphs)**
+Once its tombstones outnumber its live nodes, `GRAPH_WORN_FLOOR` of them
+at least (`VectorIndex::worn`: two counts, no node read),
+`Database::rebuild_worn` builds it again as a compact's graph phase does
+(`graphs_online`), without the rewrite and within its bounds: a graph
+behind its writes, unread or past its nodes is kept, tried again only
+once as many writes as its tombstones have landed (`worn_after`), and a
+refusal places none. The record a compact wrote of the graph it replaces
+is dead from then (`Persisted::kept`). A server's keeper runs it before
+each save, a replica's too, the native library's `Compactor` before each
+compact; every `compact` rebuilds each worn graph, whatever it names.
+
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by
 `Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.

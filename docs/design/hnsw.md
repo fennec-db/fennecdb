@@ -1,6 +1,6 @@
 # The HNSW graph
 
-The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *The HNSW graph*: the graph as derived data, its records, its restore and open, its linking, and vectors written again. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *The HNSW graph*: the graph as derived data, its records, its restore and open, its linking, and vectors written again; and of the one [src/engine/CLAUDE.md](../../crates/fennec-core/src/engine/CLAUDE.md) lists under *Storage*, beside the maintenance it shares: a worn graph rebuilt. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## The graph is derived
 
@@ -403,3 +403,111 @@ statement that needs the graph, as the derived indexes are -- an open would
 no longer validate the graph it holds, and the first `near` or write would
 pay the 6 ms; the arena kept in the file for an open to map rather than copy
 -- every 100 000 x 128 file 51 MB larger, its vectors twice.
+
+## Worn graphs
+
+**A worn graph is rebuilt.** A write that gives a row another vector, or
+deletes it, leaves its node a tombstone: its vector, its lists and its
+flags stay, routing walks, until the graph is built again -- about 230
+bytes of heap at 16 dimensions (64 of vector, 128 of level-0 list at the
+full stride, the document, the upper levels' header, a flag), and about
+145 in each record of it (the vector, the links, a flag, a level, a hash
+half). Only a compact rebuilt one, and only of the collections it named:
+the P6 soak's primary, 27 vector updates a second into 20 000 rows of
+`vector<16>` beside a `compact usertable` every 20 minutes, carried about
+490 000 tombstones by its fifth hour -- 113 MB of heap, and a record of
+about 75 MB the keeper appended every five minutes and the requested
+compact held whole and copied again -- and its 512 MB container killed it.
+The file never reached half dead for the server's own compact to rebuild
+it either: the record each requested compact wrote counted as kept.
+
+So a graph whose tombstones outnumber its live nodes, and number
+`GRAPH_WORN_FLOOR` (10 000) at least, is worn (`VectorIndex::worn`: two
+counts the writes keep, compared -- a look reads no node), and
+`Database::rebuild_worn` builds it again beside the database: a compact's
+graph phase (`graphs_online`) without the rewrite -- its store taken as a
+pin takes it, its vectors read and linked with no lock held, the writes
+made meanwhile caught up with in rounds, the write lock taken for the last
+round's links, `GRAPH_HELD` at most, and to put it in place. The ratio
+bounds what the rebuilds cost: each links every live node once, and each
+tombstone it drops was left by a write that linked a node of its own, so
+the rebuilds together link no more than the writes did, and the graph
+holds about twice the nodes it reads at most -- its heap and its record
+with it. A lower ratio -- tombstones a quarter of the live nodes -- would
+rebuild four times as often, four links a write on top of its own, for a
+graph at most a quarter past its live nodes rather than twice them; a
+budget in bytes would rebuild a big graph over and over for a little of
+it, as a record on a bound of the linking alone would have been written
+over and over (above). The floor is
+`GRAPH_SAVE_CHANGES`: what a rebuild costs whatever its graph -- its holds
+of the lock, its log line, and the graph's record written again -- is paid
+once in as many tombstones as a record waits for, and a rebuild drops at
+least that many, which it counts as changes (`changed_by`), so the keeper
+writes the rebuilt graph at the look that rebuilt it, where after a crash
+an open would restore the record before, tombstones and all. Below it a
+small graph keeps up to 10 000: 2.3 MB at 16 dimensions, 32 MB at 768.
+
+`make churn-bench` (`examples/churn.rs`) writes 20 000 x 16 over 500 000
+times, a row at a time -- 7.3 MB of heap and a 1.3 MB record freshly
+loaded. Never rebuilt, as before, the graph ended at 520 000 nodes, 500 000
+of them tombstones, 121.5 MB of heap (`graph_bytes` and `arena_bytes`,
+capacity included) and a 64.5 MB record. Rebuilt by a keeper looking every
+5 s, the writer at 2 000 updates a second: 23 rebuilds, each dropping about
+20 900 tombstones in 418-475 ms (440 at the median) on an M-series Mac's
+eight cores beside the writer, the write lock held 1.61 ms at the median and
+1.90 at most -- the last round's links and the swap; the most a look found
+was 41 006 nodes, 16.4 MB and a 4.1 MB record, and the run ended at 39 535,
+9.8 MB and 3.9 MB.
+
+A server's keeper (`fennec_http::link::keep`) rebuilds before it saves, on
+its thread, so the record it appends next is the rebuilt graph's; a rebuild
+of seconds holds its looks at the other databases back as long, and a
+crash meanwhile links what they wrote since again, as after any look. A
+replica rebuilds as its primary does: it applies every write its primary
+takes, each a tombstone in its graph, which is its own, sent to none, and
+the rebuild writes nothing and moves no change -- as a replica's compact.
+The native library's `Compactor` rebuilds before each compact it looks
+for (`FENNEC_OPEN_NO_AUTO_COMPACT` stops both); an app embedding the
+engine starts one, or calls `rebuild_worn` from a thread of its own. Every
+`compact` rebuilds each worn graph, whatever collection it names
+(`Rebuild::Compact`), since its rewrite writes every graph's record and a
+worn one's is mostly tombstones -- under the lock too (`rebuild_graphs_here`),
+the browser module's way: it has no thread to rebuild beside a page, so a
+worn graph is rebuilt when the page compacts, and its `rebuild_worn`, there
+for a host that calls it, builds under the lock. It cost `fennec-server`
+4.5 KB of `__TEXT` on aarch64 macOS (4 224 bytes of code), the native
+library 2.5 KB, and the browser module 197 bytes, 20 brotli: its compact's
+look at every collection for a worn graph.
+
+A graph the rebuild keeps as it stood -- behind its writes, holding a
+document it cannot read, or past its nodes -- is named in the holds, as a
+compact's is, and not tried again until as many writes as its tombstones
+have landed (`worn_after`): a graph behind a sustained ingest would be
+built again at every look, every core spent on a build the rounds could
+not catch up with, where that many writes linked as many nodes, so a try
+kept costs no more than one placed. A rebuild refused -- a collection
+changed meanwhile, a storage error -- places no graph. A panic in it with
+no lock held leaves the graph the writes kept up to date, and one under
+the write lock, as a graph is put in place, the same: it opens no block
+and writes nothing, so nothing needs putting back or failing, and each
+graph is the old one or the rebuilt one, whole
+(`maintenance::tests::a_rebuild_stopped_leaves_the_graph_as_the_writes_left_it`).
+
+The record a compact beside the database wrote of a graph counts as kept
+-- what the next compact writes again (`Garbage::kept`) -- and its length is
+noted on the graph (`Persisted::kept`); a rebuild drops the graph it
+describes, so its bytes leave `kept` and count as dead, as a record the
+keeper appended does, for the file's own compaction to find. Counted whole,
+it overstates the dead bytes by the record of the rebuilt graph, which the
+next compact writes -- as the keeper's records in the tail are counted. An
+open counts no record kept, so a graph restored there notes none.
+
+`maintenance::tests` hold it: a graph past the ratio rebuilt to no
+tombstone, each row's own vector finding the ten it found before and the
+recall against the exact answer as it was; the writes made during it
+linked as the read lock would have linked them; a rebuild behind its
+writes kept and waiting out its tombstones' writes; a block put back
+during it and after it; a compact naming another collection; a replica;
+a panic and a storage error; and the record's bytes moved from kept to
+dead, exactly. `fennec-http`'s `tests/worn_graphs.rs` holds the keeper to
+it, the file opened again restoring the rebuilt graph.

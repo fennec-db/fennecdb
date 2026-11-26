@@ -69,17 +69,25 @@ a program embedding the crate starts the same thread over its database, or
 asks from one of its own:</p>
 
 <pre data-lang="rust">use fennec_core::engine::{compact_when_due, CompactPolicy, Compactor};
+use fennec_core::prelude::Database;
 
 let db = Arc::new(RwLock::new(fennec_core::fs::open("app.fennec")?));
 // Looks every 5 s; compacts beside the queries once half the file is dead
 // and at least 64 MB, or sooner as the file nears the memory the system
-// has for its pages. Stops when dropped.
+// has for its pages, and rebuilds a vector graph whose tombstones outnumber
+// its live nodes. Stops when dropped.
 let _compactor = Compactor::start(&amp;db, CompactPolicy::default())?;
 // Or, from a thread you already have:
+Database::rebuild_worn(&amp;db);
 compact_when_due(&amp;db, &amp;CompactPolicy::default());</pre>
 
 <p><code>Database::garbage</code> says what the file holds against what is
-live, without reading a document.</p>
+live, without reading a document. A vector written over or deleted leaves
+a tombstone in its graph, its vector and links kept in memory;
+<code>Database::rebuild_worn</code> builds a graph again without them once
+they outnumber its live nodes and number 10 000, beside the queries as a
+compact does, writing no file, and answers <code>None</code> when none is
+due.</p>
 
 <h2>Durability is the caller's job</h2>
 

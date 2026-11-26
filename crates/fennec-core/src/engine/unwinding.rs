@@ -35,9 +35,10 @@ pub(crate) fn armed(at: &str) -> bool {
 }
 
 /// A panic at `at` the `skip + 1`th time a write passes it, for the next
-/// write on this thread.
-#[cfg(all(feature = "std-fs", feature = "indexes", feature = "geo"))]
-fn arm(at: &'static str, skip: usize) {
+/// write on this thread -- or a maintenance's point, a rebuild placing its
+/// graph (`placing`).
+#[cfg(feature = "vector")]
+pub(crate) fn arm(at: &'static str, skip: usize) {
     PANIC_SKIP.with(|s| s.set(skip));
     PANIC_AT.with(|p| p.set(Some(at)));
 }

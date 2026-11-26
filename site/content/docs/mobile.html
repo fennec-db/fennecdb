@@ -788,9 +788,12 @@ keeps <code>&lt;name&gt;.lock</code> while it is open.</p>
     left behind, and at least 64 MB, so a file you keep updating stays under
     about twice what it holds -- sooner once it reaches three quarters of
     the memory the device has for its pages, so its reads stay in
-    memory. Open with <code>.noAutoCompact</code>
-    (<code>NO_AUTO_COMPACT</code>, <code>noAutoCompact</code>) to compact
-    only when you run <code>compact</code>.</li>
+    memory. The same thread rebuilds a vector index once the entries
+    updates and deletes left in it outnumber its live ones, beside your
+    calls, so a collection whose vectors change keeps its memory. Open
+    with <code>.noAutoCompact</code>
+    (<code>NO_AUTO_COMPACT</code>, <code>noAutoCompact</code>) to compact,
+    and rebuild, only when you run <code>compact</code>.</li>
 </ul>
 
 <details class="deep"><summary>How the file is mapped and locked on a device</summary>

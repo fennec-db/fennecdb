@@ -636,6 +636,21 @@ the next compact, rather than every write held while the compact links
 them, and the log line says so. A sustained ingest of vectors can keep it
 at every compact, its deleted entries growing until a quieter one.</p>
 
+<p>A vector index is rebuilt on its own too, without a compact. Every
+document whose vector is written over or deleted leaves a deleted entry in
+the index, its vector and its links kept in memory and in the index's
+record in the file; once they outnumber the index's live entries, and
+number 10 000 at least, the server builds the index again beside the
+queries in the same way -- its writes caught up with in rounds, the write
+lock taken for the last of them -- every 5 s looking at each file it
+serves, a replica's too, and writes the rebuilt index into the file. An
+index whose writes outrun its rebuild is kept as it stands, and tried
+again once as many documents have been written as it holds deleted
+entries. A <code>compact</code> rebuilds such an index too, whichever
+collection it names. The line names the file or the tenant:</p>
+
+<pre data-lang="text" data-label="logs">/data/db.fennec: 1 graph rebuilt, 20903 tombstones dropped in 421.0ms, the lock held 1.7ms at most (the build's copy 7.2µs, rounds 12.4µs, put in place 1.7ms)</pre>
+
 <p>Each compact and <code>create index</code> run beside the queries is
 logged in one line: what was done, how long it took, the longest it held
 the lock -- what every write waited out at most, and every read behind a
