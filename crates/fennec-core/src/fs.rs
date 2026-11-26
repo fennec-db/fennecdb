@@ -1987,28 +1987,33 @@ pub struct SideFile {
     /// page cache ([`Self::copies_in_turn`]).
     in_turn: bool,
     /// On Linux, whether the file is written past the page cache
-    /// ([`Self::past_cache`]), its step ([`past_step`]), and where the last
-    /// step ended: `out.at` is less than a step past it.
+    /// ([`Self::past_cache`]), its step ([`past_step`]), where the last
+    /// step ended -- `out.at` is less than a step past it -- and that
+    /// step's fdatasync ([`Steps`]).
     #[cfg(any(target_os = "linux", target_os = "android"))]
     past: bool,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     step: u64,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     stepped: u64,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    steps: Steps,
 }
 
 /// How much of a file a compact writes past the page cache -- its side file
 /// ([`SideFile::past_cache`]), its scratch file ([`Scratch`]) -- is written
-/// before its pages go to disk and are let go of, on Linux ([`paced`]): a
+/// before its pages go to disk and are let go of, on Linux ([`Steps`]): a
 /// sixteenth of `room`, the memory the page cache has (`cache::room`),
 /// between 4 and 64 MiB. A written page stays in the cache until it is on
 /// disk, and a cgroup cannot reclaim it before: a step dirty and the one
 /// before it on its way to disk at most, an eighth of the room, where 64 MiB
 /// a file -- the scratch file's last step left dirty as the side file took
 /// its first -- held 80 MiB dirty in a 512 MB container that was then
-/// OOM-killed (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
-/// The floor keeps the steps few, 256 a GiB, and each a write the disk
-/// takes whole; the ceiling is what a step was before it followed the room.
+/// OOM-killed (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk;
+/// the rule is src/engine/CLAUDE.md's, a file compacted before it outgrows
+/// the page cache). The floor keeps the steps few, 256 a GiB, and each a
+/// write the disk takes whole; the ceiling is what a step was before it
+/// followed the room.
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub(crate) fn past_step(room: Option<u64>) -> u64 {
     room.map_or(PAST_STEP_MOST, |r| {
@@ -2027,10 +2032,6 @@ extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
-    // Not Android's: bionic has it from API level 26, past the native
-    // library's 21.
-    #[cfg(target_os = "linux")]
-    fn sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) -> i32;
 }
 
 /// The cached pages of `len` bytes of `file` at `at` let go of -- all of
@@ -2049,70 +2050,66 @@ fn let_go_pages(file: &File, at: u64, len: u64) {
     unsafe { posix_fadvise(file.as_raw_fd(), at as i64, len as i64, POSIX_FADV_DONTNEED) };
 }
 
-/// `file` with `sync_file_range`'s `flags` over the whole of it: its dirty
-/// pages' writeback begun, waited for or both, nothing else -- no metadata,
-/// no journal commit, as an fdatasync of a file that grew makes.
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-fn sync_range(file: &File, flags: u32) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: the descriptor is `file`'s, open across the call, which takes
-    // integers alone and touches no memory of ours.
-    match unsafe { sync_file_range(file.as_raw_fd(), 0, 0, flags) } {
-        0 => Ok(()),
-        _ => Err(std::io::Error::last_os_error().into()),
-    }
-}
-
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-const SYNC_FILE_RANGE_WRITE: u32 = 2;
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
-
-/// What a file written past the page cache does each [`past_step`] it is
-/// written. On Linux the step before's writeback is waited for, this one's
-/// begun and the pages on disk let go of, so a step is dirty and the one
-/// before it on its way to disk at most, and the disk writes one while the
-/// compact fills the next: none of it a write's durability -- a scratch
-/// file is unlinked, a side file synced whole before its swap -- so no
-/// fdatasync, whose journal commit each step every write's fsync on the
-/// volume met. On Android, whose native library may not call
-/// `sync_file_range`, an fdatasync and the pages let go of: a step at most.
+/// The steps of a file written past the page cache, on Linux and Android
+/// ([`past_step`]): each step's fdatasync runs on a thread of its own while
+/// the compact writes the next, and is waited for as that one ends, its
+/// pages then let go of -- a step dirty and the one before it on its way to
+/// disk at most, the disk writing one while the compact fills the next.
+/// The compact's own fdatasync, never `sync_file_range` alone: that puts
+/// the pages on the disk and leaves the disk's cache to the next fsync of
+/// the volume, the database's own -- whose syncs, every 250 ms beside a
+/// compact, then took 53-64 ms at the median against 5 ms
+/// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
 #[cfg(all(
     unix,
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "android")
 ))]
-fn paced(file: &File) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        sync_range(file, SYNC_FILE_RANGE_WAIT_BEFORE)?;
-        sync_range(file, SYNC_FILE_RANGE_WRITE)?;
-    }
-    #[cfg(target_os = "android")]
-    file.sync_data()?;
-    let_go_pages(file, 0, 0);
-    Ok(())
-}
+#[derive(Default)]
+struct Steps(Option<std::thread::JoinHandle<std::io::Result<()>>>);
 
-/// Every page of `file` on disk and let go of: a scratch file once its deal
-/// ends (`Scratch::settle`).
 #[cfg(all(
     unix,
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "android")
 ))]
-fn settled(file: &File) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    sync_range(
-        file,
-        SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER,
-    )?;
-    #[cfg(target_os = "android")]
-    file.sync_data()?;
-    let_go_pages(file, 0, 0);
-    Ok(())
+impl Steps {
+    /// A step of `file` written: the step before's fdatasync waited for and
+    /// its pages let go of, and this one's begun on a thread of its own --
+    /// or here, where no thread can be had.
+    fn step(&mut self, file: &File) -> Result<()> {
+        self.wait(file)?;
+        let own = file.try_clone()?;
+        let spawned = std::thread::Builder::new()
+            .name("fennec-step".into())
+            .spawn(move || own.sync_data());
+        match spawned {
+            Ok(h) => self.0 = Some(h),
+            Err(_) => {
+                file.sync_data()?;
+                let_go_pages(file, 0, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// The step under way, if any, on disk, and what is on disk let go of.
+    fn wait(&mut self, file: &File) -> Result<()> {
+        if let Some(h) = self.0.take() {
+            h.join()
+                .map_err(|_| crate::error::Error::Io("a compact's fdatasync panicked".into()))??;
+            let_go_pages(file, 0, 0);
+        }
+        Ok(())
+    }
+
+    /// Every page of `file` on disk and let go of.
+    fn settle(&mut self, file: &File) -> Result<()> {
+        self.wait(file)?;
+        file.sync_data()?;
+        let_go_pages(file, 0, 0);
+        Ok(())
+    }
 }
 
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
@@ -2138,6 +2135,8 @@ impl SideFile {
             step: PAST_STEP_MOST,
             #[cfg(any(target_os = "linux", target_os = "android"))]
             stepped: 0,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            steps: Steps::default(),
         })
     }
 
@@ -2161,7 +2160,7 @@ impl SideFile {
     /// image was written, and 18 to 25k with them dropped as it went.
     /// macOS's `F_NOCACHE`; on Linux its pages put on disk and dropped
     /// (`POSIX_FADV_DONTNEED`) every [`past_step`] of `room`, the memory
-    /// the page cache has ([`paced`]).
+    /// the page cache has ([`Steps`]).
     pub fn past_cache(&mut self, room: Option<u64>) {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
@@ -2186,13 +2185,15 @@ impl SideFile {
     /// for the rest, so that the fsync under it covers only that.
     pub fn sync(&mut self) -> Result<()> {
         self.out.w.flush()?;
-        self.out.w.get_ref().sync_data()?;
-        // The pages are on disk now, and dropping them is advice too.
+        // Past the cache, the step under way waited for, the rest synced and
+        // the pages on disk let go of, which is advice too.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         if self.past {
-            let_go_pages(self.out.w.get_ref(), 0, 0);
+            self.steps.settle(self.out.w.get_ref())?;
             self.stepped = self.out.at;
+            return Ok(());
         }
+        self.out.w.get_ref().sync_data()?;
         Ok(())
     }
 
@@ -2247,12 +2248,14 @@ impl SideFile {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 pub struct Scratch {
     file: File,
-    /// On Linux, its step ([`past_step`]) and the bytes written since the
-    /// last step ended, fewer than a step.
+    /// On Linux, its step ([`past_step`]), the bytes written since the last
+    /// step ended, fewer than a step, and that step's fdatasync ([`Steps`]).
     #[cfg(any(target_os = "linux", target_os = "android"))]
     step: u64,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     unsynced: u64,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    steps: Steps,
 }
 
 #[cfg(test)]
@@ -2325,11 +2328,13 @@ impl Scratch {
             step: step.max(1),
             #[cfg(any(target_os = "linux", target_os = "android"))]
             unsynced: 0,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            steps: Steps::default(),
         })
     }
 
     /// `bytes` written at `at`. On Linux, a step at a time, its pages put on
-    /// disk and let go of as each ends ([`paced`]), as a side file past the
+    /// disk and let go of as each ends ([`Steps`]), as a side file past the
     /// cache's are: a written page stays in the cache until it is on disk,
     /// and a record longer than a step, written whole, would leave all of
     /// it dirty.
@@ -2343,7 +2348,7 @@ impl Scratch {
                 (at, rest) = (at + n as u64, &rest[n..]);
                 self.unsynced += n as u64;
                 if self.unsynced >= self.step {
-                    paced(&self.file)?;
+                    self.steps.step(&self.file)?;
                     self.unsynced = 0;
                 }
             }
@@ -2355,10 +2360,11 @@ impl Scratch {
         }
     }
 
-    /// What its deal ends with: every page on disk and let go of. Left to
-    /// the kernel, the last step's -- up to 64 MiB when a step was that --
-    /// stayed dirty while the read back filled the side file's first step,
-    /// as `POSIX_FADV_DONTNEED` lets no dirty page go. Nothing elsewhere:
+    /// What its deal ends with: the step under way waited for, the rest
+    /// synced, and every page let go of. Left to the kernel, the last step's
+    /// -- up to 64 MiB when a step was that -- stayed dirty while the read
+    /// back filled the side file's first step, as `POSIX_FADV_DONTNEED` lets
+    /// no dirty page go. Nothing elsewhere:
     /// macOS writes past the cache (`F_NOCACHE`), and Windows asks nothing
     /// of it.
     pub fn settle(&mut self) -> Result<()> {
@@ -2366,7 +2372,7 @@ impl Scratch {
         SETTLED.with(|s| s.set(s.get() + 1));
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            settled(&self.file)?;
+            self.steps.settle(&self.file)?;
             self.unsynced = 0;
         }
         Ok(())
@@ -2518,7 +2524,7 @@ impl std::io::Write for SideFile {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 impl ImageOut for SideFile {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        // Past the cache on Linux, a step at a time ([`paced`]): a bucket a
+        // Past the cache on Linux, a step at a time ([`Steps`]): a bucket a
         // compact copies in turn, 16 MiB, written whole left all of it
         // dirty whatever the step.
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2532,7 +2538,7 @@ impl ImageOut for SideFile {
                 rest = &rest[n..];
                 if self.out.at - self.stepped >= self.step {
                     self.out.w.flush()?;
-                    paced(self.out.w.get_ref())?;
+                    self.steps.step(self.out.w.get_ref())?;
                     self.stepped = self.out.at;
                 }
             }
@@ -4592,7 +4598,7 @@ mod tests {
     }
 
     /// The steps a file written past the page cache goes to disk in, on
-    /// Linux and Android ([`paced`]).
+    /// Linux and Android ([`Steps`]).
     #[cfg(all(
         target_pointer_width = "64",
         any(target_os = "linux", target_os = "android")
