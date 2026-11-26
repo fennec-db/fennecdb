@@ -396,6 +396,62 @@ in, from an operation's send (`own_p50`, `own_p99`, and the reads through
 the replica alone, `replica_p50`, `replica_p99`), beside its times from
 when it was due: whose wait a tail was.
 
+**The reads through the replica on a lane of their own.** One schedule
+for every connection still put the reads through the replica in the pool
+every operation shares, and each waits out the primary's next sync,
+some 200 ms: by Little's law the 4% of them held about 17 of the 32
+connections all the time, and at 80% of a closed-loop peak about 6 were
+spare, so a slowdown of 10-15% for 30 s queued every operation for
+seconds. Dry run 6's reads through the replica in its compactions were
+5.5 s at the p99 from the schedule, its whole class -- primary reads,
+writes and searches queued behind them -- while the replica answered
+them in 0.44-0.72 s from their send, and no line could say which. They
+have connections and a schedule of their own now (`--replica-threads`,
+128; `REPLICA_THREADS` in the script; 0 puts them back in the pool): the
+pool's open loop at 96% of the rate, the lane's at 4% (`REPLICA_SHARE`),
+each with its own lag (`behind_s` the pool's, `r_behind_s` the lane's),
+so a replica holding its reads holds them and not the pool, and its
+compaction's class is its reads and the lane's backlog behind them. The
+replica's compaction windows say what the replica answered them in, from
+their send (`r_compact_own_p50`, `r_compact_own_p99`, `p99_r_compact_own`
+on the end line), beside the class's p99 from the schedule; how far each
+lane fell behind its schedule in their seconds (`rc_r_behind_max_s`,
+`rc_behind_max_s`), and the replica's major faults and least page cache
+in them (`rc_r_majflt`, `rc_r_file_min`) -- what tells "the server held
+the read" from "the loop's queue". The replica runs with `--slow-ms 100`
+(`REPLICA_SLOW_MS`), whose log starts after a read's `Fennec-After` wait:
+the read's own lock waits and faults, in its log the run keeps. Both
+servers take `--max-connections 320`, past the default 100: the pool's
+32, the lane's 128 -- each of which reads from the primary from a kill
+until the replica is back, then lets that connection go -- the 64
+subscriptions, the replica's follow, a backup's and the looks'. The
+lane's size is Little's law with room: it holds the rate's 4% times a
+read's wait busy -- 24 at 3 000 a second and 0.2 s, 108 at the lane's
+first dry run's 9 000 a second and 0.27 s -- and a replica's compaction
+doubling the wait must find connections free, or the lane's figures are
+its own queue at every second; a lane behind its schedule says so on the
+minute's line (`r_behind_s`, `r_behind_max_s`) and in the notes. At the peak, as fast as answered, the pool
+runs closed and the lane follows it, its rate each second its share of
+what the pool did (`seconds`), a lane more than a second behind moved up
+rather than left a backlog to burst through. The peak is the rate's
+measure, and the lanes change it: in one pool the closed loop's
+connections spent most of their time in the reads' wait for the sync,
+so the peak was the pool's arithmetic -- 32 connections, 4% of them 200
+ms each and 96% a few ms, some 2 700-3 000 a second -- with the primary
+idle in part of it; with the lane the pool is the primary's alone, and
+the peak, and every fraction of it, rises to what the primary answers.
+On the harness's dry run of 2026-11-26 (100 000 records, `--memory
+256m`, `--sync 250`, three minutes each, one after the other, the host's
+load under 4 at each start) the peak in one pool was 3 235 a second, its
+reads through the replica 192 ms at the median and the others 1.6 ms, 25
+of the 32 connections in the replica's wait by Little's law, the VM's
+load 6.2-6.6; with the lane it was 7 897 (8 623 on a run before it with
+a lane of 64), the others 2.9-3.3 ms at the median as the primary did
+more, the VM's load 12-16. So a phase at a fraction of the peak now runs
+about two and a half times the operations it ran, and a long run's
+figures from before the lanes -- its rate, its file's growth and its
+compactions -- are not this one's at the same fraction.
+
 **What a restart's operations waited for.** The fourth dry run of
 2026-11-24 -- 120 minutes at 1 240 a second, 80% of its peak's slowest
 three minutes (1 551), `--sync 250`, `--memory 512m` -- held every
@@ -651,6 +707,32 @@ said whether the primary's durable change stood still -- under `--sync
 250` a replica is sent only what is on disk -- or the replica took
 nothing, and the containers' logs went with them.
 
+**Each server's memory a second.** The minute's look is one sample a
+minute: the long run's primary read 304 MB of anonymous memory at its
+minute 300, and the requested compact that then took about 130 MB more
+in seconds OOM-killed it between two looks (`anon-rss` 427 MB at the
+kill, 80 MB of dirty pages beside it). Each server's cgroup is now read
+once a second by one process the run long (`watch_memory`): a container
+in the server's process namespace -- as the look and `ycsb`'s
+larger-than-memory cells' `Watch` are -- reading its `memory.stat`
+through `/proc/1/root` with the shell's built-ins alone, a fork a second
+for `sleep`, charged to its own cgroup and never the server's; a `docker
+exec` a look was no option, a sizing loop of one every 100 ms having
+slowed a server 30-57%. It ends with the server's processes at a kill or
+a death, its last look already read, and is started again a second
+after, until the server runs again. The minute's line takes each
+server's most anonymous memory and dirty pages in the minute
+(`anon_peak`, `dirty_peak`, `r_anon_peak`, `r_dirty_peak`), its least
+page cache (`file_min`, `r_file_min`), the life's most (`anon_peak_life`,
+`dirty_peak_life`, the replica's alike) and how many looks there were
+(`mem_n`, `r_mem_n`); the replica's major faults and page cache at the
+minute's look too (`r_majflt`, `r_cg_file`). A second at a time, the open
+loop's lag in each lane is read too, its minute's most on the line
+(`behind_max_s`, `r_behind_max_s`), and every second goes to
+`<run>-seconds.tsv` in `--logs`: both lags, whether a compaction of the
+replica's was open, and both servers' anonymous memory, dirty pages,
+page cache and faults.
+
 **One checker.** `soak.rs` is the driver -- the mix, the schedule, the
 kills, the minute's line and the report -- and decides no answer: whether
 a read could have been answered so is `src/register.rs`'s alone, the rule
@@ -666,8 +748,8 @@ one never answered -- until a kill, which may take back what the first saw.
 A kill is between two reads where the server may have died after the
 first began and before the second ended: it dies somewhere in the kill's
 window, from when `docker kill` was sent (it lands a moment later; a death
-is held as a kill from the last look before it, a minute back) to when the
-server answered again. So a kill sent by the second read's end lets go of
+is held as a kill from its own time, the first connection it closed --
+below) to when the server answered again. So a kill sent by the second read's end lets go of
 a first read begun before the server was back -- one begun after the kill
 was sent saw the process the kill then took, and with it a write the kill
 may take; holding it to the kill's send alone failed a right server
@@ -727,7 +809,73 @@ the kill ends it with the namespace, its last look the thread's state at
 the kill. The report prints the run's largest gap beside the bound, and
 whether the run supports it or what it suggests (`notes`).
 
-**The mix**, over 32 connections: 36% read and 37% update of YCSB's records
+**A death is the server's own, timed by itself.** The eight-hour run of
+2026-11-25 lost its primary at 00:56:47.1Z, OOM-killed (Docker's `oom`,
+then `die` with exit 137) in the compact the schedule asked at minute
+300, which the kill due then waited for (`fence`). The harness then
+announced its kill, slept the announced second, sent `docker kill` --
+"is not running" -- wrote "the server gone 0.1 s after the kill was
+sent", and judged the writes a read after it showed gone from its own
+kill: seven mismatches, "a write answered 1213-1269 ms before a kill is
+gone, past the 650 ms a kill may take". Its kill was sent no less than a
+second after the death -- the announcement came once the fence's compact
+had failed on the closed connection, and the announced second after it --
+so those writes were answered at most 269 ms before the death, inside the
+bound; the gap was the harness's own wait, not writes held in the
+process for more than a second, and the 20 minutes of mismatches after
+it re-read the same lost writes. A server gone that the run did not kill
+is now found as it happens, from Docker's events of the primary's
+container -- one `docker events` process the run long, its `die` and
+`oom` (`follow_events`), on which the minute's wait wakes -- and by the
+container's state at each minute's end and at each kill, before its
+announcement and again before `docker kill` is sent (`dead`): a kill
+that finds its server dead is not sent, the death stands for it
+(`kill_died`), and the server is started again at once, its file
+verified, as after a kill (`died`, `restart`). Its line names it: how it
+ended (`OOM-killed under --memory 512m (exit 137)`, a signal, or an exit
+code, from `docker inspect`'s `OOMKilled` and `ExitCode`), its minute and
+its time of day, how long before the kill due -- or after it, in the side
+jobs that kill waited for -- what timed it, and its last look a second
+(below): anonymous memory and dirty pages, and the life's most. Its time
+is the first connection it closed after its last answer (`death_time`):
+the process's sockets close in its exit, before Docker reaps it; the soak
+holds 64 streams and its workers' connections open, so a death closes
+something within milliseconds, read on the clock every write's answer is
+timed on, the last answer before it bounding it from below
+(`death_answer_ms`). Docker's own times -- the `die` event, `FinishedAt`
+-- are the reap, after the process's teardown, its sockets' close among
+it, and on the VM's clock, which the harness knows only by the minute's
+probe (`clock_off_ms`, to its round trip, between steps): they stand in
+where nothing closed and are said beside the close otherwise
+(`death_docker_ms`), and with neither the minute's look before it is
+taken, as before. On the harness's dry run of 2026-11-26 three deaths
+sent from outside (`docker kill --signal KILL`, its call's start and end
+taken on this host) -- one between minutes, one in the compact the kill
+of minute 6 waited for, one in the compact the kill of minute 3 was to
+land in -- were each timed inside the 0.23-0.24 s the call took, 9-10 ms
+after the last answer before them, and Docker's `die` came 177-185 ms
+after. A server read answering more than a second after a
+close was alive then: that close is no death (`CLOSE_SLOP`). The death's
+window in the checker is the death's time to the server answering
+again, so a write a read then shows gone is judged from when the server
+went, still held to `--loss-ms`; the failures it cut before it was found
+are moved from the errors to `down` (`death_down`), and a compact or a
+backup it cut is its (`compact_died`, `backup_died`), each the death's,
+never a failure of its own -- told from a compact the kill cut by when
+the kill was sent (`kill_sent`), not by the restart's window, which the
+announcement opens a second before it: the dry run's death in that
+second was counted as the kill's cut, and its run held for `WAIT_MAX` on
+a compact no longer under way, until the wait for the kill's compact
+looked at Docker's events too. The report counts it as a failure of its own,
+apart from the planned kills: "no server died, none OOM-killed" names
+each death -- its minute, how it ended, the kill due, what timed it --
+with the mismatches and the writes a read showed gone from its line to
+the next restart's, each a loss past what `--sync` allows; the schedule's
+line counts a kill the death stood for, a compact or backup it cut, with
+it, and its restart's verify beside the kills'.
+
+**The mix**, over 32 connections and a lane of 128 for the reads through
+the replica (above): 36% read and 37% update of YCSB's records
 (A, its scrambled zipfian) and 4% read of them through the replica, sent
 after the latest write answered (`Fennec-After`, the read's start taken
 before the change it names is read: every write answered before the read
@@ -867,8 +1015,10 @@ start (`started`, so a run id used again is told apart: the report judges
 the latest attempt) and the primary's `life` (its restarts before it):
 `ops`, `ops_s` against `rate`, `idle_workers` (connections that ended no
 operation in the minute); `behind_s`, how far the open loop is behind its
-schedule at the minute's end -- the median connection's lag behind the
-operation it waits for or works on, none where it is ahead; `steady_ops`
+schedule at the minute's end -- the pool's median connection's lag behind
+the operation it waits for or works on, none where it is ahead
+(`r_behind_s` the replica lane's), and the most of each read a second
+(`behind_max_s`, `r_behind_max_s`); `steady_ops`
 and their `p50`, `p99`, `p999` and `max` in microseconds, each timed from
 when it was due, and `p99_hour`, the steady p99 of the 60 minutes to then,
 each written only where there were steady operations: a minute every
@@ -894,7 +1044,12 @@ those due while a compact ran and until back on schedule after it; and
 apart from all of them the reads through the replica waiting in a
 compaction of its own and their workers' backlog (`r_compact_ops`,
 `p99_r_compact`, `p99_r_compact_hour`, those due in a restart
-`restart_r_compact_ops`), with the compactions the watch on its
+`restart_r_compact_ops`; the reads through the replica among them as it
+answered them, `r_compact_own_n`, `r_compact_own_p50`,
+`r_compact_own_p99`; in the seconds one was open, `rc_seconds`, each
+lane's most behind, `rc_behind_max_s` and `rc_r_behind_max_s`, and each
+server's faults and least page cache, `rc_majflt`, `rc_file_min`,
+`rc_r_majflt`, `rc_r_file_min`), with the compactions the watch on its
 compaction thread saw end (`r_compacts_watched`, the longest in ms
 `r_compact_ms`; one a restart met, with the restart's span,
 `r_compact_kill_ms`), those whose end it did not see (`r_compacts_cut`),
@@ -917,19 +1072,28 @@ writes beside it), and `live`, `fennec_data_bytes`; `compactions` so far,
 `auto_compacts`, `r_auto_compacts`, `compacting`, `r_compacting`;
 `rss_anon`, `memory_bytes`, `seq` (`fennec_change_sequence`), `cg_anon`, `cg_file`, `cg_current`, `majflt`,
 `threads`, `fds` and `connections` (`fennec_connections`) of the primary,
-`r_rss_anon`, `r_memory_bytes`, `r_threads`, `r_fds` and `r_connections` of the replica;
+`r_rss_anon`, `r_memory_bytes`, `r_threads`, `r_fds`, `r_connections`,
+`r_majflt` and `r_cg_file` of the replica; each server's looks a second
+(`mem_n`, `anon_peak`, `dirty_peak`, `file_min`, `anon_peak_life`,
+`dirty_peak_life`, the replica's `r_`-named alike);
 `lag` (`/_replication/status`'s `behind`), `lag_s` (those writes at the
 minute's write rate) and `r_connected`; the sample's `match_n`,
 `match_differs`, `near_n`, `exact_differs`, `recall_sum` and
 `sample_skipped`; `host_free` and `vm_free`, the disk on each side; the
-run's doings in the minute (`kill`, `verify`, `verify_failed`, `backup`,
-`restore`, `backup_failed`, `backup_stale`, `compact`, `compact_failed`,
-`compact_busy`, `compact_killed`, `restart_ms`, `swept`, `sweep_owed`,
+run's doings in the minute (`kill`, `kill_died`, `verify`,
+`verify_failed`, `backup`, `restore`, `backup_failed`, `backup_stale`,
+`backup_died`, `compact`, `compact_failed`, `compact_busy`,
+`compact_killed`, `compact_died`, `restart_ms`, `swept`, `sweep_owed`,
 `sweep_failed`) and a kill's parts, each timed apart -- docker's kill and
 wait (`kill_ms`), the verify (`verify_ms`) and the server's own part,
 `docker start` to answering (`start_ms`) -- with `kill_compacting`,
 `kill_sync_ms` and `replica_back_ms`; `died`, `oom` and `r_died` (a server
-gone that the run did not kill, the kernel's OOM kills of it); the clock's
+gone that the run did not kill, the kernel's OOM kills of it), and a
+death's own (`death_oom`, `death_exit`, `death_at_s`, `death_source` --
+1 the first connection it closed, 2 Docker's `die`, 3 its `FinishedAt`, 4
+the minute's look -- `death_kill_due_s`, `death_announced_ms` (found in
+the kill's announced second), `death_answer_ms`, `death_docker_ms`,
+`death_down`, `death_anon`, `death_dirty`, `death_sync_ms`); the clock's
 `clock_off_ms`, `clock_rtt_ms` and `clock_step`; and what else used the
 machine: `load1`, `load5`, `others_host` (this host's other processes, in
 cores, by `ps` -- on macOS a decaying average of about the minute, every
@@ -941,11 +1105,12 @@ published ports, which Docker Desktop's `initd` does in the VM, the
 kernel's vsock work, and the run's look, verify and backup containers --
 about a core all through the third dry run, 2.6 times the server's own
 CPU for the same `/_health` requests where measured beside one). `:start` says
-the run's settings (`replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute) and `peak_auto_compacts`, `:end` closes a
+the run's settings (`replica_threads`, `replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute) and `peak_auto_compacts`, `:end` closes a
 finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
 `p99_restart` and `restart_ops`, `p99_restart_replica` and
 `restart_replica_ops`, `p99_restart_behind` and
-`restart_behind_ops`, `p99_r_compact` and `r_compact_ops`, `r_held_max`,
+`restart_behind_ops`, `p99_r_compact` and `r_compact_ops`,
+`p99_r_compact_own` and `r_compact_own_n`, `r_held_max`,
 and `restart_ms_max` over the run, both files verified after
 both stopped as a supervisor stops them, and `replica_differs`: the same
 read of `usertable`, `counters` and `docs` in id order (`order id`: a page
@@ -984,7 +1149,11 @@ line -- and the replica's, never killed and its feed full by the first
 hour's end, beyond its engine's own (`r_memory_bytes`), from the median of
 its first five settled quiet looks from minute 60 to the median of every
 five in a row after between two of its compactions, against 5% of its
-`r_rss_anon` at the first five -- a quiet look
+`r_rss_anon` at the first five -- each line saying beside it, not
+judged, the most its looks a second found: the most anonymous memory and
+dirty pages and the minute whose two came nearest `--memory` (`peaks`;
+the criterion holds growth, and a server the limit killed fails its own
+line) -- a quiet look
 being none in a minute a compact ran or was writing at the look
 (`begin_beside` clones each store), so that one look in a compaction never
 decides, and a settled one none of the five after one of the replica's
@@ -1036,7 +1205,8 @@ the second dry run failed the primary on one look, minute 17, 7 more on
 the VM's 8 CPUs, back the next minute and 0 within each life; no error -- a
 status other than a 2xx is one wherever it falls, and so is a connection
 error or a 503 saying when to come back outside a restart's window, which
-within one is `down`; no mismatch (and the minutes the VM's clock stepped
+within one is `down`, and so is one a death cut before it was found,
+said (`death_down`); no mismatch (and the minutes the VM's clock stepped
 said beside it); every stream held and all 64 open each minute; the
 replica connected each minute and within 5 s of the primary, its first
 follow within 1 800 s, back after each restart within `--replica-back-max`,
@@ -1061,14 +1231,22 @@ minutes for the schedule's compact, and the loop, 114 s behind at that
 look, was 166 s behind at the kill; the kills and verifies
 the schedule owes for the run's length (`(minutes - 1) / 30`), its
 compacts (one the server's own turned away counting), the kills that cut
-a compact, backups whose restored records held and restores; every verify,
+a compact, backups whose restored records held and restores -- a kill
+that found its server dead, a compact or a backup a death cut, counted
+with the death, and each death's restart verified beside the kills'; every verify,
 backup and restore clean; match and near as a scan; every key read back,
 after each restart and at the end; no server died and none was
-OOM-killed; the reads the replica's own compactions held, and their
+OOM-killed, each death named -- its minute, how it ended, how long before
+the kill due, what timed it -- with the mismatches and the writes a read
+showed gone from its line to the next restart's, a failure of its own
+apart from the planned kills (above); the reads the replica's own compactions held, and their
 workers' backlog, within the longest compaction the watch saw end -- with
 the restart's span where a kill's restart met it (`r_compact_kill_ms`) --
 or the one open at the last look so far where the watch was looking then,
-and two seconds (`p99_r_compact`; none, nothing judged); the replica's
+and two seconds (`p99_r_compact`; none, nothing judged), said beside it
+what the replica answered those reads in from their send
+(`p99_r_compact_own`), each lane's most behind its schedule and the
+replica's faults and least page cache in their seconds; the replica's
 compactions as its counter counted them, seen to end at its compaction
 thread, but for one open at the last look the watch was looking at -- a
 run whose watch never looked fails as not watched, and so does one with a

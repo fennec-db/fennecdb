@@ -21,7 +21,7 @@
 # KEEP_GOING=1. Each setting is an environment variable:
 #
 #   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=30 RECORDS=1000000
-#   MEMORY=512m THREADS=32 SUBSCRIPTIONS=64 KILL_EVERY=30
+#   MEMORY=512m THREADS=32 REPLICA_THREADS=128 SUBSCRIPTIONS=64 KILL_EVERY=30
 #   COMPACT_EVERY=20 BACKUP_EVERY=120 BACKUP_AT=50 KILL_IN_COMPACT_EVERY=90
 #   LOSS_MS=650 (250; 0 under always) RESTART_MAX=120 RUN=p6 QUIET_LOAD=4
 #   KEEP_GOING=0 OUT=crates/fennec-bench/results/soak.tsv
@@ -104,6 +104,9 @@ PEAK_MINUTES=${PEAK_MINUTES:-30}
 RECORDS=${RECORDS:-1000000}
 MEMORY=${MEMORY:-512m}
 THREADS=${THREADS:-32}
+# The reads through the replica on connections and a schedule of their own
+# (`ycsb soak --replica-threads`); 0 puts them back in the pool.
+REPLICA_THREADS=${REPLICA_THREADS:-128}
 SUBSCRIPTIONS=${SUBSCRIPTIONS:-64}
 KILL_EVERY=${KILL_EVERY:-30}
 COMPACT_EVERY=${COMPACT_EVERY:-20}
@@ -185,7 +188,7 @@ cleanup() {
     rm -f "$ENV_MARKER" "$ENV_MARKER.hung" "$ENV_PROGRESS"
     for n in $names; do
         cs=
-        for c in server replica server-look replica-look verify backup restored sampler replica-watch; do
+        for c in server replica server-look replica-look verify backup restored sampler replica-watch server-mem replica-mem; do
             cs="$cs $n-$c"
         done
         # shellcheck disable=SC2086
@@ -234,7 +237,7 @@ step "$cargo" build --release --offline -q -p fennec-bench --bin ycsb --no-defau
 # tree, by its id: a build from another tree moving the tag meanwhile
 # changes nothing a run starts.
 common="--sync $sync --records $RECORDS --memory $MEMORY --threads $THREADS
-    --subscriptions $SUBSCRIPTIONS --tools $NAME-tools --out $OUT --kept $KEPT
+    --replica-threads $REPLICA_THREADS --subscriptions $SUBSCRIPTIONS --tools $NAME-tools --out $OUT --kept $KEPT
     --image $ENV_IMAGE
     --progress $ENV_PROGRESS --loss-ms $LOSS_MS --restart-max $RESTART_MAX
     --logs $LOGS"
@@ -256,7 +259,7 @@ hung() {
 soak_names() {
     names="$names $1"
     ENV_VOLUME=$1-data
-    ENV_KILL="$1-server $1-replica $1-server-look $1-replica-look $1-verify $1-backup $1-restored $1-sampler $1-replica-watch"
+    ENV_KILL="$1-server $1-replica $1-server-look $1-replica-look $1-verify $1-backup $1-restored $1-sampler $1-replica-watch $1-server-mem $1-replica-mem"
     : >"$ENV_PROGRESS"
 }
 
