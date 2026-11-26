@@ -403,3 +403,38 @@ fn a_load_out_of_order_ends_dense() {
     assert_eq!(sparse(&db), 0);
     assert!(index_bytes(&db) <= as_from_one(30_000));
 }
+
+/// A block that writes more rows far from the collection's than it holds
+/// -- the far run taking the array, the rows going into the sparse map --
+/// put back: the rows come back into the array, none sparse, and so do
+/// those written after them. Before, all 10 000 stayed sparse, the index
+/// 619 KB and `get s limit 1` 126 µs in release, and the next 5 000 rows
+/// went sparse too. So too where the far rows land and are deleted after.
+#[test]
+fn a_far_run_put_back_or_deleted_leaves_the_rows_dense() {
+    let far = 5_000_000u64;
+    for lands in [false, true] {
+        let mut db = Database::new();
+        exec(&mut db, "create collection s (k int)");
+        grown(&mut db, 1, 10_000);
+        db.begin().unwrap();
+        let put = stmt("put s {id: $1, k: $1}");
+        for id in far..far + 15_000 {
+            db.execute_with(&put, &[Value::Int(id as i64)]).unwrap();
+        }
+        assert_eq!(sparse(&db), 10_000, "the far run takes the array");
+        match lands {
+            false => db.rollback(),
+            true => {
+                db.commit().unwrap();
+                exec(&mut db, &format!("del s where id >= {far}"));
+            }
+        }
+        assert_eq!(rows(&db), each(1, 10_000), "lands: {lands}");
+        assert_eq!(sparse(&db), 0, "lands: {lands}");
+        assert!(index_bytes(&db) <= as_from_one(10_000), "lands: {lands}");
+        written(&mut db, 10_001..=15_000);
+        assert_eq!(sparse(&db), 0, "lands: {lands}");
+        assert_eq!(ids(&db, "get s select id limit 2"), [1, 2]);
+    }
+}

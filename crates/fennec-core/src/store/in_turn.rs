@@ -350,9 +350,10 @@ impl Store {
     /// in their bucket, by id, from 0: `sparse` every sparse id and its
     /// length, ascending, of which the bucket's run is found by halving --
     /// those below the dense range placed before it, as `IdIndex::iter`
-    /// lists them, and those above after.
+    /// lists them, and those above after. The range is the array from its
+    /// first held slot: a sparse id may be in the room before it.
     fn places(&self, first: DocId, end: DocId, sparse: &[(DocId, u32)]) -> Places {
-        let (dense, floor) = (&self.index.dense, self.index.floor);
+        let (dense, floor) = self.index.held();
         let slot = |id: DocId| (id.max(floor) - floor).min(dense.len() as u64) as usize;
         let (lo, hi) = (slot(first), slot(end));
         let mut at = 0u64;
