@@ -98,11 +98,12 @@ const HEAD_MAX: usize = 21;
 const TAKEN: u32 = u32::MAX;
 
 /// How a compact copies a store's live records into an out that asks for
-/// them in turn ([`ImageOut::in_turn`]): the scratch file's name and the
-/// budget of memory.
+/// them in turn ([`ImageOut::in_turn`]): the scratch file's name, the
+/// budget of memory, and the scratch file's step (`fs::past_step`).
 pub struct InTurn {
     temp: PathBuf,
     budget: usize,
+    step: u64,
 }
 
 impl InTurn {
@@ -113,20 +114,21 @@ impl InTurn {
     /// `temp`'s name -- made only then, so an out that asks costs a compact
     /// that does not copy in turn no allocation.
     pub fn at(file: u64, live: u64, temp: impl FnOnce() -> PathBuf) -> Option<InTurn> {
-        let budget = match ASSUMED.with(|a| a.get()) {
-            Some(assumed) => assumed?,
+        let (budget, room) = match ASSUMED.with(|a| a.get()) {
+            Some(assumed) => (assumed?, crate::cache::room()),
             None if live < FROM as u64 => return None,
             None => {
                 let room = crate::cache::room();
                 // Asked only where it decides: a file past the room is
                 // past it whatever the faults.
                 let faulting = room.is_some_and(|r| file <= r) && crate::cache::faulting();
-                budget(file, room, faulting)?
+                (budget(file, room, faulting)?, room)
             }
         };
         Some(InTurn {
             temp: temp(),
             budget,
+            step: crate::fs::past_step(room),
         })
     }
 }
@@ -478,7 +480,7 @@ impl Store {
         out: &mut dyn ImageOut,
     ) -> Result<bool> {
         let total = buckets.last().map_or(0, |b| b.at + b.len);
-        let Some(mut scratch) = Scratch::create(&t.temp, 2 * total + MARGIN) else {
+        let Some(mut scratch) = Scratch::create(&t.temp, 2 * total + MARGIN, t.step) else {
             return Ok(false);
         };
         let broken = BROKEN.with(|b| b.take());
@@ -578,6 +580,12 @@ impl Store {
             }
         }
         let whole = met && !astray && buckets.iter().zip(&put).all(|(b, &p)| p == b.len);
+        // Its last step on disk and let go of before the read back fills the
+        // side file's first: left dirty, the two held two steps of a cgroup
+        // that cannot reclaim them. One not whole is closed, never read.
+        if whole {
+            scratch.settle()?;
+        }
         Ok(whole.then_some(sums))
     }
 
@@ -794,6 +802,11 @@ mod tests {
         assert!(InTurn::at(2 << 20, from - 1, || temp.to_path_buf()).is_none());
         let t = InTurn::at(2 << 20, from, || temp.to_path_buf()).expect("past the room");
         assert_eq!((t.temp.as_path(), t.budget), (temp, 4 << 20));
+        // The scratch file's step follows the same room.
+        assert_eq!(t.step, crate::fs::past_step(Some(1 << 20)));
+        crate::cache::assume(Some(Some(160 << 20)));
+        let t = InTurn::at(200 << 20, from, || temp.to_path_buf()).expect("past the room");
+        assert_eq!((t.budget, t.step), (16 << 20, 10 << 20));
         crate::cache::assume(Some(None));
         assert!(InTurn::at(2 << 20, from, || temp.to_path_buf()).is_none());
         assume(Some(Some(7)));
@@ -808,8 +821,13 @@ mod tests {
         crate::cache::assume(None);
     }
 
+    /// The scratch file's step in the tests: a few records, so that every
+    /// copy through one goes to disk in steps, a record across two of them
+    /// and the one longer than a bucket across many.
+    const STEP: u64 = 1_000;
+
     /// An out that asks for the records in turn, through a scratch file at
-    /// `temp`, in `budget` bytes.
+    /// `temp` written [`STEP`] at a time, in `budget` bytes.
     struct Asking {
         bytes: Vec<u8>,
         temp: PathBuf,
@@ -831,6 +849,7 @@ mod tests {
             Some(InTurn {
                 temp: self.temp.clone(),
                 budget: self.budget,
+                step: STEP,
             })
         }
     }
@@ -913,7 +932,9 @@ mod tests {
 
     /// The copy in turn writes the bytes the walk by id writes, through a
     /// scratch file in buckets of every size down to one record each, and in
-    /// memory where one bucket holds them; the scratch file leaves no name.
+    /// memory where one bucket holds them; the scratch file leaves no name,
+    /// and each deal ends with it settled -- on disk, its pages let go of
+    /// (`fs::Scratch::settle`) -- before a bucket is read back.
     #[test]
     fn a_copy_in_turn_writes_what_the_walk_by_id_writes() {
         let st = scattered();
@@ -924,6 +945,7 @@ mod tests {
         assert_eq!(by_id.len(), st.live_len());
         let (_dir, path) = temp("same");
         let before = copied();
+        let settled = crate::fs::scratch_settled();
         for budget in [1, 700, 4_000, 20_000, 1 << 20] {
             let mut out = Asking {
                 bytes: Vec::new(),
@@ -936,6 +958,7 @@ mod tests {
         }
         let (s, m) = copied();
         assert_eq!((s - before.0, m - before.1), (4, 1));
+        assert_eq!(crate::fs::scratch_settled() - settled, 4);
     }
 
     /// A scratch file that refuses a write, or reads the first bucket back

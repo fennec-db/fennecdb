@@ -2600,7 +2600,7 @@ fn rewrite_beside(
             // or the old file alone, where the process waits for the disk.
             if b.mapped && room.is_some_and(|r| need > r || crate::cache::faulting()) {
                 b.past = true;
-                b.side.past_cache();
+                b.side.past_cache(room);
             }
             // Past the room, the old file read from its start to its end
             // rather than at random by id (`store::InTurn`).
