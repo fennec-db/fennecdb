@@ -336,6 +336,7 @@ Covers `crates/fennec-core/src/engine/`.
 - A file compacts itself once half of it is dead
 - A file is compacted before it outgrows the page cache
 - Dead bytes are whole frames
+- The id floor
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 

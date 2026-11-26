@@ -7,7 +7,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 ## Files
 
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate -- how deep a value read off the bytes nests, a SQLite file's lengths -- the build profiles and the pinned toolchain
-- [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
+- [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction, the id index's floor and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, a block as one record, and the model every write and index is held to
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, a node's tenants each synced on a thread of its own, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
@@ -220,3 +220,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 171. [The Flutter plugin ships each platform's library once, and no symbolic link](integrations.md#flutter-plugin) (added after the move, under *Integrations and deploy*)
 172. [A node syncs each tenant on a thread of its own](durability.md#a-nodes-syncs) (added after the move, under *Durability*)
 173. [A sealed chunk opens only after its own, and a replica keeps a store it cannot restore](js-client.md#sealed-chunks-in-a-chain) (added after the move, under *The JS client and Cloudflare*)
+174. [The id floor](storage.md#the-id-indexs-floor) (added after the move, under *Storage*)

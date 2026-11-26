@@ -1,6 +1,6 @@
 # Storage
 
-The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Storage*: the mapped file, the handover of writes to it, a block's spills, compaction and the file format; the rules of the handover, of maintenance beside the database and of compaction are in [crates/fennec-core/src/engine/CLAUDE.md](../../crates/fennec-core/src/engine/CLAUDE.md), beside `handover.rs`, `maintenance.rs` and `garbage.rs`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Storage*: the mapped file, the handover of writes to it, a block's spills, compaction and the file format; the rules of the handover, of maintenance beside the database, of compaction and of the id index's floor are in [crates/fennec-core/src/engine/CLAUDE.md](../../crates/fennec-core/src/engine/CLAUDE.md), beside `handover.rs`, `maintenance.rs` and `garbage.rs`, and `store.rs`'s `IdIndex`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## The mapped file
 
@@ -1164,6 +1164,136 @@ read back to be written again. A scratch file a bucket: a descriptor each,
 past a few hundred buckets more than a process may hold, and a name each
 to leave.
 
+## The id index's floor
+
+**The id index's dense array starts at a floor, the id of its first
+slot, and the empty slots before its first held one are cut.** A
+collection gives its ids in turn from 1, so the index that finds a
+document by id (`store::IdIndex`) is an array of 12-byte locations,
+`dense[id - floor]`, with a sparse map beside it for ids given from
+outside far from it. Through 0.2.0 the array started at 1 and spanned
+every id the collection had given, its deleted rows' slots held empty: a
+collection whose ids climb while its oldest rows go -- sessions under
+`@ttl`, a queue, an outbox -- grew 12 bytes for every row it made,
+whatever it held. The P6 soak's `sessions`, 55 rows a second each swept a
+minute after it was made, held a few thousand rows and grew its index by
+57 MB a day, and nothing gave it back: a compact's relocation kept the
+array as it stood, an open of a file never compacted built it from 1
+again, and an open of a compacted one, whose first id was past
+`MAX_DENSE_GAP`, put every row in the sparse map, a hash lookup each from
+then on.
+
+**What moves the floor up**, only ever past empty slots:
+
+- *A delete.* `lead` is the first held slot. A delete of it looks for the
+  next held one (`IdIndex::past_lead`) and, once the empty run before it
+  is `CUT_FROM` slots (4 096, 48 KB) and half the array or more, moves
+  the rest to the front and the floor past the run (`cut`), giving back
+  the room past four times what is left, never below `CUT_FROM`'s. Half:
+  a cut moves at most as many slots as it drops, so however long the ids
+  climb a slot is moved a bounded number of times, and the array spans
+  at most about twice its first held id to its last. `CUT_FROM`: under it
+  a cut would move a large array to give back less than one gap's growth.
+  An array left with no location is let go of at once whatever its
+  length, nothing to move, so a queue that empties at every write keeps
+  no slot. It is a write's own, under the write lock, because a compact
+  may never come: a file under 64 MB, `--auto-compact` off, an app's
+  native library, the browser module, where only the page asks one.
+- *A compact's or a checkpoint's relocation* (`IdIndex::relocate`), which
+  walks the array anyway: every empty slot before the first held one.
+- *An open.* An image's index lists the live ids in order, and the open
+  starts the array at the first: in shares (`adopt_shares`, the first
+  document read ahead and each share's stretch counted from it -- an image
+  whose ids from there leave the array a quarter empty read in turn, as
+  before), or in turn, where an index holding nothing takes its first id
+  as its floor (`insert_apart`), as a store compacted in memory
+  (`Store::compacted`) does. The writes the open walks after the image go
+  through the delete's rule.
+
+**What moves it down** is a write of an id below it. Within
+`MAX_DENSE_GAP` of the floor the array is lowered by the gap or a quarter
+of the slots it holds, whichever is more, never below 1 (`IdIndex::lower`)
+-- so ids written each below the one before, a block's deletes put back
+in turn, move the array once a quarter they fill, not once an id, and one
+id written there adds a quarter at most -- and the sparse ids it then
+covers move in. A lowering takes only slots the array from 1 held, so the
+array never holds more than it did. Further below, the id goes into the
+sparse map, which so holds ids on both sides of the dense range: the
+browser client's optimistic rows sit at 2^52, and an index that started
+there, given id 1, would otherwise ask for 2^52 slots. Every walk lists
+the sparse ids below the range first (`IdIndex::sparse_apart`: `iter`,
+`iter_from`, `relocate`; and the copy in turn's `places`, the one reader
+of the array outside `IdIndex`).
+
+An id below the floor reads as absent: `id.wrapping_sub(floor)` passes
+every slot, as an id past the end does, and the sparse map holds it only
+where it was written there. A lookup is the subtraction it was --
+`id - 1` became `id - floor` -- with the floor read beside the array.
+
+**Every reader of the array** goes through the floor. Lookups,
+`contains`, `remove` and the writes' `insert`; the walks in id order; a
+pin (`Store::pinned`), a compaction's stores (`begin_beside`) and a
+stream's rows clone the index with its floor, so a cut after the clone
+moves nothing it reads (`tests/id_floor.rs`, a pinned read across the
+move); a block put back points its ids back through `insert` and `remove`
+(`Store::point`), which lower the floor again where the block's deletes
+cut it (a block put back across the move); a replica's `apply` lands its
+primary's frames through the same calls (a replica holding its primary's
+index). The file format does not change: an image's index and the frames
+say ids, never slots. `store::tests::the_id_index_answers_as_a_map_while_its_floor_moves`
+holds the index to a map through 150 000 writes of every kind, its floor
+moved hundreds of times either way, a clone taken before each run of
+front deletes read after it.
+
+**`lead` and `after`.** `lead` is exact -- the first held slot, or the
+array's length where it is empty -- since a cut drops what is before it:
+an insert into an empty slot before it moves it there. `after` says the
+slots strictly between `lead` and it are empty, and the look for the next
+held slot goes on from there: without it an id deleted and written again
+at the front walked the empty run behind it at every delete, however long,
+where the array from 1 did nothing. A write keeps both in a comparison or
+two: a new id at the end, the ids' usual climb, in one; a delete of any
+but the first held id in one.
+
+**Rejected.**
+
+- *Cutting at a compact and an open alone.* No cost on a write, and no
+  bound where no compact comes (above).
+- *A ring (`VecDeque`).* Gives the front back with no move, but every
+  lookup wraps its index, a comparison and a subtraction more than the
+  floor's one load.
+- *Every id below the floor lowering it.* The 2^52 rows above.
+- *Lowering by the id alone, or by the whole array.* By the id, a block's
+  deletes put back in turn moved the array once an id; by the array, one
+  id written just below a large one doubled it.
+- *Giving the room back at every cut.* A queue that empties and fills
+  again would reallocate its array at every write.
+
+**What it costs.** A million sessions made one after another, each
+deleted 3 000 writes after it was made, through `put` and `del ... where
+id = $1` on a file (aarch64 macOS, release): 12 582 912 bytes of index on
+main at the end and at most, the same after a compact, 111 264 after an
+open of the compacted file (every row in the sparse map) and 12 582 912
+after an open of one never compacted; here 98 304 at the end and at most
+(8 192 slots), the same after a compact, 36 000 after an open of the
+compacted file (3 000 slots, the rows dense again) and 98 304 after an
+open of one never compacted. A lookup reads the floor beside the array,
+where it subtracted 1; a new id at the end asks one comparison more, a
+delete one, and CI's perf job holds the instructions an op. The browser
+module grew 2 423 bytes raw, 1 232 gzip and 948 brotli (845.7 KB, `make
+size-report BASE=main`), most of them in the rare paths kept apart
+(`insert_apart` and the take-over a lowering asks) and the walks' third
+part; on aarch64 macOS fennec-server's code grew 8 256 bytes (0.16%) and
+the native library's 9 344 (0.39%), each file one 16 KiB page.
+
+**Left as it was.** The text and vector indexes' per-document numbers
+(`DocMap`, 4 bytes a slot) span the ids from 1 too; they are derived,
+built from the live documents at their first read or an open, where ids
+past the gap go to their sparse map, and a sessions collection seldom
+holds a text or a vector field. An image whose first id is far below the
+rest -- one row kept from long ago -- starts the array there at an open
+and puts the rest in the sparse map, as an array from 1 did.
+
 ## File format
 
 **File format** (see README *File format*): every record is
@@ -2116,9 +2246,11 @@ core, each into its own stretch of the dense id array (`adopt_shares`). Read
 in turn through `get_uvarint` and `insert`, the index was 9.5 ms of a
 million rows' open; a byte read inline and the next id pushed onto the dense
 array (`push_above`), 4.8; in shares, a million rows of no vector open in
-1.3 ms against 10.3 (`make opens-bench`). Ids that would leave the array a
-quarter empty or reach the sparse map are read in turn, as `insert` places
-them, and so is an index whose shares do not read as it says. A binary that
+1.3 ms against 10.3 (`make opens-bench`). The array starts at the first
+document's id ([the id index's floor](#the-id-indexs-floor)); ids that would
+leave it from there a quarter empty or reach the sparse map are read in
+turn, as `insert` places them, and so is an index whose shares do not read
+as it says. A binary that
 knows only `FRAMES_MARK` walks the record of a `FRAMES_SPLIT` image, as it
 walks one with no index.
 

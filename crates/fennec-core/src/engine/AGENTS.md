@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) and the id index's floor (`store.rs`'s `IdIndex`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -101,3 +101,15 @@ live, and `Garbage::live`, `fennec_data_bytes` and the compact's trigger
 read it high. `store::tests::the_live_bytes_are_the_live_frames_to_the_byte`
 holds it through appends, an undone block and every load; a file an older
 build wrote counts its dead heads short until its next compact.
+
+**[The id floor](../../../../docs/design/storage.md#the-id-indexs-floor)**
+is where a store's id index starts (`store::IdIndex`): its dense array
+holds the ids from its first held one, the empty slots before that cut
+once they are `CUT_FROM` and half the array (`past_lead`), at a
+compact's or a checkpoint's relocation and by an open, which starts it
+at the first id it reads (`adopt_shares`, an empty index's first
+insert). An id below the floor reads as absent; written, it lowers the
+floor within `MAX_DENSE_GAP` and is sparse past it, so the sparse map
+holds ids on both sides, listed below the range first. Whatever reads
+the array goes through the floor -- `IdIndex`'s methods, and `in_turn`'s
+`places` -- never `id - 1`.

@@ -550,6 +550,13 @@ never sweeps — its writes are its primary's, the sweep's among them — and
 neither does a tenant that follows another node. The server's
 <code>Idempotency-Key</code>s are kept this way.</p>
 
+<p>A swept collection's ids climb as its rows go, and its id index, 12
+bytes an id, spans only its oldest row's id to its newest's: the slots of
+the rows swept away are let go of as the sweep passes them. A million
+sessions made one after another, 3 000 of them live, hold 98 KB of it;
+before, the index kept a slot for every session ever made, 57 MB more a
+day at 55 a second, which a <code>compact</code> did not give back.</p>
+
 <p>The ttl is a kind of index in the file (kind 9, the milliseconds behind
 it), so a binary from before it refuses the file rather than hand out the
 rows past their time. A write takes the place of a row past its time:
