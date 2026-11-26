@@ -355,7 +355,11 @@ time at the next open, never data.</p>
     the system has for its pages is compacted sooner, once a third of what
     the compact writes is dead, so its reads stay in memory: up to four
     bytes written a byte updated against two. Over a million 1 KB records updated at 150 000 a
-    second, each compact held the write lock 6 to 13 ms. An embedding
+    second, each compact held the write lock 6 to 13 ms. Such a compact
+    stops, writing nothing, while it rebuilds the vector graphs before it
+    writes the file, once the database is closed, its tenant deleted,
+    moved or made to follow, or the server stops; one writing the file
+    finishes first. An embedding
     program calls <code>compact_when_due</code> from a thread of its own or
     starts a <code>Compactor</code>; the browser module has no thread to run
     one, and drops the dead records from each image it persists.</li>

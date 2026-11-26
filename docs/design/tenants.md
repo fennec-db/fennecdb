@@ -91,7 +91,9 @@ take-back -- and the shutdown let the database go first (`held::let_go`),
 and the rebuild gives up at its next step rather than hold the file's lock
 through a build of up to a minute, where the delete waited the 5 s for the
 lock and answered 500, and a create of the name after it with it
-([hnsw.md](hnsw.md#worn-graphs)). The router cannot tell a node that is gone from one it cannot reach,
+([hnsw.md](hnsw.md#worn-graphs)). So does the node's own compact while it
+rebuilds its graphs, every worn one, before it writes the file: it then
+writes nothing; one writing the file finishes, as before. The router cannot tell a node that is gone from one it cannot reach,
 and guessing makes two primaries, so it promotes on its own only under a
 lease (`fennec-shard --auto-failover`, nodes `fennec-server --dir --lease`;
 `fennec-shard/src/lease.rs`, `fennec-http/src/lease.rs`): a node stops

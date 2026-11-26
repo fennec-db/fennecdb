@@ -656,8 +656,10 @@ rebuild, or holding a document it cannot read, is kept as it stands, and
 tried again once as many documents have been written as it holds deleted
 entries; another index is rebuilt meanwhile as it wears. A tenant
 deleted, moved or made to follow, or the server stopping, stops a rebuild
-under way rather than wait for it. A <code>compact</code> rebuilds such an
-index too, whichever collection it names. The line names the file or the
+under way rather than wait for it, and the server's own compact while it
+rebuilds the indexes, before it writes the file: it then writes nothing,
+and one already writing the file finishes first. A <code>compact</code>
+rebuilds such an index too, whichever collection it names. The line names the file or the
 tenant:</p>
 
 <pre data-lang="text" data-label="logs">/data/db.fennec: 1 graph rebuilt, 20903 tombstones dropped in 421.0ms, the lock held 1.7ms at most (the build's copy 7.2µs, rounds 12.4µs, put in place 1.7ms)</pre>

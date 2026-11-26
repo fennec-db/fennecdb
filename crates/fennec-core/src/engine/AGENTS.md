@@ -73,9 +73,12 @@ compacts run, never on the graph keeper's thread: a server's compacter
 after each compact look, a replica's too, the native library's
 `Compactor` where no compact is due; every `compact` rebuilds each worn
 graph, whatever it names. Whatever lets the database go stops a rebuild
-at its next step, placing no graph (`rebuild_worn_until`, its stop
-latched): the `Compactor`'s drop, a tenant's release, a shutdown
-(`held::let_go`, `held::stops`).
+at its next step, placing no graph (`rebuild_worn_until`), and a host's
+compact in its graph phase, which then writes nothing and never begins
+its rewrite (`compact_when_due_until`) -- a rewrite begun runs to its end
+-- each stop latched in `graphs_online`, a word taken back holding: the
+`Compactor`'s drop, a tenant's release, a shutdown (`held::let_go`,
+`held::stops`).
 
 **[A file compacts itself once half of it is dead](../../../../docs/design/storage.md#compaction)**
 and 64 MB: `CompactPolicy` is the one rule, run beside the database by

@@ -507,19 +507,52 @@ at 100 000 x 768 (50 s over some 200 batches) -- before each round, and
 under the write
 lock before it places a graph; once told, it places none, puts off no
 graph's next try and answers `None`. What it was told holds for the rest
-of the rebuild: a release refused takes its word back
-(`held::taken_back`), and a round that left its links undone once told
-must never be placed. The `Compactor`'s drop tells it, which `fennec_close`
+of the rebuild, latched in `graphs_online`: a release refused takes its
+word back (`held::taken_back`), and a round that left its links undone
+once told must never be placed. The first build latched it in
+`rebuild_worn_until` and no test held it there: unlatched, a yes at one
+look alone -- the look before the last round's chunk, 106 of 108 at 100
+rows -- left that chunk unlinked, the look after said no, and the rebuild
+placed a graph missing a write made during it, a row holding its old
+vector. The `Compactor`'s drop tells it, which `fennec_close`
 is: a close on an app's UI thread as it goes to the background waited a
 rebuild of 20 000 x 768 out, seconds on a phone, an ANR or a watchdog's
 kill. So do a tenant's release -- a delete, a follow, a take-back -- and a
 node's or a file server's shutdown (`held::let_go`), and a shutdown's lock
 kept to the exit, which the rebuild would wait for for good
-(`held::stops`). Asked under the write lock last, a holder that tells it
-under its own read lock finds no graph placed after it, which is how
+(`held::stops`). The node's shutdown looks at its open tenants without
+waiting on a slot busy opening, closing or releasing, and a release
+refused meanwhile takes its let-go back; neither escapes, since the
+shutdown then takes each slot's lock and marks its tenant kept to the
+exit before it takes the tenant's write lock, and a rebuild so missed runs
+on only through the syncs of the tenants before it. Waiting on a busy
+slot there held every other tenant's let-go back a `RELEASE_WAIT`. Asked
+under the write lock last, a holder that tells it under its own read lock
+finds no graph placed after it, which is how
 `maintenance::tests::a_compactor_dropped_during_its_rebuild_leaves_the_graph`
-and `tenants::tests::a_delete_stops_a_rebuild_under_way_rather_than_wait_it_out`
-catch it under way.
+and `tenants::tests`' delete, follow, take-back and shutdown catch it
+under way.
+
+A host's compact asks the same stop in its graph phase
+(`compact_when_due_until`, `Database::compact_beside_until`): the
+`Compactor` and a server's compacter run a compact due before a rebuild,
+and its graph phase rebuilds every worn graph, as long as a rebuild takes.
+The first build passed it a stop that never said so, so a close during a
+compact's graph phase waited the whole build out, as long as the rebuild
+it was there to stop. Told there, the compact ends rather than go on to
+its rewrite, and answers `None`: nothing is written before the rewrite --
+the side file is the rewrite's own -- and no graph is placed, so the file
+and the graphs stand as the writes left them, as a stopped rebuild leaves
+them, and the compact is due again at the next look. Going on to the
+rewrite with the graphs kept as they stood was the other way: a close
+would then wait the rewrite out, 2.1 s a gigabyte, and the rewrite would
+write each worn graph's record, tombstones and all, which the graph phase
+is there to drop. A rewrite begun runs to its end, its file in place or
+none, as before; a `compact` statement is never told. The compact's stop,
+and the latch moved, cost `fennec-server` 896 bytes of code and the
+native library 704, each `__TEXT` the pages it was, on aarch64 macOS; the
+browser module, which compacts under the lock and asks no stop, is the
+same length, brotli 207 bytes more, inside the layout's noise.
 
 While a rebuild runs the heap holds the old graph, the live vectors copied
 out of the documents (a `Vec<f32>` each, `IndexCopy::vectors`) and the new
@@ -580,13 +613,19 @@ recall against the exact answer as it was; the writes made during it
 linked as the read lock would have linked them; a rebuild behind its
 writes kept and waiting out its tombstones' writes, and a kept graph
 putting off no other's rebuild; a block put back during it and after it;
-a compact naming another collection; a replica applying its primary's
-records during it; a stop at each of its looks, and a `Compactor` dropped
-during one and rebuilding on its own; a panic and a storage error; and
-the record's bytes moved from kept to dead, exactly. `vector::tests`
+a compact naming another collection; a replica's follower applying its
+primary's records on a thread of its own as the rebuild reads, links its
+rounds and places its graph, a message refused and put back among them;
+a refusal for a change meanwhile, in its own words; a stop at each of its
+looks, a stop said at one look alone at every look, and a `Compactor`
+dropped during one and rebuilding on its own; a compact told to stop in
+its graph phase, and a `Compactor` dropped there; a panic and a storage
+error; and the record's bytes moved from kept to dead, exactly. `vector::tests`
 hold the build's stop between its batches. `fennec-http`'s
 `tests/worn_graphs.rs` holds the server to it at its own floor and record
 pace -- 200 live nodes, fewer than a record waits for, so only the
 tombstones dropped make the rebuilt graph's record due -- the file holding
 a record of the worn graph first, and opened again restoring the rebuilt
-one to the byte; `tenants::tests` hold a delete to stopping one.
+one to the byte; `tenants::tests` hold a delete, a follow, a take-back
+and the shutdown -- told before its syncs, by its let-go -- to stopping
+one.
