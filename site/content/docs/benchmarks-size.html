@@ -50,7 +50,7 @@ its bundle.</p>
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">4999 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">5031 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>fennec</code> with no default feature, no import, backup or MCP: <code>make small</code></td><td class="n"><b>2983 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">8375 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>850 KB</b></td><td class="n"><b>292 KB</b></td><td class="n">353 KB</td></tr>
@@ -66,7 +66,7 @@ its bundle.</p>
 <details class="deep"><summary>Method, and where the module's bytes go</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>363 KB brotli</b> for both together. A binary you execute and an image
+<b>367 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
