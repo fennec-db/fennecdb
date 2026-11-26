@@ -815,9 +815,10 @@ MB against 33 to 41 before, and with the server's 11 MB alone at 34 to 37
 against 80; in a container of 1.5 GB, at 64 against 88 to 90. Each step is the compact's own <code>fdatasync</code>, so the
 server's own syncs are not left to flush the compact's writes: beside it,
 writes synced every 250 ms took 1.5 to 3.3 ms at the median, against 1.1 to
-17.8 before. Where memory is that tight, the compact itself takes a few
-percent longer for it, 2 to 5% on the disk it was measured on; from 1 GB of
-it up it takes as long as before.</p>
+17.8 before. Where memory is that tight, the compact itself takes longer
+for it: in the container of 512 MB with 300 MB of it the server's own,
+5.57 s at the median against 5.27 before, 5.7% longer, on the disk it was
+measured on; from 1 GB of it up it takes as long as before.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
