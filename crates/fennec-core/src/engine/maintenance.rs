@@ -595,7 +595,13 @@ impl Database {
             // Refused, the feature named, as `execute` refuses it.
             #[cfg(not(feature = "composite"))]
             Statement::CreateComposite { .. } => held(&|g| g.execute_with(stmt, &[])),
-            Statement::Compact(which) => compact_online(db, which.as_deref(), during, &mut holds),
+            Statement::Compact(which) => {
+                match compact_online(db, which.as_deref(), during, &mut holds, &|| false) {
+                    Ok(Some(done)) => Ok(done),
+                    Ok(None) => unreachable!("a compact never told to stop gives up"),
+                    Err(e) => Err(e),
+                }
+            }
             _ => return None,
         };
         Some((r, holds))
@@ -2153,12 +2159,15 @@ fn composite_online(
     r
 }
 
+/// `stop` as [`graphs_online`] asks it: told during the graph phase, the
+/// compact ends there, `None`, and its rewrite never begins.
 fn compact_online(
     db: &RwLock<Database>,
     which: Option<&str>,
     during: &mut dyn FnMut(),
     holds: &mut Holds,
-) -> Result<Response> {
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Response>> {
     // No record is copied under a lock: the graphs holding tombstones are
     // rebuilt here, beside the database, and the rewrite -- the live records
     // streamed into a new file, 2.1 s for 1 GB, a dropped field's values
@@ -2171,18 +2180,28 @@ fn compact_online(
     // compact kept them (docs/design/storage.md#dropped-places).
     #[cfg(not(target_arch = "wasm32"))]
     {
-        graphs_online(db, Rebuild::Compact(which), during, holds, &|| false)?;
-        rewrite_beside(db, which, during, holds)
+        // Told to stop in its graph phase, the compact ends there rather
+        // than go on to its rewrite: nothing is written before the rewrite
+        // -- the side file is its own -- and no graph placed, so the file
+        // and the graphs stand as the writes left them, as a rebuild
+        // stopped leaves them. Gone on to the rewrite, the graphs kept as
+        // they stood, a close waited the rewrite out, 2.1 s a gigabyte,
+        // and the rewrite wrote each worn graph's record, tombstones and
+        // all, which the graph phase is there to drop.
+        if graphs_online(db, Rebuild::Compact(which), during, holds, stop)?.is_none() {
+            return Ok(None);
+        }
+        rewrite_beside(db, which, during, holds).map(Some)
     }
     // The browser module has no thread to build beside the page and no
     // file to write beside its own, and maintains nothing (fennec-wasm
     // calls no `maintain`): its compact is `execute`'s, under the lock.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (during, holds);
+        let _ = (during, holds, stop);
         let mut g = write(db);
         g.may_write(true)?;
-        g.compact(which, true)
+        g.compact(which, true).map(Some)
     }
 }
 
@@ -2215,12 +2234,13 @@ impl Database {
 /// stood. Refused -- the database failed, a collection changed meanwhile --
 /// it places none: each graph stands as the writes left it.
 ///
-/// `stop` is a rebuild's (a compact's never says so): asked before each
-/// graph, as its vectors are read and linked, before each round and under
-/// the write lock before any graph is placed, and once it says to give up,
-/// `None`, every graph standing as the writes left it. Asked under that
-/// lock last, a holder letting the database go under its own -- a close,
-/// a release, a shutdown -- finds no graph placed after it.
+/// `stop` is a rebuild's, and a host's compact's (a statement's never says
+/// so): asked before each graph, as its vectors are read and linked,
+/// before each round and under the write lock before any graph is placed,
+/// and once it says to give up, `None`, every graph standing as the writes
+/// left it. Asked under that lock last, a holder letting the database go
+/// under its own -- a close, a release, a shutdown -- finds no graph placed
+/// after it.
 #[cfg(not(target_arch = "wasm32"))]
 fn graphs_online(
     db: &RwLock<Database>,
@@ -2233,6 +2253,18 @@ fn graphs_online(
         Rebuild::Compact(_) => changed_while_compacted,
         Rebuild::Worn => changed_while_rebuilt,
     };
+    // Once said, said for the rest of it, whatever `stop` says after: a
+    // release refused takes its word back (`held::taken_back`), and a round
+    // told to give up -- between its chunks (`graph_round`) or within one
+    // (`link_looked_up`) -- left the rest of its writes unlinked, a graph
+    // missing them that must never be placed: a yes at one look alone, the
+    // last round's chunk, placed one holding a row's old vector.
+    let said = std::cell::Cell::new(false);
+    let latched = || {
+        said.set(said.get() || stop());
+        said.get()
+    };
+    let stop: &dyn Fn() -> bool = &latched;
     let due = {
         let g = read(db);
         let began = Began::now();
@@ -2351,23 +2383,35 @@ impl Database {
         db: &RwLock<Database>,
         stop: &dyn Fn() -> bool,
     ) -> Option<(Result<Response>, Holds)> {
-        // Once said, said for the rest of the rebuild, whatever `stop` says
-        // after -- a release refused takes its word back: a round that
-        // linked by none of its writes once told to give up is never
-        // placed.
-        let said = std::cell::Cell::new(false);
-        let latched = || {
-            if !said.get() && stop() {
-                said.set(true);
-            }
-            said.get()
-        };
-        if latched() || !read(db).rebuild_due() {
+        // What it says from here on holds for the rest of the rebuild
+        // (`graphs_online`'s latch).
+        if stop() || !read(db).rebuild_due() {
             return None;
         }
         let mut holds = Holds::default();
-        match graphs_online(db, Rebuild::Worn, &mut || {}, &mut holds, &latched) {
+        match graphs_online(db, Rebuild::Worn, &mut || {}, &mut holds, stop) {
             Ok(Some(placed)) => Some((Ok(placed.said()), holds)),
+            Ok(None) => None,
+            Err(e) => Some((Err(e), holds)),
+        }
+    }
+
+    /// A `compact` of every collection beside the database, as
+    /// [`Self::maintain_held`] runs one, giving up in its graph phase once
+    /// `stop` says so, where [`Self::rebuild_worn_until`] asks it: then it
+    /// has written nothing and placed no graph, and answers `None`. What a
+    /// host's compact runs ([`super::compact_when_due_until`]): the
+    /// graph phase rebuilds every worn graph, as long as a rebuild takes --
+    /// 50 s at 100 000 x 768 -- which a close, a release or a shutdown
+    /// would otherwise wait out. A rewrite begun runs to its end, its file
+    /// in place or none.
+    pub(crate) fn compact_beside_until(
+        db: &RwLock<Database>,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<(Result<Response>, Holds)> {
+        let mut holds = Holds::default();
+        match compact_online(db, None, &mut || {}, &mut holds, stop) {
+            Ok(Some(done)) => Some((Ok(done), holds)),
             Ok(None) => None,
             Err(e) => Some((Err(e), holds)),
         }
@@ -4389,11 +4433,61 @@ mod tests {
         }
     }
 
+    /// How far a replica's follower, on a thread of its own, may apply its
+    /// primary's messages, and how far it has: a rebuild's seams let it go
+    /// on and wait for what it must have landed by then, never for less,
+    /// so the rest lands while the rebuild links.
+    #[derive(Default)]
+    struct Paced {
+        at: std::sync::Mutex<(usize, usize)>,
+        moved: std::sync::Condvar,
+    }
+
+    impl Paced {
+        /// Lets the follower apply up to `allowed` messages, and waits until
+        /// it applied `landed` of them.
+        fn let_on(&self, allowed: usize, landed: usize) {
+            let mut at = self.at.lock().expect("paced");
+            at.0 = at.0.max(allowed);
+            self.moved.notify_all();
+            let (at, waited) = self
+                .moved
+                .wait_timeout_while(at, Duration::from_secs(60), |at| at.1 < landed)
+                .expect("paced");
+            assert!(
+                !waited.timed_out(),
+                "the follower applied {} of {landed}",
+                at.1
+            );
+        }
+
+        /// The follower's wait to apply its `n`th message.
+        fn may_apply(&self, n: usize) {
+            let at = self.at.lock().expect("paced");
+            let (at, waited) = self
+                .moved
+                .wait_timeout_while(at, Duration::from_secs(60), |at| at.0 < n)
+                .expect("paced");
+            drop(at);
+            assert!(!waited.timed_out(), "never let apply message {n}");
+        }
+
+        fn applied(&self, n: usize) {
+            self.at.lock().expect("paced").1 = n;
+            self.moved.notify_all();
+        }
+    }
+
     /// A replica rebuilds its own worn graphs beside the records its
-    /// primary sends: those it applies during the rebuild are caught up
-    /// with as a writer's are -- the graph placed is the one the read lock
-    /// would have built, each row holding the vector its primary wrote --
-    /// and the rebuild writes nothing and moves no change, as its compact.
+    /// primary sends, applied on a thread of their own as its follower
+    /// applies them, while the rebuild reads its copy, links its rounds and
+    /// places its graph -- some landing as the build links, some as a round
+    /// does, some before the last round under the write lock -- one message
+    /// among them refused, its third record failing its sum, and put back
+    /// whole with the two before it that waited on the graph's batch, then
+    /// sent again whole. The graph placed holds every row with the vector
+    /// its primary wrote last, as a build of the rows at its end would, and
+    /// the rebuild writes nothing and moves no change, as its compact.
     #[test]
     fn a_replica_rebuilds_its_own_worn_graphs() {
         let fed = Fed::default();
@@ -4407,37 +4501,83 @@ mod tests {
         replica.follow(vec![(7, 0)]).expect("follow");
         replica.apply(&fed.take()).expect("the primary's records");
         assert_eq!(replica.change_seq(), primary.change_seq());
-        let before = vectors(&replica);
+        // Its primary's writes during the rebuild, a message a row: rows 1
+        // to 20, then 31 to 33 in one message -- refused, 33's record
+        // damaged on the way, and sent again whole -- then 21 to 30.
+        let mut row = |id: i64| {
+            put(&mut primary, id, vec_of(id, 2));
+            fed.take()
+        };
+        let mut sent: Vec<(Vec<u8>, bool)> = (1..=20).map(|id| (row(id), false)).collect();
+        let three: Vec<Vec<u8>> = (31..=33).map(&mut row).collect();
+        let mut damaged = three.concat();
+        let mid = damaged.len() - three[2].len() / 2;
+        damaged[mid] ^= 0x40;
+        sent.push((damaged, true));
+        sent.push((three.concat(), false));
+        sent.extend((21..=30).map(|id| (row(id), false)));
+        let all = sent.len();
         let lock = Arc::new(RwLock::new(replica));
-        let primary = Arc::new(std::sync::Mutex::new(primary));
-        let (p, feed) = (Arc::clone(&primary), fed.clone());
-        let (r, _) = rebuilt_beside(&lock, move |point, met, l| {
-            if (point, met) == ("read", 0) {
-                // Its primary's writes, a row at a time, each record
-                // applied as the replica's follower lands it.
-                let mut p = p.lock().expect("primary");
-                for id in 1..=10 {
-                    put(&mut p, id, vec_of(id, 2));
-                    writer(l).apply(&feed.take()).expect("applied");
+        let paced = Arc::new(Paced::default());
+        let follower = {
+            let (l, paced) = (Arc::clone(&lock), Arc::clone(&paced));
+            std::thread::spawn(move || {
+                for (n, (message, refused)) in (1..).zip(sent) {
+                    paced.may_apply(n);
+                    let mut g = l.write().expect("lock");
+                    let seq = g.change_seq();
+                    match refused {
+                        true => {
+                            let e = g.apply(&message).expect_err("a damaged record");
+                            assert!(e.to_string().contains("checksum"), "{e}");
+                            assert_eq!(g.change_seq(), seq, "a record of it landed");
+                        }
+                        false => {
+                            g.apply(&message).expect("applied");
+                        }
+                    }
+                    drop(g);
+                    paced.applied(n);
                 }
+            })
+        };
+        let (p, met) = (
+            Arc::clone(&paced),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let m = Arc::clone(&met);
+        let (r, _) = rebuilt_beside(&lock, move |point, at, _| {
+            let mut m = m.lock().expect("met");
+            match (point, at) {
+                // As the copy is read, and the build links: ten landed,
+                // five more let land meanwhile.
+                ("read", 0) => p.let_on(15, 10),
+                // As the first round links: the refused message and the
+                // one sent again landed, four more let land meanwhile.
+                ("round", 0) => p.let_on(26, 22),
+                // Past the rounds: the rest landed, for the write lock's
+                // last.
+                ("finish", 0) => p.let_on(all, all),
+                _ => return,
             }
+            m.push(point.to_string());
         });
-        assert_eq!(
-            r.expect("rebuilt"),
-            Response::Ok("1 graph rebuilt, 600 tombstones dropped".into())
+        follower.join().expect("the follower");
+        assert_eq!(*met.lock().expect("met"), ["read", "round", "finish"]);
+        let done = r.expect("rebuilt");
+        assert!(
+            matches!(&done, Response::Ok(m) if m.starts_with("1 graph rebuilt, ")),
+            "{done:?}"
         );
         let db = lock.read().expect("lock");
-        let primary = primary.lock().expect("primary");
         assert!(db.history().following);
         assert_eq!(db.change_seq(), primary.change_seq(), "no change its own");
-        let ix = &db.collection("g").expect("g").vectors["v"];
-        let written: Vec<DocId> = (1..=10).collect();
-        assert_eq!(
-            ix.serialize_graph(),
-            locked(&db, &before, &written, true).serialize_graph()
-        );
-        assert_eq!((ix.len(), ix.dead()), (300, 10));
         assert_eq!(vectors(&db), vectors(&primary));
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        assert_eq!(ix.dump(1..=300), rebuilt(&db).dump(1..=300));
+        assert_eq!(ix.len(), 300);
+        // Its 600 tombstones dropped, those left the writes' meanwhile.
+        assert!(ix.dead() < 600, "{}", ix.dead());
     }
 
     /// A rebuild told to stop gives up wherever it is -- before it looks,
@@ -4508,6 +4648,179 @@ mod tests {
         }
     }
 
+    /// A stop that says so at one look alone -- as a release refused takes
+    /// its word back (`held::taken_back`) -- holds for the rest of the
+    /// rebuild, whichever look it is: each gives up, the graph as the
+    /// writes left it. Unlatched, a yes at the look before a round's chunk
+    /// (`graph_round`), the look after it no, left the chunk unlinked and
+    /// placed a graph missing a write made during the rebuild, row 1
+    /// holding its old vector. 40 rows of a narrow beam, every look of
+    /// theirs in a few seconds of a debug build: at 100 of the default's,
+    /// 108 looks took a minute.
+    #[test]
+    fn a_stop_said_at_one_look_holds_for_the_rest_of_the_rebuild() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let worn = || {
+            let mut db = Database::new();
+            db.set_worn_floor(10);
+            let narrow = VectorIndexSpec {
+                m: 4,
+                ef_construction: 16,
+                ..VectorIndexSpec::default()
+            };
+            made_by(&mut db, "g", true, narrow);
+            for gen in [0, 10, 11] {
+                put_rows(&mut db, 1..=40, gen);
+            }
+            db
+        };
+        // The graph as the writes left it, by how many there were.
+        let graph = |db: &Database| db.collection("g").expect("g").vectors["v"].serialize_graph();
+        let wants: Vec<Vec<u8>> = (0..=2)
+            .map(|wrote| {
+                let mut want = worn();
+                for id in 1..=wrote {
+                    put(&mut want, id, vec_of(id, 4));
+                }
+                graph(&want)
+            })
+            .collect();
+        let run = |said_at: usize| {
+            let lock = Arc::new(RwLock::new(worn()));
+            let (looks, wrote) = (Cell::new(0), Rc::new(Cell::new(0)));
+            let w = Rc::clone(&wrote);
+            let r = seamed(
+                &lock,
+                move |point, met, l| match (point, met) {
+                    // Each a round's: the first as the copy is read, the
+                    // second as the first round links.
+                    ("read", 0) | ("round", 0) => {
+                        w.set(w.get() + 1);
+                        put(&mut writer(l), w.get(), vec_of(w.get(), 4));
+                    }
+                    _ => {}
+                },
+                || {
+                    Database::rebuild_worn_until(&lock, &|| {
+                        looks.set(looks.get() + 1);
+                        looks.get() == said_at
+                    })
+                },
+            );
+            (r, looks.get(), wrote.get(), lock)
+        };
+        let (r, looks, wrote, _) = run(0);
+        r.expect("due").0.expect("rebuilt");
+        assert_eq!(wrote, 2, "both rounds' writes");
+        for said_at in 1..=looks {
+            let (r, _, wrote, lock) = run(said_at);
+            let tag = format!("said at look {said_at} of {looks}");
+            assert!(r.is_none(), "{tag}: {:?}", r.map(|r| r.0));
+            let db = lock.read().expect("lock");
+            assert_eq!(graph(&db), wants[wrote as usize], "{tag}");
+            assert!(!db.maintaining(), "{tag}: a tail left");
+            assert_eq!(db.collection("g").expect("g").vectors["v"].worn_after(), 0);
+        }
+    }
+
+    /// A host's compact told to stop in its graph phase -- the
+    /// `Compactor`'s drop, a release, a shutdown -- ends there wherever it
+    /// is told, as a rebuild does: `None`, no graph placed and nothing
+    /// written, its dead records where they were and no tail left; never
+    /// told, it compacts. Gone on to its rewrite, a close waited out the
+    /// rebuild of every worn graph the graph phase makes, and then the
+    /// rewrite.
+    #[test]
+    fn a_compact_told_to_stop_in_its_graph_phase_ends_there() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let run = |stop_at: usize| {
+            let lock = Arc::new(RwLock::new(worn_in_blocks(100)));
+            let (looks, wrote) = (Cell::new(0), Rc::new(Cell::new(false)));
+            let w = Rc::clone(&wrote);
+            let r = seamed(
+                &lock,
+                move |point, met, l| {
+                    if (point, met) == ("read", 0) {
+                        put(&mut writer(l), 5, vec_of(5, 4));
+                        w.set(true);
+                    }
+                },
+                || {
+                    Database::compact_beside_until(&lock, &|| {
+                        looks.set(looks.get() + 1);
+                        looks.get() >= stop_at
+                    })
+                },
+            );
+            (r, looks.get(), wrote.get(), lock)
+        };
+        let stored = |db: &Database| db.collection("g").expect("g").store.total_bytes();
+        let held = stored(&worn_in_blocks(100));
+        let (r, looks, _, lock) = run(usize::MAX);
+        assert!(looks > 3, "its stop asked {looks} times");
+        let done = r.expect("ran").0.expect("compacted");
+        assert!(
+            matches!(&done, Response::Ok(m) if m.starts_with("compaction done")),
+            "{done:?}"
+        );
+        {
+            let db = lock.read().expect("lock");
+            assert!(stored(&db) < held, "no dead record dropped");
+            assert_eq!(db.collection("g").expect("g").vectors["v"].dead(), 1);
+        }
+        let graph = |db: &Database| db.collection("g").expect("g").vectors["v"].serialize_graph();
+        // The first look, before the first graph; at its read; at its build;
+        // the look after its rounds; and under the write lock, its last.
+        for stop_at in [1, 2, 3, looks / 2, looks - 1, looks] {
+            let (r, _, wrote, lock) = run(stop_at);
+            let tag = format!("stopped at look {stop_at} of {looks}");
+            assert!(r.is_none(), "{tag}: {:?}", r.map(|r| r.0));
+            let mut want = worn_in_blocks(100);
+            if wrote {
+                put(&mut want, 5, vec_of(5, 4));
+            }
+            let db = lock.read().expect("lock");
+            assert_eq!(graph(&db), graph(&want), "{tag}");
+            assert_eq!(stored(&db), stored(&want), "{tag}: dead records dropped");
+            assert!(!db.maintaining(), "{tag}: a tail left");
+        }
+    }
+
+    /// A rebuild refused where its collection changed meanwhile says so in
+    /// its own words -- no graph placed, and the next rebuild tries again:
+    /// no "run `compact` again", which nobody runs for it -- puts off no
+    /// rebuild, and the next one places the graph.
+    #[test]
+    fn a_rebuild_refused_for_a_change_says_the_next_one_tries_again() {
+        let lock = Arc::new(RwLock::new(worn_in_blocks(300)));
+        let (r, holds) = rebuilt_beside(&lock, |point, met, l| {
+            if (point, met) == ("read", 0) {
+                writer(l)
+                    .execute(&Statement::AlterCollection {
+                        collection: "g".into(),
+                        change: crate::query::Alter::AddField(Field::new("more", DataType::Text)),
+                    })
+                    .expect("altered");
+            }
+        });
+        let words = "`g` changed while its graph was rebuilt; no graph was placed, and the next \
+                     rebuild tries again";
+        assert!(matches!(&r, Err(Error::Query(m)) if m == words), "{r:?}");
+        assert!(holds.kept.is_empty());
+        {
+            let db = lock.read().expect("lock");
+            let ix = &db.collection("g").expect("g").vectors["v"];
+            assert_eq!((ix.len(), ix.dead(), ix.worn_after()), (300, 600, 0));
+            assert!(db.rebuild_due() && !db.maintaining());
+        }
+        let (r, _) = Database::rebuild_worn(&lock).expect("due");
+        r.expect("rebuilt");
+        let db = lock.read().expect("lock");
+        assert_eq!(db.collection("g").expect("g").vectors["v"].dead(), 0);
+    }
+
     /// The native library's thread rebuilds a worn graph where no compact
     /// is due, at a look of its own.
     #[test]
@@ -4551,6 +4864,56 @@ mod tests {
         drop(c);
         let db = db.read().expect("lock");
         assert_eq!(graph(&db), before, "as it stood");
+        assert!(!db.maintaining(), "a tail left");
+        let ix = &db.collection("g").expect("g").vectors["v"];
+        assert_eq!((ix.len(), ix.dead(), ix.worn_after()), (300, 600, 0));
+    }
+
+    /// Dropped while its compact rebuilds the graphs -- every worn one, as
+    /// long as a rebuild takes -- the `Compactor` gives up there rather
+    /// than build on: the drop returns with the graph as it stood and the
+    /// file not rewritten, its dead records where they were, no tail left.
+    /// The read lock is held from before the look until the stop is said,
+    /// so the compact, which takes the write lock only to place its graphs
+    /// and then for its rewrite, is in its graph phase when it is told. A
+    /// drop that waited the compact out would find the graph placed and
+    /// the file compacted.
+    #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
+    #[test]
+    fn a_compactor_dropped_in_its_compacts_graph_phase_leaves_file_and_graph() {
+        let scratch = crate::engine::unwinding::Scratch::new("fennecdb-compact-stopped");
+        let mut db = crate::fs::open(scratch.0.join("g.fennec")).expect("open");
+        db.set_worn_floor(10);
+        made(&mut db, "g", true);
+        for gen in [0, 10, 11] {
+            put_rows(&mut db, 1..=300, gen);
+        }
+        db.sync().expect("sync");
+        let policy = CompactPolicy {
+            ratio: 0.5,
+            floor: 0,
+            memory: false,
+        };
+        let db = Arc::new(RwLock::new(db));
+        let graph = |db: &Database| db.collection("g").expect("g").vectors["v"].serialize_graph();
+        let held = db.read().expect("lock");
+        assert!(held.compact_due(&policy));
+        let (before, garbage) = (graph(&held), held.garbage());
+        let every = Duration::from_millis(1);
+        let c = Compactor::start_every(&db, policy, every).expect("started");
+        let until = std::time::Instant::now() + Duration::from_secs(60);
+        while !held.maintaining() {
+            assert!(std::time::Instant::now() < until, "no compact began");
+            std::thread::sleep(every);
+        }
+        c.stop_looking();
+        drop(held);
+        drop(c);
+        let db = db.read().expect("lock");
+        assert_eq!(graph(&db), before, "as it stood");
+        assert_eq!(db.compactions(), 0, "the file rewritten");
+        let now = db.garbage();
+        assert_eq!((now.file, now.live), (garbage.file, garbage.live));
         assert!(!db.maintaining(), "a tail left");
         let ix = &db.collection("g").expect("g").vectors["v"];
         assert_eq!((ix.len(), ix.dead(), ix.worn_after()), (300, 600, 0));
