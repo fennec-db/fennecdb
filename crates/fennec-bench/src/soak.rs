@@ -10235,7 +10235,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             c,
             b.is_empty() && at_end == 0.0,
             format!(
-                "{:.0}{}{}{}{}",
+                "{:.0}{}{}{}{}{}",
                 total + at_end,
                 minutes_said(&b),
                 match at_end > 0.0 {
@@ -10251,6 +10251,13 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 match (key, sum("death_down")) {
                     ("errors", d) if d > 0.0 => format!(
                         "; {d:.0} connections a death of the primary cut before it was found counted with it, as down"
+                    ),
+                    _ => String::new(),
+                },
+                // A restart's catch-up's 504s are its own (`Catch`), said.
+                match (key, sum("catchup_down")) {
+                    ("errors", d) if d > 0.0 => format!(
+                        "; {d:.0} reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
                     ),
                     _ => String::new(),
                 }
@@ -16651,6 +16658,7 @@ mod tests {
                     ("death_source", 1.0),
                     ("death_kill_due_s", -12.3),
                     ("death_down", 96.0),
+                    ("catchup_down", 185.0),
                     ("compact_died", 1.0),
                     ("lost_writes", 1.0),
                     ("lost_ms_max", 150.0),
@@ -16694,7 +16702,7 @@ mod tests {
         );
         assert!(
             said(CRITERIA[9]).ends_with(
-                "; 96 connections a death of the primary cut before it was found counted with it, as down"
+                "; 96 connections a death of the primary cut before it was found counted with it, as down; 185 reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
             ),
             "{}",
             said(CRITERIA[9])
