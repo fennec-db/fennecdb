@@ -9,7 +9,7 @@ and sharing their disk syncs, a server that usually needs no cache in front of i
 a file per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
 Written in Rust with no dependencies but TLS's (rustls, in the server, the
-router and the shell), it runs inside a web page as 349 KB of
+router and the shell), it runs inside a web page as 353 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FennecQL**).
@@ -235,7 +235,7 @@ import { Fennec } from './fennec.js';
 const db = await Fennec.open('./fennec.wasm');
 ```
 
-349 KB of gzipped WebAssembly and an 88 KB gzipped client — no wasm-bindgen, no
+353 KB of gzipped WebAssembly and an 88 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fennecdb/web/client`, 12 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fennecdb.com/docs/javascript#packages)). With live
@@ -381,7 +381,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64 and arm64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM), its database kept in IndexedDB or a file of the origin's and held to what it keeps in Chrome, Firefox and Safari, the page reloaded in the middle of a write ([Keeping a database](https://fennecdb.com/docs/javascript#keeping)) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · an app (beta) for macOS on Apple silicon, Windows and Linux (`install.sh --app`, `install.ps1 -App`, or the release's DMG, zip or tarball, unsigned: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 349 KB gzip wasm + 88 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2983–4999 KB binary, x86-64 Linux as CI measures it · 8.58 MB container image |
+| **Runtime size** | 353 KB gzip wasm + 88 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2983–4999 KB binary, x86-64 Linux as CI measures it · 8.58 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 
