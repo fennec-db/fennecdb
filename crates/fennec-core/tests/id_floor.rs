@@ -301,3 +301,105 @@ fn a_replica_applying_climbing_ids_holds_the_primarys_index() {
     assert_eq!(index_bytes(&replica), index_bytes(&primary));
     assert!(index_bytes(&replica) <= BOUND);
 }
+
+/// The ids `s`'s id index holds in its sparse map: those every walk in id
+/// order collects and sorts.
+fn sparse(db: &Database) -> usize {
+    db.collection("s").unwrap().store.sparse_ids()
+}
+
+/// Rows `ids` written with their own ids, in one block, in that order.
+fn written(db: &mut Database, ids: impl IntoIterator<Item = u64>) {
+    let put = stmt("put s {id: $1, k: $1}");
+    db.begin().unwrap();
+    for id in ids {
+        db.execute_with(&put, &[Value::Int(id as i64)]).unwrap();
+    }
+    db.commit().unwrap();
+}
+
+/// Rows `from` to `to`, each its id as its `k`.
+fn each(from: u64, to: u64) -> Vec<(u64, Value)> {
+    (from..=to).map(|id| (id, Value::Int(id as i64))).collect()
+}
+
+/// The most an array from 1 to `last` holds, grown by doubling, and the
+/// room of a sparse map that held a few ids.
+fn as_from_one(last: u64) -> usize {
+    (last as usize).next_power_of_two() * 12 + 1_024
+}
+
+/// A delete from the highest id down that its `require` refuses is put
+/// back from the lowest up, under the floor its deletes cut: the rows come
+/// back into the array, none sparse, and the index holds no more than an
+/// array from 1. Before, the ids more than the gap below the floor stayed
+/// in the sparse map, each walk sorting them, until an open.
+#[test]
+fn a_refused_delete_from_the_top_down_puts_the_rows_back_dense() {
+    let mut db = Database::new();
+    exec(&mut db, "create collection s (k int)");
+    grown(&mut db, 1, 40_000);
+    let before = rows(&db);
+    let refused = db.execute(&stmt("del s where id <= 30000 order id desc require 1"));
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(rows(&db), before);
+    assert_eq!(sparse(&db), 0);
+    assert!(index_bytes(&db) <= as_from_one(40_000));
+    assert_eq!(ids(&db, "get s select id limit 2"), [1, 2]);
+}
+
+/// A replica's pending row, at 2^52, written into an empty collection, and
+/// the server's rows after it, below: the rows go into the array once
+/// they outnumber it, the pending row alone sparse, and none once it goes.
+/// Before, every row stayed sparse, after the pending row went too.
+#[test]
+fn rows_written_below_a_pending_row_go_dense() {
+    let pending = 1u64 << 52;
+    let mut db = Database::new();
+    exec(&mut db, "create collection s (k int)");
+    written(&mut db, [pending]);
+    written(&mut db, 1..=20_000);
+    assert_eq!(sparse(&db), 1);
+    exec(&mut db, &format!("del s where id = {pending}"));
+    assert_eq!(rows(&db), each(1, 20_000));
+    assert_eq!(sparse(&db), 0);
+    assert!(index_bytes(&db) <= as_from_one(20_000));
+}
+
+/// A reseed while a write is pending: every row but the pending one
+/// deleted, the array emptied and its floor past them, and the shape's
+/// rows written again, below it, in one block. Before, 15 904 of the 20
+/// 000 went sparse.
+#[test]
+fn a_reseed_beside_a_pending_row_writes_the_rows_dense() {
+    let pending = 1u64 << 52;
+    let mut db = Database::new();
+    exec(&mut db, "create collection s (k int)");
+    written(&mut db, (1..=20_000).chain([pending]));
+    db.begin().unwrap();
+    exec(&mut db, &format!("del s where id < {pending}"));
+    let put = stmt("put s {id: $1, k: $1}");
+    for id in 1..=20_000 {
+        db.execute_with(&put, &[Value::Int(id)]).unwrap();
+    }
+    db.commit().unwrap();
+    assert_eq!(sparse(&db), 1);
+    let mut want = each(1, 20_000);
+    want.push((pending, Value::Int(pending as i64)));
+    assert_eq!(rows(&db), want);
+    assert!(index_bytes(&db) <= as_from_one(20_000));
+}
+
+/// A load whose first row is its last id, the rest in turn, as a COPY
+/// without `ORDER BY` sends a table whose last row an update moved to the
+/// front: every row ends in the array. Before, all but the last 4 096
+/// stayed sparse.
+#[test]
+fn a_load_out_of_order_ends_dense() {
+    let mut db = Database::new();
+    exec(&mut db, "create collection s (k int)");
+    written(&mut db, [30_000].into_iter().chain(1..30_000));
+    assert_eq!(rows(&db), each(1, 30_000));
+    assert_eq!(sparse(&db), 0);
+    assert!(index_bytes(&db) <= as_from_one(30_000));
+}

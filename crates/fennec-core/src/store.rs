@@ -385,6 +385,16 @@ fn adopt_shares(
 /// the dense slot for an id in that range, so a sparse entry the dense array
 /// grew over would vanish from every lookup while `ids()` still listed it --
 /// which is what happened before [`IdIndex::insert`] moved them over.
+///
+/// And no sparse id is within the gap of the dense range, either side: the
+/// array grown or lowered to within it of one takes it in, and the ids it
+/// then reaches the same way. The sparse map holds only ids the gap rule
+/// keeps out, and while they outnumber the array's, 64 or more, their
+/// largest run takes the array where it holds more ([`Self::rebase`]):
+/// a floor the first id set high -- a replica's pending row at 2^52, a
+/// COPY whose first row is its last id -- or a block's deletes put back
+/// from the lowest left every row below it sparse, sorted at every walk,
+/// until the next open.
 #[derive(Clone)]
 struct IdIndex {
     /// `dense[i]` -> id `floor + i`
@@ -406,13 +416,23 @@ struct IdIndex {
     /// browser module 4.4 KB larger and its HNSW build 15% slower, the whole
     /// id index no longer inlining into the hot paths at `opt-level = "z"`.
     sparse: HashMap<DocId, Loc>,
-    /// No sparse id above the dense range is below this, so the dense array
-    /// only has to look for ones to take over once it reaches it; those
-    /// below the floor it never grows over. A lower bound, not the minimum:
-    /// a removal leaves it where it was, which costs at most one scan that
-    /// finds nothing and sets it right. `DocId::MAX` for none.
+    /// No sparse id above the dense range is within the gap of this one or
+    /// below it: the lowest such id less [`MAX_DENSE_GAP`], so the array
+    /// grown to it is within the gap of a sparse id and takes it in, still
+    /// one comparison where the array grows. Those below the floor it never
+    /// grows over. A lower bound, not the exact figure: a removal leaves it
+    /// where it was, which costs at most one scan that finds nothing and
+    /// sets it right. `DocId::MAX` for none.
     sparse_floor: DocId,
     count: usize,
+    /// The sparse ids from which the next [`Self::rebase`] looks for a run
+    /// to take the array: [`REBASE_FROM`], or twice what the last one left
+    /// sparse, so a rebase sorts ids at least half of which came since.
+    rebase_at: usize,
+    /// The slots a cut, a lowering or a rebase copied, and the rebases
+    /// that looked: what the amortised bounds are held to.
+    #[cfg(test)]
+    moved: (usize, usize),
 }
 
 impl Default for IdIndex {
@@ -425,6 +445,9 @@ impl Default for IdIndex {
             sparse: HashMap::new(),
             sparse_floor: DocId::MAX,
             count: 0,
+            rebase_at: REBASE_FROM,
+            #[cfg(test)]
+            moved: (0, 0),
         }
     }
 }
@@ -436,6 +459,12 @@ const MAX_DENSE_GAP: u64 = 4096;
 /// beside half the array ([`IdIndex::past_lead`]): below it, 48 KB, a cut
 /// would move the array for less than it gives back.
 const CUT_FROM: usize = MAX_DENSE_GAP as usize;
+
+/// The fewest sparse ids, outnumbering the array's, that a write looks
+/// among for a run to take the array ([`IdIndex::rebase`]): fewer are
+/// sorted at a walk in about a microsecond, and a handful of a replica's
+/// pending rows never move it.
+const REBASE_FROM: usize = 64;
 
 impl IdIndex {
     /// Allocated bytes. Approximate for `HashMap`: hashbrown also keeps one
@@ -500,7 +529,8 @@ impl IdIndex {
     /// starts -- an open of an image whose first id is past the gap, a
     /// compact's fresh store, put its rows in the sparse map from 1 --
     /// one below the floor within the gap, which it is lowered to take,
-    /// and any other into the sparse map. Apart, as it is the rare one.
+    /// and any other into the sparse map, which may then hold more ids
+    /// than the array ([`Self::rebase`]). Apart, as it is the rare one.
     #[inline(never)]
     fn insert_apart(&mut self, id: DocId, loc: Loc) {
         if id >= 1 && (self.count == 0 || id < self.floor && self.floor - id <= MAX_DENSE_GAP) {
@@ -517,41 +547,73 @@ impl IdIndex {
             // At the range's start, or in it: `insert`'s own paths place it.
             return self.insert(id, loc);
         }
-        if id >= self.floor && id < self.sparse_floor {
-            self.sparse_floor = id;
+        // Past the range it is more than the gap past its last slot, so
+        // the subtraction stays above 0.
+        if id >= self.floor && id - MAX_DENSE_GAP < self.sparse_floor {
+            self.sparse_floor = id - MAX_DENSE_GAP;
         }
         if self.sparse.insert(id, loc).is_none() {
             self.count += 1;
+            if 2 * self.sparse.len() > self.count {
+                self.rebase();
+            }
         }
     }
 
     /// Lowers the floor to take `id`, below it by at most the gap: by the
-    /// gap or a quarter of the slots the array holds, whichever is more,
-    /// never below 1 -- so ids written each below the one before, a block's
-    /// deletes put back in turn, move the array once a quarter they fill,
-    /// some four slots an id, rather than once an id, and one id written
-    /// there adds a quarter at most -- the sparse ids it now covers moved
-    /// in. The range from 1 held every slot this one takes.
+    /// gap or, while the array holds a location in half its slots or more,
+    /// a quarter of them, whichever is more, never below 1 -- so ids
+    /// written each below the one before, a block's deletes put back in
+    /// turn, move the array once a quarter they fill, some four slots an
+    /// id, rather than once an id, and one id written there adds a quarter
+    /// at most. Half: ids each written past the quarter the one before
+    /// left grew the array by a quarter each, 2^40 slots in 85 writes; now
+    /// they leave it half empty at once, and each adds the gap at most
+    /// from there, as the growth at its end does. The sparse ids it now
+    /// covers move in, and so do those within the gap below the new floor,
+    /// and below them, taking it down to the last.
     fn lower(&mut self, id: DocId) {
         let was = self.floor;
         let len = self.dense.len();
-        let by = (was - id)
-            .max(MAX_DENSE_GAP)
-            .max(len as u64 / 4)
-            .min(was - 1) as usize;
+        let held = self.count - self.sparse.len();
+        let quarter = match 2 * held >= len {
+            true => len as u64 / 4,
+            false => 0,
+        };
+        let mut to = was - (was - id).max(MAX_DENSE_GAP).max(quarter).min(was - 1);
+        let mut below: Vec<DocId> = Vec::new();
+        if !self.sparse.is_empty() {
+            below.extend(self.sparse.keys().copied().filter(|&k| k < was));
+            below.sort_unstable();
+            for &k in below.iter().rev() {
+                if k < to && to - k > MAX_DENSE_GAP {
+                    break;
+                }
+                to = to.min(k);
+            }
+        }
+        let by = (was - to) as usize;
         // Into an array of its own, the empty slots first: shifting the
         // slots in place took a copy and a fill of the browser module's own.
         let mut dense = Vec::with_capacity(len + by);
         dense.resize(by, Loc::EMPTY);
         dense.extend_from_slice(&self.dense);
         self.dense = dense;
-        self.floor = was - by as u64;
+        self.floor = to;
         (self.lead, self.after) = (self.lead + by, self.after + by);
-        // Every sparse id from the new floor up to the old one, which the
-        // take-over reaches before any past the range's end.
-        if !self.sparse.is_empty() {
-            self.take_over_sparse(was - 1);
+        #[cfg(test)]
+        {
+            self.moved.0 += len;
         }
+        // Every sparse id from the new floor up to the old one.
+        for &k in below.iter().filter(|&&k| k >= to) {
+            if let Some(l) = self.sparse.remove(&k) {
+                let i = (k - to) as usize;
+                self.dense[i] = l;
+                self.placed(i);
+            }
+        }
+        self.trim();
     }
 
     /// Keeps `lead` and `after` saying what they say once slot `i`, empty,
@@ -567,10 +629,10 @@ impl IdIndex {
         }
     }
 
-    /// Moves the sparse entries the dense array, just grown to `upto` or
-    /// lowered to below it, now covers into it -- and with them every one it
-    /// can reach under the same gap rule, growing further to do so. The keys
-    /// are sorted once, so a run of sparse ids is taken in one pass: taking
+    /// Moves the sparse entries within the gap of the dense array, just
+    /// grown to `upto`, into it -- and with them every one it can reach
+    /// under the same gap rule, growing further to do so. The keys are
+    /// sorted once, so a run of sparse ids is taken in one pass: taking
     /// only those at or below `upto` meant one scan of the whole map per
     /// insert while the array grew through the run. Those below the floor
     /// stay.
@@ -597,7 +659,74 @@ impl IdIndex {
                 self.placed(i);
             }
         }
-        self.sparse_floor = keys.get(taken).copied().unwrap_or(DocId::MAX);
+        self.sparse_floor = keys.get(taken).map_or(DocId::MAX, |&k| k - MAX_DENSE_GAP);
+        self.trim();
+    }
+
+    /// Gives back the sparse map's room once it holds a quarter of it or
+    /// less: a run taken into the array left the map at its largest, 5.5
+    /// MB where the array was 3.1, until the next open.
+    fn trim(&mut self) {
+        if 4 * self.sparse.len() <= self.sparse.capacity() {
+            self.sparse.shrink_to(2 * self.sparse.len());
+        }
+    }
+
+    /// The sparse map holds more ids than the array, and at least
+    /// `rebase_at`: its largest run -- ids each within the gap of the one
+    /// before -- takes the array where it holds more ids than the array
+    /// does, the array's own going into the sparse map, so the map ends
+    /// smaller than it was. Every id of the run, and of the array, is more
+    /// than the gap from the other (the second invariant), so neither is
+    /// within it of the new range. Sorting the sparse ids is what it costs
+    /// where no run is larger, and `rebase_at` doubles past what it leaves,
+    /// so the next one sorts ids at least half of which came since. A
+    /// write's own, under the write lock, as the cut is.
+    #[inline(never)]
+    fn rebase(&mut self) {
+        if self.sparse.len() < self.rebase_at {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.moved.1 += 1;
+        }
+        let keys = self.sparse_from(0);
+        let (mut run, mut from) = (0..0, 0);
+        for i in 1..=keys.len() {
+            if keys.get(i).is_none_or(|&k| k - keys[i - 1] > MAX_DENSE_GAP) {
+                if i - from > run.len() {
+                    run = from..i;
+                }
+                from = i;
+            }
+        }
+        if run.len() > self.count - self.sparse.len() {
+            let (lo, hi) = (keys[run.start], keys[run.end - 1]);
+            let mut dense = vec![Loc::EMPTY; (hi - lo + 1) as usize];
+            for &k in &keys[run.clone()] {
+                if let Some(l) = self.sparse.remove(&k) {
+                    dense[(k - lo) as usize] = l;
+                }
+            }
+            let was = std::mem::replace(&mut self.dense, dense);
+            #[cfg(test)]
+            {
+                self.moved.0 += was.len() + self.dense.len();
+            }
+            for (i, &l) in was.iter().enumerate().skip(self.lead) {
+                if !l.is_empty() {
+                    self.sparse.insert(self.floor + i as u64, l);
+                }
+            }
+            (self.floor, self.lead, self.after) = (lo, 0, 0);
+            self.sparse_floor = match self.sparse.keys().filter(|&&k| k > hi).min() {
+                Some(&k) => k - MAX_DENSE_GAP,
+                None => DocId::MAX,
+            };
+            self.trim();
+        }
+        self.rebase_at = (2 * self.sparse.len()).max(REBASE_FROM);
     }
 
     fn remove(&mut self, id: DocId) -> Option<Loc> {
@@ -613,6 +742,12 @@ impl IdIndex {
             self.count -= 1;
             if i == self.lead {
                 self.past_lead();
+            }
+            // The array now holding fewer ids than the sparse map: a run
+            // of those may hold more than it, where the array's rows went
+            // after the rows of a run far from them came.
+            if 2 * self.sparse.len() > self.count {
+                self.rebase();
             }
             return Some(old);
         }
@@ -657,6 +792,10 @@ impl IdIndex {
         let left = self.dense.len() - k;
         self.dense.copy_within(k.., 0);
         self.dense.truncate(left);
+        #[cfg(test)]
+        {
+            self.moved.0 += left;
+        }
         self.floor += k as u64;
         (self.lead, self.after) = (0, self.after - k);
         let keep = left.max(CUT_FROM);
@@ -2503,6 +2642,13 @@ impl Store {
         self.index.bytes()
     }
 
+    /// The ids the id index holds in its sparse map rather than its array:
+    /// those a walk in id order collects and sorts first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sparse_ids(&self) -> usize {
+        self.index.sparse.len()
+    }
+
     /// A store the rewrite wrote no data record for: nothing live, and no
     /// hold on the file it read from.
     pub fn let_go(&mut self) {
@@ -3269,10 +3415,10 @@ mod tests {
         };
         let mut st = Store::new();
         // The array starts at 1. 10 000 and 5 000 are too far past its end:
-        // sparse. 4 000 is within the gap: the array grows to it. 8 000 is
-        // within the gap of 4 000: the array grows over 5 000. (The first
-        // id of an empty index is where its array starts, so without 1 all
-        // four would be dense from 10 000 down.)
+        // sparse. 4 000 is within the gap: the array grows to it, and to 5
+        // 000, within the gap of 4 000. 8 000 takes 10 000 in the same way.
+        // (The first id of an empty index is where its array starts, so
+        // without 1 all four would be dense from 10 000 down.)
         for id in [1u64, 10_000, 5_000, 4_000, 8_000] {
             st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
         }
@@ -3314,23 +3460,26 @@ mod tests {
         assert!(st2.contains(5_000));
 
         // A run of sparse ids is taken over in one go when the array, from
-        // 1, reaches it, including the ones past the id that reached it.
+        // 1, comes within the gap of it: 16 000 takes 20 000 to 20 499. The
+        // array holds more than the run, which so does not take it.
         let mut st = Store::new();
-        st.append(OP_PUT, 1, &Store::encode_doc(&sc, &doc(1)));
+        for id in 1u64..=600 {
+            st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
+        }
         for id in 20_000u64..20_500 {
             st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
         }
-        assert_eq!(st.index.sparse.len(), 500);
-        for id in (4_000u64..=20_000).step_by(4_000) {
+        assert_eq!((st.index.floor, st.index.sparse.len()), (1, 500));
+        for id in (4_000u64..=16_000).step_by(4_000) {
             st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
         }
-        assert_eq!((st.len(), st.index.sparse.len()), (505, 0));
+        assert_eq!((st.len(), st.index.sparse.len()), (1_104, 0));
         for id in [4_000u64, 16_000, 20_000, 20_001, 20_499] {
             assert!(st.contains(id), "{id} vanished");
         }
         let ids = st.ids();
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "not sorted");
-        assert_eq!(ids.len(), 505);
+        assert_eq!(ids.len(), 1_104);
     }
 
     /// A store takes its frames in from a file that holds them only where
@@ -3673,8 +3822,9 @@ mod tests {
 
     /// What an id index says of itself whatever was written to it: `lead`
     /// its first held slot, nothing held between it and `after`, an array
-    /// holding nothing let go, no sparse id in the dense range nor one
-    /// above it under `sparse_floor`, and the ids and the count `model`'s.
+    /// holding nothing let go, no sparse id in the dense range nor within
+    /// the gap of it, either side, nor one above it within the gap of
+    /// `sparse_floor`, and the ids and the count `model`'s.
     fn held_as(ix: &IdIndex, model: &std::collections::BTreeMap<DocId, Loc>, what: &str) {
         let len = ix.dense.len();
         assert!(ix.floor >= 1, "{what}: floor {}", ix.floor);
@@ -3691,10 +3841,21 @@ mod tests {
                 k.wrapping_sub(ix.floor) >= len as u64,
                 "{what}: sparse {k} in the dense range"
             );
-            assert!(
-                k < ix.floor || k >= ix.sparse_floor,
-                "{what}: {k} under the sparse floor"
-            );
+            match k < ix.floor {
+                true => assert!(
+                    ix.floor - k > MAX_DENSE_GAP,
+                    "{what}: {k} within the gap below {}",
+                    ix.floor
+                ),
+                false => assert!(
+                    k - ix.floor - len as u64 >= MAX_DENSE_GAP
+                        && k - MAX_DENSE_GAP >= ix.sparse_floor,
+                    "{what}: {k} within the gap past {} slots from {}, or of the sparse floor {}",
+                    len,
+                    ix.floor,
+                    ix.sparse_floor
+                ),
+            }
         }
         assert_eq!(ix.len(), model.len(), "{what}: count");
         let ids: Vec<DocId> = model.keys().copied().collect();
@@ -3820,8 +3981,9 @@ mod tests {
 
     /// An index whose array starts at its first id, 10 000, puts an id far
     /// below it in the sparse map; ids written nearer, each within the gap
-    /// of the floor, lower it a gap at a time, and the one that takes it to
-    /// 1 takes that sparse id into the array.
+    /// of the floor, lower it a gap at a time, and the one that takes it
+    /// within the gap of that sparse id takes it into the array, the floor
+    /// down to it.
     #[test]
     fn a_floor_lowered_over_a_sparse_id_takes_it_in() {
         use std::collections::BTreeMap;
@@ -3838,7 +4000,7 @@ mod tests {
             held_as(&ix, &model, &format!("{id}"));
             floors.push((ix.floor, ix.sparse.len()));
         }
-        let want = [(10_000, 0), (10_000, 1), (5_904, 1), (1_808, 1), (1, 0)];
+        let want = [(10_000, 0), (10_000, 1), (5_904, 1), (3, 0), (3, 0)];
         assert_eq!(floors, want);
     }
 
@@ -3881,5 +4043,179 @@ mod tests {
         let shape = (q.len(), q.index.dense.len(), q.index.floor);
         assert_eq!(shape, (0, 0, 50_001));
         assert!(q.index.bytes() <= 4 * CUT_FROM * std::mem::size_of::<Loc>());
+    }
+
+    /// Ids written to an index in turn, and a model of them.
+    fn written(
+        ix: &mut IdIndex,
+        model: &mut std::collections::BTreeMap<DocId, Loc>,
+        ids: impl IntoIterator<Item = DocId>,
+    ) {
+        for id in ids {
+            let at = Loc {
+                seg: 0,
+                off: id as u32,
+                len: 1,
+            };
+            ix.insert(id, at);
+            model.insert(id, at);
+        }
+    }
+
+    /// Ids deleted from an index in turn, and from its model.
+    fn deleted(
+        ix: &mut IdIndex,
+        model: &mut std::collections::BTreeMap<DocId, Loc>,
+        ids: impl IntoIterator<Item = DocId>,
+    ) {
+        for id in ids {
+            assert_eq!(ix.remove(id), model.remove(&id), "{id}");
+        }
+    }
+
+    /// Every order of writes ends with the rows dense, as an array from 1
+    /// holds them, and the sparse map holding only the ids the gap keeps
+    /// apart: a block's deletes from the highest id down put back from the
+    /// lowest up, under the floor the deletes cut up; rows written below a
+    /// replica's pending one, which came first, before it goes; the rows of
+    /// an array emptied below a pending one written again, as a reseed
+    /// does; and a load whose first id is its last, the rest in turn --
+    /// and in no order, which ended dense before too. Before, the four left
+    /// 137 500, 40 000, 15 904 and 45 903 sparse, each walk sorting them,
+    /// until an open.
+    #[test]
+    fn every_order_of_writes_ends_with_the_rows_dense() {
+        use std::collections::BTreeMap;
+        let pending = 1 << 52;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=200_000);
+        deleted(&mut ix, &mut model, (1..=150_000).rev());
+        assert_eq!(ix.floor, 150_001);
+        written(&mut ix, &mut model, 1..=150_000);
+        held_as(&ix, &model, "put back");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "put back");
+        // No more than the array from 1 held, 262 144 slots.
+        assert!(ix.bytes() <= 3_145_728, "{} bytes", ix.bytes());
+
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, [pending]);
+        written(&mut ix, &mut model, 1..=40_000);
+        held_as(&ix, &model, "below a pending row");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 1), "below a pending row");
+        deleted(&mut ix, &mut model, [pending]);
+        held_as(&ix, &model, "the pending row gone");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "the pending row gone");
+
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, (1..=20_000).chain([pending]));
+        deleted(&mut ix, &mut model, 1..=20_000);
+        assert_eq!((ix.floor, ix.dense.len()), (20_001, 0));
+        written(&mut ix, &mut model, 1..=20_000);
+        held_as(&ix, &model, "reseeded");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 1), "reseeded");
+
+        // The last id first, then the rest in turn; then every id once in
+        // an order drawn, the first the highest.
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, [50_000].into_iter().chain(1..50_000));
+        held_as(&ix, &model, "the last first");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "the last first");
+        let mut ids: Vec<DocId> = (1..50_000).collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for i in (1..ids.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ids.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, [50_000].into_iter().chain(ids));
+        held_as(&ix, &model, "in no order");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 0), "in no order");
+    }
+
+    /// The rows of the array deleted, from its end, below a run of sparse
+    /// ids larger than what is left hand the run the array: an index whose
+    /// first id was far above the rows written after it ends as an array
+    /// from 1 holds them.
+    #[test]
+    fn rows_deleted_below_a_sparse_run_hand_it_the_array() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1_000_000..1_100_000);
+        written(&mut ix, &mut model, 1..=50_000);
+        assert_eq!((ix.floor, ix.sparse.len()), (1_000_000, 50_000));
+        deleted(&mut ix, &mut model, (1_000_001..1_100_000).rev());
+        held_as(&ix, &model, "deleted");
+        assert_eq!((ix.floor, ix.sparse.len()), (1, 1));
+    }
+
+    /// A cut moves no more slots than it drops, so however long ids climb
+    /// through deletes each is moved a bounded number of times: 60 000
+    /// live rows whose ids climb to 300 000 move fewer slots than they
+    /// delete. Cut at every 4 096 empty slots, whatever the array, they
+    /// moved the 60 000 live ones each time, 3.5 million.
+    #[test]
+    fn a_cut_moves_no_more_slots_than_it_drops() {
+        let (live, to) = (60_000u64, 300_000u64);
+        let mut ix = IdIndex::default();
+        let at = Loc {
+            seg: 0,
+            off: 0,
+            len: 1,
+        };
+        for id in 1..=to {
+            ix.insert(id, at);
+            if id > live {
+                ix.remove(id - live);
+            }
+        }
+        assert_eq!(ix.ids(), (to - live + 1..=to).collect::<Vec<_>>());
+        let deletes = (to - live) as usize;
+        assert!(ix.moved.0 <= deletes, "{} slots moved", ix.moved.0);
+    }
+
+    /// Ids written each below the one before lower the floor a quarter of
+    /// the array at a time: 100 000 of them below 100 000 rows move it four
+    /// times, 576 562 slots, where a gap at a time moved it 25 times, 3.7
+    /// million. Each written just past the quarter the one before left,
+    /// they leave the array half empty at once, and from there each
+    /// lowers it by the gap: the array lowered by its quarter each time
+    /// spanned 4 million slots after 29 of them, and 2^40 after 85.
+    #[test]
+    fn ids_written_downward_lower_the_floor_a_quarter_at_a_time() {
+        use std::collections::BTreeMap;
+        let (from, rows) = (1_000_000u64, 100_000u64);
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, from..from + rows);
+        written(&mut ix, &mut model, (from - rows..from).rev());
+        held_as(&ix, &model, "downward");
+        let moved = ix.moved.0;
+        assert!(moved <= 4 * 2 * rows as usize, "{moved} slots moved");
+
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, [1 << 22]);
+        for _ in 0..60 {
+            let id = ix.floor - 1;
+            written(&mut ix, &mut model, [id]);
+        }
+        held_as(&ix, &model, "past each quarter");
+        let len = ix.dense.len();
+        assert!(len <= 61 * (MAX_DENSE_GAP as usize + 1), "{len} slots");
+    }
+
+    /// A rebase that finds no run larger than the array looks again only
+    /// once the sparse ids have doubled: 100 rows from 1 and 5 000 ids
+    /// each more than the gap from the next look 6 times, the array where
+    /// it was. Looking at every write past 100 sorted the ids 4 900 times.
+    #[test]
+    fn a_rebase_looks_again_once_the_sparse_ids_double() {
+        use std::collections::BTreeMap;
+        let (mut ix, mut model) = (IdIndex::default(), BTreeMap::new());
+        written(&mut ix, &mut model, 1..=100);
+        let apart = (1..=5_000u64).map(|k| 1_000_000 + k * (MAX_DENSE_GAP + 1));
+        written(&mut ix, &mut model, apart);
+        held_as(&ix, &model, "apart");
+        assert_eq!((ix.floor, ix.dense.len(), ix.moved.1), (1, 100, 6));
     }
 }
