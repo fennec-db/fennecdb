@@ -1015,17 +1015,32 @@ wrote itself, so a write's fsync meets a step's at most where main's met
 *Measured* (a scratch program over `Database::maintain`, the compact beside
 the database, its cgroup's `memory.stat` read every 5 ms; `docker run
 --cpus=3 --memory 512m --memory-swap 512m`, Linux 6.12 aarch64 in macOS's
-Docker, an ext4 volume; the 1-minute load 2.7-4.0 at each run's start, main
-and this change in ABBA turns, a run the load rose past 5 in left out; a
-million 1 KB documents each updated once at a random key, 2.04 GB, 1.02
-live). With 300 MiB held by the process, as the soak's server held its
-indexes -- `cache::room` 186-190 MB, a step of 11.9 MiB -- main left 33-39
-MiB dirty at the peak and 34-41 dirty or on their way, this change 15 and
-15-23; with 11 MiB held -- 491 MB of room, a step of 30.7 MiB -- main left
-the soak's 78-80 and 80, this change 34 and 34-37. The kernel throttles a
-cgroup's writer by a share of what it could hold of the file, clean pages
-counted, which is all that kept main's peak under its 64 MiB steps of two
-files. MEASURED_TIMES
+Docker, an ext4 volume; the 1-minute load under 4 at each run's start,
+main and this change in ABBA turns, a run the load rose past 5 in left
+out; a million 1 KB documents each updated once at a random key, 2.04 GB,
+1.02 live). With 300 MiB held by the process, as the soak's server held its
+indexes -- `cache::room` 186-190 MB, a step of 11.9 MiB -- main left 33-41
+MiB dirty or on their way at the peak, this change 15-23; with 11 MiB held
+-- 491 MB of room, a step of 30.7 MiB -- main left the soak's 80, this
+change 34-37. The kernel throttles a cgroup's writer by a share of what it
+could hold of the file, clean pages counted, which is all that kept main's
+peak under its 64 MiB steps of two files; at 190 MB of room it holds this
+change's under its two steps too, 64 MiB steps on the same thread peaking
+at 15-22, and the sixteenth is the bound where it allows more.
+
+The compact alone took 4.75 s at the median on main and 4.95 with this
+change, 43 and 41 runs in six sessions: this change's median 1.7-4.7%
+above main's in four quiet sessions and 4.7% below in a fifth; with writes
+beside it 2.5-2.9% above. Steps of 64 MiB on the same thread took as long
+as a sixteenth's (4.80 s at the median against 4.77 and main's 4.59, ten
+runs each), and main's own 64 MiB steps synced where they end, with the
+scratch file settled and the writes cut at the steps, as long as main
+(4.64 s against 4.60, six runs each): what costs is a step's fdatasync
+running beside the compact's writes, the price of the bound, which an
+fdatasync where each step ends pays several times over (below). On macOS,
+whose files are written past the cache as before and step nowhere, the
+code is main's: 4.2-11.2 s on main and 8.2-12.1 with this change, six runs
+each, the spread of a laptop's disk.
 
 The writes beside it. With a write made durable every 2 ms (`--sync
 always`, a kilobyte a write into [the sync log](durability.md#the-sync-log)),
@@ -1034,13 +1049,16 @@ during this change's, 27-64 ms and 29-60 at the most, the compacts
 4.03-4.28 s and 4.15-4.31 (one of 5.39). With writes buffered and synced
 every 250 ms (`--sync 250`, the default, the file's own fdatasync), the
 syncs took 1.1-17.8 ms at the median beside main's compacts and 1.5-3.3
-beside this change's, eight runs each, the compacts 4.41-4.95 s and
-4.40-5.02. Of the four runs a side whose slow syncs were timed, a sync
-took 44-60 ms during three of main's compacts, as one met a 64 MiB
-fdatasync, and none took 40 during this change's. The first sync after the
-swap, every step's fdatasync waited for before it, took 99-105 ms in two
-of main's four runs and 105-154 in each of this change's: what holds it is
-the swap's, not a step's, and it is left for a change of its own.
+beside this change's, twelve runs each in three sessions, the compacts
+4.59 and 4.71 s at the median. Of the eight runs a side whose every sync
+was timed, a sync took 41-90 ms during six of main's compacts, as one met
+a 64 MiB fdatasync, and during one of this change's, 73 ms in its last
+fifth of a second; none took 40 during the other seven. The first sync
+after the swap took 79-154 ms in each of this change's eight runs so timed
+and 99-120 in six of main's eight -- as long with steps of 64 MiB, and
+with the scratch file's last step left to the kernel as main left it: the
+swap's, every step's fdatasync waited for before it, which this change
+does not touch.
 
 *Rejected.* `sync_file_range` -- `WRITE` for a step, `WAIT_BEFORE` for the
 one before, no journal commit, as first built: the same peaks, but nothing
@@ -1056,7 +1074,12 @@ the compact filled a step. An fdatasync each step where it ends, as main's
 `sync_file_range`, the compact idle while the disk wrote. A step of a
 thirty-second of the room: 9.4 MiB dirty at the peak, the syncs and the
 compact as a sixteenth's -- twice the threads and fdatasyncs for a bound
-the room already allows. Leaving the pages to the kernel's dirty
+the room already allows. Letting go of only the stretches a step synced,
+never a page the next one dirtied -- `POSIX_FADV_DONTNEED` starts a dirty
+page's writeback and, failing to drop it, drains every CPU's page lists to
+try again -- for the time above: no faster, 5.13 s at the median against
+4.97 letting go of the whole file and 4.89 on main, eight runs each.
+Leaving the pages to the kernel's dirty
 throttling, as main did: the 80 MiB above. The kernel counts the clean
 pages a cgroup could drop as room for dirty ones, and a compact reading
 the old file fills the cache with just those.

@@ -2008,7 +2008,7 @@ pub struct SideFile {
 /// disk, and a cgroup cannot reclaim it before: a step dirty and the one
 /// before it on its way to disk at most, an eighth of the room, where 64 MiB
 /// a file -- the scratch file's last step left dirty as the side file took
-/// its first -- held 80 MiB dirty in a 512 MB container that was then
+/// its first -- held 84 MB dirty in a 512 MB container that was then
 /// OOM-killed (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk;
 /// the rule is src/engine/CLAUDE.md's, a file compacted before it outgrows
 /// the page cache). The floor keeps the steps few, 256 a GiB, and each a

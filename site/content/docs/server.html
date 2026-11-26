@@ -809,11 +809,12 @@ a container of 512 MB holding 417 MB of its own a compact left 84 MB of
 written pages there at once, and the container was killed. Compacting a 2
 GB file of 1 GB live in a container of 512 MB, with 300 MB of it the
 server's own, the written pages waiting for the disk now peak at 15 to 23
-MB against 34 to 41 before, and with the server's 11 MB alone at 34 to 37
+MB against 33 to 41 before, and with the server's 11 MB alone at 34 to 37
 against 80. Each step is the compact's own <code>fdatasync</code>, so the
 server's own syncs are not left to flush the compact's writes: beside it,
 writes synced every 250 ms took 1.5 to 3.3 ms at the median, against 1.1 to
-17.8 before.</p>
+17.8 before. The compact itself takes a few percent longer for it, 2 to 5%
+on the disk it was measured on.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
