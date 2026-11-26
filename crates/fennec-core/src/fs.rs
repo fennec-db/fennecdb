@@ -2058,7 +2058,7 @@ fn let_go_pages(file: &File, at: u64, len: u64) {
 /// The compact's own fdatasync, never `sync_file_range` alone: that puts
 /// the pages on the disk and leaves the disk's cache to the next fsync of
 /// the volume, the database's own -- whose syncs, every 250 ms beside a
-/// compact, then took 53-64 ms at the median against 5 ms
+/// compact, then took 53-64 ms at the median against 3-5
 /// (docs/design/storage.md#a-compacts-pages-on-their-way-to-disk).
 #[cfg(all(
     unix,

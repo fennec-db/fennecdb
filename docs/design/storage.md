@@ -921,9 +921,10 @@ forgotten once it is done (`cache::forget_faults`): counted, the next
 look found the process faulting, and a 1.6 GB file that took none was
 compacted every 6 s. A compact whose old and new files would not fit
 together, or that starts while the process faults, writes the new one past
-the cache (`SideFile::past_cache`: `F_NOCACHE`, or synced and
-`POSIX_FADV_DONTNEED` every 64 MB, since written pages stay until they are
-on disk; none on Windows, whose `FILE_FLAG_NO_BUFFERING` asks for writes
+the cache (`SideFile::past_cache`: `F_NOCACHE`, or put on disk and
+`POSIX_FADV_DONTNEED` a sixteenth of the room at a time, since written
+pages stay until they are on disk -- [a compact's pages on their way to
+disk](#a-compacts-pages-on-their-way-to-disk); none on Windows, whose `FILE_FLAG_NO_BUFFERING` asks for writes
 the image's writer does not align) and reads it in after the swap rather than before: through the
 cache its pages pushed out the old file's, which the reads need until the
 swap, and the writer ran at 5-6k updates a second through a compact, 8k
@@ -959,6 +960,106 @@ records hold (none, by the count above), a compact ordering the records by
 heat (a uniform workload has none; YCSB's hottest quarter of 16 KB pages
 takes 77% of reads in id order against 96% by heat, which matters only
 once the live records outgrow memory, and E's scans want id order).
+
+### A compact's pages on their way to disk
+
+**What a compact writes past the page cache goes to disk a sixteenth of the
+room at a time** (`fs::past_step`, `fs::Steps`). A page a process writes
+stays in memory until it is on disk, and a cgroup, whose limit counts it,
+cannot reclaim it before: a written page holds the container as an
+anonymous one does until its writeback ends. The side file past the cache
+(`SideFile::past_cache`) and the scratch file a compact reads the file in
+turn through ([below](#reading-the-file-in-turn)) were synced and their
+pages dropped every 64 MiB whatever the room, and the scratch file's last
+stretch, less than that, never: the read back let each bucket go
+(`POSIX_FADV_DONTNEED`), which drops no dirty page, while the side file
+filled its first 64 MiB. The P6 soak's primary, in a container of 512 MB
+holding 417 MiB of its own, was OOM-killed in a requested compact with 84
+MB of `file_dirty` in its cgroup and 15 MiB of clean file pages left to
+reclaim -- its two files' steps at once, a sampler a second having seen
+64 MiB on an earlier compact.
+
+Now a step is a sixteenth of what `cache::room` gives -- the memory the
+page cache has, a cgroup's limit less what its processes hold that is not
+file pages -- between 4 and 64 MiB; a write longer than a step, a bucket
+copied in turn among them (16 MiB), goes in pieces; and the scratch file is
+settled -- every page on disk and dropped -- as its deal ends
+(`Scratch::settle`), before the side file takes a byte of the bucket read
+back. On Linux and Android each step's fdatasync runs on a thread of its
+own while the compact writes the next, and is waited for as that one ends,
+the pages then on disk dropped (`POSIX_FADV_DONTNEED`): a step dirty and
+one on its way at most, an eighth of the room, the disk writing one while
+the compact fills the next. The in-turn copy's buffers take a quarter of
+the same room at most (`in_turn::budget`), so from 64 MiB of room up its
+buffers and its pages on their way together stay under half of it, the
+rest left to the old file's pages, which the reads need until the swap.
+The floor keeps a step a run of large requests the disk takes whole and
+the steps few, 256 a GiB, a thread and an fdatasync each; the ceiling is
+the step as it was, reached from a GiB of room. Where no thread or
+descriptor can be had, a step is synced where it ends, and a file dropped
+mid-step -- a compact that failed -- waits its fdatasync out. macOS writes
+both files past the cache (`F_NOCACHE`) and Windows through it, as before:
+neither steps.
+
+*Not a write's durability.* None of these files is the sink's -- the side
+file is synced whole before its swap, under no lock (`SideFile::sync`), and
+the scratch file is unlinked -- so a step takes no lock of the database's
+and never the sink's disk: `Sink::syncing`, a `try_lock` of it, says no
+durability for one, and a write's buffer or a handover is put off for none,
+as before. What a step can hold up is a write's own fsync on the same
+volume, which flushes the disk's cache of whatever reached it unflushed and
+shares the journal's commits: each step's fdatasync flushes what the step
+wrote itself, so a write's fsync meets a step's at most where main's met
+64 MiB.
+
+*Measured* (a scratch program over `Database::maintain`, the compact beside
+the database, its cgroup's `memory.stat` read every 5 ms; `docker run
+--cpus=3 --memory 512m --memory-swap 512m`, Linux 6.12 aarch64 in macOS's
+Docker, an ext4 volume; the 1-minute load 2.7-4.0 at each run's start, main
+and this change in ABBA turns, a run the load rose past 5 in left out; a
+million 1 KB documents each updated once at a random key, 2.04 GB, 1.02
+live). With 300 MiB held by the process, as the soak's server held its
+indexes -- `cache::room` 186-190 MB, a step of 11.9 MiB -- main left 33-39
+MiB dirty at the peak and 34-41 dirty or on their way, this change 15 and
+15-23; with 11 MiB held -- 491 MB of room, a step of 30.7 MiB -- main left
+the soak's 78-80 and 80, this change 34 and 34-37. The kernel throttles a
+cgroup's writer by a share of what it could hold of the file, clean pages
+counted, which is all that kept main's peak under its 64 MiB steps of two
+files. MEASURED_TIMES
+
+The writes beside it. With a write made durable every 2 ms (`--sync
+always`, a kilobyte a write into [the sync log](durability.md#the-sync-log)),
+its fsync took 19.9-24.2 ms at p99 during main's compacts and 9.2-19.4
+during this change's, 27-64 ms and 29-60 at the most, the compacts
+4.03-4.28 s and 4.15-4.31 (one of 5.39). With writes buffered and synced
+every 250 ms (`--sync 250`, the default, the file's own fdatasync), the
+syncs took 1.1-17.8 ms at the median beside main's compacts and 1.5-3.3
+beside this change's, eight runs each, the compacts 4.41-4.95 s and
+4.40-5.02. Of the four runs a side whose slow syncs were timed, a sync
+took 44-60 ms during three of main's compacts, as one met a 64 MiB
+fdatasync, and none took 40 during this change's. The first sync after the
+swap, every step's fdatasync waited for before it, took 99-105 ms in two
+of main's four runs and 105-154 in each of this change's: what holds it is
+the swap's, not a step's, and it is left for a change of its own.
+
+*Rejected.* `sync_file_range` -- `WRITE` for a step, `WAIT_BEFORE` for the
+one before, no journal commit, as first built: the same peaks, but nothing
+flushed the disk's cache of the compact's writes but the next fsync on the
+volume, the database's own. With writes synced every 250 ms its syncs took
+53-64 ms at the median beside the compact against main's 3-5, and the
+compact 6.42-9.10 s against 6.09-7.38; beside a durable write every 2 ms,
+4.70-4.93 s on main against 5.15-5.41. The same with each step waited for
+whole (`WAIT_BEFORE | WRITE | WAIT_AFTER`, a step at most): 15 MiB at the
+peak, 4.59-5.35 s alone against 4.23-4.55 pipelined, the disk idle while
+the compact filled a step. An fdatasync each step where it ends, as main's
+64 MiB steps were synced: 5.79-6.90 s alone against 4.79-5.20 with
+`sync_file_range`, the compact idle while the disk wrote. A step of a
+thirty-second of the room: 9.4 MiB dirty at the peak, the syncs and the
+compact as a sixteenth's -- twice the threads and fdatasyncs for a bound
+the room already allows. Leaving the pages to the kernel's dirty
+throttling, as main did: the 80 MiB above. The kernel counts the clean
+pages a cgroup could drop as room for dirty ones, and a compact reading
+the old file fills the cache with just those.
 
 ### Reading the file in turn
 
@@ -1043,9 +1144,10 @@ for each, as can a volume another program fills meanwhile. Then the
 scratch file's write the disk refuses ends the deal, and the records are
 walked by id (*Its failures*, below), the scratch file's room given back
 as it closes before a record of the walk is written. A scratch file is written and read past the page cache as a side
-file past it is (`F_NOCACHE`; on Linux synced and its pages dropped every
-64 MB, each bucket's dropped once read back): its pages would push out the
-old file's, which the reads need until the swap.
+file past it is (`F_NOCACHE`; on Linux on disk and its pages dropped a step
+at a time and as its deal ends, [below](#a-compacts-pages-on-their-way-to-disk),
+each bucket's dropped once read back): its pages would push out the old
+file's, which the reads need until the swap.
 
 *Its name.* The scratch file is `<file>.sorting` -- `data.fennec.sorting`
 beside `data.fennec` -- made by its open alone (`O_CREAT | O_EXCL`,
