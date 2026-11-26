@@ -20,7 +20,9 @@
 //!
 //!   36% read and 37% update of YCSB's records (A), its scrambled zipfian,
 //!       and 4% read of them through the replica, sent after the latest
-//!       write answered (`Fennec-After`),
+//!       write answered (`Fennec-After`) -- on connections and a schedule
+//!       of their own (`--replica-threads`), so that the replica holding
+//!       them holds them alone,
 //!    2% increment of a counter (`set counters {n: n + 1}`), not
 //!       idempotent: a write landing twice shows; 1% read of one,
 //!    3% insert and 3% delete -- new keys, the oldest inserted deleted --
@@ -40,6 +42,19 @@
 //! compact. Each minute a sample of `match` and `near` is held to a scan
 //! of the same rows, and at the end every key is read back and the
 //! replica's rows compared with the primary's.
+//!
+//! A server that dies on its own -- the kernel's OOM kill under its
+//! `--memory`, an exit -- is found as Docker says it (`follow_events`) or
+//! by its state at a minute's end or a kill, named on a line of its own,
+//! timed by the burst of closes its exit made (`death_time`), the writes a
+//! read then shows gone judged from that time, and started again; each
+//! server's cgroup is read a second (`watch_memory`) and the open loop's
+//! lag too (`seconds`), the minute's line taking their most. After each
+//! restart, until the loop is back on its schedule and the replica holds
+//! the change answered then (`catch_up`), within `--replica-back-max` of
+//! the one and `--catchup-max` of the server answering again, a read
+//! through the replica held past its wait while the replica's change
+//! advanced is the restart's, and the lane is moved up.
 //!
 //! A minute's line (`results/soak.tsv`, family `soak`, cell
 //! `<sync>:<label>:m<minute>`) is appended as the minute ends: a run cut
@@ -225,6 +240,80 @@ const PEAK_STRETCH: usize = 3;
 /// second, well past the probe's own round trip of a few ms.
 const CLOCK_STEP_MS: f64 = 200.0;
 
+/// The share of the mix that reads through the replica: on its own
+/// connections and its own schedule (`--replica-threads`), apart from the
+/// pool every other operation shares.
+const REPLICA_SHARE: f64 = 0.04;
+
+/// The replica's `--slow-ms`: its slow log starts after a read's
+/// `Fennec-After` wait (fennec-http's `after`), so it names what a read
+/// through it spent past the primary's sync -- lock waits, faults -- the
+/// part dry run 6's minute figures could not tell from the loop's queue.
+const REPLICA_SLOW_MS: u64 = 100;
+
+/// Both servers' `--max-connections`, past the default of 100: the
+/// harness's own are the pool's 32, the replica lane's 128 -- each of
+/// which reads from the primary from a kill until the replica is back --
+/// the 64 subscriptions, the replica's follow, a backup's and the looks'
+/// scrapes, some 235.
+const MAX_CONNECTIONS: u64 = 320;
+
+/// How long after a close the server may still be read answering before
+/// that close is taken for no death (`Shared::closed`). An answer the
+/// server wrote before it died can be read after another connection saw
+/// it close -- each connection's bytes come through Docker's port
+/// forwarding on a relay of its own, and the thread holding it waits for
+/// a core among the harness's 250 -- but within milliseconds: the dry run
+/// of 2026-11-26's three deaths had their first close 9-10 ms after the
+/// last answer before it. A burst of closes the server answered past is no
+/// death's -- a stream's end or a refused connect beside others -- and is
+/// let go at the next close. Kept longer, it stands for a death that came
+/// after it: a slop of a second took a close 0.9 s before a server that
+/// then hung 30 s and was OOM-killed for its time, and excused writes
+/// answered half a minute before it went. Too short a slop only moves a
+/// death's time to the next burst, later: the judge stricter by an
+/// answer's few ms, never more lenient (the writes a read shows gone are
+/// excused from the death's time back, and `death_time` never takes one
+/// before the last answer). 50 ms is five times the gap the dry run
+/// measured, and a twentieth of the second.
+const CLOSE_SLOP: u64 = 50_000_000;
+
+/// The closes, within how long of the first of them, that are a death's
+/// rather than one connection's (`Shared::closed`). A process's exit
+/// closes every socket it holds in the kernel's one teardown, so a death
+/// cuts the 64 streams, each blocked in its read, and the workers'
+/// requests under way at once, and the harness reads them as fast as its
+/// threads wake; a close that was no death's -- a stream the server ended,
+/// a connection thread's panic, a refused connect -- is one connection's,
+/// and the next close of a living server comes as another connection
+/// happens to end, not within the span. One close timed a death that came
+/// later where the server stopped answering between them: a stream ended
+/// by the server, then a hang and an OOM kill, its writes excused from the
+/// stream's end. Three within 20 ms, ten times the widest the dry runs of
+/// 2026-11-26 through `run-soak.sh` measured: an OOM kill's three came
+/// within 0.1 ms, an outside `docker kill`'s within 1.2, the planned
+/// kill's within 2.1. A run whose death closes fewer -- no streams, an
+/// idle pool -- is timed by Docker's own times, later, as before the
+/// closes were read.
+const BURST_CLOSES: u32 = 3;
+const BURST_SPAN: u64 = 20_000_000;
+
+/// How fast this process's clock (`Shared::ns`, macOS's `CLOCK_UPTIME_RAW`,
+/// never slewed) and Docker's VM's, which follows the host's wall clock,
+/// may part between two probes, in parts per million: NTP slews the wall
+/// clock at 500 at the most. Measured on this Mac at -43 over three
+/// minutes and +5.6 over two -- some 60 ms by the 90th minute of a run had
+/// Docker's times been read through the wall clock at `t0`, which put a
+/// planned kill's end, 20-200 ms after its send, before it.
+const CLOCK_DRIFT_PPM: u64 = 500;
+
+/// How long a side job that failed waits for a death to be found before it
+/// counts its failure as its own (`cut_by`): the death is found from
+/// Docker's `die` event at once, or from the container's state, which
+/// Docker sets as it reaps the process -- milliseconds after its sockets
+/// close, which is what the job saw.
+const DEATH_WAIT: Duration = Duration::from_secs(5);
+
 /// A run's settings: `ycsb soak --help` lists them.
 struct Opts {
     sync: String,
@@ -238,6 +327,10 @@ struct Opts {
     dim: usize,
     memory: String,
     threads: usize,
+    /// The replica lane's connections: the reads through the replica on a
+    /// schedule of their own (`REPLICA_SHARE` of the rate); 0 puts them in
+    /// the pool every operation shares, as before the lanes.
+    replica_threads: usize,
     subscriptions: usize,
     kill_every: u64,
     kill_in_compact_every: u64,
@@ -268,7 +361,7 @@ struct Opts {
 
 const HELP: &str = "ycsb soak --sync 250|always (--rate <ops/s> [--label 50] | --peak)
     [--minutes 480] [--records 1000000] [--docs 20000] [--counters 1000] [--dim 16]
-    [--memory 512m] [--threads 32] [--subscriptions 64] [--kill-every 30]
+    [--memory 512m] [--threads 32] [--replica-threads 128] [--subscriptions 64] [--kill-every 30]
     [--kill-in-compact-every 90] [--compact-every 20] [--backup-every 120]
     [--backup-at 50] [--ttl 60] [--slack 1] [--loss-ms 650|0] [--restart-max 120]
     [--replica-back-max 60] [--lag-max 5] [--catchup-max 300] [--recall-min 0.925]
@@ -291,6 +384,14 @@ impl Opts {
             dim: 16,
             memory: "512m".into(),
             threads: 32,
+            // A read through the replica waits out the primary's next sync:
+            // dry run 6's took 177-232 ms at the median. By Little's law the
+            // lane holds the rate's 4% times that busy -- 24 at 3 000 a
+            // second, 108 at the 9 000 of the lane's first dry run, a
+            // 100 000-record file whose reads took 0.27 s -- and a replica's
+            // compaction doubling it must find room, or the lane's figures
+            // are its own queue at every second.
+            replica_threads: 128,
             subscriptions: 64,
             kill_every: 30,
             kill_in_compact_every: 90,
@@ -347,6 +448,7 @@ impl Opts {
                 "--dim" => o.dim = n() as usize,
                 "--memory" => o.memory = v.clone(),
                 "--threads" => o.threads = n() as usize,
+                "--replica-threads" => o.replica_threads = n() as usize,
                 "--subscriptions" => o.subscriptions = n() as usize,
                 "--kill-every" => o.kill_every = n(),
                 "--kill-in-compact-every" => o.kill_in_compact_every = n(),
@@ -649,6 +751,8 @@ impl Kit {
             "restored",
             "sampler",
             "replica-watch",
+            "server-mem",
+            "replica-mem",
         ]
         .iter()
         .map(|c| format!("{}-{c}", self.name))
@@ -766,6 +870,7 @@ impl Kit {
     /// in its environment, never its arguments.
     fn start(&self, container: &str, port: u16, volume: &str, args: &[&str]) {
         let buffer = self.replication_buffer.to_string();
+        let most = MAX_CONNECTIONS.to_string();
         let (ok, out) = docker_env(
             Duration::from_secs(120),
             &self.secrets(),
@@ -796,6 +901,8 @@ impl Kit {
                     "0.0.0.0:8080",
                     "--replication-buffer",
                     &buffer,
+                    "--max-connections",
+                    &most,
                 ][..],
                 args,
             ]
@@ -823,11 +930,19 @@ impl Kit {
 
     fn start_replica(&self) {
         let primary = format!("http://{}:8080", self.server());
+        let slow = REPLICA_SLOW_MS.to_string();
         self.start(
             &self.replica(),
             self.replica_port,
             &self.volume("replica-data"),
-            &["--file", "/data/replica.fennec", "--replica-of", &primary],
+            &[
+                "--file",
+                "/data/replica.fennec",
+                "--replica-of",
+                &primary,
+                "--slow-ms",
+                &slow,
+            ],
         );
     }
 
@@ -918,6 +1033,18 @@ impl Kit {
             return None;
         }
         Look::parse(&out)
+    }
+
+    /// A container's state as Docker has it, with how its process ended
+    /// (`Exit`); `None` where `docker inspect` did not answer.
+    fn exit(&self, container: &str) -> Option<Exit> {
+        let (ok, out) = docker(&[
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}} {{.State.FinishedAt}}",
+            container,
+        ]);
+        ok.then(|| Exit::parse(&out)).flatten()
     }
 
     /// Whether a container runs, and whether the kernel killed it for its
@@ -1040,6 +1167,328 @@ impl Look {
         })
     }
 }
+
+/// How a container's process ended, as `docker inspect` has it: whether it
+/// runs, whether the kernel killed it for its memory (`OOMKilled`), its
+/// exit code, and when it was reaped (`FinishedAt`), unix ns on the clock
+/// of Docker's VM -- `None` where it never ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Exit {
+    running: bool,
+    oom: bool,
+    code: Option<i64>,
+    finished: Option<u64>,
+}
+
+impl Exit {
+    /// `{{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}
+    /// {{.State.FinishedAt}}`'s line.
+    fn parse(out: &str) -> Option<Exit> {
+        let mut w = out.split_whitespace();
+        Some(Exit {
+            running: w.next()? == "true",
+            oom: w.next()? == "true",
+            code: w.next().and_then(|c| c.parse().ok()),
+            finished: w.next().and_then(unix_ns),
+        })
+    }
+
+    /// How it ended, in words: the kernel's OOM kill under the run's
+    /// `memory`, a signal (an exit code past 128), or its own exit.
+    fn said(&self, memory: &str) -> String {
+        match (self.oom, self.code) {
+            (true, Some(c)) => format!("OOM-killed under --memory {memory} (exit {c})"),
+            (true, None) => format!("OOM-killed under --memory {memory}"),
+            (false, Some(c)) if c > 128 => format!(
+                "killed by signal {} (exit {c}), not by the kernel for its memory",
+                c - 128
+            ),
+            (false, Some(c)) => format!("exited with code {c}"),
+            (false, None) => "gone, its exit code unread".into(),
+        }
+    }
+}
+
+/// An RFC 3339 time as Docker writes it (`2026-11-26T00:56:47.123456789Z`)
+/// in unix ns; `None` for one before 1970 -- Docker's
+/// `0001-01-01T00:00:00Z` for a container that never ended -- or another
+/// zone than UTC.
+fn unix_ns(s: &str) -> Option<u64> {
+    let s = s.strip_suffix('Z').or_else(|| s.strip_suffix("+00:00"))?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, mo, da) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms.split(':').map(|x| x.parse::<i64>().ok());
+    let (h, mi, se) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || frac.len() > 9 {
+        return None;
+    }
+    let ns: i64 = match frac {
+        "" => 0,
+        f => f.parse::<i64>().ok()? * 10i64.pow(9 - f.len() as u32),
+    };
+    // Days from 1970-01-01 to the civil date (H. Hinnant's
+    // `days_from_civil`).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((mo + 9) % 12) + 2) / 5 + da - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let secs = days * 86_400 + h * 3_600 + mi * 60 + se;
+    u64::try_from(secs)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(ns as u64)
+}
+
+/// Unix ns as the time of day in UTC, to the ms: what a death's line names
+/// beside Docker's own times and the servers' logs.
+fn utc(ns: u64) -> String {
+    let ms = ns / 1_000_000 % 86_400_000;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}Z",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1_000 % 60,
+        ms % 1_000
+    )
+}
+
+/// Where a death's time was read from (`death_time`), the line's
+/// `death_source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The burst of closes its exit made after its last answer
+    /// (`BURST_CLOSES`), on this process's clock -- the one every write's
+    /// answer is timed on.
+    Close = 1,
+    /// Docker's `die` event, on the VM's clock, by the probe kept.
+    Event = 2,
+    /// Docker's `State.FinishedAt`, likewise.
+    Finished = 3,
+    /// None of those: the minute's look before it, as before.
+    Look = 4,
+}
+
+impl Source {
+    fn said(self) -> &'static str {
+        match self {
+            Source::Close => "the burst of closes its exit made",
+            Source::Event => "Docker's die event",
+            Source::Finished => "Docker's FinishedAt",
+            Source::Look => "the minute's look before it, nothing closing or Docker's times read",
+        }
+    }
+}
+
+/// The time a death of the primary's writes are judged from, in ns from the
+/// run's start, where it was read from, and the last answer read before
+/// that time.
+///
+/// The burst of closes the server's exit made after its last answer,
+/// where there is one: the process's sockets close in its exit, before
+/// Docker reaps it, and the soak holds 64 streams and its workers'
+/// connections open, so it is the death to a few ms -- on the clock every
+/// write's answer is timed on. `closed` is the burst's first close
+/// (`Shared::closed`; one close alone is none), `answered` the last answer
+/// read at all: a server read answering more than `CLOSE_SLOP` after a
+/// burst was alive then, and that burst no death; one read within it was
+/// written before the death, which is taken at that answer where it came
+/// after the burst -- never before the last answer, as a time before the
+/// real death excuses writes the server held for longer than
+/// `--loss-ms`. Docker's times (`docker`: its `die` event, or
+/// `FinishedAt`) are the VM's clock, which this process knows only by the
+/// probe it keeps (`Shared::clock`), to that reading's error (`err`,
+/// `Shared::clock_err`: its round trip, the drift since); and they are the
+/// reap, after the process's teardown, its sockets' close among it: taken
+/// where no burst was read -- at the latest the reading's error allows,
+/// and never before the last answer, so that it is never before the death
+/// it stands for -- and said beside the burst where one was. A probe the
+/// minute took behind a restart's backlog answered in seconds (the dry run
+/// of 2026-11-26's minute 4, its p99 3.4 s): read through it as it came, a
+/// death with no burst was timed up to half that before its reap. With
+/// neither, the minute's look before it (`look`), or the last answer
+/// where that came after it.
+fn death_time(
+    closed: u64,
+    answered: u64,
+    docker: Option<(u64, Source)>,
+    err: u64,
+    look: u64,
+) -> (u64, Source, Option<u64>) {
+    let c = closed;
+    let last = (answered > 0).then_some(answered);
+    if c != u64::MAX && answered <= c.saturating_add(CLOSE_SLOP) {
+        return (c.max(answered), Source::Close, last);
+    }
+    match docker {
+        Some((d, s)) => (d.saturating_add(err).max(answered), s, last),
+        None => (look.max(answered), Source::Look, last),
+    }
+}
+
+/// How far before the kill due at minute `due` a death at `at` (ns from the
+/// start) came, in words, and in seconds for the line: negative where the
+/// kill was due first and waited for the side jobs before it -- the long
+/// run of 2026-11-25's primary died in the compact the kill of minute 300
+/// waited for.
+fn before_kill(at: u64, due: Option<u64>) -> (String, Option<f64>) {
+    let Some(m) = due else {
+        return ("no kill due after it".into(), None);
+    };
+    let s = (m * 60) as f64 - at as f64 / 1e9;
+    let said = match s >= 0.0 {
+        true if s >= 120.0 => format!("{:.1} min before the kill due at minute {m}", s / 60.0),
+        true => format!("{s:.1} s before the kill due at minute {m}"),
+        false => format!(
+            "{:.1} s after the kill due at minute {m} was due, as it waited for the side jobs",
+            -s
+        ),
+    };
+    (said, Some(s))
+}
+
+/// One look at a server's cgroup a second (`watch_memory`): its anonymous
+/// memory, page cache, dirty and writeback pages, in bytes, and the major
+/// faults its processes took so far (`memory.stat`'s `anon`, `file`,
+/// `file_dirty`, `file_writeback`, `pgmajfault`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemSample {
+    anon: u64,
+    file: u64,
+    dirty: u64,
+    writeback: u64,
+    majflt: u64,
+}
+
+impl MemSample {
+    /// The watch's line, `M <anon> <file> <dirty> <writeback> <majflt>`.
+    fn parse(l: &str) -> Option<MemSample> {
+        let mut w = l.strip_prefix("M ")?.split_whitespace();
+        let mut n = || w.next()?.parse::<u64>().ok();
+        Some(MemSample {
+            anon: n()?,
+            file: n()?,
+            dirty: n()?,
+            writeback: n()?,
+            majflt: n()?,
+        })
+    }
+}
+
+/// A stretch's looks a second -- a minute's, a life's, a minute's seconds
+/// in a window of the replica's -- as the line writes them: the most
+/// anonymous memory and dirty pages, the least page cache, the major
+/// faults between them, and how many looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemSpan {
+    anon: u64,
+    dirty: u64,
+    file: u64,
+    faults: u64,
+    n: u64,
+}
+
+impl MemSpan {
+    fn add(span: &mut Option<MemSpan>, s: MemSample, faults: u64) {
+        let x = span.get_or_insert(MemSpan {
+            anon: 0,
+            dirty: 0,
+            file: u64::MAX,
+            faults: 0,
+            n: 0,
+        });
+        x.anon = x.anon.max(s.anon);
+        x.dirty = x.dirty.max(s.dirty);
+        x.file = x.file.min(s.file);
+        x.faults += faults;
+        x.n += 1;
+    }
+}
+
+/// A server's looks a second as the run keeps them: the latest and when,
+/// the minute's since its line took them, the life's since its latest
+/// start, and the minute's seconds a window of the replica's was open in.
+/// The minute line's one look missed the compaction's jump of some 130 MB
+/// that OOM-killed the long run's primary at minute 300.
+#[derive(Default)]
+struct Mem {
+    last: Option<(u64, MemSample)>,
+    minute: Option<MemSpan>,
+    life: Option<MemSpan>,
+    window: Option<MemSpan>,
+}
+
+impl Mem {
+    /// A look at `t`, the replica's window open then or not: its faults
+    /// are those since the last look of the same life.
+    fn sample(&mut self, t: u64, s: MemSample, in_window: bool) {
+        let faults = match self.last {
+            Some((_, p)) if s.majflt >= p.majflt => s.majflt - p.majflt,
+            _ => 0,
+        };
+        MemSpan::add(&mut self.minute, s, faults);
+        MemSpan::add(&mut self.life, s, faults);
+        if in_window {
+            MemSpan::add(&mut self.window, s, faults);
+        }
+        self.last = Some((t, s));
+    }
+
+    /// A new life: the server started again, its cgroup's counters with it.
+    fn restarted(&mut self) {
+        self.life = None;
+        self.last = None;
+    }
+}
+
+/// The open loop's lag sampled each second (`seconds`), the most of each
+/// lane's since the minute's line took them, and the most while a window
+/// of the replica's was open, with how many seconds were.
+#[derive(Default)]
+struct Behind {
+    main: Option<f64>,
+    replica: Option<f64>,
+    window_main: Option<f64>,
+    window_replica: Option<f64>,
+    window_s: u64,
+}
+
+/// `x` held as the most of `m`.
+fn most(m: &mut Option<f64>, x: Option<f64>) {
+    if let Some(x) = x {
+        *m = Some(m.map_or(x, |y| y.max(x)));
+    }
+}
+
+/// The minute line's names for each server's looks a second, the
+/// primary's then the replica's: the looks, the most anonymous memory and
+/// dirty pages, the least page cache, the life's most of the two, and in
+/// the seconds a window of the replica's was open the faults and the least
+/// page cache.
+const MEM_KEYS: [[&str; 8]; 2] = [
+    [
+        "mem_n",
+        "anon_peak",
+        "dirty_peak",
+        "file_min",
+        "anon_peak_life",
+        "dirty_peak_life",
+        "rc_majflt",
+        "rc_file_min",
+    ],
+    [
+        "r_mem_n",
+        "r_anon_peak",
+        "r_dirty_peak",
+        "r_file_min",
+        "r_anon_peak_life",
+        "r_dirty_peak_life",
+        "rc_r_majflt",
+        "rc_r_file_min",
+    ],
+];
 
 /// The free bytes of the disk holding `path`, by `df`: the host's.
 fn host_free(path: &Path) -> Option<u64> {
@@ -1450,7 +1899,7 @@ impl Checker {
             true => None,
             false => Some(match past {
                 Some(ms) => format!(
-                    "; a write answered {ms} ms before a kill is gone, past the {} ms a kill may take",
+                    "; a write answered {ms} ms before a kill or a death is gone, past the {} ms a kill may take",
                     self.regs.kills.loss / 1_000_000
                 ),
                 None => String::new(),
@@ -2330,7 +2779,12 @@ fn behind_s(slots: &[Slot], now: u64) -> Option<f64> {
 /// has not settled yet (`held`), in the order they ended: one its counter
 /// did not move in was none (`settle`); and the most it held since the
 /// minute's line took its figures (`held_max`), the most of every worker's
-/// on the line (`r_held_max`): how near the run came to `HELD_MAX`.
+/// on the line (`r_held_max`): how near the run came to `HELD_MAX`. And
+/// the reads through the replica among a compaction's of its own, from
+/// their send (`r_compact_own`): what the replica answered them in, beside
+/// the class's time from the schedule -- dry run 6's class p99 of 5.5 s was
+/// the loop's queue, the replica's own answers 0.44-0.72 s at the p99 of
+/// those minutes, and no line could say so.
 struct Hists {
     steady: Hist,
     restart: Hist,
@@ -2340,6 +2794,7 @@ struct Hists {
     own: Hist,
     replica: Hist,
     r_compact: Hist,
+    r_compact_own: Hist,
     restart_r_compact: u64,
     held: VecDeque<Held>,
     held_max: usize,
@@ -2360,13 +2815,15 @@ struct Held {
 /// `via_replica` a read through the replica, `behind` the latest kill met
 /// with the loop behind its schedule (`Shared::restart_behind`),
 /// `in_restart` due in a restart's window, `took` its time from when it
-/// was due.
+/// was due, `own_us` from its send to its answer in µs -- a `u32`, 71
+/// minutes, so that a held operation stays 32 bytes (`HELD_MAX`).
 #[derive(Clone, Copy, Debug)]
 struct Rec {
     via_replica: bool,
     behind: bool,
     in_restart: bool,
     took: u64,
+    own_us: u32,
 }
 
 impl Hists {
@@ -2380,6 +2837,7 @@ impl Hists {
             own: Hist::new(),
             replica: Hist::new(),
             r_compact: Hist::new(),
+            r_compact_own: Hist::new(),
             restart_r_compact: 0,
             held: VecDeque::new(),
             held_max: 0,
@@ -2397,7 +2855,18 @@ impl Hists {
         self.own.merge(&o.own);
         self.replica.merge(&o.replica);
         self.r_compact.merge(&o.r_compact);
+        self.r_compact_own.merge(&o.r_compact_own);
         self.restart_r_compact += o.restart_r_compact;
+    }
+
+    /// [`Hists::record`] of an operation's `Rec`: a read through the
+    /// replica among a compaction's of its own counted by its own answer
+    /// time too (`r_compact_own`).
+    fn record_rec(&mut self, c: Class, r: Rec) {
+        self.record(c, r.via_replica, r.behind, r.in_restart, r.took);
+        if c == Class::ReplicaCompact && r.via_replica {
+            self.r_compact_own.record(r.own_us as u64 * 1_000);
+        }
     }
 
     /// An operation of class `c` that took `took` from when it was due:
@@ -2446,8 +2915,7 @@ impl Hists {
             } else {
                 x.otherwise
             };
-            let r = x.rec;
-            self.record(c, r.via_replica, r.behind, r.in_restart, r.took);
+            self.record_rec(c, x.rec);
         }
     }
 
@@ -2468,7 +2936,7 @@ impl Hists {
         }
         match held {
             None => {
-                self.record(c, r.via_replica, r.behind, r.in_restart, r.took);
+                self.record_rec(c, r);
                 None
             }
             Some((window, otherwise)) => {
@@ -2513,6 +2981,7 @@ struct Kept {
     restart_replica: Hist,
     restart_behind: Hist,
     r_compact: Hist,
+    r_compact_own: Hist,
     held_max: usize,
 }
 
@@ -2536,6 +3005,7 @@ impl Kept {
             restart_replica: Hist::new(),
             restart_behind: Hist::new(),
             r_compact: Hist::new(),
+            r_compact_own: Hist::new(),
             held_max: 0,
         }
     }
@@ -2553,6 +3023,7 @@ impl Kept {
         self.restart_replica.merge(&h.restart_replica);
         self.restart_behind.merge(&h.restart_behind);
         self.r_compact.merge(&h.r_compact);
+        self.r_compact_own.merge(&h.r_compact_own);
         self.held_max = self.held_max.max(h.held_max);
         if self.hours.len() == 60 {
             self.hours.pop_front();
@@ -2598,9 +3069,13 @@ impl Kept {
             ("p99_r_compact", &h.r_compact),
             ("p99_r_compact_hour", &rhour),
         ]));
+        v.push(("r_compact_own_n", h.r_compact_own.n.to_string()));
         for (k50, k99, x) in [
             ("own_p50", "own_p99", &h.own),
             ("replica_p50", "replica_p99", &h.replica),
+            // The replica's own answers to the reads its compaction held,
+            // from their send: beside `p99_r_compact`, from the schedule.
+            ("r_compact_own_p50", "r_compact_own_p99", &h.r_compact_own),
         ] {
             if x.n > 0 {
                 v.push((k50, format!("{:.0}", x.pct(0.5))));
@@ -2619,6 +3094,7 @@ impl Kept {
             ("restart_replica_ops", self.restart_replica.n.to_string()),
             ("restart_behind_ops", self.restart_behind.n.to_string()),
             ("r_compact_ops", self.r_compact.n.to_string()),
+            ("r_compact_own_n", self.r_compact_own.n.to_string()),
             ("r_held_max", self.held_max.to_string()),
         ];
         v.extend(p99s(&[
@@ -2626,6 +3102,7 @@ impl Kept {
             ("p99_restart_replica", &self.restart_replica),
             ("p99_restart_behind", &self.restart_behind),
             ("p99_r_compact", &self.r_compact),
+            ("p99_r_compact_own", &self.r_compact_own),
         ]));
         v
     }
@@ -2660,6 +3137,176 @@ struct Stream {
     open_since: AtomicU64,
     conns: AtomicU64,
     seen: AtomicU64,
+}
+
+/// The primary's closes as they come (`Shared::closed`): the run of them
+/// under way -- its first and last close, how many, each within
+/// `BURST_SPAN` of the first -- and, once it is a burst, how far apart its
+/// `BURST_CLOSES` came, ns.
+#[derive(Clone, Copy, Debug, Default)]
+struct Closes {
+    first: u64,
+    last: u64,
+    n: u32,
+    spread: u64,
+}
+
+/// A restart's catch-up (`catch_up`): from its window's start, through the
+/// backlog the open loop sends the primary once it answers again, until the
+/// loop is back on its schedule and the replica holds the newest change
+/// answered then. A read through the replica sent in it that the replica
+/// held past its wait and answered 504 while the replica's change was
+/// advancing is the restart's, `down` (`Shared::catch_504`), and the lane's
+/// schedule is moved up meanwhile (`lane_due`). The dry run of 2026-11-26
+/// counted 185 such 504s in the minute after its planned kill, every error
+/// it had there: the replica was back 517 ms after the server answered, at
+/// the change the kill left, then some 7 000 changes behind the writes of
+/// the pool's backlog -- past the 5 s a read waits -- while the lane sent
+/// its own backlog of reads, 128 at a time, each waiting for the newest
+/// change. It is bounded twice (`CatchMax`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Catch {
+    /// The restart's minute, and its window's start: the first send whose
+    /// 504 is the restart's.
+    minute: u64,
+    from: u64,
+    /// The server answering again, `u64::MAX` before.
+    back: u64,
+    /// The loop back on its schedule once reads went through the replica
+    /// again, and the newest change answered then: the change the replica
+    /// must hold.
+    on: Option<(u64, u64)>,
+    /// Its end, `u64::MAX` while it is open, and how it ended.
+    to: u64,
+    end: CatchEnd,
+    /// The reads through the replica a 504 answered in it, and the lane's
+    /// reads its moves skipped, in thousandths (`dropped_milli`).
+    down: u64,
+    moved_milli: u64,
+    /// Whether its line was said (`catch_up`).
+    said: bool,
+}
+
+/// How a restart's catch-up ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatchEnd {
+    Open,
+    /// The replica held the change answered as the loop came back.
+    Caught,
+    /// `--replica-back-max` passed after the loop came back, the replica
+    /// short of that change: a 504 after it is an error.
+    Bound,
+    /// `--catchup-max` passed after the server answered again, the loop
+    /// not back on its schedule or the replica short of the change then:
+    /// a 504 after it is an error.
+    Long,
+    /// The next restart began first.
+    Cut,
+    /// The run ended first.
+    RunEnd,
+}
+
+impl Catch {
+    fn new(minute: u64, from: u64) -> Catch {
+        Catch {
+            minute,
+            from,
+            back: u64::MAX,
+            on: None,
+            to: u64::MAX,
+            end: CatchEnd::Open,
+            down: 0,
+            moved_milli: 0,
+            said: false,
+        }
+    }
+
+    /// At `now`, the loop `behind` its schedule (`behind_s`, `None` at the
+    /// peak, which keeps none) and reads going through the replica again
+    /// or not (`through`): the first look on its schedule with them going
+    /// through takes the newest change answered (`newest`) as the one the
+    /// replica must hold. Before reads go through it again its backlog is
+    /// no reader's, and the loop may be on its schedule within the grace,
+    /// the pool's writes still landing on the replica.
+    fn on_schedule(&mut self, now: u64, behind: Option<f64>, through: bool, newest: u64) {
+        if self.to == u64::MAX
+            && self.on.is_none()
+            && through
+            && behind.is_none_or(|b| b <= ON_SCHEDULE_S)
+        {
+            self.on = Some((now, newest));
+        }
+    }
+
+    /// The replica read holding the change `held` at `now` (`None` where
+    /// it could not be read): whether that ends the catch-up -- the change
+    /// the loop's return named held, or one of its bounds (`max`) passed
+    /// without it: `--replica-back-max` from that return, or, the loop
+    /// back or not, `--catchup-max` from the server answering again.
+    fn settle(&mut self, now: u64, held: Option<u64>, max: CatchMax) -> bool {
+        if self.to != u64::MAX {
+            return false;
+        }
+        let past = |since: u64, bound: u64| since != u64::MAX && now.saturating_sub(since) >= bound;
+        self.end = match self.on {
+            Some((_, target)) if held.is_some_and(|h| h >= target) => CatchEnd::Caught,
+            Some((at, _)) if past(at, max.replica) => CatchEnd::Bound,
+            _ if past(self.back, max.whole) => CatchEnd::Long,
+            _ => return false,
+        };
+        self.to = now;
+        true
+    }
+}
+
+/// A restart's catch-up's two bounds (`Catch::settle`), ns. The replica's,
+/// `--replica-back-max` from the loop's return, holds a replica that
+/// follows too slowly once the backlog is sent. The whole catch-up's,
+/// `--catchup-max` from the server answering again -- the run's bound on a
+/// replica catching up with a backlog of writes, the end's as here -- holds
+/// one that never ends: a 504 is the restart's only while the replica's
+/// change advances (`Shared::catch_504`), and a loop drains a kill's backlog
+/// in four times as long as the server was gone (at 80% of the peak), so a
+/// kill met with the loop far behind -- the third round's dry run met its
+/// kill of minute 60 166 s behind, some 11 minutes to drain -- would keep
+/// one open, its slow replica's 504s the restart's, the whole time; the
+/// open loop's own verdict fails the loop only past a kill interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CatchMax {
+    replica: u64,
+    whole: u64,
+}
+
+/// The VM's clock as a probe read it (`clock_probe`, `CLOCK_PROBE`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Probe {
+    /// The VM's clock less this host's wall clock, ms, from the middle of
+    /// the request: the minute's `clock_off_ms`, and what a step is told
+    /// by (`clock_stepped`).
+    off_ms: f64,
+    /// The request's round trip, ms and ns: what bounds the offsets' error.
+    rtt_ms: f64,
+    rtt_ns: u64,
+    /// The VM's clock, unix ns, less this process's (`Shared::ns`) at the
+    /// middle of the request, and that middle: what Docker's times are
+    /// read on this process's clock by (`Shared::vm_ns`).
+    vm_less_ns: i64,
+    at: u64,
+}
+
+impl Probe {
+    /// The VM's `now()`, `t_ms`, read between `wall` (ms, this host's wall
+    /// clock) and `ns` (this process's clock) before and after.
+    fn read(t_ms: i64, wall: (f64, f64), ns: (u64, u64)) -> Probe {
+        let mid = ns.0 + (ns.1 - ns.0) / 2;
+        Probe {
+            off_ms: t_ms as f64 - (wall.0 + wall.1) / 2.0,
+            rtt_ms: wall.1 - wall.0,
+            rtt_ns: ns.1 - ns.0,
+            vm_less_ns: (t_ms as i128 * 1_000_000 - mid as i128) as i64,
+            at: mid,
+        }
+    }
 }
 
 /// What the workers, the subscribers and the minute's look share.
@@ -2807,12 +3454,97 @@ struct Shared {
     /// both servers as a read through the replica answers 504
     /// (`replication_said`).
     repl_token: std::sync::OnceLock<String>,
+    /// The first slot of the replica lane (`--replica-threads`): the slots
+    /// before it are the pool's, the rest the lane's, none where the reads
+    /// through the replica share the pool. The lane's schedule is its own:
+    /// the next one due, in ns from `t0`, and the time between two, which at
+    /// the peak follows the pool's answers each second (`seconds`) -- the
+    /// lane's share of what the pool did -- and the pool's operations ended,
+    /// which it follows.
+    lane: usize,
+    r_due: AtomicU64,
+    r_every: AtomicU64,
+    pool_ops: AtomicU64,
+    /// The lane's reads answered since the minute's line took them, and,
+    /// at the peak, those its schedule dropped -- in thousandths of a
+    /// read: a lane more than a second behind is moved up to a second
+    /// behind, the reads it skips never sent (`work`).
+    lane_ops: AtomicU64,
+    lane_dropped_milli: AtomicU64,
+    /// `t0` on the wall clock, unix ns: what a time of the run's is named
+    /// by on a line (`utc`), never what Docker's are read by -- the wall
+    /// clock is slewed, `t0`'s `Instant` is not.
+    t0_wall: u64,
+    /// The VM's clock less this process's (`ns`) at the probe kept
+    /// (`Probe`, `clock`), ns, that probe's round trip and when it was
+    /// taken (0 before the first): what
+    /// Docker's times, the VM's, are read on this process's clock by
+    /// (`vm_ns`), and the error that reading carries (`clock_err`).
+    clock_vm: std::sync::atomic::AtomicI64,
+    clock_rtt: AtomicU64,
+    clock_at: AtomicU64,
+    /// The latest a primary's connection was read answering -- a worker's
+    /// answer, a stream's event -- and the first close of the burst of
+    /// closes since (`u64::MAX` while none): a death's time (`death_time`).
+    /// The closes as they come, under way to a burst or not
+    /// (`Shared::closed`).
+    answered: AtomicU64,
+    closed: AtomicU64,
+    closes: Mutex<Closes>,
+    /// When each connection that failed outside a restart's window failed
+    /// since the minute's line took the errors: those from a death on are
+    /// its, `down` and not errors, once it is found (`death_errors`).
+    cut_errors: Mutex<Vec<u64>>,
+    /// The deaths found, by their time: what a side job cut by one asks
+    /// (`cut_by`).
+    deaths: Mutex<Vec<u64>>,
+    /// When the last kill the schedule sent was sent (0 before any): a
+    /// compact cut after it is the kill's, one cut before it -- in the
+    /// announced second, the server dead before the kill -- the death's.
+    /// The restart's window cannot tell them: the announcement opens it.
+    /// Stored before `docker kill` is sent, so that a job its cut ends
+    /// finds it; and a death in the moment before the send, which Docker's
+    /// inspect showed running, is found only after Docker's wait
+    /// (`gone_before`): until the kill sent at `kill_sent` is judged
+    /// (`kill_judged`, its time once judged either way; `kill_death`, its
+    /// time once judged a death's, stored first), a job it cut waits to
+    /// say whose (`cut_by`) -- a death's timed before the job was asked
+    /// among them, which the deaths found cannot name.
+    kill_sent: AtomicU64,
+    kill_judged: AtomicU64,
+    kill_death: AtomicU64,
+    /// Each restart's catch-up (`Catch`), the latest last, and whether
+    /// the latest is open: the lane's schedule is moved up while it is
+    /// (`lane_due`).
+    catches: Mutex<Vec<Catch>>,
+    catching: AtomicBool,
+    /// The replica's change as `catch_up` last read it and when that read
+    /// began, and the latest time its change is known to have advanced
+    /// after (`r_seen`), 0 before any: a replica's 504 in a catch-up is the
+    /// restart's only while it is within the read's wait (`catch_504`).
+    r_read: Mutex<Option<(u64, u64)>>,
+    r_advanced: AtomicU64,
+    /// Each server's cgroup a second (`watch_memory`): the primary's, then
+    /// the replica's.
+    mem: [Mutex<Mem>; 2],
+    /// The open loop's lag each second (`seconds`).
+    behind: Mutex<Behind>,
 }
 
 impl Shared {
     fn new(o: &Opts, addr: String, raddr: String, ranges: &[(u64, u64)]) -> Shared {
+        let t0 = Instant::now();
+        let t0_wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        // The lane's share of the rate; at the peak a first guess until the
+        // pool's first second says.
+        let r_rate = match o.rate > 0.0 {
+            true => o.rate * REPLICA_SHARE,
+            false => 100.0,
+        };
         Shared {
-            t0: Instant::now(),
+            t0,
             stop: AtomicBool::new(false),
             addr,
             raddr,
@@ -2865,7 +3597,7 @@ impl Shared {
             sessions: Mutex::new(VecDeque::new()),
             next_session: AtomicU64::new(1),
             doc_writes: Mutex::new(Vec::new()),
-            slots: (0..o.threads)
+            slots: (0..o.threads + o.replica_threads)
                 .map(|_| Slot {
                     hists: Mutex::new(Hists::new()),
                     log: Mutex::new(Vec::new()),
@@ -2891,7 +3623,186 @@ impl Shared {
             notes: Mutex::new(Vec::new()),
             fault: Mutex::new(None),
             repl_token: std::sync::OnceLock::new(),
+            lane: o.threads,
+            r_due: AtomicU64::new(0),
+            r_every: AtomicU64::new((1e9 / r_rate) as u64),
+            pool_ops: AtomicU64::new(0),
+            lane_ops: AtomicU64::new(0),
+            lane_dropped_milli: AtomicU64::new(0),
+            t0_wall,
+            // Until the first probe, the wall clock at `t0`: off by the
+            // drift since, which `clock_err` counts.
+            clock_vm: std::sync::atomic::AtomicI64::new(t0_wall as i64),
+            clock_rtt: AtomicU64::new(0),
+            clock_at: AtomicU64::new(0),
+            answered: AtomicU64::new(0),
+            closed: AtomicU64::new(u64::MAX),
+            closes: Mutex::new(Closes::default()),
+            cut_errors: Mutex::new(Vec::new()),
+            kill_sent: AtomicU64::new(0),
+            kill_judged: AtomicU64::new(0),
+            kill_death: AtomicU64::new(0),
+            catches: Mutex::new(Vec::new()),
+            catching: AtomicBool::new(false),
+            r_read: Mutex::new(None),
+            r_advanced: AtomicU64::new(0),
+            deaths: Mutex::new(Vec::new()),
+            mem: [Mutex::new(Mem::default()), Mutex::new(Mem::default())],
+            behind: Mutex::new(Behind::default()),
         }
+    }
+
+    /// The pool's slots, and the replica lane's.
+    fn pool_slots(&self) -> &[Slot] {
+        &self.slots[..self.lane]
+    }
+    fn lane_slots(&self) -> &[Slot] {
+        &self.slots[self.lane..]
+    }
+
+    /// A primary's connection read answering at `t`.
+    fn answered(&self, t: u64) {
+        self.answered.fetch_max(t, Ordering::SeqCst);
+    }
+
+    /// A primary's connection found closed -- cut, refused, a stream ended
+    /// -- at `t`. A death is told from a close that was no death's by how
+    /// many close together: `BURST_CLOSES` within `BURST_SPAN` of the
+    /// first of them are its exit's, and that first close is kept
+    /// (`closed`, `death_time`) while the server is not read answering
+    /// past it by more than `CLOSE_SLOP`; a close alone, or closes spread
+    /// wider, are each one connection's, and time nothing. A burst, or a
+    /// run of closes toward one, the server was read answering past by
+    /// more than the slop is let go -- it was no death's -- and the closes
+    /// from this one counted afresh.
+    fn closed(&self, t: u64) {
+        let a = self.answered.load(Ordering::SeqCst);
+        let mut run = self.closes.lock().unwrap();
+        let burst = self.closed.load(Ordering::SeqCst);
+        if burst != u64::MAX {
+            if a <= burst.saturating_add(CLOSE_SLOP) {
+                return;
+            }
+            self.closed.store(u64::MAX, Ordering::SeqCst);
+        }
+        // Each close's time is taken before this lock, on its own thread:
+        // the run's first is the earliest, whichever came in first.
+        let joins = run.n > 0
+            && t.abs_diff(run.first) <= BURST_SPAN
+            && a <= run.first.saturating_add(CLOSE_SLOP);
+        match joins {
+            true => {
+                run.n += 1;
+                run.first = run.first.min(t);
+                run.last = run.last.max(t);
+            }
+            false => {
+                *run = Closes {
+                    first: t,
+                    last: t,
+                    n: 1,
+                    spread: 0,
+                }
+            }
+        }
+        if run.n >= BURST_CLOSES {
+            run.spread = run.last - run.first;
+            self.closed.store(run.first, Ordering::SeqCst);
+        }
+    }
+
+    /// The death's burst of closes (`closed`) -- `u64::MAX` where none
+    /// was read, or the server was read answering past it by more than
+    /// `CLOSE_SLOP` -- and how far apart its `BURST_CLOSES` came, ns.
+    fn burst(&self) -> (u64, u64) {
+        let run = self.closes.lock().unwrap();
+        let c = self.closed.load(Ordering::SeqCst);
+        let a = self.answered.load(Ordering::SeqCst);
+        match c != u64::MAX && a <= c.saturating_add(CLOSE_SLOP) {
+            true => (c, run.spread),
+            false => (u64::MAX, 0),
+        }
+    }
+
+    /// The server answering again at `t` after a restart: its life's
+    /// answers and closes counted from here. Without it a life that died
+    /// before a worker answered was timed by the last death's burst, or by
+    /// the refused connects of its restart's, and every failure since
+    /// moved to `down`; and its kill judged by the last life's last answer.
+    fn back(&self, t: u64) {
+        let mut run = self.closes.lock().unwrap();
+        *run = Closes::default();
+        self.closed.store(u64::MAX, Ordering::SeqCst);
+        self.answered.store(t, Ordering::SeqCst);
+    }
+
+    /// The VM's clock read by a probe: from here Docker's times are read
+    /// on this process's clock by it (`vm_ns`) -- unless the probe kept
+    /// reads them closer, its error now (`clock_err`) under this one's,
+    /// and the two agree within both errors. The minute's probe waits
+    /// behind whatever the server is answering: after a restart, behind
+    /// the loop's backlog, its round trip seconds where the last took a
+    /// few ms. Two that disagree -- the VM's clock stepped, or drifted
+    /// past the bound -- take the new one. Whether it was taken.
+    fn clock(&self, p: &Probe) -> bool {
+        let at = self.clock_at.load(Ordering::SeqCst);
+        if at > 0 {
+            let kept = self.clock_err(p.at);
+            let new = p.rtt_ns + 1_000_000;
+            let off = self.clock_vm.load(Ordering::SeqCst);
+            let agree = (p.vm_less_ns as i128 - off as i128).unsigned_abs() <= (kept + new) as u128;
+            if agree && kept < new {
+                return false;
+            }
+        }
+        self.clock_vm.store(p.vm_less_ns, Ordering::SeqCst);
+        self.clock_rtt.store(p.rtt_ns, Ordering::SeqCst);
+        self.clock_at.store(p.at, Ordering::SeqCst);
+        true
+    }
+
+    /// A time Docker gives, unix ns on the VM's clock, in ns from `t0` on
+    /// this process's, by the kept probe's offset against this process's
+    /// clock itself (`ns`) -- never through the wall clock at `t0`, which
+    /// parts from it by tens of ms an hour; `None` before `t0`.
+    fn vm_ns(&self, vm: u64) -> Option<u64> {
+        let off = self.clock_vm.load(Ordering::SeqCst);
+        u64::try_from(vm as i128 - off as i128).ok()
+    }
+
+    /// How far a time read through `vm_ns` at `t` may be off: the kept
+    /// probe's round trip (`clock`), the ms `now()` is read to, and the
+    /// drift the two clocks may have taken since (`CLOCK_DRIFT_PPM`).
+    fn clock_err(&self, t: u64) -> u64 {
+        let since = t.saturating_sub(self.clock_at.load(Ordering::SeqCst));
+        self.clock_rtt.load(Ordering::SeqCst)
+            + 1_000_000
+            + (since as u128 * CLOCK_DRIFT_PPM as u128 / 1_000_000) as u64
+    }
+
+    /// The failures counted as errors from `at` on -- a death's, cut by it
+    /// before the run knew -- moved to `down`; how many.
+    fn death_errors(&self, at: u64) -> u64 {
+        let mut v = self.cut_errors.lock().unwrap();
+        let n = v.iter().filter(|&&t| t >= at).count() as u64;
+        v.retain(|&t| t < at);
+        let _ = self
+            .errors
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                Some(e.saturating_sub(n))
+            });
+        self.down.fetch_add(n, Ordering::SeqCst);
+        n
+    }
+
+    /// The minute's errors and `down`, taken for its line.
+    fn take_errors(&self) -> (u64, u64) {
+        let mut v = self.cut_errors.lock().unwrap();
+        v.clear();
+        (
+            self.errors.swap(0, Ordering::SeqCst),
+            self.down.swap(0, Ordering::SeqCst),
+        )
     }
 
     /// Both servers' `/_replication/status` as they are now: the replica's
@@ -3013,7 +3924,15 @@ impl Shared {
         if restart_kind && self.restarting(t) {
             self.down.fetch_add(1, Ordering::Relaxed);
         } else {
-            self.errors.fetch_add(1, Ordering::Relaxed);
+            // Under the lock the minute's line takes the errors with, so a
+            // death found later moves no more than were counted.
+            {
+                let mut v = self.cut_errors.lock().unwrap();
+                if restart_kind && v.len() < 100_000 {
+                    v.push(t);
+                }
+                self.errors.fetch_add(1, Ordering::SeqCst);
+            }
             self.note(what());
         }
     }
@@ -3025,6 +3944,82 @@ impl Shared {
             .iter()
             .map(|&(_, k, back)| (k, back))
             .collect()
+    }
+
+    /// The catch-up of the restart of minute `m` opened, from its window's
+    /// start: one still open is cut by it, its own 504s counted to it.
+    fn catch_open(&self, m: u64, from: u64) {
+        let mut c = self.catches.lock().unwrap();
+        if let Some(x) = c.last_mut().filter(|x| x.to == u64::MAX) {
+            x.to = from;
+            x.end = CatchEnd::Cut;
+        }
+        c.push(Catch::new(m, from));
+        self.catching.store(true, Ordering::SeqCst);
+    }
+
+    /// The server answering again at `back`, for the catch-up's line.
+    fn catch_back(&self, back: u64) {
+        if let Some(x) = self.catches.lock().unwrap().last_mut() {
+            x.back = back;
+        }
+    }
+
+    /// A read through the replica sent at `s` that the replica held past
+    /// its wait and answered 504: the restart's where `s` falls in a
+    /// catch-up (`Catch`) and the replica's change advanced within the
+    /// wait before now (`r_advanced`) -- counted `down` and to it, `Some((m,
+    /// true))` -- and an error otherwise: `Some((m, false))` in the catch-up
+    /// of minute `m` with the replica's change standing still, a stall the
+    /// backlog does not explain, `None` with no restart behind it or the
+    /// replica caught up. By its send, not its answer: the replica answers
+    /// a 504 the full wait after it, and those of reads sent as the
+    /// catch-up ended come after its end.
+    fn catch_504(&self, s: u64) -> Option<(u64, bool)> {
+        let mut c = self.catches.lock().unwrap();
+        let x = c.iter_mut().rev().find(|x| s >= x.from && s <= x.to)?;
+        // Read before `now`: the advance it stands for came before now.
+        let advanced = self.r_advanced.load(Ordering::SeqCst);
+        let wait = fennec_http::AFTER_WAIT.as_nanos() as u64;
+        if advanced == 0 || advanced.saturating_add(wait) < self.ns() {
+            return Some((x.minute, false));
+        }
+        x.down += 1;
+        self.down.fetch_add(1, Ordering::SeqCst);
+        Some((x.minute, true))
+    }
+
+    /// The replica read holding change `seq` by a read of its status begun
+    /// at `at` (`catch_up`; `None`, not read): a change past the one the
+    /// read before it found came after that read began, the latest such
+    /// time kept (`r_advanced`). The read's start, not its answer: the
+    /// status says the change as of some moment of the call, and a call
+    /// can take seconds behind a server's backlog.
+    fn r_seen(&self, at: u64, seq: Option<u64>) {
+        let Some(seq) = seq else {
+            return;
+        };
+        let mut r = self.r_read.lock().unwrap();
+        if let Some((was_at, was)) = *r {
+            if seq > was {
+                self.r_advanced.fetch_max(was_at, Ordering::SeqCst);
+            }
+        }
+        *r = Some((at, seq));
+    }
+
+    /// The lane's reads a move of its schedule skipped in an open
+    /// catch-up, in thousandths of a read.
+    fn catch_moved(&self, milli: u64) {
+        if let Some(x) = self
+            .catches
+            .lock()
+            .unwrap()
+            .last_mut()
+            .filter(|x| x.to == u64::MAX)
+        {
+            x.moved_milli += milli;
+        }
     }
 }
 
@@ -3077,12 +4072,23 @@ impl Worker<'_> {
                 &self.sh.addr
             };
             let c = if replica { &mut self.rc } else { &mut self.c };
+            // A connect's own failure, kept: one refused is a close, one
+            // that timed out is not (`a_close`) -- the server may be
+            // alive and slow, and a close taken for its death's time.
+            let mut unconnected = None;
             if c.is_none() {
-                *c = http::Http::try_connect(addr, Duration::from_secs(60)).ok();
+                match http::Http::try_connect(addr, Duration::from_secs(60)) {
+                    Ok(x) => *c = Some(x),
+                    Err(e) => unconnected = Some(e),
+                }
                 if !replica {
                     self.life = None;
                 }
             }
+            // The request's send, once connected -- a connect may take up
+            // to its 60 s: what tells a replica's 504 of a restart's
+            // catch-up from one after it (`catch_504`).
+            let sent = self.sh.ns();
             let got = match c.as_mut() {
                 Some(c) => match c.try_query_with(text, params, headers) {
                     Ok((status, body)) => {
@@ -3091,7 +4097,7 @@ impl Worker<'_> {
                     }
                     Err(e) => Err(e),
                 },
-                None => Err(std::io::Error::other("no connection")),
+                None => Err(unconnected.unwrap_or_else(|| std::io::Error::other("no connection"))),
             };
             let t = self.sh.ns();
             // A connection's server is the one that answered it first,
@@ -3100,6 +4106,15 @@ impl Worker<'_> {
             // the server behind it is there to answer.
             if !replica && got.is_ok() && self.life.is_none() {
                 self.life = Some(self.sh.life.load(Ordering::SeqCst));
+            }
+            // What a death's time is read from (`death_time`): the
+            // primary answering, and its connections closing.
+            if !replica {
+                match &got {
+                    Ok(_) => self.sh.answered(t),
+                    Err(e) if a_close(e) => self.sh.closed(t),
+                    Err(_) => {}
+                }
             }
             match got {
                 Ok((status, body, seq, _)) if status < 300 => return Answer::Ok(body, seq),
@@ -3134,11 +4149,33 @@ impl Worker<'_> {
                             said()
                         ));
                     }
-                    // A read the replica held past its wait: what each
-                    // server said of replication as it answered.
+                    // A read the replica held past its wait while it caught
+                    // up after a restart -- the writes of the loop's
+                    // backlog ahead of it, its change advancing -- is the
+                    // restart's.
+                    let catch = match replica && status == 504 {
+                        true => self.sh.catch_504(sent),
+                        false => None,
+                    };
+                    if let Some((_, true)) = catch {
+                        return Answer::Refused(status);
+                    }
+                    // Any other: what each server said of replication as
+                    // it answered.
                     let sh = self.sh;
                     self.sh.failed(t, false, || match replica && status == 504 {
-                        true => format!("{}{}", said(), sh.replication_said()),
+                        true => format!(
+                            "{}{}{}",
+                            said(),
+                            match catch {
+                                Some((m, _)) => format!(
+                                    "; sent in the catch-up of minute {m}'s restart, the replica's change not seen to advance in the {} s before",
+                                    fennec_http::AFTER_WAIT.as_secs()
+                                ),
+                                None => String::new(),
+                            },
+                            sh.replication_said()
+                        ),
                         false => said(),
                     });
                     return Answer::Refused(status);
@@ -3392,23 +4429,35 @@ impl Worker<'_> {
         true
     }
 
-    fn op(&mut self, value: &mut String, zipf: &mut Scrambled) -> bool {
-        let u = self.rng.f64();
+    /// A read of a record through the replica, the mix's 4%.
+    fn replica_read(&mut self, zipf: &mut Scrambled, lane: bool) -> bool {
+        let key = zipf.next(&mut self.rng, self.sh.records) + 1;
+        // Not across a restart: the replica would wait out the primary's
+        // absence for the write it is sent after, and its own reconnect
+        // after it. To the primary meanwhile.
+        let replica =
+            self.sh.replica_ok.load(Ordering::SeqCst) && !self.sh.restarting(self.sh.ns());
+        // The lane's connection to the primary is for a restart alone:
+        // let go once the replica is read again, not held idle for the
+        // half hour to the next, where the server's idle bound closes it.
+        if lane && replica {
+            self.c = None;
+        }
+        self.read(key, replica)
+    }
+
+    /// One operation of the mix; `lanes`, the reads through the replica on
+    /// a lane of their own (`--replica-threads`): the pool's mix is then
+    /// the rest of it, each operation's share as before.
+    fn op(&mut self, value: &mut String, zipf: &mut Scrambled, lanes: bool) -> bool {
+        let u = pool_u(self.rng.f64(), lanes);
         let records = self.sh.records;
         match u {
             u if u < 0.36 => {
                 let key = zipf.next(&mut self.rng, records) + 1;
                 self.read(key, false)
             }
-            u if u < 0.40 => {
-                let key = zipf.next(&mut self.rng, records) + 1;
-                // Not across a restart: the replica would wait out the
-                // primary's absence for the write it is sent after, and its
-                // own reconnect after it. To the primary meanwhile.
-                let replica =
-                    self.sh.replica_ok.load(Ordering::SeqCst) && !self.sh.restarting(self.sh.ns());
-                self.read(key, replica)
-            }
+            u if u < 0.40 => self.replica_read(zipf, false),
             u if u < 0.77 => {
                 let key = zipf.next(&mut self.rng, records) + 1;
                 let f = self.rng.below(FIELDS as u64) as u8;
@@ -3535,6 +4584,45 @@ impl Worker<'_> {
     }
 }
 
+/// The pool's draw `r` in [0, 1) as a point of the mix (`Worker::op`):
+/// itself where the reads through the replica share the pool, and where
+/// they have a lane of their own the rest of the mix, each operation's
+/// share of the pool's in the proportion it was -- [0.36, 0.40), the
+/// replica's, never drawn.
+fn pool_u(r: f64, lanes: bool) -> f64 {
+    match lanes {
+        false => r,
+        true => {
+            let u = r * (1.0 - REPLICA_SHARE);
+            // Past the replica's share from its end, not by adding it:
+            // 0.36 + 0.04 is 0.39999999999999997 in an f64, the replica's.
+            if u < 0.36 {
+                u
+            } else {
+                (u - 0.36) + 0.40
+            }
+        }
+    }
+}
+
+/// Whether a request's failure is its connection gone -- closed, cut or
+/// refused -- rather than a wait that ran out: what a death does to every
+/// connection at once. A connect that timed out is no close: the server
+/// may be alive and slow, and the close would be taken for a death's time
+/// (`Shared::closed`).
+fn a_close(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind as K;
+    matches!(
+        e.kind(),
+        K::UnexpectedEof
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::ConnectionRefused
+            | K::BrokenPipe
+            | K::NotConnected
+    )
+}
+
 /// `{"affected":1}`'s count.
 fn affected(body: &[u8]) -> u64 {
     body.strip_prefix(b"{\"affected\":")
@@ -3564,19 +4652,41 @@ fn work(sh: &Shared, w: usize) {
     };
     let mut zipf = Scrambled::new();
     let mut value = String::with_capacity(super::FIELD_LEN);
+    // The replica lane: the reads through the replica on connections and
+    // a schedule of their own, so that a replica holding its reads -- its
+    // own compaction, dry run 6's -- holds them and not the pool every
+    // other operation shares. In one pool, each such read waits out the
+    // primary's next sync (`Fennec-After`, ~200 ms): 4% of the operations
+    // held some 17 of the 32 connections all the time, and a slowdown of
+    // 10-15% for 30 s queued every operation for seconds (dry run 6's
+    // `p99_r_compact` of 5.5 s, the replica answering in 0.44-0.72 s).
+    let lanes = sh.lane < sh.slots.len();
+    let in_lane = w >= sh.lane;
     // Open loop: one schedule, an operation every `every`, each connection
     // taking the next as it is free (`Shared::next`) -- an operation waits
     // for a connection only while every one is busy, never behind its own
-    // connection's slow one.
-    let every = (sh.rate > 0.0).then(|| Duration::from_secs_f64(1.0 / sh.rate));
+    // connection's slow one. The pool's rate is the run's less the lane's.
+    let pool_rate = match lanes {
+        true => sh.rate * (1.0 - REPLICA_SHARE),
+        false => sh.rate,
+    };
+    let every = (sh.rate > 0.0).then(|| Duration::from_secs_f64(1.0 / pool_rate));
     let window = |from: &AtomicU64, to: &AtomicU64| {
         (from.load(Ordering::Relaxed), to.load(Ordering::Relaxed))
     };
     let verdict = |id: u64| sh.r_verdict(id);
     let mut classes = Classes::default();
     while !sh.stop.load(Ordering::Relaxed) {
-        let (due, on_time) = match every {
-            Some(e) => {
+        let (due, on_time) = match (in_lane, every) {
+            (true, _) => {
+                let d = lane_due(sh, sh.ns());
+                slot.due.store(d, Ordering::Relaxed);
+                let due = sh.t0 + Duration::from_nanos(d);
+                let now = Instant::now();
+                std::thread::sleep(due.saturating_duration_since(now));
+                (due, due > now)
+            }
+            (false, Some(e)) => {
                 let n = sh.next.fetch_add(1, Ordering::Relaxed);
                 let due = sh.t0 + e.mul_f64(n as f64);
                 slot.due.store(
@@ -3587,16 +4697,24 @@ fn work(sh: &Shared, w: usize) {
                 std::thread::sleep(due.saturating_duration_since(now));
                 (due, due > now)
             }
-            None => (Instant::now(), true),
+            (false, None) => (Instant::now(), true),
         };
         // Every write that began before this one is logged before the
         // checker reads past it (`safe`).
         let sent = Instant::now();
         slot.inflight.store(sh.ns(), Ordering::SeqCst);
         me.via_replica = false;
-        let ok = me.op(&mut value, &mut zipf);
+        let ok = match in_lane {
+            true => me.replica_read(&mut zipf, true),
+            false => me.op(&mut value, &mut zipf, lanes),
+        };
         slot.inflight.store(u64::MAX, Ordering::SeqCst);
         slot.done.fetch_add(1, Ordering::Relaxed);
+        if !in_lane {
+            sh.pool_ops.fetch_add(1, Ordering::Relaxed);
+        } else if ok {
+            sh.lane_ops.fetch_add(1, Ordering::Relaxed);
+        }
         let at = due.saturating_duration_since(sh.t0).as_nanos() as u64;
         let (id, from, to) = *sh.r_window.lock().unwrap();
         let w = Windows {
@@ -3606,14 +4724,16 @@ fn work(sh: &Shared, w: usize) {
         };
         let (c, held) = classes.of(at, sh.ns(), me.via_replica, on_time, &w, id, &verdict);
         if ok {
+            let own = sent.elapsed().as_nanos() as u64;
             let r = Rec {
                 via_replica: me.via_replica,
                 behind: sh.restart_behind.load(Ordering::Relaxed),
                 in_restart: at >= w.restart.0 && at <= w.restart.1,
                 took: due.elapsed().as_nanos() as u64,
+                own_us: (own / 1_000).min(u32::MAX as u64) as u32,
             };
             let mut h = slot.hists.lock().unwrap();
-            h.own.record(sent.elapsed().as_nanos() as u64);
+            h.own.record(own);
             if let Some(window) = h.took(c, held, r, &verdict) {
                 cut_r_window(sh, window, sh.ns(), Cut::Held);
                 h.settle(&verdict);
@@ -3622,6 +4742,41 @@ fn work(sh: &Shared, w: usize) {
             sh.ops.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// The replica lane's next read, due in ns from `t0`: its own schedule, a
+/// read every `r_every`. At the peak it follows what the pool answers
+/// (`seconds`), and one more than a second behind `now` is moved up: its
+/// share of the pool's operations, never a backlog of its own that a
+/// slower pool would see it burst through. So too from a restart until
+/// its catch-up ends (`Shared::catching`): the reads due while the
+/// primary was gone, and those the replica's 504s held the lane behind
+/// by, sent at once -- 128 connections each waiting for the newest change
+/// on a replica the pool's backlog of writes has put behind -- were 504s
+/// in their turn. The reads a move skips are counted: dropped, never sent,
+/// the lane short of its share by them, and in a catch-up said on its line.
+fn lane_due(sh: &Shared, now: u64) -> u64 {
+    let step = sh.r_every.load(Ordering::Relaxed);
+    let catching = sh.catching.load(Ordering::Relaxed);
+    if sh.rate == 0.0 || catching {
+        let floor = now.saturating_sub(1_000_000_000);
+        let was = sh.r_due.fetch_max(floor, Ordering::Relaxed);
+        if was < floor {
+            let milli = dropped_milli(floor - was, step);
+            sh.lane_dropped_milli.fetch_add(milli, Ordering::Relaxed);
+            if catching {
+                sh.catch_moved(milli);
+            }
+        }
+    }
+    sh.r_due.fetch_add(step, Ordering::Relaxed)
+}
+
+/// The reads a move of the lane's schedule by `skipped` ns skips, one due
+/// every `step` ns, in thousandths of a read: the moves are many and small,
+/// a whole read's count of each would round most to none.
+fn dropped_milli(skipped: u64, step: u64) -> u64 {
+    (skipped as u128 * 1000 / step.max(1) as u128).min(u64::MAX as u128) as u64
 }
 
 /// An SSE `data:` line of a subscription: its change, rows and deletions.
@@ -3682,6 +4837,10 @@ fn subscribe(sh: &Shared, i: usize) {
             Ok(s)
         })();
         let mut ended = String::from("refused");
+        // Its connection closed or refused, rather than answered with a
+        // status: what a death's time is read from (`death_time`). A
+        // connect that timed out is none (`a_close`).
+        let mut gone = matches!(&opened, Err(e) if a_close(e));
         if let Ok(s) = opened {
             let conn = me.conns.fetch_add(1, Ordering::SeqCst) + 1;
             let at = sh.ns();
@@ -3695,9 +4854,11 @@ fn subscribe(sh: &Shared, i: usize) {
                 match r.read_line(&mut line) {
                     Ok(0) => {
                         ended = "ended".into();
+                        gone = true;
                         break;
                     }
                     Ok(_) if head => {
+                        sh.answered(sh.ns());
                         // Its server's life, the one turning as it answers
                         // (`Worker::life`).
                         life = sh.life.load(Ordering::SeqCst);
@@ -3715,6 +4876,7 @@ fn subscribe(sh: &Shared, i: usize) {
                             event = name.trim().to_string();
                         } else if let Some(data) = line.strip_prefix("data: ") {
                             let e = sh.ns();
+                            sh.answered(e);
                             match stream_data(data.trim(), event == "seed") {
                                 Some(mut ev) => {
                                     ev.seq = in_life(life, ev.seq);
@@ -3745,6 +4907,7 @@ fn subscribe(sh: &Shared, i: usize) {
                     }
                     Err(e) => {
                         ended = e.to_string();
+                        gone = a_close(&e);
                         break;
                     }
                 }
@@ -3754,7 +4917,11 @@ fn subscribe(sh: &Shared, i: usize) {
         if sh.stop.load(Ordering::Relaxed) {
             break;
         }
-        sh.failed(sh.ns(), true, || format!("subscription {i}: {ended}"));
+        let t = sh.ns();
+        if gone {
+            sh.closed(t);
+        }
+        sh.failed(t, true, || format!("subscription {i}: {ended}"));
         std::thread::sleep(Duration::from_secs(1));
     }
 }
@@ -3968,6 +5135,10 @@ struct Doings {
     compact_busy: AtomicU64,
     /// Compacts a kill cut: asked, under way, the server killed.
     compact_killed: AtomicU64,
+    /// Compacts and backups a death of the primary cut (`cut_by`):
+    /// the death's, counted with it, never a failure of their own.
+    compact_died: AtomicU64,
+    backup_died: AtomicU64,
     restart_ms: AtomicU64,
     swept: AtomicU64,
     /// Keys a restart's sweep was handed, and sweeps that could not read
@@ -3981,6 +5152,37 @@ struct Doings {
 impl Doings {
     fn figure(&self, name: &'static str, value: String) {
         self.figures.lock().unwrap().push((name, value));
+    }
+}
+
+/// The figures said since the last line (`Doings::figure`) onto the line
+/// `v` being written: a minute's, or the end's for those said after the
+/// last minute's -- a catch-up the run's end cut, or one said within its
+/// wait of the end (`catch_look`), whose 504s the "no error" verdict
+/// counts. The kill's: one kill a minute at the most, a death beside it the
+/// rarer still -- the last said of each kept. A restart's catch-up's, of
+/// which a minute may end two: their counts added, their times the worst
+/// kept -- -1, a bound passed (`catchup_replica_ms`), over any -- never a
+/// later one's over an earlier's.
+fn figures_onto(doings: &Doings, v: &mut Vec<(&str, String)>) {
+    let figures = std::mem::take(&mut *doings.figures.lock().unwrap());
+    for (name, x) in figures {
+        let mut was = None;
+        v.retain(|(k, s)| match *k == name {
+            true => {
+                was = Some(s.clone());
+                false
+            }
+            false => true,
+        });
+        let num = |s: &str| s.parse::<i64>().unwrap_or(0);
+        let x = match (name, was) {
+            ("catchup_down" | "catchup_moved", Some(w)) => (num(&w) + num(&x)).to_string(),
+            ("catchup_replica_ms", Some(w)) if num(&w) < 0 || num(&x) < 0 => "-1".into(),
+            ("catchup_replica_ms" | "catchup_on_ms", Some(w)) => num(&w).max(num(&x)).to_string(),
+            _ => x,
+        };
+        v.push((name, x));
     }
 }
 
@@ -4124,12 +5326,92 @@ struct Side {
     kit: Kit,
 }
 
+/// What cut a side job that failed (`cut_by`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutBy {
+    /// The run's kill, which the schedule lands in a compact: no failure.
+    Kill,
+    /// A death of the primary's: the death's, never the job's own.
+    Death,
+}
+
+/// How long a side job cut after the run's kill was sent waits for that
+/// kill to be judged its or a death's (`Shared::kill_judged`): the kill's
+/// `docker kill` and `docker wait` are bounded at 60 s and 120 s, the
+/// inspect after them is one more call.
+const KILL_JUDGE_WAIT: Duration = Duration::from_secs(200);
+
+/// What cut a side job of `[s, ...]` that failed, `close` where its
+/// connection went rather than a wait running out: a death found since
+/// `s` (`Shared::deaths`); the run's kill, sent since, once the kill's
+/// path judged it (`judge_kill`): its own, or a death's (`kill_death`) --
+/// a death in the moment before the send is found only after Docker's
+/// wait (`gone_before`), and the job, cut by it, saw its connection close
+/// after `kill_sent` was stored all the same, the death timed before `s`
+/// where the server was gone before the job was asked; with no kill sent
+/// since, a closed connection and the
+/// server not running with no restart's window open (`stopped`: Docker's
+/// word), looked for `death_wait` at the most, as the job sees its
+/// connection close before the run finds the death; and in a restart's
+/// window with nothing else found, the kill's, as before the deaths were
+/// told apart. `None`: a failure of the job's own. The long run's compact
+/// of minute 300 counted as a failure of its own, the death that cut it
+/// its cause.
+fn cut_by(
+    sh: &Shared,
+    s: u64,
+    close: bool,
+    stopped: &dyn Fn() -> bool,
+    death_wait: Duration,
+    kill_wait: Duration,
+) -> Option<CutBy> {
+    let t = Instant::now();
+    loop {
+        if sh.deaths.lock().unwrap().iter().any(|&d| d >= s) {
+            return Some(CutBy::Death);
+        }
+        let sent = sh.kill_sent.load(Ordering::SeqCst);
+        if sent >= s {
+            if sh.kill_judged.load(Ordering::SeqCst) >= sent {
+                return Some(match sh.kill_death.load(Ordering::SeqCst) >= sent {
+                    true => CutBy::Death,
+                    false => CutBy::Kill,
+                });
+            }
+            if t.elapsed() >= kill_wait {
+                return Some(CutBy::Kill);
+            }
+        } else {
+            if !close || t.elapsed() >= death_wait {
+                break;
+            }
+            if !sh.restarting(sh.ns()) && stopped() {
+                return Some(CutBy::Death);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50).min(death_wait));
+    }
+    sh.restarting(sh.ns()).then_some(CutBy::Kill)
+}
+
 impl Side {
+    /// What cut a job of `[s, ...]` that failed (`cut_by`), Docker asked
+    /// whether the server runs.
+    fn cut_by(&self, s: u64, close: bool) -> Option<CutBy> {
+        let stopped = || {
+            self.kit
+                .exit(&self.kit.server())
+                .is_some_and(|x| !x.running)
+        };
+        cut_by(&self.sh, s, close, &stopped, DEATH_WAIT, KILL_JUDGE_WAIT)
+    }
+
     fn compact(&self, for_kill: bool) {
         let sh = &self.sh;
         sh.compact_to.store(u64::MAX, Ordering::SeqCst);
         sh.compact_from.store(sh.ns(), Ordering::SeqCst);
         let first = Instant::now();
+        let asked = sh.ns();
         loop {
             sh.compact_since.store(sh.ns(), Ordering::SeqCst);
             let (t, file) = (Instant::now(), sh.p_file.load(Ordering::SeqCst));
@@ -4166,11 +5448,27 @@ impl Side {
                     self.doings.compact_busy.fetch_add(1, Ordering::Relaxed);
                     say("compact refused: the server's own was writing its file".into());
                 }
-                // Cut by a kill the schedule landed in it: what the run means
-                // it to meet, not a failure -- the file must verify after.
-                Err(_) if sh.restarting(sh.ns()) => {
-                    self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
-                }
+                Err(e) => match self.cut_by(asked, a_close(&e)) {
+                    // Cut by a kill the schedule landed in it: what the run
+                    // means it to meet, not a failure -- the file must
+                    // verify after.
+                    Some(CutBy::Kill) => {
+                        self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Cut by a death of the primary's: the death's -- before
+                    // the kill's window, which the announcement opens a
+                    // second before the kill, or in the moment before the
+                    // kill's send: the dry run's death in that second was
+                    // counted as the kill's cut.
+                    Some(CutBy::Death) => {
+                        say(format!("compact cut by the primary's death: {e}"));
+                        self.doings.compact_died.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => {
+                        sh.note(format!("compact failed: {e}"));
+                        self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
                 other => {
                     sh.note(format!("compact failed: {other:?}"));
                     self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
@@ -4251,6 +5549,11 @@ impl Side {
                 "rm -f /data/restored.fennec",
                 Duration::from_secs(120),
             );
+        } else if !backed && self.cut_by(s, true) == Some(CutBy::Death) {
+            // Its stream from the primary cut by the primary's death: the
+            // death's, not the backup's.
+            say(format!("backup {id} cut by the primary's death"));
+            self.doings.backup_died.fetch_add(1, Ordering::Relaxed);
         } else {
             say(out);
             self.doings.backup_failed.fetch_add(1, Ordering::Relaxed);
@@ -4492,6 +5795,10 @@ struct Settings {
     recall_min: f64,
     subscriptions: u64,
     threads: u64,
+    /// The replica lane's connections (`--replica-threads`): 0 where the
+    /// reads through the replica share the pool, a start line from before
+    /// the lanes among them.
+    replica_threads: u64,
     /// The servers' `--replication-buffer`, MiB: 64, the server's own
     /// default, where a start line from before it does not say.
     replication_buffer: u64,
@@ -4518,6 +5825,7 @@ impl Settings {
             recall_min: o.recall_min,
             subscriptions: o.subscriptions as u64,
             threads: o.threads as u64,
+            replica_threads: o.replica_threads as u64,
             replication_buffer: o.replication_buffer,
             cpus: 0,
         }
@@ -4542,6 +5850,7 @@ impl Settings {
             ("recall_min", format!("{}", self.recall_min)),
             ("subscriptions", self.subscriptions.to_string()),
             ("threads", self.threads.to_string()),
+            ("replica_threads", self.replica_threads.to_string()),
             ("replication_buffer", self.replication_buffer.to_string()),
             ("cpus", self.cpus.to_string()),
         ]
@@ -4564,6 +5873,7 @@ impl Settings {
             recall_min: g("recall_min")?,
             subscriptions: g("subscriptions")? as u64,
             threads: g("threads")? as u64,
+            replica_threads: g("replica_threads").map_or(0, |x| x as u64),
             replication_buffer: g("replication_buffer").map_or(64, |x| x as u64),
             cpus: g("cpus").map_or(0, |x| x as u64),
         })
@@ -4684,31 +5994,31 @@ fn read_all(
     Some(digests)
 }
 
-/// The server's clock against this host's, by a write of `now()`
-/// (`CLOCK_PROBE`): the offset in ms from the middle of the request, and
-/// the request's round trip, which bounds the offset's error.
-fn clock_probe(addr: &str) -> Option<(f64, f64)> {
+/// The server's clock against this host's wall clock and this process's
+/// own (`sh.ns`), by a write of `now()` (`CLOCK_PROBE`), each from the
+/// middle of the request (`Probe`).
+fn clock_probe(addr: &str, sh: &Shared) -> Option<Probe> {
     let wall = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64() * 1e3)
     };
     let mut c = http::Http::try_connect(addr, Duration::from_secs(10)).ok()?;
-    let before = wall();
+    let (before, b_ns) = (wall(), sh.ns());
     let (status, body) = c.try_query(CLOCK_PROBE, "").ok()?;
-    let after = wall();
+    let (after, a_ns) = (wall(), sh.ns());
     if status != 200 {
         return None;
     }
-    let t = *http::ints(body, "t").first()? as f64;
-    Some((t - (before + after) / 2.0, after - before))
+    let t = *http::ints(body, "t").first()?;
+    Some(Probe::read(t, (before, after), (b_ns, a_ns)))
 }
 
 /// Whether the clock moved against this host's from one probe to the next
 /// by more than a probe's error can explain: a step the `@ttl` slack must
 /// take (`CLOCK_STEP_MS`).
-fn clock_stepped(prev: (f64, f64), now: (f64, f64)) -> bool {
-    (now.0 - prev.0).abs() - (prev.1 + now.1) / 2.0 > CLOCK_STEP_MS
+fn clock_stepped(prev: Probe, now: Probe) -> bool {
+    (now.off_ms - prev.off_ms).abs() - (prev.rtt_ms + now.rtt_ms) / 2.0 > CLOCK_STEP_MS
 }
 
 /// A secret of the run's: 32 bytes of the system's randomness, as hex --
@@ -5098,6 +6408,907 @@ fn watch_replica(sh: &Shared, kit: &Kit) {
     }
     // A compaction still open as the run ends: cut, its end unseen.
     counter.edge(sh, w.stop(sh.ns()), &mut read);
+}
+
+/// A server's memory watch's script (`watch_memory`): its cgroup's
+/// `memory.stat` once a second, read through the server's own root -- the
+/// shell's built-ins alone, a fork a second for `sleep`. A `docker exec` a
+/// look is no option: a sizing loop of one every 100 ms slowed a server
+/// 30-57%. It runs in a container of its own, charged to its own cgroup,
+/// and ends with the server's processes (its process namespace's).
+const MEM_SCRIPT: &str = "cd /proc/1/root/sys/fs/cgroup || exit 0; \
+    while :; do a=0; f=0; d=0; w=0; j=0; \
+      while read -r k v; do case $k in anon) a=$v;; file) f=$v;; \
+        file_dirty) d=$v;; file_writeback) w=$v;; pgmajfault) j=$v;; esac; \
+      done < memory.stat || exit 0; \
+      echo \"M $a $f $d $w $j\"; sleep 1; \
+    done";
+
+/// The memory watch's container on `server`: in its process namespace,
+/// reading another user's `/proc/1/root` a ptrace's right, on no network.
+fn mem_args(name: &str, server: &str) -> Vec<String> {
+    let pid = format!("--pid=container:{server}");
+    [
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--name",
+        name,
+        "--network",
+        "none",
+        &pid,
+        "--cap-add",
+        "SYS_PTRACE",
+        ALPINE,
+        "sh",
+        "-c",
+        MEM_SCRIPT,
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// Watches a server's cgroup a second for the run's length (`which` 0 the
+/// primary, 1 the replica), into `Shared::mem`: the minute's, the life's
+/// and a replica's window's most anonymous memory and dirty pages, least
+/// page cache and faults. One process the run long, as `ycsb`'s
+/// larger-than-memory cells watch theirs (`Watch`), started again a second
+/// after it ends -- the server killed, its namespace gone with it -- until
+/// the server runs again: the look a minute read 304 MB at the long run's
+/// minute 300, and the compaction that then took 130 MB more in seconds
+/// OOM-killed it between two looks.
+fn watch_memory(sh: &Shared, kit: &Kit, which: usize) {
+    use std::process::{Command, Stdio};
+    let server = match which {
+        0 => kit.server(),
+        _ => kit.replica(),
+    };
+    let name = format!("{server}-mem");
+    let args = mem_args(&name, &server);
+    while !sh.stop.load(Ordering::Relaxed) {
+        docker(&["rm", "-f", &name]);
+        let child = Command::new("docker")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            let (tx, lines) = mpsc::channel::<String>();
+            if let Some(out) = child.stdout.take() {
+                std::thread::spawn(move || {
+                    for l in BufReader::new(out).lines().map_while(Result::ok) {
+                        if tx.send(l).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            loop {
+                if sh.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match lines.recv_timeout(Duration::from_millis(500)) {
+                    Ok(l) => {
+                        if let Some(s) = MemSample::parse(&l) {
+                            let open = sh.r_since.load(Ordering::SeqCst) != u64::MAX;
+                            sh.mem[which].lock().unwrap().sample(sh.ns(), s, open);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        docker(&["rm", "-f", &name]);
+        // The server being started again: looked for each second.
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until && !sh.stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Each second of the run: the open loop's lag in each lane (`behind_s`),
+/// the most of the minute's and of its seconds in a window of the
+/// replica's (`Behind`); at the peak, the replica lane's schedule set to its
+/// share of what the pool answered in the second; and a line of
+/// `<run>-seconds.tsv` in `--logs` -- the lags, the window, both servers'
+/// memory, page cache and faults at their latest look -- which the minute's
+/// line sums up: dry run 6 had `behind_s` once a minute, and its one look
+/// inside a replica's compaction, 16 s into it, could not say how its
+/// queue grew.
+fn seconds(sh: &Shared, log: Option<PathBuf>) {
+    let mut f = log.and_then(|p| File::create(p).ok());
+    if let Some(f) = f.as_mut() {
+        let _ = writeln!(
+            f,
+            "s\tutc\tbehind_s\tr_behind_s\tr_compacting\tanon_mb\tdirty_mb\tfile_mb\tmajflt\tr_anon_mb\tr_dirty_mb\tr_file_mb\tr_majflt"
+        );
+    }
+    let lanes = sh.lane < sh.slots.len();
+    let mut pool_before = sh.pool_ops.load(Ordering::Relaxed);
+    let mut next = Instant::now() + Duration::from_secs(1);
+    let mut last = Instant::now();
+    while !sh.stop.load(Ordering::Relaxed) {
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        next += Duration::from_secs(1);
+        let now = sh.ns();
+        let b = behind_s(sh.pool_slots(), now);
+        let rb = match lanes {
+            true => behind_s(sh.lane_slots(), now),
+            false => None,
+        };
+        let open = sh.r_since.load(Ordering::SeqCst) != u64::MAX;
+        {
+            let mut x = sh.behind.lock().unwrap();
+            most(&mut x.main, b);
+            most(&mut x.replica, rb);
+            if open {
+                most(&mut x.window_main, b);
+                most(&mut x.window_replica, rb);
+                x.window_s += 1;
+            }
+        }
+        if sh.rate == 0.0 && lanes {
+            let p = sh.pool_ops.load(Ordering::Relaxed);
+            let secs = last.elapsed().as_secs_f64().max(0.1);
+            last = Instant::now();
+            let rate =
+                p.saturating_sub(pool_before) as f64 / secs * REPLICA_SHARE / (1.0 - REPLICA_SHARE);
+            pool_before = p;
+            sh.r_every
+                .store((1e9 / rate.max(1.0)) as u64, Ordering::Relaxed);
+        }
+        let Some(f) = f.as_mut() else {
+            continue;
+        };
+        let look = |i: usize| {
+            let m = sh.mem[i].lock().unwrap();
+            match m.last {
+                Some((t, s)) if now.saturating_sub(t) < 2_000_000_000 => format!(
+                    "{}\t{}\t{}\t{}",
+                    s.anon >> 20,
+                    s.dirty >> 20,
+                    s.file >> 20,
+                    s.majflt
+                ),
+                _ => "\t\t\t".into(),
+            }
+        };
+        let lag = |x: Option<f64>| x.map_or(String::new(), |x| format!("{x:.2}"));
+        let _ = writeln!(
+            f,
+            "{:.0}\t{}\t{}\t{}\t{}\t{}\t{}",
+            now as f64 / 1e9,
+            utc(sh.t0_wall + now),
+            lag(b),
+            lag(rb),
+            open as u8,
+            look(0),
+            look(1)
+        );
+    }
+}
+
+/// How often a restart's catch-up is looked at (`catch_up`): the replica's
+/// status asked four times a second from the restart's start until every
+/// read sent in its catch-up had its wait. An advance of the replica's
+/// change is dated by the start of the read before the one that found it
+/// (`Shared::r_seen`): looked at this often, a replica advancing steadily
+/// is known to have within the last half second or so, well within the 5
+/// s a 504 is judged over; and a 504 of a read sent in the quarter second
+/// after the replica held the change is still the restart's.
+const CATCH_EVERY: Duration = Duration::from_millis(250);
+
+/// Each restart's catch-up (`Catch`) followed to its end at a look every
+/// `CATCH_EVERY` (`catch_look`), and said once it is over: the replica's
+/// change read from its `/_replication/status`.
+fn catch_up(sh: &Shared, kit: &Kit, doings: &Doings, max: CatchMax) {
+    let wait = fennec_http::AFTER_WAIT.as_nanos() as u64 + 1_000_000_000;
+    let mut held = || {
+        kit.status(kit.replica_port)
+            .filter(|st| st.contains("\"connected\":true"))
+            .and_then(|st| json_num(&st, "seq"))
+    };
+    loop {
+        let stop = sh.stop.load(Ordering::Relaxed);
+        for x in catch_look(sh, doings, max, wait, stop, &mut held) {
+            say(catch_said(&x, max));
+        }
+        if stop {
+            break;
+        }
+        std::thread::sleep(CATCH_EVERY);
+    }
+}
+
+/// One look at the restarts' catch-ups (`catch_up`): the loop's lag and
+/// whether reads go through the replica again, then -- while one is not
+/// yet said, from its window's start, before the loop is back too -- the
+/// replica's change (`held`), read outside the lock a 504 is judged under:
+/// whether it advances (`Shared::r_seen`), and whether the latest, open,
+/// is over by it or past a bound (`max`, `Catch::settle`), at the time
+/// taken before the read, so that no read sent while the status call ran
+/// -- its timeouts 10 s -- counts as the restart's. How long the replica
+/// took from the loop's return is written as it ends
+/// (`catchup_replica_ms`, -1 where a bound passed first). Handed back to
+/// be said, with the 504s it took and the lane's reads it moved up
+/// (`catchup_down`, `catchup_moved`): each ended catch-up once every read
+/// sent in it has had `wait` -- the replica's wait,
+/// `fennec_http::AFTER_WAIT`, and a second -- to come back; at the run's
+/// end (`stop`) each at once, one still open cut by it, its figures the
+/// end line's (`figures_onto`).
+fn catch_look(
+    sh: &Shared,
+    doings: &Doings,
+    max: CatchMax,
+    wait: u64,
+    stop: bool,
+    held: &mut dyn FnMut() -> Option<u64>,
+) -> Vec<Catch> {
+    let now = sh.ns();
+    let through = sh.replica_ok.load(Ordering::SeqCst) && !sh.restarting(now);
+    let behind = behind_s(sh.pool_slots(), now);
+    let newest = sh.max_seq.load(Ordering::SeqCst);
+    let (open, unsaid) = {
+        let mut c = sh.catches.lock().unwrap();
+        let unsaid = c.iter().any(|x| !x.said);
+        let open = c.last_mut().filter(|x| x.to == u64::MAX).map(|x| {
+            x.on_schedule(now, behind, through, newest);
+            x.from
+        });
+        (open, unsaid)
+    };
+    if unsaid && !stop {
+        let at = sh.ns();
+        let held = held();
+        sh.r_seen(at, held);
+        let mut c = sh.catches.lock().unwrap();
+        if let Some(x) = c.last_mut().filter(|x| Some(x.from) == open) {
+            if x.settle(at, held, max) {
+                sh.catching.store(false, Ordering::SeqCst);
+                let ms = match (x.end, x.on) {
+                    (CatchEnd::Caught, Some((on, _))) => ((x.to - on) / 1_000_000) as i64,
+                    _ => -1,
+                };
+                doings.figure("catchup_replica_ms", ms.to_string());
+                if let Some((on, _)) = x.on {
+                    doings.figure(
+                        "catchup_on_ms",
+                        (on.saturating_sub(x.back) / 1_000_000).to_string(),
+                    );
+                }
+            }
+        }
+    }
+    let now = sh.ns();
+    let mut c = sh.catches.lock().unwrap();
+    if stop {
+        for x in c.iter_mut().filter(|x| x.to == u64::MAX) {
+            x.to = now;
+            x.end = CatchEnd::RunEnd;
+        }
+        sh.catching.store(false, Ordering::SeqCst);
+    }
+    let said: Vec<Catch> = c
+        .iter_mut()
+        .filter(|x| !x.said && x.to != u64::MAX && (stop || now >= x.to.saturating_add(wait)))
+        .map(|x| {
+            x.said = true;
+            *x
+        })
+        .collect();
+    drop(c);
+    for x in &said {
+        doings.figure("catchup_down", x.down.to_string());
+        doings.figure("catchup_moved", (x.moved_milli / 1000).to_string());
+    }
+    said
+}
+
+/// A restart's catch-up on its line (`catch_up`): how long the loop took to
+/// be back on its schedule from the server answering again, and the
+/// replica to hold the change answered then from there -- or which of its
+/// bounds (`max`) passed first, its 504s errors from there, or that the
+/// next restart or the run's end came first -- both bounds named, and the
+/// reads through the replica a 504 answered in it while the replica's
+/// change advanced, the restart's, and the lane's it moved up.
+fn catch_said(x: &Catch, max: CatchMax) -> String {
+    let s = |a: u64, b: u64| a.saturating_sub(b) as f64 / 1e9;
+    let back = match x.back {
+        u64::MAX => "the server not answering again".to_string(),
+        b => match x.on {
+            Some((on, _)) => format!(
+                "the loop back on its schedule {:.1} s after the server answered again",
+                s(on, b)
+            ),
+            None => format!(
+                "the loop not back on its schedule, with reads through the replica again, in the {:.1} s after the server answered again",
+                s(x.to, b)
+            ),
+        },
+    };
+    let end = match x.end {
+        CatchEnd::Cut => "cut by the next restart",
+        _ => "cut by the run's end",
+    };
+    let how = match (x.end, x.on) {
+        (CatchEnd::Caught, Some((on, seq))) => format!(
+            "over: {back}, the replica holding change {seq}, the newest answered then, {:.1} s after that",
+            s(x.to, on)
+        ),
+        (CatchEnd::Bound, Some((on, seq))) => format!(
+            "NOT over within --replica-back-max: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after that, a 504 from there an error",
+            s(x.to, on)
+        ),
+        (CatchEnd::Long, Some((_, seq))) => format!(
+            "NOT over within --catchup-max: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after the server answered again, a 504 from there an error",
+            s(x.to, x.back)
+        ),
+        (CatchEnd::Long, None) => {
+            format!("NOT over within --catchup-max: {back}, a 504 from there an error")
+        }
+        (_, Some((on, seq))) => format!(
+            "{end}: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after that",
+            s(x.to, on)
+        ),
+        (_, None) => format!("{end}: {back}"),
+    };
+    format!(
+        "minute {}: the restart's catch-up {how}; held to {} s from the loop's return (--replica-back-max) and {} s from the server answering again (--catchup-max); {} reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; {} of the lane's due in it moved up, never sent",
+        x.minute,
+        max.replica / 1_000_000_000,
+        max.whole / 1_000_000_000,
+        x.down,
+        x.moved_milli / 1000
+    )
+}
+
+/// Docker's word on the primary's process as it ended: its `die`, with
+/// its exit code, or the kernel's `oom` kill of a process of its cgroup,
+/// at `vm` (unix ns on the VM's clock), read at `at` (ns from `t0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DockerEv {
+    at: u64,
+    vm: u64,
+    die: bool,
+    exit: Option<i64>,
+}
+
+impl DockerEv {
+    /// `docker events`' line as `follow_events` asks it, `{{.TimeNano}}
+    /// {{.Action}} {{.Actor.Attributes.name}} {{index .Actor.Attributes
+    /// "exitCode"}}`, of the container `name` alone: Docker's `container=`
+    /// filter may take a name's prefix too, and the server's own watches
+    /// -- `<server>-mem`, `<server>-look`, which ends every minute --
+    /// begin with its name.
+    fn parse(l: &str, at: u64, name: &str) -> Option<DockerEv> {
+        let mut w = l.split_whitespace();
+        let vm = w.next()?.parse().ok()?;
+        let die = match w.next()? {
+            "die" => true,
+            "oom" => false,
+            _ => return None,
+        };
+        if w.next()? != name {
+            return None;
+        }
+        Some(DockerEv {
+            at,
+            vm,
+            die,
+            exit: w.next().and_then(|c| c.parse().ok()),
+        })
+    }
+}
+
+/// `program` with `args` under a shell that ends it once this process
+/// lets go of the shell's input -- dropped, or this process gone, killed
+/// or interrupted as it may be: a `docker events` follows forever and
+/// writes only on an event, so with nothing to end it, it outlived a
+/// killed `ycsb` until its next line found no reader. Only the program
+/// holds the output: it ending closes it, the reader sees the end, and the
+/// shell is let go. The shell is a process group of its own: Ctrl-C in a
+/// terminal signals the foreground group, which held `ycsb`, the shell
+/// and the program -- the shell died of it before it could `kill $p`, and
+/// the program, an asynchronous list's, ignores SIGINT, so it lived on.
+/// Out of that group, the shell outlives `ycsb` and ends the program.
+fn tied(program: &str, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.args([
+        "-c",
+        "\"$@\" </dev/null & p=$!; exec >/dev/null; read -r x; kill $p 2>/dev/null; wait $p",
+        "sh",
+        program,
+    ])
+    .args(args)
+    .stdin(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    c
+}
+
+/// Follows Docker's events of the primary's container for the run's
+/// length -- one `docker events` process, no polling -- and hands each
+/// `die` and `oom` to the minute's loop (`events`): a death between two
+/// minutes is found as it happens, not at the next minute's look, which
+/// the failures it cut meanwhile were counted as errors before. Started
+/// again 5 s after it ends; ended with this process (`tied`).
+fn follow_events(sh: &Shared, kit: &Kit, events: mpsc::Sender<DockerEv>) {
+    use std::process::Stdio;
+    let server = kit.server();
+    let filter = format!("container={server}");
+    while !sh.stop.load(Ordering::Relaxed) {
+        let child = tied(
+            "docker",
+            &[
+                "events",
+                "--filter",
+                &filter,
+                "--filter",
+                "event=die",
+                "--filter",
+                "event=oom",
+                "--format",
+                "{{.TimeNano}} {{.Action}} {{.Actor.Attributes.name}} {{index .Actor.Attributes \"exitCode\"}}",
+            ],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+        if let Ok(mut child) = child {
+            let (tx, lines) = mpsc::channel::<(u64, String)>();
+            if let Some(out) = child.stdout.take() {
+                let t0 = sh.t0;
+                std::thread::spawn(move || {
+                    for l in BufReader::new(out).lines().map_while(Result::ok) {
+                        if tx.send((t0.elapsed().as_nanos() as u64, l)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            loop {
+                if sh.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match lines.recv_timeout(Duration::from_millis(500)) {
+                    Ok((at, l)) => {
+                        if let Some(ev) = DockerEv::parse(&l, at, &server) {
+                            let _ = events.send(ev);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            // Its input let go: the shell ends `docker events`, then itself.
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until && !sh.stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// The primary as Docker has it now (`look`, `docker inspect`), Docker's
+/// events read so far kept in `evs` -- a death's `die` and `oom` for its
+/// line: its `Exit` where it is not running -- a death, the run's kill
+/// not sent. Docker sets the state as it reaps the process, after its
+/// sockets close: a death of the moment before a look is found after it
+/// (`gone_before`).
+fn dead(
+    look: impl FnOnce() -> Option<Exit>,
+    events: &mpsc::Receiver<DockerEv>,
+    evs: &mut Vec<DockerEv>,
+) -> Option<Exit> {
+    evs.extend(events.try_iter());
+    look().filter(|x| !x.running)
+}
+
+/// The run's kill of minute `m`, sent at `k`: noted first (`kill_sent`),
+/// so that a side job its end cuts finds it, then `docker kill` and
+/// Docker's wait for the end. Hands back when the wait ended, the server's
+/// state then (`docker inspect`), and whether `docker kill` found it not
+/// running: what tells the kill's end from a death of the moment before
+/// it (`gone_before`).
+fn send_kill(bench: &Kit, sh: &Shared, m: u64, k: u64) -> (u64, Option<Exit>, bool) {
+    // What the replica must hold before reads go through it again
+    // (`restart`): the newest change answered before the kill.
+    sh.replica_target
+        .store(sh.max_seq.load(Ordering::SeqCst), Ordering::SeqCst);
+    sh.kill_sent.store(k.max(1), Ordering::SeqCst);
+    let (ok, out) = docker_within(
+        Duration::from_secs(60),
+        &["kill", "--signal", "KILL", &bench.server()],
+    );
+    let not_running = !ok && out.to_ascii_lowercase().contains("is not running");
+    if !ok {
+        sh.note(format!("docker kill at minute {m}: {out}"));
+    }
+    let (ok, out) = docker_within(Duration::from_secs(120), &["wait", &bench.server()]);
+    if !ok {
+        sh.note(format!("docker wait at minute {m}: {out}"));
+    }
+    let killed = sh.ns();
+    (killed, bench.exit(&bench.server()), not_running)
+}
+
+/// Whether the server the run's kill, sent at `k`, found gone had died
+/// before it was sent: a death, not the kill -- its writes judged from its
+/// own time (`died`), earlier than `k`, and the run failed for it. The
+/// looks before the send (`dead`) read Docker's state, which Docker sets
+/// as it reaps the process, after its sockets close: a death in the moment
+/// before the send -- an OOM kill in the compact the kill was to land in
+/// -- is still running to them, and `docker kill` then finds it not
+/// running, or kills nothing. So after Docker's wait: the kernel's OOM
+/// kill (`OOMKilled`, which Docker sets from the same event as its `oom`
+/// and clears at a start), or `docker kill` finding it not running
+/// (`not_running`); else on this process's own clock, the one `k` is
+/// read on, where it read the server: its last answer (`answered`) more
+/// than `CLOSE_SLOP` before the send, and its exit's burst of closes
+/// (`closed`, `u64::MAX` where none was read) after that answer and
+/// before the send. A server read answering within the slop of the send
+/// or after it is the kill's -- a planned kill's last answers come up to
+/// its landing, tens of ms after `k` -- and a burst after the send is the
+/// kill's own, a server that stopped answering before it hung, not dead.
+/// Only where neither an answer within the slop nor a burst was read,
+/// Docker's end (`FinishedAt`, `finished` on this process's clock by the
+/// kept probe's offset against it, `Shared::vm_ns`) before the send by
+/// more than that reading's error (`err`, `Shared::clock_err`). Read
+/// through the wall clock at `t0` instead, a planned kill's end, 20-200
+/// ms after its send, came before it once the two clocks had parted by
+/// more than that -- some 60 ms by the 90th minute on this Mac -- and the
+/// kill was judged a death; a death just before the send, the other way,
+/// the kill.
+fn gone_before(
+    exit: &Exit,
+    not_running: bool,
+    answered: u64,
+    closed: u64,
+    finished: Option<u64>,
+    err: u64,
+    k: u64,
+) -> bool {
+    if exit.running {
+        return false;
+    }
+    if exit.oom || not_running {
+        return true;
+    }
+    if answered > 0 && answered.saturating_add(CLOSE_SLOP) >= k {
+        return false;
+    }
+    if closed != u64::MAX {
+        return closed < k;
+    }
+    finished.is_some_and(|f| f.saturating_add(err) < k)
+}
+
+/// The run's kill sent at `k` judged after Docker's wait, from the
+/// server's state then (`exit`) and whether `docker kill` found it not
+/// running: the state where it was a death of the moment before the send
+/// (`gone_before`), read on what the run read of the server
+/// (`Shared::answered`, `Shared::burst`) and Docker's end by the latest
+/// probe. Stored as judged either way (`kill_judged`, a death's in
+/// `kill_death` first), so that a side job the kill's end cut says whose
+/// its cut was at once (`cut_by`): a death's timed before the job was
+/// asked, never among the deaths it looks for, waited out `KILL_JUDGE_WAIT`
+/// and was counted the kill's.
+fn judge_kill(sh: &Shared, exit: Option<Exit>, not_running: bool, k: u64) -> Option<Exit> {
+    let before = exit.filter(|x| {
+        gone_before(
+            x,
+            not_running,
+            sh.answered.load(Ordering::SeqCst),
+            sh.burst().0,
+            x.finished.and_then(|v| sh.vm_ns(v)),
+            sh.clock_err(k),
+            k,
+        )
+    });
+    if before.is_some() {
+        sh.kill_death.store(k.max(1), Ordering::SeqCst);
+    }
+    sh.kill_judged.store(k.max(1), Ordering::SeqCst);
+    before
+}
+
+/// The kill of minute `m`, sent at `k`, judged its own (`judge_kill`), in
+/// words: the server's last answer and its exit's burst of closes read
+/// against the send -- a planned kill's come after it.
+fn kill_said(sh: &Shared, m: u64, k: u64) -> String {
+    let ms = |t: u64| (t as f64 - k as f64) / 1e6;
+    let a = sh.answered.load(Ordering::SeqCst);
+    let burst = match sh.burst() {
+        (u64::MAX, _) => "no burst of closes read".to_string(),
+        (c, spread) => format!(
+            "its burst of closes {:+.0} ms ({BURST_CLOSES} within {:.1} ms)",
+            ms(c),
+            spread as f64 / 1e6
+        ),
+    };
+    format!(
+        "minute {m}: the kill judged the kill's: its server last read answering {:+.0} ms of the send, {burst}",
+        ms(a)
+    )
+}
+
+/// The first minute from `m` on with a kill on the run's schedule: the
+/// kill a death came before.
+fn next_kill(m: u64, o: &Opts) -> Option<u64> {
+    (m.max(1)..o.minutes).find(|&k| {
+        schedule(
+            k,
+            o.minutes,
+            o.kill_every,
+            o.kill_in_compact_every,
+            o.compact_every,
+            o.backup_every,
+            o.backup_at,
+        )
+        .iter()
+        .any(|d| matches!(d, Doing::Kill { .. }))
+    })
+}
+
+/// Why the wait for the compact a kill is to land in ended (`compact_wait`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactWait {
+    /// Docker's `die` of the primary: the dry run's second death, sent a
+    /// second into the kill's compact, held the run here for `WAIT_MAX`,
+    /// the compact's cut counted as the kill's, no compact left under way
+    /// to end.
+    Died,
+    /// The compact under way a second: the kill lands in it.
+    UnderWay,
+    /// It ended within the second: killed without.
+    Ended,
+    /// None of its own under way within `WAIT_MAX`: killed without.
+    Timeout,
+}
+
+/// Whether the wait for the compact the kill is to land in ends, and why:
+/// `evs` Docker's events read since it began, `since` when the compact
+/// under way was asked (`u64::MAX` while none is), `now`, whether it
+/// ended (`ended`) and how long the wait has been.
+fn compact_wait(
+    evs: &[DockerEv],
+    since: u64,
+    now: u64,
+    ended: bool,
+    waited: Duration,
+) -> Option<CompactWait> {
+    if evs.iter().any(|e| e.die) {
+        return Some(CompactWait::Died);
+    }
+    if since != u64::MAX && now.saturating_sub(since) >= 1_000_000_000 {
+        return Some(CompactWait::UnderWay);
+    }
+    if ended {
+        return Some(CompactWait::Ended);
+    }
+    (waited >= WAIT_MAX).then_some(CompactWait::Timeout)
+}
+
+/// A death of the primary the run did not cause, found now: its time read
+/// (`death_time`) -- the burst of closes its exit made, else Docker's
+/// `die` (`evs`) or `FinishedAt` by the clock probe kept, else the minute's
+/// look before (`look`) -- and said on a line of its own: how it ended,
+/// its minute, how long before the kill due (`kill_due`, the minute's
+/// where it was found as that kill was to be sent), and its memory at its
+/// last look a second. The failures it cut before it was found are moved
+/// from the errors to `down`; the server is started again as after a kill
+/// (`restart`), its window from the death -- or from the kill's
+/// announcement, `announced`, where it was found in it -- and its kill
+/// time the death's, so a write a read later shows gone is judged from
+/// when the server went, still held to `--loss-ms`. The long run of
+/// 2026-11-25 sent its kill of minute 300 to a primary OOM-killed in the
+/// compact that kill waited for, timed the death by its own kill, sent
+/// after its announced second, and counted seven writes answered 1.2 s
+/// before its kill -- all but a fraction of a second of it the harness's
+/// own wait -- as gone past the 650 ms a kill may take.
+#[allow(clippy::too_many_arguments)]
+fn died(
+    bench: &Kit,
+    sh: &Shared,
+    doings: &Doings,
+    o: &Opts,
+    exit: Exit,
+    evs: &mut Vec<DockerEv>,
+    look: u64,
+    kill_due: Option<u64>,
+    announced: Option<u64>,
+    sampler: Option<Sampler>,
+    longest: &mut u64,
+) -> u64 {
+    let (from, at, m) = found_dead(sh, doings, o, exit, evs, look, kill_due, announced);
+    restart(bench, sh, doings, (from, at, m), None, sampler, o, longest)
+}
+
+/// [`died`] but its restart, which is Docker's: the death timed, said and
+/// counted, its restart's window open from `from` with its time `at` for
+/// the kill's -- what the checker judges the writes a read later shows
+/// gone from (`Shared::kills`) -- and its minute. Hands back the three.
+#[allow(clippy::too_many_arguments)]
+fn found_dead(
+    sh: &Shared,
+    doings: &Doings,
+    o: &Opts,
+    exit: Exit,
+    evs: &mut Vec<DockerEv>,
+    look: u64,
+    kill_due: Option<u64>,
+    announced: Option<u64>,
+) -> (u64, u64, u64) {
+    let event = evs.iter().rev().find(|e| e.die).map(|e| e.vm);
+    let oom_event = evs
+        .iter()
+        .rev()
+        .find(|e| !e.die)
+        .and_then(|e| sh.vm_ns(e.vm));
+    evs.clear();
+    let docker = match event.and_then(|v| sh.vm_ns(v)) {
+        Some(t) => Some((t, Source::Event)),
+        None => exit
+            .finished
+            .and_then(|v| sh.vm_ns(v))
+            .map(|t| (t, Source::Finished)),
+    };
+    let (closed, spread) = sh.burst();
+    let err = docker.map_or(0, |(t, _)| sh.clock_err(t));
+    let (at, source, answered) = death_time(
+        closed,
+        sh.answered.load(Ordering::SeqCst),
+        docker,
+        err,
+        look,
+    );
+    // An answer read after the burst it is timed by, within the slop: how
+    // late -- what `CLOSE_SLOP` is measured against.
+    let late = match (source, answered) {
+        (Source::Close, Some(a)) if a > closed => Some(a - closed),
+        _ => None,
+    };
+    sh.deaths.lock().unwrap().push(at);
+    // Its restart's window opened first -- from the kill's announcement
+    // where it was found in it, the window that opened, from whichever
+    // came first -- so that a failure from here on is `down`, then the
+    // failures it cut before it was found moved there.
+    let from = match announced {
+        Some(a) => a.min(at),
+        None => at,
+    };
+    {
+        let mut w = sh.windows.lock().unwrap();
+        match w.last_mut() {
+            Some(x) if announced == Some(x.0) && x.2 == u64::MAX => *x = (from, at, u64::MAX),
+            _ => w.push((from, at, u64::MAX)),
+        }
+    }
+    sh.restart_to.store(u64::MAX, Ordering::SeqCst);
+    sh.restart_from.store(from, Ordering::SeqCst);
+    let moved = sh.death_errors(at);
+    let m = at / 60_000_000_000 + 1;
+    let due = kill_due.or_else(|| next_kill(m, o));
+    let (before, before_s) = before_kill(at, due);
+    // Found in the kill's announced second -- its compact, its wait -- the
+    // kill not sent: said so, not as the side jobs the kill waited for.
+    let in_kill = announced.map(|a| at.saturating_sub(a));
+    let before = match in_kill {
+        Some(d) => format!(
+            "{:.1} s after the kill due at minute {} was announced, before it was sent",
+            d as f64 / 1e9,
+            due.unwrap_or(m)
+        ),
+        None => before,
+    };
+    let (last, life) = {
+        let x = sh.mem[0].lock().unwrap();
+        (x.last.map(|l| l.1), x.life)
+    };
+    let ms = |a: u64, b: u64| (a as f64 - b as f64) / 1e6;
+    say(format!(
+        "the server DIED in minute {m}, at {} ({:.1} s into it): {}; {before}; its time {}{}{}{}{}{}{}",
+        utc(sh.t0_wall + at),
+        (at % 60_000_000_000) as f64 / 1e9,
+        exit.said(&o.memory),
+        source.said(),
+        // How close together the burst's closes came: what `BURST_SPAN`
+        // is measured against.
+        match source {
+            Source::Close => format!(
+                " ({BURST_CLOSES} closes within {:.1} ms)",
+                spread as f64 / 1e6
+            ),
+            // Docker's, read through the clock's probe: at the latest
+            // that reading allows (`death_time`).
+            Source::Event | Source::Finished => {
+                format!(", {:.0} ms past its reading, the probe's error", err as f64 / 1e6)
+            }
+            Source::Look => String::new(),
+        },
+        match (answered, late) {
+            (Some(_), Some(l)) => format!(
+                ", its last answer read {:.0} ms after the burst's first close",
+                l as f64 / 1e6
+            ),
+            (Some(a), None) => format!(", {:.0} ms after its last answer", ms(at, a)),
+            (None, _) => String::new(),
+        },
+        match (source, docker) {
+            (Source::Close, Some((t, _))) => format!(
+                "; Docker's {} {:+.0} ms of it",
+                if event.is_some() { "die" } else { "FinishedAt" },
+                ms(t, at)
+            ),
+            _ => String::new(),
+        },
+        match oom_event {
+            Some(t) => format!(", its oom {:+.0} ms", ms(t, at)),
+            None => String::new(),
+        },
+        match (last, life) {
+            (Some(l), Some(p)) => format!(
+                "; its last look a second anon {} MB and dirty {} MB, its life's most {} MB and {} MB",
+                l.anon >> 20,
+                l.dirty >> 20,
+                p.anon >> 20,
+                p.dirty >> 20
+            ),
+            _ => "; its memory not watched".into(),
+        },
+        match moved {
+            0 => String::new(),
+            n => format!("; {n} failures it cut before it was found counted as down, not errors"),
+        }
+    ));
+    doings.deaths.fetch_add(1, Ordering::Relaxed);
+    if exit.oom {
+        doings.oom.fetch_add(1, Ordering::Relaxed);
+    }
+    for (k, v) in [
+        ("death_oom", (exit.oom as u8).to_string()),
+        (
+            "death_exit",
+            exit.code.map_or("-1".into(), |c| c.to_string()),
+        ),
+        ("death_at_s", format!("{:.3}", at as f64 / 1e9)),
+        ("death_source", (source as u8).to_string()),
+        ("death_down", moved.to_string()),
+    ] {
+        doings.figure(k, v);
+    }
+    if let Some(s) = before_s {
+        doings.figure("death_kill_due_s", format!("{s:.1}"));
+    }
+    if let Some(d) = in_kill {
+        doings.figure("death_announced_ms", (d / 1_000_000).to_string());
+    }
+    if let Some(a) = answered {
+        doings.figure("death_answer_ms", format!("{:.0}", ms(at, a)));
+    }
+    if let Some(l) = late {
+        doings.figure("death_late_ms", format!("{:.0}", l as f64 / 1e6));
+    }
+    if let Some((t, _)) = docker {
+        doings.figure("death_docker_ms", format!("{:.0}", ms(t, at)));
+    }
+    if let Some(l) = last {
+        doings.figure("death_anon", l.anon.to_string());
+        doings.figure("death_dirty", l.dirty.to_string());
+    }
+    sh.restart_behind.store(
+        behind_s(sh.pool_slots(), sh.ns()).is_some_and(|b| b > ON_SCHEDULE_S),
+        Ordering::SeqCst,
+    );
+    (from, at, m)
 }
 
 /// The replica's compaction counter (`fennec_auto_compactions_total`) as
@@ -5512,7 +7723,48 @@ fn replica_compaction(sh: &Shared, edge: Option<Edge>, count: Count) {
     say(said);
 }
 
+/// The file descriptors the run holds at the most: two a connection of
+/// `http::Http`'s (its socket and the reader's clone of it); the pool's
+/// one each, the replica lane's two -- to the replica, and to the primary
+/// from a kill until the replica is back -- or, with no lane, the pool's
+/// two; one a subscription's stream; and `FDS_BESIDE` for the rest. The
+/// lane took the run from about 200 to some 380, and 640 at a restart,
+/// past macOS's default soft limit of 256: a connect past it fails
+/// (`EMFILE`), counted as the server's error.
+fn fds_needed(o: &Opts) -> u64 {
+    let https = match o.replica_threads {
+        0 => 2 * o.threads,
+        r => o.threads + 2 * r,
+    };
+    2 * https as u64 + o.subscriptions as u64 + FDS_BESIDE
+}
+
+/// What else the run holds beside its connections: the standard three, the
+/// side job's connection, the minute's scrapes and probes, the watches'
+/// and `docker`'s pipes, the seconds' log and the results' appends.
+const FDS_BESIDE: u64 = 64;
+
+/// This process's soft limit on open files, as a shell it starts inherits
+/// it (`ulimit -n`): `None` where none, or unread.
+fn open_files_limit() -> Option<u64> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "ulimit -n"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 fn run(o: &Opts) {
+    // Held to the limit before anything starts: past it, every connect
+    // fails as the servers' error, the run hours on (run-soak.sh raises
+    // it).
+    let need = fds_needed(o);
+    if let Some(have) = open_files_limit().filter(|&have| have < need) {
+        eprintln!(
+            "the soft limit on open files is {have}, under the {need} the run holds at a restart: raise it (`ulimit -n {need}`; run-soak.sh does)"
+        );
+        std::process::exit(2);
+    }
     if let Some(p) = &o.progress {
         *PROGRESS.lock().unwrap() = std::fs::OpenOptions::new()
             .create(true)
@@ -5642,12 +7894,13 @@ fn run(o: &Opts) {
     let follow_max = 1_800;
     let follow = caught_up(Duration::from_secs(follow_max), "the first follow", true);
     say(format!(
-        "the replica {}; {} connections at {}, {} subscriptions, --sync {}, --memory {}",
+        "the replica {}; {} connections and {} on the replica's lane at {}, {} subscriptions, --sync {}, --memory {}",
         match follow {
             Some(s) => format!("followed in {s:.0} s"),
             None => format!("did NOT catch up in {follow_max} s"),
         },
         o.threads,
+        o.replica_threads,
         match o.rate > 0.0 {
             true => format!("{:.0} ops/s", o.rate),
             false => "the peak".into(),
@@ -5700,11 +7953,37 @@ fn run(o: &Opts) {
         .collect();
     let sh = Arc::new(Shared::new(o, addr.clone(), raddr.clone(), &ranges));
     let _ = sh.repl_token.set(bench.token.clone());
+    // The VM's clock against this host's before the first death can need
+    // it (`vm_ns`).
+    if let Some(p) = clock_probe(&addr, &sh) {
+        sh.clock(&p);
+    }
     let mut handles = Vec::new();
-    for w in 0..o.threads {
+    for w in 0..o.threads + o.replica_threads {
         let sh = Arc::clone(&sh);
         handles.push(std::thread::spawn(move || work(&sh, w)));
     }
+    for which in 0..2 {
+        let (sh, kit) = (Arc::clone(&sh), bench.0.clone());
+        handles.push(std::thread::spawn(move || watch_memory(&sh, &kit, which)));
+    }
+    {
+        let sh = Arc::clone(&sh);
+        let log = o
+            .logs
+            .as_ref()
+            .map(|d| d.join(format!("{}-seconds.tsv", o.name)));
+        handles.push(std::thread::spawn(move || seconds(&sh, log)));
+    }
+    let (events_tx, events) = mpsc::channel::<DockerEv>();
+    {
+        let (sh, kit) = (Arc::clone(&sh), bench.0.clone());
+        handles.push(std::thread::spawn(move || {
+            follow_events(&sh, &kit, events_tx)
+        }));
+    }
+    // Docker's events of the primary read and not yet a death's.
+    let mut evs: Vec<DockerEv> = Vec::new();
     for i in 0..o.subscriptions {
         let sh = Arc::clone(&sh);
         handles.push(std::thread::spawn(move || subscribe(&sh, i)));
@@ -5714,6 +7993,16 @@ fn run(o: &Opts) {
         handles.push(std::thread::spawn(move || watch_replica(&sh, &kit)));
     }
     let doings = Arc::new(Doings::default());
+    {
+        let (sh, kit, doings) = (Arc::clone(&sh), bench.0.clone(), Arc::clone(&doings));
+        let max = CatchMax {
+            replica: o.replica_back_max.saturating_mul(1_000_000_000),
+            whole: o.catchup_max.saturating_mul(1_000_000_000),
+        };
+        handles.push(std::thread::spawn(move || {
+            catch_up(&sh, &kit, &doings, max)
+        }));
+    }
     let (jobs, side_jobs) = mpsc::channel::<Job>();
     let side = Side {
         sh: Arc::clone(&sh),
@@ -5740,12 +8029,19 @@ fn run(o: &Opts) {
     // through the replica apart -- and the others.
     let mut kept = Kept::new();
     let mut prev_majflt = None;
+    let mut r_prev_majflt = None;
+    // Each server's minute of looks a second, for the minute's say line.
+    let mut peaks: [Option<MemSpan>; 2] = [None, None];
     let mut prev_oom = 0;
     // Each server's own compactions (`fennec_auto_compactions_total`), its
     // count kept across the primary's restarts.
     let mut auto = [(0u64, 0u64); 2];
     let mut totals = (0u64, 0u64, 0u64);
     let mut peak = Vec::new();
+    // The peak's reads through the replica lane, of every operation, and
+    // those its schedule dropped (in thousandths), over the minutes its
+    // mean is taken over.
+    let mut peak_lane = (0u64, 0u64, 0u64);
     let mut last = sh.t0;
     let mut life = 0u64;
     let mut env_failed = None;
@@ -5753,7 +8049,7 @@ fn run(o: &Opts) {
     let mut minutes_run = 0;
     let mut restart_ms_max = 0u64;
     let mut backup_id = 0u64;
-    let mut clock_prev: Option<(f64, f64)> = None;
+    let mut clock_prev: Option<Probe> = None;
     // The CPU the two servers' cgroups and the VM's CPUs had used at the
     // last look.
     let mut cpu_prev: Option<(u64, u64, u64)> = None;
@@ -5761,16 +8057,88 @@ fn run(o: &Opts) {
     // Kills the restart's sweep has not read back after yet.
     let mut swept_after = 0usize;
     let floor = o.disk_floor;
+    // The kills the schedule meant that found the server dead, the death
+    // standing for them (`kill_died`).
+    let kill_died = AtomicU64::new(0);
     for m in 1..=o.minutes {
         let at = sh.t0 + Duration::from_secs(60 * m);
-        std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        // The minute waited out on Docker's events: a death of the
+        // primary between two minutes is found as it happens -- its `die`
+        // -- and the server started again at once.
+        loop {
+            let left = at.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match events.recv_timeout(left) {
+                Ok(ev) => {
+                    evs.push(ev);
+                    if !ev.die {
+                        continue;
+                    }
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
+                        let look = (m - 1) * 60_000_000_000;
+                        let back = died(
+                            &bench,
+                            &sh,
+                            &doings,
+                            o,
+                            x,
+                            &mut evs,
+                            look,
+                            None,
+                            None,
+                            None,
+                            &mut restart_ms_max,
+                        );
+                        evs.extend(events.try_iter());
+                        evs.retain(|e| e.at > back);
+                        life += 1;
+                        prev_majflt = None;
+                        prev_oom = 0;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(left);
+                    break;
+                }
+            }
+        }
+        // And by its state, where Docker's events said nothing: died
+        // between the minute's looks, timed by what closed.
+        if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
+            let look = (m - 1) * 60_000_000_000;
+            let back = died(
+                &bench,
+                &sh,
+                &doings,
+                o,
+                x,
+                &mut evs,
+                look,
+                None,
+                None,
+                None,
+                &mut restart_ms_max,
+            );
+            evs.extend(events.try_iter());
+            evs.retain(|e| e.at > back);
+            life += 1;
+            prev_majflt = None;
+            prev_oom = 0;
+        }
         minutes_run = m;
         let now = Instant::now();
         let secs = now.duration_since(last).as_secs_f64();
         last = now;
         // The latencies of the minute, and of the hour to it: the steady
         // operations apart from the restarts' and the compacts' (`class`).
-        let loop_behind = behind_s(&sh.slots, sh.ns());
+        let loop_behind = behind_s(sh.pool_slots(), sh.ns());
+        let lane_behind = match o.replica_threads {
+            0 => None,
+            _ => behind_s(sh.lane_slots(), sh.ns()),
+        };
         let mut h = Hists::new();
         let mut idle = 0;
         // The operations held for a replica's compaction its end settled
@@ -5806,6 +8174,8 @@ fn run(o: &Opts) {
             idle += (s.done.swap(0, Ordering::Relaxed) == 0) as u64;
         }
         let ops = sh.ops.swap(0, Ordering::Relaxed);
+        let lane_ops = sh.lane_ops.swap(0, Ordering::Relaxed);
+        let lane_dropped = sh.lane_dropped_milli.swap(0, Ordering::Relaxed);
         // The checker: every read that ended before the earliest
         // operation in flight, what no later read needs let go of, past
         // the window a kill could still take back.
@@ -5872,8 +8242,7 @@ fn run(o: &Opts) {
         } else {
             checker.touched.clear();
         }
-        let errors = sh.errors.swap(0, Ordering::Relaxed);
-        let down = sh.down.swap(0, Ordering::Relaxed);
+        let (errors, down) = sh.take_errors();
         totals.0 += ops;
         totals.1 += errors;
         totals.2 += mismatches;
@@ -5910,13 +8279,14 @@ fn run(o: &Opts) {
         let write_rate = ops as f64 / secs * 0.5;
         let lag_s = behind.map_or(-1.0, |b| b as f64 / write_rate.max(1.0));
         let (load1, load5) = load_average();
-        let clock = clock_probe(&addr);
+        let clock = clock_probe(&addr, &sh);
         let stepped = match (clock_prev, clock) {
             (Some(a), Some(b)) => clock_stepped(a, b),
             _ => false,
         };
-        if clock.is_some() {
+        if let Some(p) = clock {
             clock_prev = clock;
+            sh.clock(&p);
         }
         // What the VM's CPUs did beside the two servers' cgroups -- the
         // run's own look, verify and backup containers among it -- in
@@ -5998,6 +8368,8 @@ fn run(o: &Opts) {
             ("ops_s", format!("{:.0}", ops as f64 / secs)),
             ("rate", format!("{:.0}", o.rate)),
             ("idle_workers", idle.to_string()),
+            ("lane_ops", lane_ops.to_string()),
+            ("lane_dropped", (lane_dropped / 1000).to_string()),
             (
                 "r_compacts_watched",
                 sh.r_compacts_seen.swap(0, Ordering::Relaxed).to_string(),
@@ -6123,9 +8495,9 @@ fn run(o: &Opts) {
         if let Some(ms) = checker.lost_ms_max.take() {
             v.push(("lost_ms_max", ms.to_string()));
         }
-        if let Some((off, rtt)) = clock {
-            v.push(("clock_off_ms", format!("{off:.1}")));
-            v.push(("clock_rtt_ms", format!("{rtt:.1}")));
+        if let Some(p) = clock {
+            v.push(("clock_off_ms", format!("{:.1}", p.off_ms)));
+            v.push(("clock_rtt_ms", format!("{:.1}", p.rtt_ms)));
         }
         if let Some(s) = sample {
             v.extend([
@@ -6162,21 +8534,74 @@ fn run(o: &Opts) {
             ]);
         }
         if let Some(l) = rlook {
+            // Its faults and page cache too: dry run 6 could not tell a
+            // replica faulting in its compaction from the loop's queue.
+            let majflt = match r_prev_majflt {
+                Some(p) if l.majflt >= p => l.majflt - p,
+                _ => l.majflt,
+            };
+            r_prev_majflt = Some(l.majflt);
             v.extend([
                 ("r_file", l.file.to_string()),
                 ("r_rss_anon", l.rss_anon.to_string()),
                 ("r_threads", l.threads.to_string()),
                 ("r_fds", l.fds.to_string()),
                 ("r_compacting", (l.compacting as u8).to_string()),
+                ("r_majflt", majflt.to_string()),
+                ("r_cg_file", l.cgroup.file.to_string()),
             ]);
         }
-        // A server gone that the run did not kill: its death and whether
-        // the kernel killed it for its memory, on this minute's line.
-        let (up, oom_killed) = bench.state(&bench.server());
-        let (rup, _) = bench.state(&bench.replica());
-        if oom_killed {
-            doings.oom.fetch_add(1, Ordering::Relaxed);
+        // Each server's looks a second in the minute (`watch_memory`): the
+        // most anonymous memory and dirty pages, the least page cache and
+        // the faults, the life's most, and the seconds a window of the
+        // replica's was open in.
+        for (i, k) in MEM_KEYS.iter().enumerate() {
+            let (minute, life, window) = {
+                let mut x = sh.mem[i].lock().unwrap();
+                (x.minute.take(), x.life, x.window.take())
+            };
+            v.push((k[0], minute.map_or(0, |s| s.n).to_string()));
+            if let Some(s) = minute {
+                v.extend([
+                    (k[1], s.anon.to_string()),
+                    (k[2], s.dirty.to_string()),
+                    (k[3], s.file.to_string()),
+                ]);
+            }
+            if let Some(s) = life {
+                v.extend([(k[4], s.anon.to_string()), (k[5], s.dirty.to_string())]);
+            }
+            if let Some(s) = window {
+                v.extend([(k[6], s.faults.to_string()), (k[7], s.file.to_string())]);
+            }
+            peaks[i] = minute;
         }
+        // The open loop's lag each second of the minute, each lane's most,
+        // and in a window of the replica's.
+        {
+            let b = std::mem::take(&mut *sh.behind.lock().unwrap());
+            for (k, x) in [
+                ("behind_max_s", b.main),
+                ("r_behind_max_s", b.replica),
+                ("rc_behind_max_s", b.window_main),
+                ("rc_r_behind_max_s", b.window_replica),
+            ] {
+                if let Some(x) = x {
+                    v.push((k, format!("{x:.2}")));
+                }
+            }
+            if b.window_s > 0 {
+                v.push(("rc_seconds", b.window_s.to_string()));
+            }
+        }
+        if let Some(b) = lane_behind {
+            v.push(("r_behind_s", format!("{b:.1}")));
+        }
+        v.push((
+            "kill_died",
+            kill_died.swap(0, Ordering::Relaxed).to_string(),
+        ));
+        let (rup, _) = bench.state(&bench.replica());
         for (name, n) in [
             ("kill", &doings.kills),
             ("died", &doings.deaths),
@@ -6191,6 +8616,8 @@ fn run(o: &Opts) {
             ("compact_failed", &doings.compact_failed),
             ("compact_busy", &doings.compact_busy),
             ("compact_killed", &doings.compact_killed),
+            ("compact_died", &doings.compact_died),
+            ("backup_died", &doings.backup_died),
             ("restart_ms", &doings.restart_ms),
             ("swept", &doings.swept),
             ("sweep_owed", &doings.sweep_owed),
@@ -6198,13 +8625,7 @@ fn run(o: &Opts) {
         ] {
             v.push((name, n.swap(0, Ordering::Relaxed).to_string()));
         }
-        // The kill's figures: one kill a minute at the most, a death beside
-        // it the rarer still -- the last said of each kept.
-        let figures = std::mem::take(&mut *doings.figures.lock().unwrap());
-        for (name, x) in figures {
-            v.retain(|(k, _)| *k != name);
-            v.push((name, x));
-        }
+        figures_onto(&doings, &mut v);
         v.push(("r_died", (!rup as u8).to_string()));
         // The replica, kept from reads after a restart until it said it
         // held the newest change: looked at again each minute.
@@ -6249,12 +8670,47 @@ fn run(o: &Opts) {
                 h.replica.pct(0.99) / 1e3
             ),
         };
+        // The replica lane's lag, and its reads' own answers in a window of
+        // the replica's, beside the class's from the schedule.
+        let tail = match lane_behind {
+            Some(b) if b >= 1.0 => format!("{tail}, the replica lane {b:.0} s behind"),
+            _ => tail,
+        };
+        // At the peak the lane follows the pool, and what it could not
+        // keep up with it dropped: its share of what was answered, which
+        // the soak's rate asks 4% of.
+        let tail = match (o.peak && o.replica_threads > 0, ops) {
+            (true, 1..) => format!(
+                "{tail}; the replica lane {:.1}% of them{}",
+                lane_ops as f64 * 100.0 / ops as f64,
+                match lane_dropped / 1000 {
+                    0 => String::new(),
+                    d => format!(", {d} of its reads dropped, more than a second behind"),
+                }
+            ),
+            _ => tail,
+        };
+        let tail = match h.r_compact_own.n {
+            0 => tail,
+            _ => format!(
+                "{tail}; in the replica's compaction p99 {:.0} ms from the schedule, the replica answering in {:.0}",
+                h.r_compact.pct(0.99) / 1e3,
+                h.r_compact_own.pct(0.99) / 1e3
+            ),
+        };
+        let peak_said = |p: Option<MemSpan>| match p {
+            Some(p) => format!(" (most {}, dirty {})", p.anon >> 20, p.dirty >> 20),
+            None => String::new(),
+        };
         say(format!(
-            "{m:>4} min: {:.0} ops/s, {tail}; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB, lag {lag_s:.1} s, load {load1:.1}",
+            "{m:>4} min: {:.0} ops/s, {tail}; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB{}, the replica's {} MB{}, lag {lag_s:.1} s, load {load1:.1}",
             ops as f64 / secs,
             look.map(|l| l.file >> 20).unwrap_or(0),
             metric_sum(page.as_bytes(), "fennec_data_bytes") >> 20,
             look.map(|l| l.rss_anon >> 20).unwrap_or(0),
+            peak_said(peaks[0]),
+            rlook.map(|l| l.rss_anon >> 20).unwrap_or(0),
+            peak_said(peaks[1]),
         ));
         if let Some(why) = &env_failed {
             say(format!("the environment failed the run: {why}"));
@@ -6265,36 +8721,16 @@ fn run(o: &Opts) {
         }
         if o.peak && m > 1 {
             peak.push((m, ops as f64, secs));
+            peak_lane.0 += lane_ops;
+            peak_lane.1 += ops;
+            peak_lane.2 += lane_dropped;
         }
         if !rup {
             sh.note(format!("the replica was found stopped at minute {m}"));
+            // Its looks a second, the next life's from here: its life's
+            // most is its own, never the one before's.
+            sh.mem[1].lock().unwrap().restarted();
             let _ = docker(&["start", &bench.replica()]);
-        }
-        if !up {
-            // Died between looks: from its last look on, an answered
-            // write may be gone -- held as a kill from there.
-            sh.note(format!(
-                "the server was found stopped at minute {m}{}",
-                if oom_killed { ", OOM-killed" } else { "" }
-            ));
-            doings.deaths.fetch_add(1, Ordering::Relaxed);
-            sh.restart_behind.store(
-                loop_behind.is_some_and(|b| b > ON_SCHEDULE_S),
-                Ordering::SeqCst,
-            );
-            let from = now_ns.saturating_sub(60_000_000_000);
-            restart(
-                &bench,
-                &sh,
-                &doings,
-                (from, from, m),
-                None,
-                o,
-                &mut restart_ms_max,
-            );
-            life += 1;
-            prev_majflt = None;
-            prev_oom = 0;
         }
         // The minute's doings, after its line: their cost shows in the next.
         for d in schedule(
@@ -6328,6 +8764,33 @@ fn run(o: &Opts) {
                         WAIT_MAX,
                         &format!("the kill due at minute {m}"),
                     );
+                    // A server that died on its own while the kill waited
+                    // -- the long run's primary, OOM-killed in the compact
+                    // its kill of minute 300 waited for -- is a death,
+                    // timed by itself and never by the kill, which is
+                    // not sent.
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
+                        let back = died(
+                            &bench,
+                            &sh,
+                            &doings,
+                            o,
+                            x,
+                            &mut evs,
+                            m * 60_000_000_000,
+                            Some(m),
+                            None,
+                            None,
+                            &mut restart_ms_max,
+                        );
+                        evs.extend(events.try_iter());
+                        evs.retain(|e| e.at > back);
+                        kill_died.fetch_add(1, Ordering::Relaxed);
+                        life += 1;
+                        prev_majflt = None;
+                        prev_oom = 0;
+                        continue;
+                    }
                     say(format!(
                         "the kill due at minute {m}{}: announced",
                         if in_compact { ", in a compact" } else { "" }
@@ -6338,7 +8801,7 @@ fn run(o: &Opts) {
                     // been minutes (the third dry run's kill of minute 60
                     // waited out a compact of five minutes, the loop 114 s
                     // behind at the minute's look and 166 s at the kill).
-                    let lag = behind_s(&sh.slots, from);
+                    let lag = behind_s(sh.pool_slots(), from);
                     sh.restart_behind
                         .store(lag.is_some_and(|b| b > ON_SCHEDULE_S), Ordering::SeqCst);
                     if let Some(b) = lag {
@@ -6362,6 +8825,8 @@ fn run(o: &Opts) {
                             doings.compacts.load(Ordering::SeqCst)
                                 + doings.compact_busy.load(Ordering::SeqCst)
                                 + doings.compact_failed.load(Ordering::SeqCst)
+                                + doings.compact_died.load(Ordering::SeqCst)
+                                + doings.compact_killed.load(Ordering::SeqCst)
                         };
                         let before = ended();
                         let _ = jobs.send(Job::Compact {
@@ -6369,41 +8834,110 @@ fn run(o: &Opts) {
                             for_kill: true,
                         });
                         let t = Instant::now();
+                        let seen = evs.len();
                         loop {
-                            let since = sh.compact_since.load(Ordering::SeqCst);
-                            if since != u64::MAX && sh.ns().saturating_sub(since) >= 1_000_000_000 {
-                                break;
-                            }
-                            if ended() != before {
-                                sh.note(format!(
+                            evs.extend(events.try_iter());
+                            let wait = compact_wait(
+                                &evs[seen..],
+                                sh.compact_since.load(Ordering::SeqCst),
+                                sh.ns(),
+                                ended() != before,
+                                t.elapsed(),
+                            );
+                            match wait {
+                                None => {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                    continue;
+                                }
+                                Some(CompactWait::Ended) => sh.note(format!(
                                     "the compact the kill at minute {m} was to land in ended within a second: killed without"
-                                ));
-                                break;
-                            }
-                            if t.elapsed() >= WAIT_MAX {
-                                sh.note(format!(
+                                )),
+                                Some(CompactWait::Timeout) => sh.note(format!(
                                     "the kill at minute {m} found no compact of its own under way within {} s: killed without",
                                     WAIT_MAX.as_secs()
-                                ));
-                                break;
+                                )),
+                                Some(CompactWait::Died | CompactWait::UnderWay) => {}
                             }
-                            std::thread::sleep(Duration::from_millis(20));
+                            break;
                         }
                     }
                     // The announced second: operations due from `from` on
                     // are the restart's.
                     let k = (from + 1_000_000_000).max(sh.ns());
                     std::thread::sleep(Duration::from_nanos(k.saturating_sub(sh.ns())));
+                    // Dead in that second, or in the compact the kill was
+                    // to land in: the death's, the kill not sent.
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
+                        let back = died(
+                            &bench,
+                            &sh,
+                            &doings,
+                            o,
+                            x,
+                            &mut evs,
+                            from,
+                            Some(m),
+                            Some(from),
+                            sampler,
+                            &mut restart_ms_max,
+                        );
+                        evs.extend(events.try_iter());
+                        evs.retain(|e| e.at > back);
+                        kill_died.fetch_add(1, Ordering::Relaxed);
+                        life += 1;
+                        prev_majflt = None;
+                        prev_oom = 0;
+                        continue;
+                    }
                     let k = sh.ns();
-                    restart(
+                    let (killed, exit, not_running) = send_kill(&bench, &sh, m, k);
+                    // Dead in the moment before the send, which Docker's
+                    // state showed running to the look above: told after
+                    // Docker's wait (`gone_before`), the death's, timed by
+                    // itself, the kill not counted -- judged either way
+                    // for the side job it cut (`judge_kill`).
+                    if let Some(x) = judge_kill(&sh, exit, not_running, k) {
+                        sh.note(format!(
+                            "the kill at minute {m} found its server gone before it was sent: a death"
+                        ));
+                        evs.extend(events.try_iter());
+                        let back = died(
+                            &bench,
+                            &sh,
+                            &doings,
+                            o,
+                            x,
+                            &mut evs,
+                            from,
+                            Some(m),
+                            Some(from),
+                            sampler,
+                            &mut restart_ms_max,
+                        );
+                        evs.extend(events.try_iter());
+                        evs.retain(|e| e.at > back);
+                        kill_died.fetch_add(1, Ordering::Relaxed);
+                        life += 1;
+                        prev_majflt = None;
+                        prev_oom = 0;
+                        continue;
+                    }
+                    // The kill's own: a side job it cut is the kill's
+                    // (`cut_by`), stored so by `judge_kill`.
+                    say(kill_said(&sh, m, k));
+                    let back = restart(
                         &bench,
                         &sh,
                         &doings,
                         (from, k, m),
+                        Some(killed),
                         sampler,
                         o,
                         &mut restart_ms_max,
                     );
+                    // Docker's `die` of the kill's: the run's own.
+                    evs.extend(events.try_iter());
+                    evs.retain(|e| e.at > back);
                     doings.kills.fetch_add(1, Ordering::Relaxed);
                     life += 1;
                     prev_majflt = None;
@@ -6566,6 +9100,9 @@ fn run(o: &Opts) {
         ("env_failed", (env_failed.is_some() as u8).to_string()),
     ];
     v.extend(kept.end());
+    // What was said after the last minute's line: the catch-ups the run's
+    // end cut or that ended within their wait of it (`catch_look`).
+    figures_onto(&doings, &mut v);
     if let Some(ms) = checker.lost_ms_max.take() {
         v.push(("lost_ms_max", ms.to_string()));
     }
@@ -6593,6 +9130,19 @@ fn run(o: &Opts) {
         v.push(("peak_slowest_at", at.to_string()));
         let own = auto[0].0 + auto[0].1;
         v.push(("peak_auto_compacts", own.to_string()));
+        // The lane's share of the peak, beside the 4% the soak's rate
+        // asks of it: a peak whose lane dropped reads it could not serve
+        // measured fewer of them, and its rate's fraction asks more.
+        if o.replica_threads > 0 {
+            let share = peak_lane.0 as f64 * 100.0 / peak_lane.1.max(1) as f64;
+            v.push(("peak_lane_share", format!("{share:.2}")));
+            v.push(("peak_lane_dropped", (peak_lane.2 / 1000).to_string()));
+            say(format!(
+                "the peak: {mean:.0} a second, its slowest {PEAK_STRETCH} minutes {slowest:.0}; the replica lane {share:.1}% of it, its share {:.0}%, {} of its reads dropped, more than a second behind",
+                REPLICA_SHARE * 100.0,
+                peak_lane.2 / 1000
+            ));
+        }
         println!("peak {slowest:.0}");
         println!("peak_mean {mean:.0}");
         println!("peak_slowest_at {at}");
@@ -6630,53 +9180,70 @@ fn run(o: &Opts) {
 /// verify is copied aside before the server opens it again, and the run's
 /// volumes kept. After it, no read goes through the replica until the
 /// replica is connected and holds the newest change answered before the
-/// kill (`replica_back_ms`, bounded by `--replica-back-max`).
+/// kill (`replica_back_ms`, bounded by `--replica-back-max`). `kill`, the
+/// run's own kill, sent at `k` (`send_kill`), and when Docker's wait for
+/// its end ended; a death (`died`) is gone already, its `k` its time.
+/// Hands back when the server was started again, in ns: Docker's events of
+/// the process before are the kill's or the death's.
+#[allow(clippy::too_many_arguments)]
 fn restart(
     bench: &Kit,
     sh: &Shared,
     doings: &Doings,
     at: (u64, u64, u64),
+    kill: Option<u64>,
     sampler: Option<Sampler>,
     o: &Opts,
     longest: &mut u64,
-) {
+) -> u64 {
     let (from, k, m) = at;
     {
+        // The kill's window, opened as it was announced: its time the
+        // send's. A death's is opened by `found_dead`, its time there.
         let mut w = sh.windows.lock().unwrap();
         match w.last_mut() {
-            Some(x) if x.0 == from && x.1 == u64::MAX => x.1 = k,
+            Some(x) if x.0 == from && x.2 == u64::MAX => {
+                if kill.is_some() {
+                    x.1 = k;
+                }
+            }
             _ => w.push((from, k, u64::MAX)),
         }
     }
     sh.restart_to.store(u64::MAX, Ordering::SeqCst);
     sh.restart_from.store(from, Ordering::SeqCst);
     sh.replica_ok.store(false, Ordering::SeqCst);
-    let target = sh.max_seq.load(Ordering::SeqCst);
-    sh.replica_target.store(target, Ordering::SeqCst);
-    let (ok, out) = docker_within(
-        Duration::from_secs(60),
-        &["kill", "--signal", "KILL", &bench.server()],
-    );
-    if !ok {
-        sh.note(format!("docker kill at minute {m}: {out}"));
+    // Its catch-up from the window's start (`catch_up`): the replica's
+    // 504s the restart's, the lane moved up, until the loop is back on its
+    // schedule and the replica holds the change answered then.
+    sh.catch_open(m, from);
+    // The newest change answered before the kill was sent (`send_kill`
+    // read it then), or before the death.
+    if kill.is_none() {
+        sh.replica_target
+            .store(sh.max_seq.load(Ordering::SeqCst), Ordering::SeqCst);
     }
-    let (ok, out) = docker_within(Duration::from_secs(120), &["wait", &bench.server()]);
-    if !ok {
-        sh.note(format!("docker wait at minute {m}: {out}"));
+    let target = sh.replica_target.load(Ordering::SeqCst);
+    let killed = kill.unwrap_or_else(|| sh.ns());
+    let kill = kill.is_some();
+    if kill {
+        say(format!(
+            "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
+            (killed - k) as f64 / 1e9
+        ));
     }
-    let killed = sh.ns();
-    say(format!(
-        "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
-        (killed - k) as f64 / 1e9
-    ));
-    // A death has no kill of the run's to time, nor a watch on it.
+    // A death found in the kill's announced second had the syncer watched
+    // to it; one found otherwise has no watch, and no kill of the run's to
+    // time.
     let sync_ms = sampler.and_then(Sampler::finish);
-    if k != from {
+    if kill {
         doings.figure("kill_ms", ((killed - k) / 1_000_000).to_string());
         doings.figure(
             "kill_sync_ms",
             sync_ms.map_or("-1".into(), |x| x.to_string()),
         );
+    } else if let Some(x) = sync_ms {
+        doings.figure("death_sync_ms", x.to_string());
     }
     let t = Instant::now();
     let copy = format!("failed-m{m:04}.fennec");
@@ -6695,7 +9262,8 @@ fn restart(
     doings.figure("verify_ms", t.elapsed().as_millis().to_string());
     doings.figure("kill_compacting", (beside as u8).to_string());
     say(format!(
-        "killed at minute {m}{}{}; fennec verify {} in {:.0} s",
+        "{} at minute {m}{}{}; fennec verify {} in {:.0} s",
+        if kill { "killed" } else { "died" },
         if beside { ", a compact writing" } else { "" },
         match sync_ms {
             Some(0) => ", no fsync in flight".to_string(),
@@ -6715,9 +9283,13 @@ fn restart(
     }
     doings.verifies.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
+    let started_ns = sh.ns();
     // A connection first answered from here is the next server's: the
     // last was gone, and nothing answered since.
     sh.life.fetch_add(1, Ordering::SeqCst);
+    // Its memory a second, the next life's from here: the watch of the
+    // last ended with its process.
+    sh.mem[0].lock().unwrap().restarted();
     let (ok, out) = docker(&["start", &bench.server()]);
     assert!(ok, "docker start after the kill at minute {m}: {out}");
     // A line between docker's start and the wait for an answer: the two
@@ -6731,6 +9303,10 @@ fn restart(
         WAIT_MAX.as_secs()
     );
     let back = sh.ns();
+    // This life's answers and closes from here: the last life's burst and
+    // its restart's refused connects time none of its deaths.
+    sh.back(back);
+    sh.catch_back(back);
     sh.restart_to.store(back, Ordering::SeqCst);
     sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
     let ms = (back - k) / 1_000_000;
@@ -6738,8 +9314,9 @@ fn restart(
     doings.figure("start_ms", started.elapsed().as_millis().to_string());
     *longest = (*longest).max(ms);
     say(format!(
-        "answering again {:.1} s after the kill, {:.1} s after its start",
+        "answering again {:.1} s after the {}, {:.1} s after its start",
         ms as f64 / 1e3,
+        if kill { "kill" } else { "death" },
         started.elapsed().as_secs_f64()
     ));
     let t = Instant::now();
@@ -6770,6 +9347,7 @@ fn restart(
         Some((from, sh.ns().max(back.saturating_add(GRACE)))),
         None,
     );
+    started_ns
 }
 
 // ----------------------------------------------------------------- report
@@ -7000,6 +9578,192 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
         out.push(judge_run(&run, attempts.len(), cells));
     }
     out
+}
+
+/// What a server's looks a second (`watch_memory`, `p` "" the primary's
+/// and "r_" the replica's) found at their most over the run, said beside
+/// its memory criterion: the most anonymous memory and dirty pages in a
+/// second, and the minute whose two came nearest `--memory` (`limit`, the
+/// end line's) -- their sum, the two maybe a second apart. Not judged: the
+/// criterion holds a life's growth, a server the limit killed fails its
+/// own (`CRITERIA[18]`), and no run has measured a bound. The look a
+/// minute missed the compaction's jump of some 130 MB that killed the long
+/// run's primary at minute 300, read at 304 MB a minute before its death.
+fn peaks(minutes: &[Line], p: &str, limit: Option<f64>) -> String {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(&format!("{p}{k}")).copied();
+    let most = |k: &str| {
+        minutes
+            .iter()
+            .filter_map(|(n, m)| Some((*n, get(m, k)?)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    };
+    let Some((am, a)) = most("anon_peak") else {
+        return String::new();
+    };
+    let mb = |x: f64| x / 1048576.0;
+    let dirty = most("dirty_peak").map_or(String::new(), |(dm, d)| {
+        format!(", dirty pages {:.0} MB (minute {dm})", mb(d))
+    });
+    let near = limit.and_then(|l| {
+        minutes
+            .iter()
+            .filter_map(|(n, m)| {
+                Some((
+                    *n,
+                    get(m, "anon_peak")? + get(m, "dirty_peak").unwrap_or(0.0),
+                ))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(n, x)| {
+                format!(
+                    "; the two {:.0} MB of --memory's {:.0} at minute {n}",
+                    mb(x),
+                    mb(l)
+                )
+            })
+    });
+    format!(
+        "; a second at a time the most anonymous memory {:.0} MB (minute {am}){dirty}{}, said, not judged",
+        mb(a),
+        near.unwrap_or_default()
+    )
+}
+
+/// What the replica's own compactions held, said beside their criterion's
+/// p99 from the schedule: the reads through it among them as it answered
+/// them, from their send (`p99_r_compact_own`); the most each lane was
+/// behind its schedule in a second of a window (`rc_r_behind_max_s`, the
+/// replica lane's, and `rc_behind_max_s`, the pool's, which a lane of its
+/// own leaves out of the replica's stall); and the replica's major faults
+/// and least page cache in those seconds -- dry run 6 could tell none of
+/// "the server held the read" from "the loop's queue". Nothing where the
+/// lines have none of it, a run from before.
+fn rc_figures(minutes: &[Line], end: Option<&HashMap<String, f64>>) -> String {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied();
+    let most = |k: &str| {
+        minutes
+            .iter()
+            .filter_map(|(_, m)| get(m, k))
+            .reduce(f64::max)
+    };
+    let least = |k: &str| {
+        minutes
+            .iter()
+            .filter_map(|(_, m)| get(m, k))
+            .reduce(f64::min)
+    };
+    let total = |k: &str| {
+        minutes
+            .iter()
+            .filter_map(|(_, m)| get(m, k))
+            .reduce(|a, b| a + b)
+    };
+    let mut s = String::new();
+    if let Some(p) = end.and_then(|m| get(m, "p99_r_compact_own")) {
+        write!(
+            s,
+            "; the replica answered the reads through it among them in {:.2} s at the p99 from their send ({:.0} reads)",
+            p / 1e6,
+            end.and_then(|m| get(m, "r_compact_own_n")).unwrap_or(0.0)
+        )
+        .unwrap();
+    }
+    if let Some(secs) = total("rc_seconds") {
+        write!(s, "; in their {secs:.0} seconds").unwrap();
+        for (k, what) in [
+            ("rc_r_behind_max_s", "the replica lane"),
+            ("rc_behind_max_s", "the pool"),
+        ] {
+            if let Some(b) = most(k) {
+                write!(s, ", {what} {b:.1} s behind at the most").unwrap();
+            }
+        }
+        if let Some(f) = total("rc_r_majflt") {
+            write!(s, ", the replica's major faults {f:.0}").unwrap();
+        }
+        if let Some(c) = least("rc_r_file_min") {
+            write!(s, ", its page cache {:.0} MB at the least", c / 1048576.0).unwrap();
+        }
+    }
+    s
+}
+
+/// Each death of the primary's the lines name (`died`), as the death
+/// criterion says it: its minute, how it ended, how long before the kill
+/// due, what timed it, and the mismatches and the writes a read showed gone
+/// from its line to the next restart's -- judged from the death's time, so
+/// each is a loss past what `--sync` allows, never the harness's clock.
+fn deaths_said(minutes: &[Line]) -> String {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied();
+    let restarts: Vec<u64> = minutes
+        .iter()
+        .filter(|(_, m)| {
+            get(m, "kill").is_some_and(|x| x > 0.0) || get(m, "died").is_some_and(|x| x > 0.0)
+        })
+        .map(|(k, _)| *k)
+        .collect();
+    let each: Vec<String> = minutes
+        .iter()
+        .filter(|(_, m)| get(m, "died").is_some_and(|x| x > 0.0))
+        .map(|(k, m)| {
+            let next = restarts
+                .iter()
+                .find(|&&r| r > *k)
+                .copied()
+                .unwrap_or(u64::MAX);
+            let after: Vec<&HashMap<String, f64>> = minutes
+                .iter()
+                .filter(|(x, _)| *x >= *k && *x < next)
+                .map(|x| x.1)
+                .collect();
+            let total = |key: &str| after.iter().filter_map(|m| get(m, key)).sum::<f64>();
+            let lost_ms = after
+                .iter()
+                .filter_map(|m| get(m, "lost_ms_max"))
+                .reduce(f64::max);
+            let minute = get(m, "death_at_s").map_or(*k, |s| (s / 60.0) as u64 + 1);
+            let how = match (get(m, "death_oom"), get(m, "death_exit")) {
+                (Some(o), _) if o > 0.0 => "OOM-killed".to_string(),
+                (_, Some(c)) if c >= 0.0 => format!("exit {c:.0}"),
+                _ => "how it ended unread".to_string(),
+            };
+            let due = match (get(m, "death_kill_due_s"), get(m, "death_announced_ms")) {
+                (_, Some(a)) => format!(
+                    ", {:.1} s after the kill due was announced, before it was sent",
+                    a / 1e3
+                ),
+                (Some(s), None) if s >= 0.0 => format!(", {s:.0} s before the kill due"),
+                (Some(s), None) => format!(
+                    ", {:.0} s after the kill due, in the side jobs it waited for",
+                    -s
+                ),
+                (None, None) => String::new(),
+            };
+            let by = match get(m, "death_source").map(|x| x as u8) {
+                // The burst of closes, as every line says it: an older
+                // run's lines wrote its first close under the same number.
+                Some(1) => ", timed by the burst of closes its exit made",
+                Some(2) => ", timed by Docker's die event",
+                Some(3) => ", timed by Docker's FinishedAt",
+                Some(_) => ", timed by the minute's look before it",
+                None => "",
+            };
+            format!(
+                "minute {minute}: {how}{due}{by}; {:.0} mismatches and {:.0} writes gone with it in the {} minutes from its line{}",
+                total("mismatches"),
+                total("lost_writes"),
+                after.len(),
+                lost_ms.map_or(String::new(), |x| format!(", the earliest answered {x:.0} ms before it"))
+            )
+        })
+        .collect();
+    match each.is_empty() {
+        true => String::new(),
+        false => format!(
+            "; the primary's deaths, each a failure of its own: {}",
+            each.join("; ")
+        ),
+    }
 }
 
 /// A line of the primary's in a compaction: its side file written at the
@@ -7353,6 +10117,10 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         }
         judged_lives += judged as usize;
     }
+    let limit = end
+        .and_then(|m| get(m, "memory_limit"))
+        .filter(|x| *x > 0.0);
+    let peaks_said = |p: &str| peaks(&minutes, p, limit);
     v.push((
         CRITERIA[5],
         judged_lives > 0 && grew.is_empty(),
@@ -7363,14 +10131,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             // ten quiet looks between two. Said so, each life's looks
             // beside it.
             0 => format!(
-                "NOT JUDGED, too few quiet looks: no life of the primary had ten between two compactions from its fifth line, its other looks in a compaction -- quiet of settled: {}",
+                "NOT JUDGED, too few quiet looks: no life of the primary had ten between two compactions from its fifth line, its other looks in a compaction -- quiet of settled: {}{}",
                 match looks.is_empty() {
                     true => "no line names its life".to_string(),
                     false => looks.join(", "),
-                }
+                },
+                peaks_said("")
             ),
             _ => format!(
-                "{judged_lives} of {} lives of ten quiet looks between two compactions or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of a stretch's first five to its last five's{}{}",
+                "{judged_lives} of {} lives of ten quiet looks between two compactions or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of a stretch's first five to its last five's{}{}{}",
                 lives.len(),
                 most * 100.0,
                 cap / 1048576.0,
@@ -7384,7 +10153,8 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                         d / 1048576.0
                     ),
                     _ => String::new(),
-                }
+                },
+                peaks_said("")
             ),
         },
     ));
@@ -7454,12 +10224,13 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 CRITERIA[6],
                 over.is_empty(),
                 format!(
-                    "{:.0} MB from minute {}, the most {:+.1}% after{}; {} settled quiet looks, the {REPLICA_SETTLE} after each of its compactions left out",
+                    "{:.0} MB from minute {}, the most {:+.1}% after{}; {} settled quiet looks, the {REPLICA_SETTLE} after each of its compactions left out{}",
                     b / 1048576.0,
                     rq[0].1,
                     most * 100.0,
                     minutes_said(&over),
-                    rq.len()
+                    rq.len(),
+                    peaks_said("r_")
                 ),
             ));
         }
@@ -7467,8 +10238,9 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             CRITERIA[6],
             false,
             format!(
-                "not judged: {} settled quiet looks after the first hour, ten needed, five in a row between two compactions after the first five",
-                rq.len()
+                "not judged: {} settled quiet looks after the first hour, ten needed, five in a row between two compactions after the first five{}",
+                rq.len(),
+                peaks_said("r_")
             ),
         )),
     }
@@ -7580,6 +10352,8 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         v.push((c, ok, detail.trim_end_matches("; ").to_string()));
     }
     let steps = broke(&|m| get(m, "clock_step") == Some(1.0));
+    // The end line's among them: the catch-ups said after the last minute's.
+    let catch_down = total("catchup_down");
     for (c, key) in [(CRITERIA[9], "errors"), (CRITERIA[10], "mismatches")] {
         let total = sum(key);
         let at_end = end
@@ -7590,7 +10364,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             c,
             b.is_empty() && at_end == 0.0,
             format!(
-                "{:.0}{}{}{}",
+                "{:.0}{}{}{}{}{}",
                 total + at_end,
                 minutes_said(&b),
                 match at_end > 0.0 {
@@ -7600,6 +10374,21 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 match key == "mismatches" && !steps.is_empty() {
                     true => format!("; the VM's clock stepped at minutes {}", list(&steps)),
                     false => String::new(),
+                },
+                // A death's cut connections are its own (`CRITERIA[18]`):
+                // said, counted as `down` rather than here.
+                match (key, sum("death_down")) {
+                    ("errors", d) if d > 0.0 => format!(
+                        "; {d:.0} connections a death of the primary cut before it was found counted with it, as down"
+                    ),
+                    _ => String::new(),
+                },
+                // A restart's catch-up's 504s are its own (`Catch`), said.
+                match (key, catch_down) {
+                    ("errors", d) if d > 0.0 => format!(
+                        "; {d:.0} reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
+                    ),
+                    _ => String::new(),
                 }
             ),
         ));
@@ -7640,6 +10429,19 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         .iter()
         .filter_map(|(_, m)| get(m, "replica_back_ms"))
         .fold(0.0f64, f64::max);
+    // And caught up with the writes of the loop's backlog after it, held
+    // to the same bound from the loop's return and to `--catchup-max` from
+    // the server's (`CatchMax`): -1 where one passed first. The end line's
+    // too: a catch-up's said after the last minute's line.
+    let past = |m: &HashMap<String, f64>| get(m, "catchup_replica_ms").is_some_and(|x| x < 0.0);
+    let short = broke(&past);
+    let short_end = end.is_some_and(past);
+    let caught_most = minutes
+        .iter()
+        .map(|(_, m)| *m)
+        .chain(end)
+        .filter_map(|m| get(m, "catchup_replica_ms"))
+        .fold(0.0f64, f64::max);
     let follow = start.and_then(|m| Some((get(m, "follow_s")?, get(m, "follow_max")?)));
     let catchup = end.and_then(|m| get(m, "catchup_s"));
     let catchup_max = settings.map_or(0.0, |s| s.catchup_max as f64);
@@ -7648,11 +10450,13 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         CRITERIA[12],
         lagging.is_empty()
             && late_back.is_empty()
+            && short.is_empty()
+            && !short_end
             && follow.is_some_and(|(s, max)| s >= 0.0 && s <= max)
             && catchup.is_some_and(|s| s >= 0.0 && s <= catchup_max)
             && differs == Some(0.0),
         format!(
-            "connected and within {lag_max:.0} s of the primary{}; followed in {}; back after a restart within {:.1} s at most, the bound {:.0} s{}; caught up at the end in {}; {}",
+            "connected and within {lag_max:.0} s of the primary{}; followed in {}; back after a restart within {:.1} s at most, the bound {:.0} s{}, and holding the change answered as the loop was back on its schedule within {:.1} s of it at most{}{}; caught up at the end in {}; {}",
             minutes_said(&lagging),
             follow.map_or("?".into(), |(s, _)| format!("{s:.0} s")),
             back_most / 1e3,
@@ -7660,6 +10464,18 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             match late_back.is_empty() {
                 true => String::new(),
                 false => format!(" (past it at minutes {})", list(&late_back)),
+            },
+            caught_most / 1e3,
+            match short.is_empty() {
+                true => String::new(),
+                false => format!(
+                    " (NOT within it, or --catchup-max of the server answering again, at minutes {})",
+                    list(&short)
+                ),
+            },
+            match short_end {
+                true => " (NOT within it, or --catchup-max of the server answering again, in a catch-up said after the last minute)",
+                false => "",
             },
             catchup.map_or("? (no end line)".into(), |s| format!("{s:.0} s of {catchup_max:.0}")),
             match differs {
@@ -7931,31 +10747,47 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     let (kills, in_compact, compacts, backups) = settings.map_or((0, 0, 0, 0), |s| owed(n, &s));
     let got = |k: &str| sum(k) as u64;
     let differ = total("backup_differs") as u64;
+    // A death is a failure of its own (`CRITERIA[18]`), apart from the
+    // planned kills: a kill it found the server dead at, and a compact or
+    // a backup it cut, are its, counted with it here -- the long run's
+    // death at its kill of minute 300 counted as a kill, timed by it.
+    // Every restart verifies the file: a death's as a kill's.
+    let (kill_died, died) = (got("kill_died"), got("died"));
     let mut short = Vec::new();
     for (what, have, want, exact) in [
-        ("kills", got("kill"), kills, true),
-        ("verifies", got("verify"), kills, true),
+        ("kills", got("kill") + kill_died, kills, true),
+        (
+            "verifies",
+            got("verify"),
+            (kills + died).saturating_sub(kill_died),
+            true,
+        ),
         // One the server's own compact turned away was compacted all the
         // same.
         (
             "compacts",
-            got("compact") + got("compact_busy"),
+            got("compact") + got("compact_busy") + got("compact_died"),
             compacts,
             false,
         ),
         (
             "kills that cut a compact",
             got("compact_killed"),
-            in_compact,
+            in_compact.saturating_sub(kill_died.min(in_compact)),
             false,
         ),
         (
             "backups",
-            got("backup").saturating_sub(differ),
+            got("backup").saturating_sub(differ) + got("backup_died"),
             backups,
             false,
         ),
-        ("restores", got("restore"), backups, false),
+        (
+            "restores",
+            got("restore") + got("backup_died"),
+            backups,
+            false,
+        ),
     ] {
         if (exact && have != want) || have < want {
             short.push(format!("{what} {have} of {want}"));
@@ -7979,6 +10811,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             );
             if due.contains(&Doing::Kill { in_compact: true })
                 && line(m + 1).and_then(|x| get(x, "kill_compacting")) != Some(1.0)
+                && !line(m + 1).is_some_and(|x| get(x, "kill_died").is_some_and(|d| d > 0.0))
             {
                 short.push(format!("the kill at minute {m} found no compact writing"));
             }
@@ -7989,10 +10822,16 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         settings.is_some() && short.is_empty(),
         match short.is_empty() {
             true => format!(
-                "{kills} kills ({in_compact} cutting a compact) and verifies, {} compacts ({} turned away by the server's own), {} backups and restores",
+                "{kills} kills ({in_compact} cutting a compact) and verifies, {} compacts ({} turned away by the server's own), {} backups and restores{}",
                 got("compact") + got("compact_busy"),
                 got("compact_busy"),
-                got("backup")
+                got("backup"),
+                match (kill_died, got("compact_died") + got("backup_died")) {
+                    (0, 0) => String::new(),
+                    (k, c) => format!(
+                        "; {k} kills found the server dead and {c} compacts and backups were cut by a death, each the death's"
+                    ),
+                }
             ),
             false => short.join(", "),
         },
@@ -8063,11 +10902,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         CRITERIA[18],
         gone.is_empty(),
         format!(
-            "{:.0} deaths, {:.0} OOM kills, the replica stopped {:.0} times{}",
+            "{:.0} deaths, {:.0} OOM kills, the replica stopped {:.0} times{}{}",
             sum("died"),
             sum("oom"),
             sum("r_died"),
-            minutes_said(&gone)
+            minutes_said(&gone),
+            deaths_said(&minutes)
         ),
     ));
     // The open loop's rate is the run's premise: a server that answers
@@ -8085,49 +10925,71 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         0 => 30,
         k => k,
     });
-    let looked: Vec<(u64, f64)> = minutes
-        .iter()
-        .filter_map(|(k, m)| Some((*k, get(m, "behind_s")?)))
-        .collect();
-    // Each stretch of lines behind (over a second), from its first to its
-    // last, and the most it was behind.
-    let mut stretches: Vec<(u64, u64, f64)> = Vec::new();
-    for &(k, b) in &looked {
-        if b <= ON_SCHEDULE_S {
-            continue;
-        }
-        match stretches.last_mut() {
-            Some(x) if x.1 + 1 == k => {
-                x.1 = k;
-                x.2 = x.2.max(b);
+    // Each lane alike: the pool's (`behind_s`) on every line, and the
+    // replica lane's (`r_behind_s`) where the run had one -- its 4% of the
+    // rate on a schedule of its own, which a replica that never keeps up
+    // with them leaves behind without the pool's lag showing it.
+    // Each line's lag, and each long stretch of lines behind: its first
+    // and last minute and the most it was behind.
+    type Lags = (Vec<(u64, f64)>, Vec<(u64, u64, f64)>);
+    let lag = |name: &str| -> Lags {
+        let looked: Vec<(u64, f64)> = minutes
+            .iter()
+            .filter_map(|(k, m)| Some((*k, get(m, name)?)))
+            .collect();
+        // Each stretch of lines behind (over a second), from its first to
+        // its last, and the most it was behind.
+        let mut stretches: Vec<(u64, u64, f64)> = Vec::new();
+        for &(k, b) in &looked {
+            if b <= ON_SCHEDULE_S {
+                continue;
             }
-            _ => stretches.push((k, k, b)),
+            match stretches.last_mut() {
+                Some(x) if x.1 + 1 == k => {
+                    x.1 = k;
+                    x.2 = x.2.max(b);
+                }
+                _ => stretches.push((k, k, b)),
+            }
         }
-    }
-    let long: Vec<&(u64, u64, f64)> = stretches
-        .iter()
-        .filter(|x| x.1 - x.0 + 1 >= every)
-        .collect();
-    let most = looked.iter().map(|x| x.1).fold(0.0f64, f64::max);
+        stretches.retain(|x| x.1 - x.0 + 1 >= every);
+        (looked, stretches)
+    };
+    let (looked, long) = lag("behind_s");
+    let (r_looked, r_long) = lag("r_behind_s");
+    let most = |l: &[(u64, f64)]| l.iter().map(|x| x.1).fold(0.0f64, f64::max);
+    let behind = |lane: &str, long: &[(u64, u64, f64)]| {
+        long.iter()
+            .map(|x| {
+                format!(
+                    "{lane} from minute {} to {}, {:.0} s at the most",
+                    x.0, x.1, x.2
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     v.push((
         CRITERIA[19],
-        !looked.is_empty() && looked.len() as u64 == n && long.is_empty(),
-        match (looked.is_empty(), long.is_empty()) {
+        !looked.is_empty() && looked.len() as u64 == n && long.is_empty() && r_long.is_empty(),
+        match (looked.is_empty(), long.is_empty() && r_long.is_empty()) {
             (true, _) => "not judged: no line says how far behind its schedule the loop was".into(),
             (false, true) => format!(
-                "back on it within every {every} minutes, {most:.1} s behind at the most{}",
+                "back on it within every {every} minutes, {:.1} s behind at the most{}{}",
+                most(&looked),
+                match r_looked.is_empty() {
+                    true => String::new(),
+                    false => format!(", the replica lane {:.1} s", most(&r_looked)),
+                },
                 match looked.len() as u64 == n {
                     true => String::new(),
                     false => format!("; {} of {n} lines say how far", looked.len()),
                 }
             ),
-            (false, false) => format!(
-                "behind {}",
-                long.iter()
-                    .map(|x| format!("from minute {} to {}, {:.0} s at the most", x.0, x.1, x.2))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
+            (false, false) => {
+                let mut said = behind("behind", &long);
+                said.extend(behind("the replica lane behind", &r_long));
+                said.join("; ")
+            }
         },
     ));
     // The reads held by the replica's own compactions, and their workers'
@@ -8201,7 +11063,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             "no figure of their own on this run's lines: nothing judged".to_string(),
         ),
     };
-    v.push((CRITERIA[20], rc_ok, rc_said));
+    v.push((CRITERIA[20], rc_ok, rc_said + &rc_figures(&minutes, end)));
     // The watch on the replica's compaction thread against its counter
     // (`fennec_auto_compactions_total`): a compaction is counted where its
     // end was seen as the thread going back to sleep and the counter moved
@@ -8502,6 +11364,20 @@ fn notes(
             }
         ));
     }
+    // Where the reads through the replica ran: a lane of their own, its
+    // lag, or the pool every operation shares.
+    out.push(match s.replica_threads {
+        0 => "the reads through the replica: in the pool every operation shares (no lane of their own)".into(),
+        t => format!(
+            "the reads through the replica: a lane of {t} connections on a schedule of its own at {:.0}% of the rate{}",
+            REPLICA_SHARE * 100.0,
+            minutes
+                .iter()
+                .filter_map(|(_, m)| get(m, "r_behind_max_s"))
+                .reduce(f64::max)
+                .map_or(String::new(), |b| format!(", {b:.1} s behind it at the most"))
+        ),
+    });
     let offs: Vec<f64> = minutes
         .iter()
         .filter_map(|(_, m)| get(m, "clock_off_ms"))
@@ -8997,6 +11873,7 @@ mod tests {
             recall_min: 0.925,
             subscriptions: 64,
             threads: 32,
+            replica_threads: 0,
             replication_buffer: 64,
             cpus: 8,
         };
@@ -9045,6 +11922,7 @@ mod tests {
             recall_min: 0.925,
             subscriptions: 64,
             threads: 32,
+            replica_threads: 0,
             replication_buffer: 64,
             cpus: 8,
         };
@@ -9435,6 +12313,24 @@ mod tests {
                 vec![CRITERIA[12]],
             ),
             (
+                "the replica short of the loop's writes after a restart past its bound",
+                Box::new(|m, x| {
+                    if m == 62 {
+                        x.insert("catchup_replica_ms", -1.0);
+                    }
+                }),
+                vec![CRITERIA[12]],
+            ),
+            (
+                "a catch-up said after the last minute's line past its bound",
+                Box::new(|m, x| {
+                    if m == u64::MAX {
+                        x.insert("catchup_replica_ms", -1.0);
+                    }
+                }),
+                vec![CRITERIA[12]],
+            ),
+            (
                 "a restart too long",
                 Box::new(|m, x| {
                     if m == 91 {
@@ -9489,6 +12385,17 @@ mod tests {
                 Box::new(|m, x| {
                     if (31..=70).contains(&m) {
                         x.insert("behind_s", 100.0);
+                    }
+                }),
+                vec![CRITERIA[19]],
+            ),
+            (
+                // The pool on its schedule, the replica lane's 4% never
+                // kept up with: its own lag fails it.
+                "the replica lane behind its schedule from minute 31 on",
+                Box::new(|m, x| {
+                    if m > 0 && m < u64::MAX {
+                        x.insert("r_behind_s", if m > 30 { 40.0 } else { 0.0 });
                     }
                 }),
                 vec![CRITERIA[19]],
@@ -10449,6 +13356,475 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_s_catch_up_ends_with_the_loop_on_its_schedule_and_the_replica_holding_the_change_then(
+    ) {
+        let s = 1_000_000_000u64;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        let bounds = "held to 60 s from the loop's return (--replica-back-max) and 300 s from the server answering again (--catchup-max); ";
+        let mut x = Catch::new(3, 100 * s);
+        // Down: nothing to hold, and no bound running.
+        assert!(!x.settle(10_000 * s, None, max));
+        x.back = 104 * s;
+        // Within the grace the reads go to the primary: the loop on its
+        // schedule names no change yet.
+        x.on_schedule(105 * s, Some(0.5), false, 900);
+        assert_eq!(x.on, None);
+        // Through the replica again, the loop 4 s behind with the
+        // restart's backlog: not yet; and nothing to hold before it.
+        x.on_schedule(110 * s, Some(4.0), true, 1_000);
+        assert_eq!(x.on, None);
+        assert!(!x.settle(110 * s, Some(2_000), max));
+        // Back on its schedule: the newest change answered then is the
+        // replica's to hold, a later look never moving it.
+        x.on_schedule(118 * s, Some(0.8), true, 8_000);
+        assert_eq!(x.on, Some((118 * s, 8_000)));
+        x.on_schedule(119 * s, Some(0.1), true, 9_000);
+        assert_eq!(x.on, Some((118 * s, 8_000)));
+        // Short of it, then not read, then holding it: over.
+        assert!(!x.settle(119 * s, Some(7_999), max));
+        assert!(!x.settle(120 * s, None, max));
+        assert!(x.settle(121 * s, Some(8_000), max));
+        assert_eq!((x.end, x.to), (CatchEnd::Caught, 121 * s));
+        assert!(!x.settle(122 * s, Some(8_000), max));
+        x.down = 185;
+        x.moved_milli = 1_203_400;
+        assert_eq!(
+            catch_said(&x, max),
+            format!("minute 3: the restart's catch-up over: the loop back on its schedule 14.0 s after the server answered again, the replica holding change 8000, the newest answered then, 3.0 s after that; {bounds}185 reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; 1203 of the lane's due in it moved up, never sent")
+        );
+        // Short of it `--replica-back-max` after the loop's return: over,
+        // a 504 from there an error. At the peak the loop keeps no
+        // schedule: on it as soon as reads go through the replica.
+        let mut y = Catch::new(4, 200 * s);
+        y.back = 203 * s;
+        y.on_schedule(210 * s, None, true, 5);
+        assert!(!y.settle(269 * s, Some(4), max));
+        assert!(y.settle(270 * s, Some(4), max));
+        assert_eq!((y.end, y.to), (CatchEnd::Bound, 270 * s));
+        assert_eq!(
+            catch_said(&y, max),
+            format!("minute 4: the restart's catch-up NOT over within --replica-back-max: the loop back on its schedule 7.0 s after the server answered again, the replica short of change 5, the newest answered then, 60.0 s after that, a 504 from there an error; {bounds}0 reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; 0 of the lane's due in it moved up, never sent")
+        );
+        // A loop never back on its schedule -- 11 minutes to drain a kill's
+        // backlog met 166 s behind -- its replica's 504s the restart's while
+        // its change advances: over `--catchup-max` after the server
+        // answered, a 504 from there an error, whatever the replica holds.
+        let mut z = Catch::new(5, 300 * s);
+        z.back = 304 * s;
+        z.on_schedule(400 * s, Some(30.0), true, 5);
+        assert!(!z.settle(603 * s, Some(1_000), max));
+        assert!(z.settle(604 * s, Some(1_000), max));
+        assert_eq!((z.end, z.to), (CatchEnd::Long, 604 * s));
+        assert!(catch_said(&z, max).starts_with(&format!(
+            "minute 5: the restart's catch-up NOT over within --catchup-max: the loop not back on its schedule, with reads through the replica again, in the 300.0 s after the server answered again, a 504 from there an error; {bounds}"
+        )));
+        // Back on it late, the replica's own bound not yet over: the
+        // whole one ends it all the same.
+        let mut l = Catch::new(6, 400 * s);
+        l.back = 404 * s;
+        l.on_schedule(650 * s, Some(0.5), true, 70);
+        assert!(!l.settle(703 * s, Some(69), max));
+        assert!(l.settle(704 * s, Some(69), max));
+        assert_eq!((l.end, l.to), (CatchEnd::Long, 704 * s));
+        assert!(catch_said(&l, max).starts_with(
+            "minute 6: the restart's catch-up NOT over within --catchup-max: the loop back on its schedule 246.0 s after the server answered again, the replica short of change 70, the newest answered then, 300.0 s after the server answered again, a 504 from there an error; "
+        ));
+        // The next restart first: cut by it.
+        let mut c = Catch::new(7, 900 * s);
+        c.back = 904 * s;
+        c.on_schedule(1_000 * s, Some(30.0), true, 5);
+        assert!(!c.settle(1_100 * s, None, max));
+        c.to = 1_104 * s;
+        c.end = CatchEnd::Cut;
+        assert!(catch_said(&c, max).starts_with(&format!(
+            "minute 7: the restart's catch-up cut by the next restart: the loop not back on its schedule, with reads through the replica again, in the 200.0 s after the server answered again; {bounds}"
+        )));
+    }
+
+    #[test]
+    fn a_replica_s_504_in_a_restart_s_catch_up_is_the_restart_s_and_one_after_it_an_error() {
+        // The replica holding every read past its wait; one key's answer
+        // coming 300 ms after it was sent.
+        let addr = fake(|_, body| {
+            if body.contains("77") {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            (
+                504,
+                "{\"error\":\"change 9 has not reached this server in the wait\"}".into(),
+            )
+        });
+        let mut sh = Shared::new(&opts(), addr.clone(), addr, &[]);
+        // A run 100 s in: a replica's change can have advanced long ago.
+        sh.t0 = sh.t0.checked_sub(Duration::from_secs(100)).unwrap();
+        let sh = sh;
+        let s = 1_000_000_000u64;
+        let mut w = Worker {
+            sh: &sh,
+            slot: &sh.slots[0],
+            c: None,
+            life: None,
+            rc: None,
+            rng: Rng::new(1),
+            via_replica: false,
+        };
+        let counts = || {
+            (
+                sh.errors.load(Ordering::SeqCst),
+                sh.down.load(Ordering::SeqCst),
+            )
+        };
+        // No restart behind it: an error.
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (1, 0));
+        // A kill's restart, the server back: its catch-up open from the
+        // window's start. The replica's change never seen to advance: a
+        // stall, not a catch-up -- an error, said as one in it.
+        let from = sh.ns();
+        sh.catch_open(3, from);
+        sh.catch_back(from + 1);
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (2, 0));
+        let said = sh.notes.lock().unwrap().last().cloned().unwrap();
+        assert!(
+            said.contains("; sent in the catch-up of minute 3's restart, the replica's change not seen to advance in the 5 s before"),
+            "{said}"
+        );
+        // Seen to advance, but past the wait: still standing.
+        sh.r_seen(sh.ns() - 8 * s, Some(100));
+        sh.r_seen(sh.ns() - 7 * s, Some(101));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (3, 0));
+        // A read now finding it further on knows only that it moved after
+        // the read before began, 7 s ago: still an error, and so after one
+        // finding it where it was; the next further on, that it moved after
+        // that one began, just now.
+        sh.r_seen(sh.ns(), Some(102));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (4, 0));
+        sh.r_seen(sh.ns(), Some(102));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (5, 0));
+        sh.r_seen(sh.ns(), Some(103));
+        // The replica behind the backlog's writes and catching up: the
+        // restart's, `down`, counted to it.
+        assert!(!w.read(5, true));
+        assert!(!w.read(6, true));
+        assert_eq!(counts(), (5, 2));
+        // A read sent in it whose 504 comes after it ended, by the wait:
+        // the restart's still, by its send.
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        std::thread::scope(|scope| {
+            let late = scope.spawn(|| w.read(77, true));
+            std::thread::sleep(Duration::from_millis(100));
+            let mut c = sh.catches.lock().unwrap();
+            let x = c.last_mut().unwrap();
+            x.on_schedule(sh.ns(), Some(0.2), true, 40);
+            assert!(x.settle(sh.ns(), Some(40), max));
+            drop(c);
+            assert!(!late.join().unwrap());
+        });
+        assert_eq!(counts(), (5, 3));
+        assert_eq!(sh.catches.lock().unwrap()[0].down, 3);
+        // After it, the replica caught up: an error.
+        assert!(!w.read(7, true));
+        assert_eq!(counts(), (6, 3));
+        // A 504 of the primary's is never a catch-up's. (The fake serves a
+        // connection at a time: the replica's let go.)
+        let from = sh.ns();
+        sh.catch_open(4, from);
+        w.rc = None;
+        assert!(!w.read(8, false));
+        assert_eq!(counts(), (7, 3));
+        assert_eq!(sh.catches.lock().unwrap()[1].down, 0);
+    }
+
+    #[test]
+    fn a_restart_s_catch_up_follows_the_replica_from_its_start_and_is_said_once_over() {
+        let mut sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        // A run 100 s in: a restart's grace can be over.
+        sh.t0 = sh.t0.checked_sub(Duration::from_secs(100)).unwrap();
+        let sh = sh;
+        let doings = Doings::default();
+        let s = 1_000_000_000u64;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        let figures = || std::mem::take(&mut *doings.figures.lock().unwrap());
+        let reads = std::cell::Cell::new(0);
+        let look = |wait: u64, stop: bool, held: u64| {
+            catch_look(&sh, &doings, max, wait, stop, &mut || {
+                reads.set(reads.get() + 1);
+                Some(held)
+            })
+        };
+        // No restart: the replica not asked.
+        assert!(look(0, false, 40).is_empty());
+        assert_eq!(reads.get(), 0);
+        // The kill's window open: its catch-up from the window's start, the
+        // lane moved up, and the replica asked from there -- its change
+        // standing while the primary is down: a 504 then a stall's.
+        let from = sh.ns();
+        sh.windows.lock().unwrap().push((from, from, u64::MAX));
+        sh.catch_open(3, from);
+        assert!(sh.catching.load(Ordering::SeqCst));
+        assert!(look(0, false, 50).is_empty());
+        assert!(look(0, false, 50).is_empty());
+        assert_eq!(reads.get(), 2);
+        assert_eq!(sh.r_advanced.load(Ordering::SeqCst), 0);
+        // Back within the grace, the loop on its schedule (no connection
+        // behind it): no change named yet, but the replica asked, following
+        // the primary's writes -- seen to advance after the look before
+        // began.
+        let back = sh.ns();
+        sh.windows.lock().unwrap()[0].2 = back;
+        sh.catch_back(back);
+        assert!(look(0, false, 60).is_empty());
+        let advanced = sh.r_advanced.load(Ordering::SeqCst);
+        assert!(
+            advanced >= from && advanced < back,
+            "{from} {advanced} {back}"
+        );
+        // Past the grace, the pool 3 s behind with its backlog: not yet.
+        sh.windows.lock().unwrap()[0].2 = back - GRACE - s;
+        let lagging = sh.ns().saturating_sub(3 * s);
+        for slot in sh.pool_slots() {
+            slot.due.store(lagging, Ordering::SeqCst);
+        }
+        assert!(look(0, false, 70).is_empty());
+        // On it, but the replica kept from reads since the kill: not yet.
+        for slot in sh.pool_slots() {
+            slot.due.store(sh.ns(), Ordering::SeqCst);
+        }
+        sh.replica_ok.store(false, Ordering::SeqCst);
+        assert!(look(0, false, 80).is_empty());
+        assert_eq!(sh.catches.lock().unwrap()[0].on, None);
+        assert_eq!(reads.get(), 5);
+        assert!(sh.r_advanced.load(Ordering::SeqCst) > advanced);
+        // Reads through it again: the newest change answered then named,
+        // the replica short of it, then holding it -- over at the time
+        // taken before its status was asked: a read sent while the call
+        // ran, its timeouts 10 s, is no longer the restart's -- and said
+        // only once the reads sent in it had their wait.
+        sh.replica_ok.store(true, Ordering::SeqCst);
+        sh.max_seq.store(8_000, Ordering::SeqCst);
+        assert!(look(0, false, 7_000).is_empty());
+        sh.max_seq.store(9_000, Ordering::SeqCst);
+        let asked = std::cell::Cell::new(0);
+        let mut slow = || {
+            asked.set(sh.ns());
+            std::thread::sleep(Duration::from_millis(20));
+            Some(8_000)
+        };
+        assert!(catch_look(&sh, &doings, max, 3_600 * s, false, &mut slow).is_empty());
+        assert!(!sh.catching.load(Ordering::SeqCst));
+        let x = sh.catches.lock().unwrap()[0];
+        assert_eq!((x.end, x.on.map(|o| o.1)), (CatchEnd::Caught, Some(8_000)));
+        assert!(
+            x.to <= asked.get(),
+            "over at {}, asked at {}",
+            x.to,
+            asked.get()
+        );
+        // Not yet said: the replica still asked, for the 504s to come.
+        assert!(look(3_600 * s, false, 8_100).is_empty());
+        assert_eq!(reads.get(), 7);
+        let f = figures();
+        assert!(
+            f.iter()
+                .any(|(k, v)| *k == "catchup_replica_ms" && v != "-1"),
+            "{f:?}"
+        );
+        assert!(f.iter().any(|(k, _)| *k == "catchup_on_ms"), "{f:?}");
+        assert_eq!(look(0, false, 8_200).len(), 1);
+        assert_eq!(reads.get(), 8);
+        // Every catch-up said: the replica no longer asked.
+        assert!(look(0, false, 8_300).is_empty());
+        assert_eq!(reads.get(), 8);
+        assert!(figures().iter().any(|(k, _)| *k == "catchup_down"));
+        // The next restart's, the replica short of the change past its
+        // bound -- a nanosecond here: -1.
+        sh.catch_open(4, sh.ns());
+        sh.catch_back(sh.ns());
+        sh.catches.lock().unwrap()[1].on = Some((sh.ns(), 10_000));
+        std::thread::sleep(Duration::from_millis(1));
+        let tight = CatchMax { replica: 1, ..max };
+        assert!(catch_look(&sh, &doings, tight, 3_600 * s, false, &mut || Some(9_999)).is_empty());
+        assert_eq!(sh.catches.lock().unwrap()[1].end, CatchEnd::Bound);
+        let f = figures();
+        assert!(
+            f.iter()
+                .any(|(k, v)| *k == "catchup_replica_ms" && v == "-1"),
+            "{f:?}"
+        );
+        // The one after, the loop never back on its schedule as the whole
+        // catch-up's bound passed: -1 too.
+        sh.catch_open(5, sh.ns());
+        sh.catch_back(sh.ns());
+        for slot in sh.pool_slots() {
+            slot.due
+                .store(sh.ns().saturating_sub(30 * s), Ordering::SeqCst);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        let whole = CatchMax { whole: 1, ..max };
+        assert!(catch_look(&sh, &doings, whole, 3_600 * s, false, &mut || Some(9_999)).is_empty());
+        let x = sh.catches.lock().unwrap()[2];
+        assert_eq!((x.end, x.on), (CatchEnd::Long, None));
+        let f = figures();
+        assert!(
+            f.iter()
+                .any(|(k, v)| *k == "catchup_replica_ms" && v == "-1"),
+            "{f:?}"
+        );
+        // And one open at the run's end cut by it, all said at once, the
+        // replica not asked.
+        sh.catch_open(6, sh.ns());
+        let before = reads.get();
+        let said = look(3_600 * s, true, 0);
+        assert_eq!(
+            said.iter().map(|x| (x.minute, x.end)).collect::<Vec<_>>(),
+            vec![
+                (4, CatchEnd::Bound),
+                (5, CatchEnd::Long),
+                (6, CatchEnd::RunEnd)
+            ]
+        );
+        assert_eq!(reads.get(), before);
+        assert!(!sh.catching.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_restart_cuts_the_catch_up_still_open_and_its_504s_stay_its_own() {
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let doings = Doings::default();
+        let s = 1_000_000_000u64;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        // The replica catching up; the loop never back on its schedule
+        // with reads through it.
+        sh.r_seen(sh.ns(), Some(1));
+        sh.r_seen(sh.ns(), Some(2));
+        sh.replica_ok.store(false, Ordering::SeqCst);
+        sh.catch_open(3, sh.ns());
+        let from = sh.ns();
+        assert_eq!(sh.catch_504(from), Some((3, true)));
+        // The next restart, the first still open: cut where it begins.
+        sh.catch_open(4, from + 1);
+        let c = sh.catches.lock().unwrap().clone();
+        assert_eq!((c[0].to, c[0].end, c[0].down), (from + 1, CatchEnd::Cut, 1));
+        assert_eq!((c[1].to, c[1].end), (u64::MAX, CatchEnd::Open));
+        // A read sent before the cut is the first's, one after the next's.
+        assert_eq!(sh.catch_504(from), Some((3, true)));
+        assert_eq!(sh.catch_504(from + 2), Some((4, true)));
+        // Said once its reads had their wait, as cut; the next open.
+        let said = catch_look(&sh, &doings, max, 0, false, &mut || Some(2));
+        assert_eq!(said.len(), 1);
+        assert!(catch_said(&said[0], max).starts_with(
+            "minute 3: the restart's catch-up cut by the next restart: the server not answering again; "
+        ));
+        assert_eq!(said[0].down, 2);
+        assert!(sh.catching.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn two_catch_ups_in_a_minute_add_their_reads_and_keep_their_worst() {
+        let doings = Doings::default();
+        let line = |v: &[(&str, String)]| -> Vec<(String, String)> {
+            let mut l: Vec<_> = v.iter().map(|(k, x)| (k.to_string(), x.clone())).collect();
+            l.sort();
+            l
+        };
+        let pairs = |p: &[(&str, &str)]| -> Vec<(String, String)> {
+            let mut l: Vec<_> = p
+                .iter()
+                .map(|(k, x)| (k.to_string(), x.to_string()))
+                .collect();
+            l.sort();
+            l
+        };
+        // The first past a bound, the second over in 2.5 s: the -1 kept,
+        // never the later one's over it; the reads of both. A kill's own
+        // figure: the last said.
+        let mut v: Vec<(&str, String)> = vec![("ops", "10".into())];
+        for (k, x) in [
+            ("kill_ms", "400"),
+            ("catchup_replica_ms", "-1"),
+            ("catchup_on_ms", "9000"),
+            ("catchup_down", "185"),
+            ("catchup_moved", "12"),
+            ("kill_ms", "300"),
+            ("catchup_replica_ms", "2500"),
+            ("catchup_on_ms", "4000"),
+            ("catchup_down", "7"),
+            ("catchup_moved", "3"),
+        ] {
+            doings.figure(k, x.into());
+        }
+        figures_onto(&doings, &mut v);
+        assert_eq!(
+            line(&v),
+            pairs(&[
+                ("ops", "10"),
+                ("kill_ms", "300"),
+                ("catchup_replica_ms", "-1"),
+                ("catchup_on_ms", "9000"),
+                ("catchup_down", "192"),
+                ("catchup_moved", "15"),
+            ])
+        );
+        assert!(doings.figures.lock().unwrap().is_empty());
+        // Both over, the other way round: the longer kept.
+        let mut v: Vec<(&str, String)> = Vec::new();
+        for (k, x) in [
+            ("catchup_replica_ms", "2500"),
+            ("catchup_replica_ms", "700"),
+        ] {
+            doings.figure(k, x.into());
+        }
+        figures_onto(&doings, &mut v);
+        assert_eq!(line(&v), pairs(&[("catchup_replica_ms", "2500")]));
+    }
+
+    #[test]
+    fn the_lane_is_moved_up_from_a_restart_until_its_catch_up_ends() {
+        // 100 a second, the lane's 4: a read every 250 ms.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let s = 1_000_000_000u64;
+        let step = s / 4;
+        assert_eq!(sh.r_every.load(Ordering::SeqCst), step);
+        // Off the peak and no restart: the lane's own backlog, sent.
+        sh.r_due.store(10 * s, Ordering::SeqCst);
+        assert_eq!(lane_due(&sh, 100 * s), 10 * s);
+        assert_eq!(sh.lane_dropped_milli.load(Ordering::SeqCst), 0);
+        // From a restart: a second behind at the most, the reads skipped
+        // dropped, and said as the catch-up's.
+        sh.catch_open(3, 50 * s);
+        assert_eq!(lane_due(&sh, 100 * s), 99 * s);
+        let skipped = (99 * s - (10 * s + step)) * 1000 / step;
+        assert_eq!(sh.lane_dropped_milli.load(Ordering::SeqCst), skipped);
+        assert_eq!(sh.catches.lock().unwrap()[0].moved_milli, skipped);
+        assert_eq!(lane_due(&sh, 100 * s), 99 * s + step);
+        // Over: its backlog its own again.
+        {
+            let mut c = sh.catches.lock().unwrap();
+            c[0].to = 101 * s;
+            c[0].end = CatchEnd::Caught;
+        }
+        sh.catching.store(false, Ordering::SeqCst);
+        assert_eq!(lane_due(&sh, 200 * s), 99 * s + 2 * step);
+        assert_eq!(sh.lane_dropped_milli.load(Ordering::SeqCst), skipped);
+    }
+
+    #[test]
     fn an_operation_is_the_restarts_until_its_worker_is_back_on_schedule() {
         let mut owed = None;
         let (r, none) = ((100, 200), (u64::MAX, u64::MAX));
@@ -11003,6 +14379,7 @@ mod tests {
                 behind: false,
                 in_restart: window == 2,
                 took,
+                own_us: 0,
             },
         };
         let mut h = Hists::new();
@@ -11358,6 +14735,7 @@ mod tests {
             behind: false,
             in_restart: false,
             took,
+            own_us: 0,
         };
         // A thousand operations held for window 1, open: each operation
         // asks of the oldest's window alone -- the rescan asked of every one
@@ -11448,6 +14826,7 @@ mod tests {
                             behind: false,
                             in_restart: i == 1,
                             took: 1_000 + k,
+                            own_us: 0,
                         },
                     });
                 }
@@ -11644,6 +15023,7 @@ mod tests {
                     behind: false,
                     in_restart: at >= w.restart.0 && at <= w.restart.1,
                     took,
+                    own_us: 0,
                 };
                 assert_eq!(mine.took(c, held, r, &unsettled), None);
             }
@@ -11807,10 +15187,17 @@ mod tests {
         }]);
         c.hold(u64::MAX, 0, u64::MAX, &[]);
         assert_eq!(c.mismatches, 1);
-        assert!(!clock_stepped((3.0, 2.0), (3.5, 2.0)));
-        assert!(clock_stepped((3.0, 2.0), (400.0, 2.0)));
+        let p = |off_ms, rtt_ms| Probe {
+            off_ms,
+            rtt_ms,
+            rtt_ns: 0,
+            vm_less_ns: 0,
+            at: 0,
+        };
+        assert!(!clock_stepped(p(3.0, 2.0), p(3.5, 2.0)));
+        assert!(clock_stepped(p(3.0, 2.0), p(400.0, 2.0)));
         // A round trip as long as the move: no step it can tell.
-        assert!(!clock_stepped((3.0, 2.0), (300.0, 400.0)));
+        assert!(!clock_stepped(p(3.0, 2.0), p(300.0, 400.0)));
     }
 
     #[test]
@@ -11873,7 +15260,8 @@ mod tests {
         c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
         assert_eq!(c.mismatches, 1);
         assert!(
-            c.examples[0].contains("answered 1000 ms before a kill is gone, past the 650 ms"),
+            c.examples[0]
+                .contains("answered 1000 ms before a kill or a death is gone, past the 650 ms"),
             "{}",
             c.examples[0]
         );
@@ -11887,7 +15275,8 @@ mod tests {
         c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
         assert_eq!((c.mismatches, c.lost_ms_max), (1, Some(651)));
         assert!(
-            c.examples[0].contains("answered 651 ms before a kill is gone, past the 650 ms"),
+            c.examples[0]
+                .contains("answered 651 ms before a kill or a death is gone, past the 650 ms"),
             "{}",
             c.examples[0]
         );
@@ -12501,6 +15890,1309 @@ mod tests {
             )),
             "{:?}",
             j[0].notes
+        );
+    }
+
+    #[test]
+    fn dockers_times_and_exits_are_read_as_written() {
+        let s = 1_000_000_000u64;
+        // FinishedAt to the ns, and the long run's death as Docker's
+        // events said it, to the tenth.
+        assert_eq!(
+            unix_ns("2026-11-26T00:56:47.123456789Z"),
+            Some(1_795_654_607 * s + 123_456_789)
+        );
+        assert_eq!(
+            unix_ns("2026-11-26T00:56:47.1Z"),
+            Some(1_795_654_607 * s + 100_000_000)
+        );
+        assert_eq!(unix_ns("2000-02-29T23:59:59Z"), Some(951_868_799 * s));
+        assert_eq!(unix_ns("1970-01-01T00:00:00+00:00"), Some(0));
+        // A container that never ended, and a zone not UTC's: none.
+        assert_eq!(unix_ns("0001-01-01T00:00:00Z"), None);
+        assert_eq!(unix_ns("2026-11-26T01:56:47+01:00"), None);
+        assert_eq!(unix_ns("2026-13-26T00:56:47Z"), None);
+        assert_eq!(utc(1_795_654_607 * s + 123_456_789), "00:56:47.123Z");
+        // `docker inspect`'s line for the long run's primary, and the
+        // words its death's line names it by.
+        let x = Exit::parse("false true 137 2026-11-26T00:56:47.1Z\n").unwrap();
+        assert_eq!(
+            x,
+            Exit {
+                running: false,
+                oom: true,
+                code: Some(137),
+                finished: Some(1_795_654_607 * s + 100_000_000),
+            }
+        );
+        assert_eq!(x.said("512m"), "OOM-killed under --memory 512m (exit 137)");
+        let killed = Exit::parse("false false 137 2026-11-26T00:56:47Z").unwrap();
+        assert_eq!(
+            killed.said("512m"),
+            "killed by signal 9 (exit 137), not by the kernel for its memory"
+        );
+        let exited = Exit::parse("false false 101 2026-11-26T00:56:47Z").unwrap();
+        assert_eq!(exited.said("512m"), "exited with code 101");
+        let up = Exit::parse("true false 0 0001-01-01T00:00:00Z").unwrap();
+        assert!(up.running && up.finished.is_none());
+        assert_eq!(Exit::parse(""), None);
+        // Docker's events as `follow_events` asks them, the server's alone.
+        let server = "p6-50-server";
+        assert_eq!(
+            DockerEv::parse("1795654607100000000 die p6-50-server 137", 5, server),
+            Some(DockerEv {
+                at: 5,
+                vm: 1_795_654_607 * s + 100_000_000,
+                die: true,
+                exit: Some(137),
+            })
+        );
+        assert_eq!(
+            DockerEv::parse("1795654607090000000 oom p6-50-server ", 5, server)
+                .map(|e| (e.die, e.exit)),
+            Some((false, None))
+        );
+        assert_eq!(
+            DockerEv::parse("1795654607090000000 start p6-50-server ", 5, server),
+            None
+        );
+        // Its watch, whose name a filter of the server's takes too.
+        assert_eq!(
+            DockerEv::parse("1795654607090000000 die p6-50-server-mem 137", 5, server),
+            None
+        );
+    }
+
+    #[test]
+    fn a_death_is_timed_by_its_burst_of_closes() {
+        let ms = 1_000_000u64;
+        let d = 18_012_300 * ms;
+        let docker = Some((d + 15 * ms, Source::Event));
+        // The long run's shape: the last answer 3 ms before its burst's
+        // first close, nothing answered after it: the burst, Docker's die
+        // a reap later beside it.
+        let err = 5 * ms;
+        assert_eq!(
+            death_time(d, d - 3 * ms, docker, err, 0),
+            (d, Source::Close, Some(d - 3 * ms))
+        );
+        // An answer the server wrote before it died, read a few ms after
+        // the burst began: the death taken at that answer,
+        // never before it -- a time before the last answer would excuse
+        // writes the server held longer than `--loss-ms`.
+        assert_eq!(
+            death_time(d, d + 10 * ms, docker, err, 0),
+            (d + 10 * ms, Source::Close, Some(d + 10 * ms))
+        );
+        for a in [d - 3 * ms, d, d + ms, d + CLOSE_SLOP] {
+            let (t, source, _) = death_time(d, a, docker, err, 0);
+            assert_eq!(source, Source::Close);
+            assert!(t >= a, "a death at {t} before its last answer at {a}");
+        }
+        // Read answering past the slop -- tens of ms: the review's case,
+        // answers 0.9 s after a close that was no death's -- alive then,
+        // that close no death's: Docker's time is taken, never before
+        // the last answer.
+        assert!(CLOSE_SLOP <= 100 * ms);
+        for a in [d + CLOSE_SLOP + ms, d + 900 * ms] {
+            assert_eq!(
+                death_time(d, a, docker, err, 0),
+                (a, Source::Event, Some(a))
+            );
+        }
+        // Nothing closed: Docker's, at the latest its reading through the
+        // probe allows -- read through a probe the minute took behind a
+        // restart's backlog, its round trip 3.4 s, the reading can be 1.7
+        // s before the reap: taken as read, a death with no burst was
+        // timed before it went, the writes it held excused from there.
+        let reap = d + 400 * ms;
+        let slow = 3_400 * ms + ms;
+        for read in [reap - 1_700 * ms, reap, reap + 1_700 * ms] {
+            let (t, source, last) = death_time(u64::MAX, d, Some((read, Source::Event)), slow, 7);
+            assert_eq!((source, last), (Source::Event, Some(d)));
+            assert!(t >= reap, "a death at {t} before its reap at {reap}");
+            assert_eq!(t, read + slow);
+        }
+        // Its last answer after the reading's latest: that answer.
+        assert_eq!(
+            death_time(u64::MAX, d, Some((d - 9 * ms, Source::Finished)), err, 7),
+            (d, Source::Finished, Some(d))
+        );
+        // Nor Docker's: the minute's look before, or the last answer
+        // after it.
+        assert_eq!(death_time(u64::MAX, 0, None, 0, 7), (7, Source::Look, None));
+        assert_eq!(
+            death_time(u64::MAX, d, None, 0, 7),
+            (d, Source::Look, Some(d))
+        );
+        // How long before the kill due: the long run's came 12.3 s after
+        // its kill of minute 300 was due, in the compact it waited for.
+        let (said, s) = before_kill(d, Some(300));
+        assert_eq!(s.map(|x| (x * 10.0).round() / 10.0), Some(-12.3));
+        assert_eq!(
+            said,
+            "12.3 s after the kill due at minute 300 was due, as it waited for the side jobs"
+        );
+        assert_eq!(
+            before_kill(287 * 60_000 * ms, Some(300)).0,
+            "13.0 min before the kill due at minute 300"
+        );
+        assert_eq!(
+            before_kill(17_970_000 * ms, Some(300)).0,
+            "30.0 s before the kill due at minute 300"
+        );
+        assert_eq!(before_kill(d, None).0, "no kill due after it");
+    }
+
+    #[test]
+    fn a_death_is_its_burst_of_closes_and_one_close_is_none() {
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let ms = 1_000_000u64;
+        let c = 60_000 * ms;
+        let burst = || sh.burst().0;
+        assert_eq!(burst(), u64::MAX);
+        // One close is no death's, nor two.
+        sh.answered(c - 5 * ms);
+        sh.closed(c);
+        assert_eq!(burst(), u64::MAX);
+        sh.closed(c + 2 * ms);
+        assert_eq!(burst(), u64::MAX);
+        // The third within the span: a burst, timed by its first, read
+        // in any order its threads took the lock in.
+        sh.closed(c + ms);
+        assert_eq!(sh.burst(), (c, 2 * ms));
+        // An answer written before the death, read within the slop, and
+        // the death's other closes: the first kept.
+        sh.answered(c + 10 * ms);
+        sh.closed(c + 12 * ms);
+        sh.closed(c + 40 * ms);
+        assert_eq!(burst(), c);
+        // Read answering past the slop: alive then, the burst no death's,
+        // and none read -- let go at the next close.
+        sh.answered(c + 900 * ms);
+        assert_eq!(burst(), u64::MAX);
+        assert_eq!(sh.closed.load(Ordering::SeqCst), c);
+
+        // The review's case: the server's last answer, a stream the
+        // server ended 100 ms after it, then a hang of 30 s and an OOM
+        // kill. The stream's close alone timed the death, and excused
+        // the writes answered 30 s before it went.
+        let last = c + 2_000 * ms;
+        sh.answered(last);
+        sh.closed(last + 100 * ms);
+        assert_eq!(burst(), u64::MAX);
+        let death = last + 30_000 * ms;
+        for t in [death, death + 3 * ms, death + 4 * ms] {
+            sh.closed(t);
+        }
+        assert_eq!(burst(), death);
+        assert_eq!(
+            death_time(burst(), sh.answered.load(Ordering::SeqCst), None, 0, 0),
+            (death, Source::Close, Some(last))
+        );
+        // Closes spread wider than the span -- a reconnect's refusals, a
+        // stream ending now and then -- are each one connection's.
+        sh.answered(death + 9_000 * ms);
+        let mut t = death + 10_000 * ms;
+        for _ in 0..10 {
+            sh.closed(t);
+            t += BURST_SPAN + ms;
+        }
+        assert_eq!(burst(), u64::MAX);
+        // A close of the living server's just before a hang, within the
+        // span of the death's burst: the burst timed by it, but never
+        // before the last answer.
+        let a = t + 60_000 * ms;
+        sh.answered(a);
+        for t in [a + 10 * ms, a + 25 * ms, a + 26 * ms] {
+            sh.closed(t);
+        }
+        assert_eq!(burst(), a + 10 * ms);
+        assert!(death_time(burst(), a, None, 0, 0).0 >= a);
+    }
+
+    #[test]
+    fn a_life_s_answers_and_closes_count_from_its_restart() {
+        // A death, its burst read, the restart's refused connects as it
+        // was down, the server back at `back`; then dead again 8 s after,
+        // before any worker answered, a failure past the restart's grace
+        // counted between.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let ms = 1_000_000u64;
+        let gone = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: None,
+        };
+        let death = 600_000 * ms;
+        sh.answered(death - 3 * ms);
+        for t in [death, death + ms, death + 2 * ms] {
+            sh.closed(t);
+        }
+        let (_, at, _) = found_dead(&sh, &doings, &o, gone, &mut Vec::new(), 0, None, None);
+        assert_eq!(at, death);
+        for t in [death + 1_000 * ms, death + 1_001 * ms, death + 1_002 * ms] {
+            sh.closed(t);
+        }
+        let back = death + 4_000 * ms;
+        sh.back(back);
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
+        assert_eq!(sh.burst().0, u64::MAX);
+        assert_eq!(sh.answered.load(Ordering::SeqCst), back);
+        sh.failed(back + GRACE + 1_000 * ms, true, || {
+            "a stream refused".into()
+        });
+        assert_eq!(sh.errors.load(Ordering::SeqCst), 1);
+        let again = back + GRACE + 3_000 * ms;
+        for t in [again, again + ms, again + 2 * ms] {
+            sh.closed(t);
+        }
+        // Timed by its own burst, its answer the restart's; the failure
+        // before it its own, still an error. Timed by the last death's
+        // burst it moved every failure since that death to `down`.
+        let (_, at, _) = found_dead(&sh, &doings, &o, gone, &mut Vec::new(), back, None, None);
+        assert_eq!(at, again);
+        assert_eq!(sh.errors.load(Ordering::SeqCst), 1);
+        assert_eq!(sh.down.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_close_is_a_connection_gone_not_a_wait_run_out() {
+        // A connect that timed out is no close; one refused, or a
+        // connection cut, is.
+        use std::io::{Error, ErrorKind};
+        assert!(!a_close(&Error::from(ErrorKind::TimedOut)));
+        assert!(!a_close(&Error::from(ErrorKind::WouldBlock)));
+        assert!(!a_close(&Error::other("no connection")));
+        assert!(a_close(&Error::from(ErrorKind::ConnectionRefused)));
+        assert!(a_close(&Error::from(ErrorKind::UnexpectedEof)));
+    }
+
+    /// A Checker with one kill or death, `at` to `back`, a write answered
+    /// at `answered` and a read at `back` showing it gone.
+    fn judged(kills: Vec<(u64, u64)>, answered: u64, back: u64) -> Checker {
+        let ms = 1_000_000u64;
+        let mut c = Checker::new(
+            100,
+            Kills {
+                at: kills,
+                loss: 650 * ms,
+            },
+            60_000 * ms,
+            1_000 * ms,
+            &[],
+        );
+        c.take(vec![write(7, 3, 42, answered - 2 * ms, answered, None)]);
+        c.take(vec![row(
+            7,
+            back + 100 * ms,
+            back + 101 * ms,
+            base_digests(7),
+        )]);
+        c.hold(60_000 * ms, 0, 60_000 * ms, &[]);
+        c
+    }
+
+    #[test]
+    fn a_death_s_lost_writes_are_judged_from_its_time() {
+        let ms = 1_000_000u64;
+        // The long run's shape, through what `died` does but its restart
+        // (`found_dead`): the primary gone at `death`, OOM-killed, its last
+        // answer 3 ms before; found as the kill due at minute 1 was to be
+        // sent 1.1 s after -- its fence, then the announced second -- the
+        // minute's look 50 s before; the server back 4 s after that.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let death = 50_000 * ms;
+        let (look, k) = (death - 50_000 * ms, death + 1_100 * ms);
+        let back = k + 4_000 * ms;
+        sh.answered(death - 3 * ms);
+        for t in [death, death + 2 * ms, death + 5 * ms] {
+            sh.closed(t);
+        }
+        let exit = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: None,
+        };
+        let (from, at, m) =
+            found_dead(&sh, &doings, &o, exit, &mut Vec::new(), look, Some(1), None);
+        assert_eq!((from, at, m), (death, death, 1));
+        assert_eq!(doings.deaths.load(Ordering::SeqCst), 1);
+        assert_eq!(doings.oom.load(Ordering::SeqCst), 1);
+        // A failure from the death on is `down` (its window open), the
+        // restart closes the window as the server answers again.
+        assert!(sh.restarting(death));
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
+        let kills = sh.kills();
+        assert_eq!(kills, vec![(death, back)]);
+        // Answered 150 ms before the death and gone: within what `--sync
+        // 250` allows, judged from the death.
+        let c = judged(kills.clone(), death - 150 * ms, back);
+        assert_eq!(
+            (c.mismatches, c.lost_writes, c.lost_ms_max),
+            (0, 1, Some(150))
+        );
+        // Still held to `--sync`'s bound: one answered 700 ms before the
+        // death and gone is a loss past it -- excused were the death timed
+        // by the minute's look before it.
+        let c = judged(kills, death - 700 * ms, back);
+        assert_eq!((c.mismatches, c.lost_ms_max), (1, Some(700)));
+        // Judged from the kill the run had due, as the long run judged its
+        // seven: 1 250 ms, past the 650 a kill may take -- the harness's
+        // own wait counted as the server's loss.
+        let c = judged(vec![(k, back)], death - 150 * ms, back);
+        assert_eq!(c.mismatches, 1);
+        assert!(
+            c.examples[0]
+                .contains("answered 1250 ms before a kill or a death is gone, past the 650 ms"),
+            "{}",
+            c.examples[0]
+        );
+    }
+
+    #[test]
+    fn a_kill_that_finds_its_server_gone_before_its_send_is_a_death() {
+        let ms = 1_000_000u64;
+        let k = 600_000 * ms;
+        let err = 5 * ms;
+        let none = u64::MAX;
+        let gone = |oom| Exit {
+            running: false,
+            oom,
+            code: Some(137),
+            finished: None,
+        };
+        // OOM-killed in the moment before the send, Docker's state still
+        // running to the look before it: after the wait, `OOMKilled`,
+        // whatever was read.
+        assert!(gone_before(
+            &gone(true),
+            false,
+            k + 30 * ms,
+            k + 40 * ms,
+            Some(k + 200 * ms),
+            err,
+            k
+        ));
+        // `docker kill` found it not running.
+        assert!(gone_before(&gone(false), true, k, none, None, err, k));
+        // On this process's clock: its last answer more than the slop
+        // before the send and its exit's burst after that and before the
+        // send -- whatever Docker's end says, a step of the VM's clock
+        // putting it after the send.
+        assert!(gone_before(
+            &gone(false),
+            false,
+            k - 125 * ms,
+            k - 120 * ms,
+            Some(k + 50 * ms),
+            err,
+            k
+        ));
+        // A planned kill: read answering up to its landing, after the
+        // send, its burst after -- the kill's, Docker's end before the
+        // send by a clock's step or not.
+        for finished in [Some(k + 180 * ms), Some(k - 500 * ms), None] {
+            assert!(!gone_before(
+                &gone(false),
+                false,
+                k + 20 * ms,
+                k + 40 * ms,
+                finished,
+                err,
+                k
+            ));
+        }
+        // Read answering within the slop before the send: the kill's --
+        // what the harness cannot tell from it.
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            k - CLOSE_SLOP,
+            k - 20 * ms,
+            Some(k - 40 * ms),
+            err,
+            k
+        ));
+        // Silent more than the slop before the send, its burst the kill's
+        // own after it: a server the kill found hung, not dead.
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            k - 300 * ms,
+            k + 40 * ms,
+            Some(k - 100 * ms),
+            err,
+            k
+        ));
+        // Silent, and no burst read: Docker's end, held to its reading's
+        // error.
+        let quiet = k - 300 * ms;
+        assert!(gone_before(
+            &gone(false),
+            false,
+            quiet,
+            none,
+            Some(k - 100 * ms),
+            err,
+            k
+        ));
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            quiet,
+            none,
+            Some(k - 4 * ms),
+            err,
+            k
+        ));
+        assert!(!gone_before(&gone(false), false, quiet, none, None, err, k));
+        // Nothing read at all: likewise.
+        assert!(gone_before(
+            &gone(false),
+            false,
+            0,
+            none,
+            Some(k - 100 * ms),
+            err,
+            k
+        ));
+        assert!(!gone_before(&gone(false), false, 0, none, None, err, k));
+        // Running still: no end at all.
+        let up = Exit {
+            running: true,
+            ..gone(true)
+        };
+        assert!(!gone_before(
+            &up,
+            true,
+            0,
+            k - 120 * ms,
+            Some(k - 500 * ms),
+            err,
+            k
+        ));
+
+        // The review's case through the kill's path (`judge_kill`):
+        // announced at `from`, the kill's compact asked 10 ms later, the
+        // server OOM-killed in it 950 ms in, the kill sent 50 ms after
+        // that: a death, timed by its burst, its window the
+        // announcement's.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let from = k - 1_000 * ms;
+        sh.windows.lock().unwrap().push((from, u64::MAX, u64::MAX));
+        let death = from + 950 * ms;
+        sh.answered(death - 4 * ms);
+        for c in [death, death + ms, death + 2 * ms] {
+            sh.closed(c);
+        }
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        let x = gone(true);
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
+        let (_, at, _) = found_dead(
+            &sh,
+            &doings,
+            &o,
+            x,
+            &mut Vec::new(),
+            from,
+            Some(10),
+            Some(from),
+        );
+        assert_eq!(at, death);
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = k + 4_000 * ms;
+        assert_eq!(sh.kills(), vec![(death, k + 4_000 * ms)]);
+        assert_eq!(sh.windows.lock().unwrap().len(), 1);
+        // The compact it cut, asked before the send and its connection
+        // seen to close after `kill_sent` was stored: the death's, the
+        // kill never judged its own.
+        let quick = Duration::from_millis(20);
+        let long = Duration::from_secs(2);
+        assert_eq!(
+            cut_by(&sh, from + 10 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+        // One asked after the death -- its connect refused -- and before
+        // the send: the death's at once, though no death found is since
+        // its ask -- the kill judged a death's (`kill_death`). Unjudged,
+        // it waited out the kill's bound and was counted the kill's.
+        assert_eq!(
+            cut_by(&sh, death + 30 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+    }
+
+    #[test]
+    fn a_kill_is_judged_on_this_process_s_clock_and_docker_s_end_through_a_probe_of_it() {
+        let ms = 1_000_000u64;
+        let min = 60_000 * ms;
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        // The review's run: this host's wall clock, which Docker's VM
+        // follows, 60 ms behind this process's by minute 90 -- some -11
+        // ppm; this Mac measured -43 over three minutes -- the minute's
+        // probe 3 s before each kill is sent, its round trip 4 ms; the
+        // planned kill sent at minute 90 and its end, Docker's FinishedAt,
+        // 30 ms after.
+        let vm = |t: u64| sh.t0_wall + t - t / 90_000;
+        let ms_of = |ns: u64| ns as f64 / 1e6;
+        let probe = |k: u64| {
+            let p = k - 3_000 * ms;
+            sh.clock(&Probe::read(
+                (vm(p) / ms) as i64,
+                (ms_of(vm(p) - 2 * ms), ms_of(vm(p) + 2 * ms)),
+                (p - 2 * ms, p + 2 * ms),
+            ));
+        };
+        let k = 90 * min;
+        probe(k);
+        let ended = |t: u64| Exit {
+            running: false,
+            oom: false,
+            code: Some(137),
+            finished: Some(vm(t)),
+        };
+        // Its end read through the probe, on this process's clock: after
+        // the send, within the reading's error -- the round trip, `now()`'s
+        // ms, 3 s of drift at 500 ppm.
+        let end = sh.vm_ns(vm(k + 30 * ms)).unwrap();
+        assert!(
+            end > k && end.abs_diff(k + 30 * ms) <= sh.clock_err(k),
+            "{end}"
+        );
+        assert!(sh.clock_err(k) <= 10 * ms);
+        // Nothing read of the server -- Docker's end is all there is --
+        // and the kill's: read through the wall clock at `t0` it was 30 ms
+        // before the send, and a death.
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        assert_eq!(judge_kill(&sh, Some(ended(k + 30 * ms)), false, k), None);
+        assert_eq!(sh.kill_judged.load(Ordering::SeqCst), k);
+        assert_eq!(sh.kill_death.load(Ordering::SeqCst), 0);
+        let quick = Duration::from_millis(20);
+        let long = Duration::from_secs(2);
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Kill)
+        );
+        // A death 200 ms before the next kill, at minute 120, nothing read
+        // either: Docker's end before the send past the error, a death's.
+        let k = 120 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        let x = ended(k - 200 * ms);
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
+        assert_eq!(sh.kill_death.load(Ordering::SeqCst), k);
+        assert_eq!(sh.kill_judged.load(Ordering::SeqCst), k);
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+        // Read of the server, its clock decides, Docker's not asked: a
+        // planned kill read answering to 20 ms after the send, its burst
+        // after -- a step of the VM's clock putting its end half a second
+        // before the send -- the kill's.
+        let k = 150 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        sh.answered(k + 20 * ms);
+        for c in [k + 40 * ms, k + 41 * ms, k + 43 * ms] {
+            sh.closed(c);
+        }
+        assert_eq!(judge_kill(&sh, Some(ended(k - 500 * ms)), false, k), None);
+        assert!(kill_said(&sh, 5, k).ends_with(
+            "its server last read answering +20 ms of the send, its burst of closes +40 ms (3 within 3.0 ms)"
+        ));
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Kill)
+        );
+        // Back, then dead 120 ms before the next send, its last answer 5
+        // ms before its burst -- Docker's end, by a step the other way,
+        // after the send: the death's.
+        sh.back(k + 4_000 * ms);
+        let k = 180 * min;
+        probe(k);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        sh.answered(k - 125 * ms);
+        for c in [k - 120 * ms, k - 119 * ms, k - 118 * ms] {
+            sh.closed(c);
+        }
+        let x = ended(k + 50 * ms);
+        assert_eq!(judge_kill(&sh, Some(x), false, k), Some(x));
+        assert_eq!(
+            cut_by(&sh, k - 500 * ms, true, &|| false, quick, long),
+            Some(CutBy::Death)
+        );
+    }
+
+    #[test]
+    fn a_reading_through_the_probe_kept_covers_the_drift_since_and_the_tighter_probe_is_kept() {
+        let ms = 1_000_000u64;
+        let min = 60_000 * ms;
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        // The VM's clock parting from this process's at -43 ppm, as this
+        // Mac measured over three minutes; `step` moves it at once.
+        let vm = |t: u64| sh.t0_wall + t - t * 43 / 1_000_000;
+        let ms_of = |ns: u64| ns as f64 / 1e6;
+        let probe = |t: u64, rtt: u64, step: i64| {
+            let v = (vm(t) as i64 + step) as u64;
+            Probe::read(
+                (v / ms) as i64,
+                (ms_of(vm(t) - rtt / 2), ms_of(vm(t) + rtt / 2)),
+                (t - rtt / 2, t + rtt / 2),
+            )
+        };
+        // A probe at minute 60, its round trip 4 ms, and none after it to
+        // the kill of minute 90: the minute's probes failed.
+        assert!(sh.clock(&probe(60 * min, 4 * ms, 0)));
+        let k = 90 * min;
+        // The planned kill's end, 30 ms after its send, read through it
+        // 47 ms before the send: the 77 ms the clocks parted since, which
+        // the probe's round trip and `now()`'s ms do not cover, and the
+        // drift term does -- the kill's, never a death's.
+        let end = sh.vm_ns(vm(k + 30 * ms)).unwrap();
+        assert!(end + 40 * ms < k, "{end} {k}");
+        assert!(end.abs_diff(k + 30 * ms) <= sh.clock_err(k));
+        assert!(sh.clock_err(k) > 77 * ms + 5 * ms);
+        let ended = |t: u64| Exit {
+            running: false,
+            oom: false,
+            code: Some(137),
+            finished: Some(vm(t)),
+        };
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        assert_eq!(judge_kill(&sh, Some(ended(k + 30 * ms)), false, k), None);
+        // A death with nothing closing, its last answer 2 s before Docker
+        // reaped it: Docker's die, read 77 ms early through the same probe,
+        // timed at the latest its reading allows -- never before the reap.
+        let (doings, o) = (Doings::default(), opts());
+        let reap = k + 5_000 * ms;
+        sh.answered(reap - 2_000 * ms);
+        let mut evs = vec![DockerEv {
+            at: reap + 10 * ms,
+            vm: vm(reap),
+            die: true,
+            exit: Some(137),
+        }];
+        let (_, at, _) = found_dead(&sh, &doings, &o, ended(reap), &mut evs, k, None, None);
+        assert!(sh.vm_ns(vm(reap)).unwrap() < reap);
+        assert!(at >= reap, "a death at {at}, before its reap at {reap}");
+        assert!(at <= reap + 2 * sh.clock_err(reap));
+
+        // A minute's probe behind a restart's backlog, its round trip
+        // 3.4 s, agreeing with the one kept: that one kept, its error
+        // its 4 ms and the drift its 32 minutes may hold, under a second.
+        let t = 92 * min;
+        assert!(!sh.clock(&probe(t, 3_400 * ms, 0)));
+        assert_eq!(sh.clock_at.load(Ordering::SeqCst), 60 * min);
+        assert!(sh.clock_err(t) < 1_000 * ms, "{}", sh.clock_err(t));
+        // A tighter one is taken.
+        assert!(sh.clock(&probe(t + min, 2 * ms, 0)));
+        assert_eq!(sh.clock_rtt.load(Ordering::SeqCst), 2 * ms);
+        // One that disagrees past both errors -- the VM's clock stepped 5
+        // s -- is taken, slow as it is: the one kept is wrong now.
+        let t = t + 2 * min;
+        let step = 5_000 * ms as i64;
+        assert!(sh.clock(&probe(t, 3_400 * ms, step)));
+        let read = sh.vm_ns(vm(t) + step as u64).unwrap();
+        assert!(read.abs_diff(t) <= sh.clock_err(t), "{read} {t}");
+    }
+
+    #[test]
+    fn a_job_cut_after_the_kill_was_sent_is_the_kill_s_once_the_kill_is_judged_its_own() {
+        let sh = Arc::new(Shared::new(
+            &opts(),
+            "127.0.0.1:1".into(),
+            "127.0.0.1:1".into(),
+            &[],
+        ));
+        let ms = 1_000_000u64;
+        let quick = Duration::from_millis(20);
+        let (running, stopped) = (|| false, || true);
+        // A compact asked at `s`, the kill sent after it -- `kill_sent`
+        // stored before `docker kill` -- and judged its own: the kill's.
+        let s = 5_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        sh.kill_judged.store(s + 1_000 * ms, Ordering::SeqCst);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+        // Not judged yet: the job waits for its verdict, a death found
+        // meanwhile -- the moment before the send -- the death's.
+        let s = 10_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        let t = {
+            let sh = Arc::clone(&sh);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                sh.deaths.lock().unwrap().push(s + 900 * ms);
+            })
+        };
+        let long = Duration::from_secs(30);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, long),
+            Some(CutBy::Death)
+        );
+        t.join().unwrap();
+        // Judged the kill's meanwhile: the kill's.
+        let s = 20_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        let t = {
+            let sh = Arc::clone(&sh);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                sh.kill_judged.store(s + 1_000 * ms, Ordering::SeqCst);
+            })
+        };
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, long),
+            Some(CutBy::Kill)
+        );
+        t.join().unwrap();
+        // Never judged within its bound: the kill's, as before.
+        let s = 22_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+        // No kill since: a death found since, the job's connection closed
+        // or not, is the death's.
+        sh.deaths.lock().unwrap().push(25_000 * ms);
+        assert_eq!(
+            cut_by(&sh, 24_000 * ms, false, &running, quick, quick),
+            Some(CutBy::Death)
+        );
+        // None found: the server not running with no window open, the
+        // death not found yet -- where its connection closed; a wait that
+        // ran out is nobody's, Docker not asked.
+        let s = 30_000 * ms;
+        assert_eq!(
+            cut_by(&sh, s, true, &stopped, quick, quick),
+            Some(CutBy::Death)
+        );
+        assert_eq!(cut_by(&sh, s, true, &running, quick, quick), None);
+        assert_eq!(cut_by(&sh, s, false, &stopped, quick, quick), None);
+        // In a restart's window with nothing found: the kill's, the
+        // server down for it whatever Docker says.
+        sh.windows.lock().unwrap().push((0, u64::MAX, u64::MAX));
+        assert_eq!(
+            cut_by(&sh, s, true, &stopped, quick, quick),
+            Some(CutBy::Kill)
+        );
+        assert_eq!(
+            cut_by(&sh, s, false, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+    }
+
+    #[test]
+    fn a_look_finds_a_death_where_docker_says_not_running_and_keeps_its_events() {
+        let (tx, rx) = mpsc::channel();
+        let mut evs = Vec::new();
+        let oom = DockerEv {
+            at: 5,
+            vm: 7,
+            die: false,
+            exit: None,
+        };
+        tx.send(oom).unwrap();
+        let up = Exit {
+            running: true,
+            ..Exit::default()
+        };
+        // Running, or unread: none; the events read all the same, for the
+        // death's line once there is one.
+        assert_eq!(dead(|| Some(up), &rx, &mut evs), None);
+        assert_eq!(evs, vec![oom]);
+        assert_eq!(dead(|| None, &rx, &mut evs), None);
+        let gone = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: Some(9),
+        };
+        let die = DockerEv {
+            die: true,
+            exit: Some(137),
+            ..oom
+        };
+        tx.send(die).unwrap();
+        assert_eq!(dead(|| Some(gone), &rx, &mut evs), Some(gone));
+        assert_eq!(evs, vec![oom, die]);
+    }
+
+    #[test]
+    fn the_wait_for_a_kill_s_compact_ends_on_a_die() {
+        let s = 1_000_000_000u64;
+        let die = DockerEv {
+            at: 1,
+            vm: 1,
+            die: true,
+            exit: Some(137),
+        };
+        let oom = DockerEv {
+            die: false,
+            exit: None,
+            ..die
+        };
+        let zero = Duration::ZERO;
+        assert_eq!(compact_wait(&[], u64::MAX, 5 * s, false, zero), None);
+        // An oom alone: its die is what ends the process.
+        assert_eq!(compact_wait(&[oom], u64::MAX, 5 * s, false, zero), None);
+        // The die: at once, whatever else -- the dry run's second death
+        // held the run here for `WAIT_MAX`.
+        assert_eq!(
+            compact_wait(&[oom, die], u64::MAX, 5 * s, false, zero),
+            Some(CompactWait::Died)
+        );
+        assert_eq!(
+            compact_wait(&[die], 4 * s, 5 * s, true, WAIT_MAX),
+            Some(CompactWait::Died)
+        );
+        // Under way a second: the kill lands in it.
+        assert_eq!(
+            compact_wait(&[], 4 * s, 5 * s, false, zero),
+            Some(CompactWait::UnderWay)
+        );
+        assert_eq!(compact_wait(&[], 4 * s + 1, 5 * s, false, zero), None);
+        assert_eq!(
+            compact_wait(&[], u64::MAX, 5 * s, true, zero),
+            Some(CompactWait::Ended)
+        );
+        assert_eq!(
+            compact_wait(&[], u64::MAX, 5 * s, false, WAIT_MAX),
+            Some(CompactWait::Timeout)
+        );
+    }
+
+    #[test]
+    fn a_tied_child_ends_once_its_input_is_let_go() {
+        use std::process::Stdio;
+        let mut c = tied("sh", &["-c", "echo $$; exec sleep 60"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(c.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid = line.trim().to_string();
+        let alive = |pid: &str| {
+            std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(alive(&pid));
+        // As this process ending lets go of it.
+        drop(c.stdin.take());
+        c.wait().unwrap();
+        assert!(!alive(&pid), "the tied child {pid} outlived its shell");
+    }
+
+    /// `ycsb` in a terminal for `a_tied_child_ends_with_the_run_on_ctrl_c`:
+    /// a tied child standing for `docker events`, its pid printed, then a
+    /// wait for the Ctrl-C. Run alone, nothing.
+    #[test]
+    #[ignore = "run by a_tied_child_ends_with_the_run_on_ctrl_c"]
+    fn tied_under_a_terminal() {
+        use std::process::Stdio;
+        if std::env::var_os("SOAK_TIED_UNDER_A_TERMINAL").is_none() {
+            return;
+        }
+        let mut c = tied("sh", &["-c", "echo $$; exec sleep 60"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(c.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        println!("tied {}", line.trim());
+        std::io::stdout().flush().unwrap();
+        // Its input held, as `ycsb` holds it the run long -- a wait lets
+        // go of it first -- until the Ctrl-C.
+        let _input = c.stdin.take();
+        let _ = c.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tied_child_ends_with_the_run_on_ctrl_c() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        // This test's binary again for `ycsb`, the foreground process
+        // group a terminal's Ctrl-C signals: a group of its own here.
+        let mut run = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "soak::tests::tied_under_a_terminal",
+                "--nocapture",
+            ])
+            .env("SOAK_TIED_UNDER_A_TERMINAL", "1")
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(run.stdout.take().unwrap());
+        let pid = out
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|l| l.strip_prefix("tied ").map(str::to_string))
+            .expect("the run's tied child");
+        let alive = |pid: &str| {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(alive(&pid));
+        // Ctrl-C: SIGINT to the run's group.
+        let group = format!("-{}", run.id());
+        assert!(Command::new("kill")
+            .args(["-INT", "--", &group])
+            .status()
+            .unwrap()
+            .success());
+        run.wait().unwrap();
+        // The child ignores SIGINT, as an asynchronous list's does: what
+        // ends it is the tied shell, which outlived the run. Waited for,
+        // bounded; let go of whatever the verdict.
+        let t = Instant::now();
+        while alive(&pid) && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outlived = alive(&pid);
+        if outlived {
+            let _ = Command::new("kill").args(["-9", &pid]).status();
+        }
+        assert!(!outlived, "the tied child {pid} outlived the run's Ctrl-C");
+    }
+
+    #[test]
+    fn the_run_s_open_files_are_counted_from_its_connections() {
+        let with = |r: &str| {
+            Opts::parse(&[
+                "--sync".into(),
+                "250".into(),
+                "--rate".into(),
+                "100".into(),
+                "--replica-threads".into(),
+                r.into(),
+            ])
+        };
+        // The pool's 32 one connection each, the lane's 128 two at a
+        // restart, two files a connection, the 64 streams and 64 beside.
+        assert_eq!(fds_needed(&with("128")), 2 * (32 + 2 * 128) + 64 + 64);
+        assert_eq!(fds_needed(&with("0")), 2 * (2 * 32) + 64 + 64);
+        // Past macOS's default of 256 either way with the lane: run-soak.sh
+        // raises it.
+        assert!(fds_needed(&with("128")) > 256);
+        assert!(open_files_limit().is_none_or(|n| n > 0));
+    }
+
+    #[test]
+    fn the_peak_s_lane_counts_the_reads_its_move_drops() {
+        let s = 1_000_000_000u64;
+        // A read every 10 ms: a move of 2.5 s drops 250, one of 3 ms a
+        // thousandth of each of 300.
+        assert_eq!(dropped_milli(5 * s / 2, s / 100), 250_000);
+        assert_eq!(dropped_milli(3_000_000, s / 100), 300);
+        assert_eq!(dropped_milli(s, 0), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn a_server_s_looks_a_second_keep_the_minute_s_the_life_s_and_the_window_s_most() {
+        let mb = 1u64 << 20;
+        assert_eq!(
+            MemSample::parse(&format!(
+                "M {} {} {} {} 9",
+                437 * mb,
+                15 * mb,
+                80 * mb,
+                2 * mb
+            )),
+            Some(MemSample {
+                anon: 437 * mb,
+                file: 15 * mb,
+                dirty: 80 * mb,
+                writeback: 2 * mb,
+                majflt: 9,
+            })
+        );
+        assert_eq!(MemSample::parse("M 1 2 3"), None);
+        assert_eq!(MemSample::parse("S 1 2"), None);
+        let at = |anon: u64, file: u64, dirty: u64, majflt: u64| MemSample {
+            anon: anon * mb,
+            file: file * mb,
+            dirty: dirty * mb,
+            writeback: 0,
+            majflt,
+        };
+        let mut m = Mem::default();
+        // The long run's minute 300 as a second's looks would have seen it:
+        // 304 MB at the minute's look, the compaction's jump between two.
+        m.sample(1, at(304, 200, 0, 100), false);
+        m.sample(2, at(427, 15, 80, 400), true);
+        m.sample(3, at(310, 40, 10, 450), true);
+        let minute = m.minute.take().unwrap();
+        assert_eq!(
+            minute,
+            MemSpan {
+                anon: 427 * mb,
+                dirty: 80 * mb,
+                file: 15 * mb,
+                faults: 350,
+                n: 3,
+            }
+        );
+        // The window's two seconds: their faults and their least cache.
+        let w = m.window.take().unwrap();
+        assert_eq!((w.faults, w.file, w.n), (350, 15 * mb, 2));
+        // The next minute starts empty; the life keeps its most.
+        m.sample(4, at(300, 50, 5, 460), false);
+        assert_eq!(m.minute.unwrap().anon, 300 * mb);
+        assert_eq!(m.life.unwrap().anon, 427 * mb);
+        assert!(m.window.is_none());
+        // A new life: its own most, and its faults counted from its first
+        // look -- the cgroup's counters start again with the container.
+        m.restarted();
+        m.sample(5, at(120, 50, 0, 3), false);
+        assert_eq!(m.life.map(|l| (l.anon, l.faults)), Some((120 * mb, 0)));
+    }
+
+    #[test]
+    fn the_pool_draws_the_mix_less_the_lane_s_reads_and_the_lane_counts_its_own() {
+        // In one pool the draw is the mix itself.
+        assert_eq!(pool_u(0.38, false), 0.38);
+        // With a lane: never the replica's 4%, each other share kept in
+        // proportion -- the reads 0.36 of 0.96, the updates 0.37.
+        let n = 96_000;
+        let us: Vec<f64> = (0..n).map(|i| pool_u(i as f64 / n as f64, true)).collect();
+        assert!(us.iter().all(|u| !(0.36..0.40).contains(u) && *u < 1.0));
+        let share = |lo: f64, hi: f64| {
+            us.iter().filter(|u| (lo..hi).contains(*u)).count() as f64 / n as f64
+        };
+        assert!((share(0.0, 0.36) - 0.36 / 0.96).abs() < 1e-3);
+        assert!((share(0.40, 0.77) - 0.37 / 0.96).abs() < 1e-3);
+        assert!((share(0.98, 1.0) - 0.02 / 0.96).abs() < 1e-3);
+        // A read through the replica held by its compaction is counted by
+        // its own answer too; an operation of the class that is not one --
+        // a worker's backlog after it -- by its time from the schedule
+        // alone.
+        let mut h = Hists::new();
+        let rec = |via_replica, took, own_us| Rec {
+            via_replica,
+            behind: false,
+            in_restart: false,
+            took,
+            own_us,
+        };
+        h.record_rec(Class::ReplicaCompact, rec(true, 5_400_000_000, 640_000));
+        h.record_rec(Class::ReplicaCompact, rec(false, 5_300_000_000, 3_000));
+        h.record_rec(Class::Steady, rec(true, 300_000_000, 200_000));
+        assert_eq!((h.r_compact.n, h.r_compact_own.n), (2, 1));
+        assert!((h.r_compact_own.pct(0.99) / 1e3 - 640.0).abs() < 10.0);
+        // Still 32 bytes a held operation, its own time a `u32` of µs.
+        assert_eq!(std::mem::size_of::<Held>(), 32);
+    }
+
+    #[test]
+    fn a_death_fails_its_own_criterion_and_names_what_followed_it() {
+        // The long run's death, judged by the new lines: found as the kill
+        // due at minute 300 was to be sent, OOM-killed 12.3 s after that
+        // kill was due, timed by the burst of closes its exit made; the kill
+        // not sent, the death standing for it; the 96 connections it cut
+        // counted with it; one write gone, answered 150 ms before it.
+        let run = synthetic(480, &|m, x| {
+            if m == 301 {
+                x.remove("kill");
+                x.remove("kill_ms");
+                x.remove("kill_sync_ms");
+                x.remove("kill_compacting");
+                for (k, v) in [
+                    ("kill_died", 1.0),
+                    ("died", 1.0),
+                    ("oom", 1.0),
+                    ("death_oom", 1.0),
+                    ("death_exit", 137.0),
+                    ("death_at_s", 18_012.3),
+                    ("death_source", 1.0),
+                    ("death_kill_due_s", -12.3),
+                    ("death_down", 96.0),
+                    ("catchup_down", 185.0),
+                    ("compact_died", 1.0),
+                    ("lost_writes", 1.0),
+                    ("lost_ms_max", 150.0),
+                ] {
+                    x.insert(k, v);
+                }
+            }
+            if m == 300 {
+                x.insert("anon_peak", 427.0 * 1048576.0);
+                x.insert("dirty_peak", 80.0 * 1048576.0);
+            }
+            if (1..=480).contains(&m) {
+                x.entry("anon_peak").or_insert(200.0 * 1048576.0);
+                x.entry("dirty_peak").or_insert(10.0 * 1048576.0);
+            }
+            if m == u64::MAX {
+                x.insert("memory_limit", 512.0 * 1048576.0);
+                // A catch-up said after the last minute's line, on the end
+                // line: its 504s counted with the minutes'.
+                x.insert("catchup_down", 20.0);
+                x.insert("catchup_replica_ms", 1_500.0);
+            }
+        });
+        // Its own criterion alone: the kills, the verifies, the compacts
+        // and the errors hold, the death standing for the kill it met.
+        assert_eq!(failing(&run), vec![CRITERIA[18]]);
+        let j = judge(&run, None);
+        let said = |c: &str| {
+            j[0].verdicts
+                .iter()
+                .find(|v| v.0 == c)
+                .map(|v| v.2.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            said(CRITERIA[18]),
+            "1 deaths, 1 OOM kills, the replica stopped 0 times; minutes 301; the primary's deaths, each a failure of its own: minute 301: OOM-killed, 12 s after the kill due, in the side jobs it waited for, timed by the burst of closes its exit made; 0 mismatches and 1 writes gone with it in the 30 minutes from its line, the earliest answered 150 ms before it"
+        );
+        assert!(
+            said(CRITERIA[14]).ends_with(
+                "; 1 kills found the server dead and 1 compacts and backups were cut by a death, each the death's"
+            ),
+            "{}",
+            said(CRITERIA[14])
+        );
+        assert!(
+            said(CRITERIA[9]).ends_with(
+                "; 96 connections a death of the primary cut before it was found counted with it, as down; 205 reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
+            ),
+            "{}",
+            said(CRITERIA[9])
+        );
+        assert!(
+            said(CRITERIA[5]).ends_with(
+                "; a second at a time the most anonymous memory 427 MB (minute 300), dirty pages 80 MB (minute 300); the two 507 MB of --memory's 512 at minute 300, said, not judged"
+            ),
+            "{}",
+            said(CRITERIA[5])
+        );
+        // Dead in the kill's announced second -- the harness's dry run's,
+        // a second into the compact the kill was to land in -- said as
+        // that, not as the side jobs the kill waited for.
+        let in_kill = synthetic(480, &|m, x| {
+            if m == 301 {
+                x.remove("kill");
+                for (k, v) in [
+                    ("kill_died", 1.0),
+                    ("died", 1.0),
+                    ("death_oom", 0.0),
+                    ("death_exit", 137.0),
+                    ("death_at_s", 18_003.8),
+                    ("death_source", 1.0),
+                    ("death_kill_due_s", -3.8),
+                    ("death_announced_ms", 812.0),
+                    ("compact_died", 1.0),
+                ] {
+                    x.insert(k, v);
+                }
+            }
+        });
+        let j = judge(&in_kill, None);
+        let v = &j[0]
+            .verdicts
+            .iter()
+            .find(|v| v.0 == CRITERIA[18])
+            .unwrap()
+            .2;
+        assert!(
+            v.contains(
+                "minute 301: exit 137, 0.8 s after the kill due was announced, before it was sent, timed by the burst of closes its exit made"
+            ),
+            "{v}"
+        );
+        // A kill met dead counts with the death, never as the kill: one
+        // the death did not stand for is short.
+        let short = synthetic(480, &|m, x| {
+            if m == 301 {
+                x.remove("kill");
+                x.insert("died", 1.0);
+            }
+        });
+        assert_eq!(failing(&short), vec![CRITERIA[14], CRITERIA[18]]);
+    }
+
+    #[test]
+    fn the_replicas_compaction_criterion_names_what_the_replica_answered_in() {
+        let run = synthetic(480, &|m, x| {
+            if m == 19 {
+                for (k, v) in [
+                    ("r_compacts_watched", 1.0),
+                    ("r_auto_compacts", 1.0),
+                    ("r_compact_ms", 33_600.0),
+                    ("r_compact_ops", 4_200.0),
+                    ("rc_seconds", 34.0),
+                    ("rc_r_behind_max_s", 0.6),
+                    ("rc_behind_max_s", 0.0),
+                    ("rc_r_majflt", 105_800.0),
+                    ("rc_r_file_min", 210.0 * 1048576.0),
+                ] {
+                    x.insert(k, v);
+                }
+            }
+            if m == u64::MAX {
+                x.insert("r_compact_ops", 4_200.0);
+                x.insert("p99_r_compact", 1.1e6);
+                x.insert("p99_r_compact_own", 0.72e6);
+                x.insert("r_compact_own_n", 4_200.0);
+            }
+        });
+        let j = judge(&run, None);
+        let v = j[0].verdicts.iter().find(|v| v.0 == CRITERIA[20]).unwrap();
+        assert!(v.1, "{}", v.2);
+        assert!(
+            v.2.ends_with(
+                "; the replica answered the reads through it among them in 0.72 s at the p99 from their send (4200 reads); in their 34 seconds, the replica lane 0.6 s behind at the most, the pool 0.0 s behind at the most, the replica's major faults 105800, its page cache 210 MB at the least"
+            ),
+            "{}",
+            v.2
+        );
+        // The lane, and how far behind its own schedule it fell, among the
+        // notes; a run from before the lanes says its reads shared the pool.
+        let laned = synthetic(480, &|m, x| match m {
+            0 => {
+                x.insert("replica_threads", 64.0);
+            }
+            7 => {
+                x.insert("r_behind_max_s", 1.4);
+            }
+            _ => {}
+        });
+        let notes = judge(&laned, None)[0].notes.join("\n");
+        assert!(
+            notes.contains(
+                "the reads through the replica: a lane of 64 connections on a schedule of its own at 4% of the rate, 1.4 s behind it at the most"
+            ),
+            "{notes}"
+        );
+        let notes = judge(&synthetic(480, &|_, _| {}), None)[0].notes.join("\n");
+        assert!(
+            notes.contains("in the pool every operation shares"),
+            "{notes}"
         );
     }
 }
