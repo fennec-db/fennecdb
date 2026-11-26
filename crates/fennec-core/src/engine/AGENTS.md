@@ -129,29 +129,36 @@ holds the ids from its first held one, the empty slots before it room.
 An id within `MAX_DENSE_GAP` of the held range is taken in -- below it
 into the room, moving nothing, or into a copy with room of a quarter of
 the span below it (`lower`), so the array grows down as it grows up --
-and further it is sparse, a room slot's too: the sparse map holds ids on
-both sides, listed below the first held id first and asked for where a
-slot is empty. The empty runs at either end -- the room, and the slots
-past the last held one (`last`) that deletes of the highest ids leave --
-are cut: the front's once it is more than the span from the first held
-slot to the last and the room a cut keeps (a quarter of it, `CUT_FROM`
-at most) and than what a lowering leaves, the end's once it is more than
-`CUT_FROM`, since its cut moves nothing (`past_edge`: one walk for both
-ends, both runs held to their bounds whichever moves, never one end's
-alone); every empty slot of both at a compact's or a checkpoint's
-relocation; an open starts the array at the first id it reads and ends
-it at the last (`adopt_shares`, an empty index's first insert). So the
-array is at most about twice its live span whichever way the ids move,
-and a walk back over either run costs each write two gaps at most. No
-sparse id is within the gap of the held range, either side
-(`sparse_floor`, `sparse_ceil` saying where to look), and while they
-outnumber the array's, 64 or more, their largest run takes it where it
-holds more (`rebase`, looking once the writes since -- sparse inserts,
-deletes from the array -- reach what the last look sorted, a count never
-above what the map holds): any order of writes -- a put-back from the
-lowest id up, rows below a pending one, a COPY in no order, a rebase
-undone -- ends with the rows dense, each copy and look amortised, each
-bound counted by `store::tests`, the memory by its drawn phases.
+and so is one further, past the end or in the room, where the array taken
+to it would hold a slot in two: the next new id, the highest ever given
+plus 1, once the highest rows went and their slots were cut. Further it
+is sparse, a room slot's too: the sparse map holds ids on both sides,
+listed below the first held id first and asked for where a slot is
+empty. The empty runs at either end -- the room, and the slots past the
+last held one (`last`) -- are cut once each is more than the span from
+the first held slot to the last and `CUT_FROM`, the front's also more than
+the room a cut keeps and what a lowering leaves (`past_edge`: one walk for
+both ends, both runs held to their bounds whichever moves); every empty
+slot of both at a compact's or a checkpoint's relocation; an open starts
+the array at the first id it reads and ends it at the last. So the array
+is at most about twice its live span whichever way the ids move, and an
+array emptied starts again at the next id written. A walk to the next
+held slot steps over the empty runs walks crossed and writes beyond them
+left (`holes`, two kept), so it costs a few slots a write. No sparse id is
+within the gap of the held range, either side (`sparse_floor`,
+`sparse_ceil`), and a look (`rebase`) -- where the map holds as many ids
+as the array or holds one within as many slots of it, once the writes
+since reach what the last sorted or at once while the map holds 64 ids or
+fewer -- gives the array to the largest run where it holds as many ids
+(the run just written where two do), or takes the run next to it in
+across a hole no longer than its ids; the map is built again at its size once its room
+passes four times its ids and 64. Any order of writes -- a put-back from
+the lowest id up, rows below a pending one, a COPY in no order, a rebase
+undone, the newest rows deleted and new ones written -- ends with the rows
+dense, each copy, walk and look amortised: held by a property test whose
+workloads -- queues, stacks, batches, long-lived rows, ids from outside,
+pending rows, blocks put back, clones -- meet a model that knows nothing
+of the index (`store::tests::the_id_index_holds_every_workload_dense_in_its_span_and_work`).
 Whatever reads the array goes through the floor and the first held slot
 -- `IdIndex`'s methods, and `in_turn`'s `places` through `held` -- never
 `id - 1`.
