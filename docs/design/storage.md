@@ -1171,7 +1171,8 @@ to leave.
 ## The id index's floor
 
 **The id index's dense array starts at a floor, the id of its first
-slot, and the empty slots before its first held one are cut.** A
+slot, and the empty slots before its first held one are room, cut once
+there is more of it than the array needs.** A
 collection gives its ids in turn from 1, so the index that finds a
 document by id (`store::IdIndex`) is an array of 12-byte locations,
 `dense[id - floor]`, with a sparse map beside it for ids given from
@@ -1189,22 +1190,34 @@ then on.
 
 **What moves the floor up**, only ever past empty slots:
 
-- *A delete.* `lead` is the first held slot. A delete of it looks for the
-  next held one (`IdIndex::past_lead`) and, once the empty run before it
-  is `CUT_FROM` slots (4 096, 48 KB) and half the array or more, moves
-  the rest to the front and the floor past the run (`cut`), giving back
-  the room past four times what is left, never below `CUT_FROM`'s. Half:
-  a cut moves at most as many slots as it drops, so however long the ids
-  climb a slot is moved a bounded number of times, and the array spans
-  at most about twice its first held id to its last. `CUT_FROM`: under it
-  a cut would move a large array to give back less than one gap's growth.
-  An array left with no location is let go of at once whatever its
-  length, nothing to move, so a queue that empties at every write keeps
-  no slot. It is a write's own, under the write lock, because a compact
-  may never come: a file under 64 MB, `--auto-compact` off, an app's
-  native library, the browser module, where only the page asks one.
+- *A delete.* `lead` is the first held slot. A delete of it looks for
+  the next held one (`IdIndex::past_lead`) and cuts the empty run before
+  it (`cut`), keeping room -- a quarter of the span, the slots from it
+  to the end, and `CUT_FROM` (4 096 slots, 48 KB) at most -- once the
+  run is more than the span and that room, and more than `CUT_FROM` and
+  a quarter of the span: the rest moves to the room's end, the floor
+  past the rest of the run, and the allocation past four times what is
+  left is given back, never below `CUT_FROM`'s. More than the span and
+  the room: a cut moves fewer slots than it drops, so however long the
+  ids climb a slot is moved a bounded number of times, and the array
+  spans at most about twice its first held id to its last. More than
+  `CUT_FROM` and a quarter of the span: that is the most a lowering
+  (below) leaves before the first held slot, the gap and the room below
+  it, so an id written below the first held one and deleted brings no
+  cut; and the room a cut keeps takes the next such write without a
+  lowering. Cut to the first held slot whenever the run was half the
+  array, as the first form was, the lowering and the cut took turns,
+  each copying the array: `floor - 1` written and deleted beside 100 000
+  rows copied 169 000 slots a pair (92 µs). `CUT_FROM`: under it a cut
+  would move a large array to give back less than one gap's growth. An
+  array left with no location is let go of at once whatever its length,
+  nothing to move, so a queue that empties at every write keeps no slot.
+  It is a write's own, under the write lock, because a compact may never
+  come: a file under 64 MB, `--auto-compact` off, an app's native
+  library, the browser module, where only the page asks one.
 - *A compact's or a checkpoint's relocation* (`IdIndex::relocate`), which
-  walks the array anyway: every empty slot before the first held one.
+  walks the array anyway: every empty slot before the first held one, the
+  room with them.
 - *An open.* An image's index lists the live ids in order, and the open
   starts the array at the first: in shares (`adopt_shares`, the first
   document read ahead and each share's stretch counted from it -- an image
@@ -1214,87 +1227,136 @@ then on.
   (`Store::compacted`) does. The writes the open walks after the image go
   through the delete's rule.
 
-**What moves it down** is a write of an id below it. Within
-`MAX_DENSE_GAP` of the floor the array is lowered by the gap or, while a
-location is in half its slots or more, a quarter of them, whichever is
-more, never below 1 (`IdIndex::lower`) -- so ids written each below the
-one before, a block's deletes put back in turn, move the array once a
-quarter they fill, not once an id, and one id written there adds a
-quarter at most -- and the sparse ids it then covers move in. Half: ids
-each written just past the quarter the one before left grew the array by
-a quarter a write, 4 million slots after 29 of them and 2^40 after 85;
-held to half, they leave it half empty at once, and from there each adds
-the gap at most, as a write past the end does. Further below, the id goes
-into the sparse map, which so holds ids on both sides of the dense range:
-the browser client's optimistic rows sit at 2^52, and an index that
-started there, given id 1, would otherwise ask for 2^52 slots. Every walk
-lists the sparse ids below the range first (`IdIndex::walk`, whose ids
-`iter` and `iter_from` give, and `relocate`; and the copy in turn's
-`places`, the one reader of the array outside `IdIndex`).
+**What moves it down** is a write within `MAX_DENSE_GAP` below the first
+held id (`IdIndex::lower`). Where the room before the first held slot
+reaches it, the id takes its slot, and nothing moves. Where it does not,
+the array is copied from its first held slot into one with room below
+the id of a quarter of the slots from there to the end, never below 1 --
+so ids written downward copy the array once its span has grown by a
+quarter of itself, as ids written upward reallocate it once it has
+doubled, and one id written just below a large array adds a quarter at
+most. The gap is counted from the first held id, never from the floor:
+an id more than the gap below the first held one goes into the sparse
+map wherever it is, a slot of the room's too. So room reaches no further
+than the writes that came down through it, and ids each written just
+past the room the one before left stay apart -- counted from the floor,
+they grew the array by a quarter a write, 4 million slots after 29 of
+them and 2^40 after 85. The first form kept them from it by lowering
+only by the gap where the array held a location in less than half its
+slots, which copied the whole array at every gap, quadratic: every third
+id loaded downward copied 11, 44 and 175 million slots for 100 000, 200
+000 and 400 000 rows (4.4, 17.5 and 78 ms, the index alone in release on
+aarch64 macOS, where upward took 0.7, 1.5 and 3.0), and 1 000 ids each
+the gap below the last, beside 1 000 rows, 2.05e9 slots, 24.6 GB (4.6 s,
+where upward took 4.5 ms). Now they copy 1.4, 2.8 and 5.5 million (1.4,
+2.9 and 6.0 ms) and 18 million (8.5 ms), the last array 54.6 MB where it
+was 49.2: the room below its last copy. The sparse ids within the gap
+below the id, and below them, come in with it, the array copied down to
+the lowest of them where the room does not reach it. Further below, the
+id goes into the sparse map, which so holds ids on both sides of the
+held range: the browser client's optimistic rows sit at 2^52, and an
+index that started there, given id 1, would otherwise ask for 2^52
+slots. A sparse id may so be in a slot of the room: `get` asks the map
+for an empty slot, which answers at once while it holds nothing, and
+`remove` for an empty slot before the first held one. Every walk lists the sparse
+ids below the first held id first (`IdIndex::walk`, whose ids `iter` and
+`iter_from` give, and `relocate`, which cuts the room first; and the
+copy in turn's `places`, the one reader of the array outside `IdIndex`,
+which reads it from its first held slot, `IdIndex::held`).
 
 **The sparse map holds only ids the gap keeps out.** No sparse id is
-within `MAX_DENSE_GAP` of the dense range, either side: the array grown
+within `MAX_DENSE_GAP` of the held range, either side: the array grown
 to within the gap of one takes it in (`sparse_floor` holds the lowest
 above less the gap, so the growth still asks one comparison), and a
-lowering takes the ids within the gap below its new floor, and below
-them, down to the last. And while the sparse ids outnumber the array's,
-and are `REBASE_FROM` (64) or more, a write looks among them for their
-largest run -- ids each within the gap of the one before -- which takes
-the array where it holds more ids than the array does, the array's own
-going into the sparse map (`IdIndex::rebase`): a sparse insert and a
-dense delete ask it, one comparison each. Each id of the run and of the
+lowering takes the ids within the gap below the id it takes, and below
+them, down to the last. It looks for them only where `sparse_ceil`, the
+highest sparse id below the first held one plus the gap, says one may be
+within reach, and sorts the ids below the first held one alone: the
+first form sorted the whole map at every lowering, the ids above
+included. And while the sparse ids outnumber the array's, and are
+`REBASE_FROM` (64) or more, a write looks among them for their largest
+run -- ids each within the gap of the one before -- which takes the
+array where it holds more ids than the array does, the array's own going
+into the sparse map (`IdIndex::rebase`). Each id of the run and of the
 array is more than the gap from the other, so the map ends smaller and
-neither is within the gap of the new range. A rebase that finds no larger
-run has sorted the sparse ids, and the next looks only once they have
-doubled (`rebase_at`), so each sorts ids at least half of which came
-since. Without it, the floor an empty index's first id set, or a block's
-deletes cut, kept every id more than the gap below it sparse, each walk
-sorting them, until the next open or in-memory compact (release, 200 000
-rows): `del s where id <= 150000 order id desc require 1`, refused, is
-put back from 1 up, under a floor at 150 001, and left 137 500 ids sparse,
-the index 5.5 MB where it was 3.1 and `get s limit 1` 1.9 ms where it was
-0.28; a replica's pending row at 2^52 written into an empty collection
-left the 40 000 rows after it sparse, after the row went too; a reseed
-beside a pending row, every other row deleted and written again, 15 904
-of 20 000; and a COPY, which has no `ORDER BY`, every row more than the
-gap below its first. Each now ends with its rows in the array and the
-sparse map holding the pending row alone or nothing
+neither is within the gap of the new range. A look sorts the sparse ids,
+and the next comes once the writes since -- each sparse insert, and each
+delete from the array while the map holds `REBASE_FROM` ids or more --
+reach the ids it sorted (`rebase_in`): those writes brought at most as
+many ids again, so each look sorts at most twice the writes since the
+last, and a delete from the array asks one in a call where the map holds
+that many, one comparison where it does not. The first form followed the
+map's growth alone, looking once the ids had doubled past what the last
+look left, and a rebase undone left the rows it had moved into the map
+there: 10 000 rows from 1 and a block writing 15 000 from 5 000 000 --
+the run taking the array once it outnumbered them, the 10 000 sparse --
+rolled back left all 10 000 sparse, the index 618 KB and `get s limit 1`
+130 µs in release, and the next 5 000 rows went sparse too until the map
+reached 20 000; so did the far rows landed and deleted after. Now the
+deletes bring a look once they reach the 10 001 ids it sorted, and the
+rows go back into the array, one look and 15 000 slots copied: the index
+120 KB, `get s limit 1` 0.5 µs, and the next 5 000 rows dense
+(`store::tests::a_rebase_undone_brings_the_rows_back_into_the_array`,
+`tests/id_floor.rs`). Without the rebase, the floor an empty index's
+first id set, or a block's deletes cut, kept every id more than the gap
+below it sparse, each walk sorting them, until the next open or
+in-memory compact (release, 200 000 rows): `del s where id <= 150000
+order id desc require 1`, refused, is put back from 1 up, under a floor
+at 150 001, and left 137 500 ids sparse, the index 5.5 MB where it was
+3.1 and `get s limit 1` 1.9 ms where it was 0.28; a replica's pending
+row at 2^52 written into an empty collection left the 40 000 rows after
+it sparse, after the row went too; a reseed beside a pending row, every
+other row deleted and written again, 15 904 of 20 000; and a COPY, which
+has no `ORDER BY`, every row more than the gap below its first. Each now
+ends with its rows in the array and the sparse map holding the pending
+row alone or nothing
 (`store::tests::every_order_of_writes_ends_with_the_rows_dense`,
 `tests/id_floor.rs`). A run taken in left the map the room of every id
-it had held, until the next open, so the map is let go of once the array
-has taken every id of it (`trim`); one still holding ids keeps its room,
-as it always did.
+it had held, until the next open, so the map is let go of once it holds
+no id, the array having taken them or their rows gone (`trim`); one
+still holding ids keeps its room, as it always did.
 
 An id below the floor reads as absent: `id.wrapping_sub(floor)` passes
 every slot, as an id past the end does, and the sparse map holds it only
 where it was written there. A lookup is the subtraction it was --
-`id - 1` became `id - floor` -- with the floor read beside the array.
+`id - 1` became `id - floor` -- with the floor read beside the array, and
+an empty slot asked of the map.
 
-**Every reader of the array** goes through the floor. Lookups,
-`contains`, `remove` and the writes' `insert`; the walks in id order; a
-pin (`Store::pinned`), a compaction's stores (`begin_beside`) and a
-stream's rows clone the index with its floor, so a cut after the clone
-moves nothing it reads (`tests/id_floor.rs`, a pinned read across the
-move); a block put back points its ids back through `insert` and `remove`
-(`Store::point`), the rules above bringing them into the array whatever
-the order the block put them back in -- the last of its writes first, so
-a delete from the highest id down comes back from the lowest up, far
-below the floor its deletes cut, until the ids outnumber the array or
-come within the gap of it (a block put back across the move, a refused
-delete from the top down); a replica's `apply` lands its
-primary's frames through the same calls (a replica holding its primary's
-index). The file format does not change: an image's index and the frames
-say ids, never slots. `store::tests::the_id_index_answers_as_a_map_while_its_floor_moves`
+**Every reader of the array** goes through the floor and the first held
+slot. Lookups, `contains`, `remove` and the writes' `insert`; the walks
+in id order; a pin (`Store::pinned`), a compaction's stores
+(`begin_beside`) and a stream's rows clone the index with its floor, so
+a cut after the clone moves nothing it reads (`tests/id_floor.rs`, a
+pinned read across the move); a block put back points its ids back
+through `insert` and `remove` (`Store::point`), the rules above bringing
+them into the array whatever the order the block put them back in -- the
+last of its writes first, so a delete from the highest id down comes
+back from the lowest up, far below the floor its deletes cut, until the
+ids outnumber the array or come within the gap of it (a block put back
+across the move, a refused delete from the top down); a replica's
+`apply` lands its primary's frames through the same calls (a replica
+holding its primary's index). The file format does not change: an
+image's index and the frames say ids, never slots.
+`store::tests::the_id_index_answers_as_a_map_while_its_floor_moves`
 holds the index to a map through 150 000 writes of every kind, its floor
 moved hundreds of times either way, a clone taken before each run of
-front deletes read after it, and the gap's rule kept at each step. The
-bounds are counted: a cut moves no more slots than it drops (60 000 live
-rows climbing to 300 000 move 240 000; cut at every 4 096 empty slots
-whatever the array, 3.5 million), a lowering a quarter of the array
-(100 000 ids written downward below 100 000 rows move 576 562; a gap at
-a time, 3.7 million), and a rebase that finds nothing looks again once
-the sparse ids have doubled (5 000 ids apart beside 100 rows: 6 looks,
-not 4 900).
+front deletes read after it, and the gap's rule and the room's bound
+kept at each step;
+`an_id_the_gap_from_the_held_range_is_taken_in_either_side` holds each
+bound of the gap to the slot, either side. The bounds are counted: a cut
+moves fewer slots than it drops (60 000 live rows climbing to 300 000
+move 180 000, where cut to the first held slot they moved 240 000; cut
+at every 4 096 empty slots whatever the array, 3.5 million), a lowering
+copies the array once its span grows by a quarter (100 000 ids written
+downward below 100 000 rows copy 576 569; a gap at a time, 3.7 million;
+and the loads above), a write below the first held id and its delete
+copy the array once at most (`floor - 1` or the first held id less 1,
+written and deleted 1 000 times beside 100 000 rows, 100 000 slots,
+where they took turns with the cut for 169 million; right after a cut,
+none), a lowering sorts no sparse id beyond its reach (none of 10 100
+beside 100 000 ids written downward), and a look comes once the writes
+since reach what the last sorted (5 000 ids apart beside 100 rows: 6
+looks, not 4 900; a rebase undone: one).
 
 **`lead` and `after`.** `lead` is exact -- the first held slot, or the
 array's length where it is empty -- since a cut drops what is before it:
@@ -1356,9 +1418,28 @@ ids sorted with their locations held a sort of the pairs of their own,
   a map that still holds ids; one emptied is let go of whole.
 - *Lowering by the id alone, or by the whole array.* By the id, a block's
   deletes put back in turn moved the array once an id; by the array, one
-  id written just below a large one doubled it.
+  id written just below a large one doubled it. By the gap where the
+  array was less than half held, as the first form did below half, ids
+  written downward copied it at every gap (above).
+- *Counting the room from the floor.* Writes each just past the room the
+  one before left would each grow it by a part of the array (above); the
+  first form's half held kept them from it by giving up the room.
+- *Room as spare capacity before the range, an offset into the array
+  the range starts at.* A lowering into it would move nothing as here,
+  but every lookup would add the offset, where here an empty slot before
+  the first held one is asked of the map, a comparison on a miss.
+- *Sending an id below the first held one to the sparse map, the rebase
+  merging the runs there into the array.* No lowering at all, and the
+  lookup as it was, but the rows below would stay sparse until they were
+  a part of the array large enough to copy it for -- a quarter of a
+  descending load in the map at its end, every walk sorting them, every
+  lookup a hash -- where any order of writes now ends with them dense.
+- *Cutting to the first held slot.* A write just below it and its delete
+  took turns with a lowering, each copying the array (above).
 - *Giving the room back at every cut.* A queue that empties and fills
   again would reallocate its array at every write.
+- *Following the sparse map's growth alone to look again.* A rebase
+  undone left its rows there (above).
 
 **What it costs.** A million sessions made one after another, each
 deleted 3 000 writes after it was made, through `put` and `del ... where
@@ -1408,18 +1489,47 @@ the next sparse id of its own where the take-over does both, shrank the
 map, and filtered the map's keys for the lowering where the walk's sorted
 copy serves.
 
+**What the room costs.** Against the floor with the gap's rule and the
+rebase (15305b9d): a lookup of a held id is the instructions it was, and
+one of an empty slot asks the map, which answers an empty one in a
+comparison. Asking it only for a slot before the first held one, a
+comparison more, changed what `get`'s callers inlined, 16 instructions a
+lookup by id (the gate's `core-get-id` +0.16%), and the map's lookup out
+of line made an open's walk 8 instructions an id dearer (`file-open`
++1.1%). A new id at the end asks the comparison `placed` asked, its two
+cases out of line (`insert_gap`); a delete from the array asks whether
+the map holds 64 ids where it asked whether it outnumbered the array,
+and calls the look where it does. An index holds a word more,
+`sparse_ceil`. The sessions above hold what they held: 98 304 bytes at
+the end and at most, 36 000 after an open of the compacted file; the
+orders above too (2 400 048, about 788 600 and 389 100 bytes, the map's
+room as its random state draws it). Counted as the gate counts, every
+workload against main (c2e27c6d, aarch64 musl in Docker, five runs a
+side): `file-compact` 7.40% under, `core-lookup` 0.14% under,
+`core-group` 0.12% under, `file-open` 0.07% under, `core-get-id` 0.04%
+under, and none more than 0.06% over (`core-insert`); the heap's calls
+and bytes are main's but `file-open`'s, 160 bytes an op more of 3 778 843,
+the words each store's index holds more. Against 15305b9d the
+browser module grew 484 bytes raw, 299 gzip and 297 brotli (846.3 KB,
+the last two within the report's noise), the module without the indexes
+359, 204 and -22, without any feature 376, 180 and 162: the room's
+lowering and its look below, `insert_gap`, the room a cut keeps, the
+look's count. On aarch64 macOS fennec-server's code shrank 448 bytes and
+the native library's grew 256, neither file by a page.
+
 **Left as it was.** The text and vector indexes' per-document numbers
 (`DocMap`, 4 bytes a slot) span the ids from 1 too; they are derived,
 built from the live documents at their first read or an open, where ids
 past the gap go to their sparse map, and a sessions collection seldom
 holds a text or a vector field. An image whose first id is far below the
 rest -- one row kept from long ago -- starts the array there at an open
-and puts the rest in the sparse map until 64 of them are read, which then
-take the array (a rebase), the one row sparse; an array from 1 kept them
-all sparse. The gap's own rule is main's: an id within 4 096 of the
-array's end, or now of its floor, is taken in whatever the slots between
-cost, so ids each 4 000 apart hold 48 KB of slots an id; an array from 1
-did so for those near it, one with a floor wherever its first id is.
+and puts the rest in the sparse map until 64 of them are read, which
+then take the array (a rebase), the one row sparse; an array from 1 kept
+them all sparse. The gap's own rule is main's: an id within 4 096 of the
+array's end, or now of its first held id, is taken in whatever the slots
+between cost, so ids each 4 000 apart hold 48 KB of slots an id; an
+array from 1 did so for those near it, one with a floor wherever its
+first id is.
 
 ## File format
 

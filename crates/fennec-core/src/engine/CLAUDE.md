@@ -125,18 +125,24 @@ build wrote counts its dead heads short until its next compact.
 
 **[An id floor](../../../../docs/design/storage.md#the-id-indexs-floor)**
 is where a store's id index starts (`store::IdIndex`): its dense array
-holds the ids from its first held one, the empty slots before that cut
-once they are `CUT_FROM` and half the array (`past_lead`), at a
-compact's or a checkpoint's relocation and by an open, which starts it
-at the first id it reads (`adopt_shares`, an empty index's first
-insert). An id below the floor reads as absent; written, it lowers the
-floor within `MAX_DENSE_GAP` -- a quarter of the array at a time while
-half of it is held -- and is sparse past it, so the sparse map holds ids
-on both sides, listed below the range first. No sparse id is within the
-gap of the array, either side, and while they outnumber the array's, 64
-or more, their largest run takes it where it holds more (`rebase`,
-looking again once they double): any order of writes -- a put-back from
-the lowest id up, rows below a pending one, a COPY in no order -- ends
-with the rows dense, each bound counted by `store::tests`. Whatever
-reads the array goes through the floor -- `IdIndex`'s methods, and
-`in_turn`'s `places` -- never `id - 1`.
+holds the ids from its first held one, the empty slots before it room.
+An id within `MAX_DENSE_GAP` of the held range is taken in -- below it
+into the room, moving nothing, or into a copy with room of a quarter of
+the span below it (`lower`), so the array grows down as it grows up --
+and further it is sparse, a room slot's too: the sparse map holds ids on
+both sides, listed below the first held id first and asked for where a
+slot is empty. The room is cut, a quarter of the span and `CUT_FROM` at
+most kept, once it is more than the span and that room and than what a
+lowering leaves (`past_lead`), all of it at a compact's or a
+checkpoint's relocation; an open starts the array at the first id it
+reads (`adopt_shares`, an empty index's first insert). No sparse id is
+within the gap of the held range, either side (`sparse_floor`,
+`sparse_ceil` saying where to look), and while they outnumber the
+array's, 64 or more, their largest run takes it where it holds more
+(`rebase`, looking once the writes since -- sparse inserts, deletes from
+the array -- reach what the last look sorted): any order of writes -- a
+put-back from the lowest id up, rows below a pending one, a COPY in no
+order, a rebase undone -- ends with the rows dense, each copy and look
+amortised, each bound counted by `store::tests`. Whatever reads the
+array goes through the floor and the first held slot -- `IdIndex`'s
+methods, and `in_turn`'s `places` through `held` -- never `id - 1`.
