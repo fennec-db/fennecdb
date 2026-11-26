@@ -47,7 +47,7 @@ const BEHIND_AT: usize = 64 << 10;
 /// and return without an fsync of their own.
 pub struct FileSink {
     /// The appends not yet written.
-    pending: Arc<Mutex<Vec<u8>>>,
+    pending: Arc<Mutex<Pending>>,
     /// Bytes appended since the file was opened or rewritten.
     appended: u64,
     /// Held for every write and fsync, and taken before `pending` whenever
@@ -75,6 +75,39 @@ pub struct FileSink {
     /// written gains no byte. `None` for a sink no database loaded, which
     /// appends nothing of its own.
     marks_past: Option<u64>,
+}
+
+/// What a [`FileSink`] holds that its file does not yet: the bytes
+/// appended, and before them the records handed over whole
+/// ([`Sink::append_deferred`]), each written from where its record
+/// begins in the buffer it came in. A record is kept in the buffer it was
+/// written into, never copied: a graph the keeper saves is one record,
+/// about 75 MB of the P6 soak's worn `docs` graph, and copied into the
+/// bytes appended it was held twice until the durability after the lock
+/// wrote it. Not written under the lock instead: a record held the read
+/// lock 18.3 ms p50 so, against 5.0 left to the durability, the same
+/// bytes (docs/design/hnsw.md, graphs in the tail).
+#[derive(Default)]
+struct Pending {
+    /// Written first, in the order they came: each buffer from its offset
+    /// on, the bytes appended before a record handed in ahead of it.
+    handed: Vec<(Vec<u8>, usize)>,
+    /// Written after every buffer in `handed`.
+    bytes: Vec<u8>,
+}
+
+impl Pending {
+    /// Gated as its one caller is ([`Sink::written_all`]): the browser
+    /// module's clippy refuses a method it never calls.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_empty(&self) -> bool {
+        self.handed.is_empty() && self.bytes.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.handed.clear();
+        self.bytes.clear();
+    }
 }
 
 struct Disk {
@@ -822,27 +855,33 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Disk {
-    /// Writes whatever is pending.
-    fn write_pending(&mut self, pending: &Mutex<Vec<u8>>) -> Result<()> {
+    /// Writes whatever is pending: the records handed over, in turn, then
+    /// the bytes appended after them.
+    fn write_pending(&mut self, pending: &Mutex<Pending>) -> Result<()> {
         if let Some(e) = &self.failed {
             return Err(e.clone());
         }
-        let bytes = std::mem::take(&mut *lock(pending));
-        if let Err(e) = self.file.write_all(&bytes) {
-            self.failed = Some(e.into());
-            return Err(self.failed.clone().unwrap());
+        let Pending { handed, bytes } = std::mem::take(&mut *lock(pending));
+        // By value, each buffer let go of once it is written: borrowed, a
+        // graph's record stayed in memory until the last one was. Nothing
+        // needs them after a failed write: it fails the sink, which writes
+        // nothing more until the file is opened again, and the bytes
+        // appended are dropped with them, as they always were.
+        for (buf, from) in handed {
+            self.put(&buf[from..])?;
         }
-        self.written += bytes.len() as u64;
-        self.end += bytes.len() as u64;
-        #[cfg(unix)]
-        self.tail.wrote(&bytes);
-        Ok(())
+        self.put(&bytes)
     }
 
     /// Writes whatever is pending and then `bytes`, which do not go through
     /// the buffer.
-    fn write_through(&mut self, pending: &Mutex<Vec<u8>>, bytes: &[u8]) -> Result<()> {
+    fn write_through(&mut self, pending: &Mutex<Pending>, bytes: &[u8]) -> Result<()> {
         self.write_pending(pending)?;
+        self.put(bytes)
+    }
+
+    /// Writes `bytes` at the file's end; a failure fails the sink.
+    fn put(&mut self, bytes: &[u8]) -> Result<()> {
         if let Err(e) = self.file.write_all(bytes) {
             self.failed = Some(e.into());
             return Err(self.failed.clone().unwrap());
@@ -859,7 +898,7 @@ impl Disk {
     /// What `inherited` costs a durability: where its bytes are covered,
     /// the test of it below (and of the flag where it is asked); where it
     /// fsyncs, the store clearing the flag. A plain sync passes `false`.
-    fn sync(&mut self, pending: &Mutex<Vec<u8>>, upto: u64, inherited: bool) -> Result<()> {
+    fn sync(&mut self, pending: &Mutex<Pending>, upto: u64, inherited: bool) -> Result<()> {
         if let Some(e) = &self.failed {
             return Err(e.clone());
         }
@@ -1072,7 +1111,7 @@ impl FileSink {
         let end = file.metadata().map_or(0, |m| m.len());
         let durable = Arc::new(AtomicU64::new(0));
         FileSink {
-            pending: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(Pending::default())),
             appended: 0,
             disk: Arc::new(Mutex::new(Disk {
                 file,
@@ -1316,8 +1355,8 @@ impl Sink for FileSink {
         }
         let held = {
             let mut pending = lock(&self.pending);
-            pending.extend_from_slice(bytes);
-            pending.len()
+            pending.bytes.extend_from_slice(bytes);
+            pending.bytes.len()
         };
         self.outgrown(held)
     }
@@ -1345,9 +1384,9 @@ impl Sink for FileSink {
         let held = {
             let mut pending = lock(&self.pending);
             for p in parts {
-                pending.extend_from_slice(p);
+                pending.bytes.extend_from_slice(p);
             }
-            pending.len()
+            pending.bytes.len()
         };
         self.outgrown(held)
     }
@@ -1361,10 +1400,21 @@ impl Sink for FileSink {
         self.marks_past = Some(self.durable.load(Ordering::Acquire).max(end));
     }
     /// Pending until the durability runs, however large: written here, a
-    /// kept graph's record waited out any fsync under way as well.
-    fn append_deferred(&mut self, bytes: &[u8]) -> Result<()> {
-        self.appended += bytes.len() as u64;
-        lock(&self.pending).extend_from_slice(bytes);
+    /// kept graph's record waited out any fsync under way as well. The
+    /// buffer is kept as it came ([`Pending`]), the bytes appended before
+    /// it handed in ahead of it, so that what is appended after it goes
+    /// after it. Only the bytes appended count against the buffer
+    /// ([`Self::outgrown`]): a record waits for its durability, unless the
+    /// appends after it outgrow the buffer first, which then write it
+    /// ahead of them.
+    fn append_deferred(&mut self, record: Vec<u8>, from: usize) -> Result<()> {
+        self.appended += (record.len() - from) as u64;
+        let mut pending = lock(&self.pending);
+        if !pending.bytes.is_empty() {
+            let before = std::mem::take(&mut pending.bytes);
+            pending.handed.push((before, 0));
+        }
+        pending.handed.push((record, from));
         Ok(())
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
@@ -1526,10 +1576,19 @@ impl Sink for FileSink {
         lock(&self.disk).write_pending(&self.pending)
     }
 
+    /// Counts the bytes appended alone, `all` set or not: a record handed
+    /// over ([`Sink::append_deferred`]) is left to the durability its
+    /// caller, the keeper, runs as it lets the read lock go, and with only
+    /// records pending this is `None` and a handover due waits for that
+    /// durability ([`Sink::written_all`]). Counted, the write behind of
+    /// whichever buffered write landed first after the keeper let go of the
+    /// lock would write the graph's megabytes before that request was
+    /// answered, which the keeper's durability writes a moment later
+    /// anyway.
     #[cfg(not(target_arch = "wasm32"))]
     fn write_behind(&mut self, all: bool) -> Option<Durability> {
         self.behind = true;
-        let held = lock(&self.pending).len();
+        let held = lock(&self.pending).bytes.len();
         if held == 0 || (held < BEHIND_AT && !all) {
             return None;
         }
@@ -3785,7 +3844,10 @@ mod tests {
         sink.append(b"head ").unwrap();
         let before = len(&path);
         let big = vec![7u8; 2 * WRITE_BUF];
-        sink.append_deferred(&big).unwrap();
+        // Handed over with room before it, which is not written.
+        let mut handed = vec![9u8; 3];
+        handed.extend_from_slice(&big);
+        sink.append_deferred(handed, 3).unwrap();
         assert_eq!(len(&path), before);
         let durable = sink.flush().unwrap().unwrap();
         durable().unwrap();
@@ -3796,6 +3858,107 @@ mod tests {
         sink.append(&big).unwrap();
         assert_eq!(len(&path), on_disk.len() + big.len());
 
+        drop(sink);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Records handed over keep their place among the appends: the bytes
+    /// appended before one are written before it, those appended after it
+    /// after it, two records in the order they came -- each written from
+    /// where it begins, by the durability, and the file is what appending
+    /// each in turn writes, byte for byte. An append that outgrows the
+    /// buffer after them writes them ahead of itself; one that does not
+    /// leaves them to the durability, the bytes appended alone counting
+    /// against the buffer.
+    #[test]
+    fn handed_records_keep_their_place_among_the_appends() {
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-handed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (handed_path, plain_path) = (dir.join("handed.fennec"), dir.join("plain.fennec"));
+        let _ = std::fs::remove_file(&handed_path);
+        let _ = std::fs::remove_file(&plain_path);
+        let len = |p: &Path| std::fs::metadata(p).unwrap().len() as usize;
+        let room = |r: &[u8], from: usize| {
+            let mut v = vec![0xEEu8; from];
+            v.extend_from_slice(r);
+            v
+        };
+        let (one, two) = (vec![1u8; WRITE_BUF + 17], vec![2u8; 4096]);
+        let (mut handed, _) = FileSink::open(&handed_path).unwrap();
+        let (mut plain, _) = FileSink::open(&plain_path).unwrap();
+        let start = len(&handed_path);
+
+        handed.append(b"before ").unwrap();
+        handed.append_deferred(room(&one, 5), 5).unwrap();
+        handed.append_deferred(room(&two, 0), 0).unwrap();
+        handed.append(b"after ").unwrap();
+        assert_eq!(len(&handed_path), start, "written before its durability");
+        assert!(!handed.written_all());
+        // The appends after the records past the buffer: everything goes,
+        // the records ahead of them.
+        let past = vec![3u8; WRITE_BUF];
+        handed.append(&past).unwrap();
+        handed.append(b"last").unwrap();
+        handed.flush().unwrap().unwrap()().unwrap();
+        assert!(handed.written_all());
+
+        for bytes in [&b"before "[..], &one, &two, b"after ", &past, b"last"] {
+            plain.append(bytes).unwrap();
+        }
+        plain.flush().unwrap().unwrap()().unwrap();
+        assert_eq!(
+            std::fs::read(&handed_path).unwrap(),
+            std::fs::read(&plain_path).unwrap()
+        );
+
+        drop((handed, plain));
+        let _ = std::fs::remove_file(&handed_path);
+        let _ = std::fs::remove_file(&plain_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A record handed over and dropped with the sink unwritten -- its
+    /// durability never run -- is written as the sink closes, as the bytes
+    /// appended are.
+    #[test]
+    fn a_handed_record_is_written_as_the_sink_closes() {
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-closes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("closes.fennec");
+        let _ = std::fs::remove_file(&path);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        sink.append(b"a write ").unwrap();
+        sink.append_deferred(b"..a record".to_vec(), 2).unwrap();
+        drop(sink);
+        assert!(std::fs::read(&path).unwrap().ends_with(b"a write a record"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A record handed over does not count against the buffer: written
+    /// behind the lock, appends past the buffer and under `WRITE_HELD` are
+    /// left for the write behind, the record with them, where its
+    /// megabytes counted would have taken them past `WRITE_HELD` and had
+    /// the append write it there and then, under the database's lock.
+    #[test]
+    fn a_handed_record_does_not_count_against_the_buffer() {
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-counts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("counts.fennec");
+        let _ = std::fs::remove_file(&path);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        let start = std::fs::metadata(&path).unwrap().len();
+        // Written behind from here on; nothing held yet to write.
+        assert!(sink.write_behind(false).is_none());
+        sink.append_deferred(vec![5u8; 2 * WRITE_HELD], 0).unwrap();
+        // Each under the buffer, together past it.
+        sink.append(&vec![6u8; WRITE_BUF - 1]).unwrap();
+        sink.append(&[6u8]).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), start);
+        sink.flush().unwrap().unwrap()().unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(len, start + (2 * WRITE_HELD + WRITE_BUF) as u64);
         drop(sink);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -3823,7 +3986,7 @@ mod tests {
         let holder = std::thread::spawn(move || {
             let guard = lock(&disk);
             held_tx.send(()).unwrap();
-            while lock(&pending).len() < WRITE_HELD {
+            while lock(&pending).bytes.len() < WRITE_HELD {
                 std::thread::yield_now();
             }
             drop(guard);

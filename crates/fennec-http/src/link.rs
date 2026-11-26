@@ -361,9 +361,15 @@ pub(crate) fn said_beside(what: &str, done: std::fmt::Arguments, took: Duration,
 /// a replica adopts meanwhile fails the compact rather than be written
 /// over. Its graph phase gives up at its next step once the database is
 /// let go of, as a rebuild does (`held::stops`), and the compact ends
-/// there, nothing written and nothing said: it rebuilds every worn graph,
-/// and a delete or the shutdown otherwise waited the build out.
-fn compact(what: &str, db: &Arc<RwLock<Database>>, policy: &CompactPolicy, memory: Memory) {
+/// there, nothing written and nothing said: it rebuilds every graph with a
+/// tombstone, worn or not, and a delete or the shutdown otherwise waited
+/// the build out.
+pub(crate) fn compact(
+    what: &str,
+    db: &Arc<RwLock<Database>>,
+    policy: &CompactPolicy,
+    memory: Memory,
+) {
     let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
     let t = Instant::now();
     let stop = || crate::held::stops(db);

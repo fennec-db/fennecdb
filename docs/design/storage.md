@@ -146,7 +146,9 @@ mapped file a compact copies no record: the graphs holding tombstones are
 rebuilt beside the database, their vectors read with no lock held, then each
 store is cloned under the read lock --
 the records in the old file and the sealed segments shared (`SegmentBytes` is
-an `Arc`, in the browser module too now), the index copied, each graph's record written -- the live
+an `Arc`, in the browser module too now), the index copied, each graph's
+record written, held once: streamed into the side file after its field's
+name and let go of there (`Beside::write`, [hnsw.md](hnsw.md#graphs-in-the-tail)) -- the live
 records written into `<file>.beside` with no lock held and fsynced, and
 the clones relocated onto it without reading it back (`relocate_live`). Under
 the write lock only the documents written meanwhile go in, as a data record

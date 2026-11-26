@@ -99,8 +99,9 @@ once, up to about two and a third times the graph at its peak;
 <code>rebuild_worn_until</code> asks a closure of yours between its steps,
 a fraction of a second apart, and gives up once it says so, the graph as
 it was and <code>None</code> answered: what to pass where your program
-closes the database. A compact rebuilds every worn graph before it writes
-its file, as long again, so <code>compact_when_due_until</code> asks the
+closes the database. A compact rebuilds every graph with a deleted or
+rewritten vector in it, worn or not, before it writes its file, each as
+long again, so <code>compact_when_due_until</code> asks the
 closure there too, and gives up the same way, having written nothing;
 once it writes the file it finishes, its file in place. Once said, the
 closure's word holds for the rest of the rebuild or the compact, whatever

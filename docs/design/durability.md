@@ -241,7 +241,9 @@ touched no disk before. A sink
 asked once leaves its buffer for it from then on, an append writing it
 only past `WRITE_HELD`, should the writes behind fall back. A handover writes what is pending, so for a database written behind
 it is put off to the next block's start (`hand_over_before`), where the
-write behind -- every byte, once a handover is due -- left nothing pending,
+write behind -- every byte, once a handover is due, but a graph's record
+the keeper's durability writes ([hnsw.md](hnsw.md#graphs-in-the-tail)) --
+left nothing pending,
 and runs at the end of a block only past twice its bounds: written there,
 its bytes met the same stall under the lock. A replica and the shell write
 as before; the native library writes behind as a server does (below).

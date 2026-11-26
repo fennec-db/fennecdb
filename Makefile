@@ -1266,7 +1266,9 @@ compact-bench:
 	./target/release/examples/compaction $(COMPACT_ARGS)
 
 ## What `create index` and `compact` cost the readers and writers of a
-## running database: under the write lock, then beside it.
+## running database: under the write lock, then beside it; and the heap
+## and the read lock a graph keeper's save takes, its graph clean and with
+## a fifth of its vectors written again.
 maintenance-bench:
 	$(CARGO) run --release -p fennec-core --example maintenance -- 100000 128
 

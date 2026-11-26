@@ -360,9 +360,12 @@ time at the next open, never data.</p>
     writes the file, once the database is closed, its tenant deleted,
     moved or made to follow, or the server stops; one writing the file
     finishes first. An embedding
-    program calls <code>compact_when_due</code> from a thread of its own or
-    starts a <code>Compactor</code>; the browser module has no thread to run
-    one, and drops the dead records from each image it persists.</li>
+    program calls <code>compact_when_due_until</code> from a thread of its
+    own, with a closure that says when it closes the database, or starts a
+    <code>Compactor</code>, which stops as it is dropped
+    (<a href="embedding.html">embedding</a>); the browser module has no
+    thread to run one, and drops the dead records from each image it
+    persists.</li>
   <li>A delete is a tombstone and the graph node stays in memory, its
     vector and links in the graph's record in the file, until the graph is
     rebuilt. Changing a document's vector also marks the old node deleted

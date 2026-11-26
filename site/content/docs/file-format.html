@@ -230,7 +230,12 @@ rebuilds the graph rather than restore it against the documents the whole
 file left, which a vector rewritten after the record would not match. It
 is not a write: the change counter does not move, no replica is sent it,
 and a record cut short is cut off the file like any other. The next
-checkpoint leaves the ones before it out.</p>
+checkpoint leaves the ones before it out. The record is made in memory once,
+to its length, and handed to the file's writer as it is, never copied, so
+saving a graph holds its record once, as a compact writing it does: at
+100 000 × 128 a save of a 6.7 MB record peaks at 17.5 MB of heap, where it
+took 24.1, and one of an 18.7 MB record, a fifth of the vectors written
+again, at 30.2 MB, where it took 52.3.</p>
 
 <p>A server does not wait for the tail. It opens with the tail's vectors in
 the arena but in no neighbour list, measures each of them in every

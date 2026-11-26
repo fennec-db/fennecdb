@@ -307,10 +307,11 @@ pub fn compact_when_due_in(
 /// `stop` says so -- asked as [`Database::rebuild_worn_until`] asks it,
 /// and what it said held for the rest -- with nothing written and no graph
 /// placed: `None` then, as when nothing was due. Its graph phase rebuilds
-/// every worn graph, as long as a rebuild takes, which a close let go of a
-/// host's compact would otherwise wait out; a rewrite begun runs to its
-/// end, its file in place or none. What the [`Compactor`] runs, and a
-/// server's compacter, told by what lets a tenant go.
+/// every graph with a tombstone, worn or not, each as long as a rebuild
+/// takes, which a close let go of a host's compact would otherwise wait
+/// out; a rewrite begun runs to its end, its file in place or none. What
+/// the [`Compactor`] runs, and a server's compacter, told by what lets a
+/// tenant go.
 pub fn compact_when_due_until(
     db: &RwLock<Database>,
     policy: &CompactPolicy,
@@ -392,8 +393,9 @@ impl Compactor {
 }
 
 impl Compactor {
-    /// Tells the thread to stop -- a rebuild under way gives up at its
-    /// next step -- without waiting for it: the drop waits.
+    /// Tells the thread to stop -- a rebuild under way, and a compact in
+    /// its graph phase, give up at their next step; a compact rewriting
+    /// the file finishes -- without waiting for it: the drop waits.
     pub(crate) fn stop_looking(&self) {
         let (lock, cv) = &*self.stop;
         *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;

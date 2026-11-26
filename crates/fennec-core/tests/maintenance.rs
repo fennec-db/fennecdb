@@ -234,6 +234,75 @@ fn a_compact_takes_the_tombstones_out_of_the_graph() {
     }
 }
 
+/// A compact beside the database writes, with no write meanwhile, the file
+/// a compact under the write lock writes, byte for byte, its graphs'
+/// records among them: beside, each record is the field's name and the
+/// graph streamed into it from the graph taken under the read lock
+/// (`Beside::write`), under the lock one payload of the two
+/// (`Database::image_into`), and the bytes must be the same -- a graph
+/// rebuilt for its tombstones and one written as it stands. Then a server's
+/// keeper's save appends each graph to either file alike, a write left
+/// pending before it and one after.
+#[test]
+fn a_compact_beside_writes_the_file_the_lock_writes() {
+    let dir = std::env::temp_dir().join(format!("fennecdb-beside-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let compact = fennec_ql::parse_one("compact").unwrap();
+    let mut files = Vec::new();
+    for beside in [false, true] {
+        let path = dir.join(format!("{beside}.fennec"));
+        let _ = std::fs::remove_file(&path);
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        exec(
+            &mut db,
+            "create collection a (n int, v vector<4> @hnsw(cosine))",
+        );
+        exec(
+            &mut db,
+            "create collection b (n int, v vector<3> @hnsw(l2, m=8))",
+        );
+        for i in 0..400 {
+            exec(
+                &mut db,
+                &format!("put a {{n: {i}, v: [{i}.0, 1.0, {}.0, 0.5]}}", i % 7),
+            );
+            exec(
+                &mut db,
+                &format!("put b {{n: {i}, v: [1.0, {i}.0, {}.0]}}", i % 3),
+            );
+        }
+        // `a`'s graph left with tombstones, rebuilt; `b`'s as it stands.
+        exec(&mut db, "set a {v: [2.0, 1.0, 3.0, 4.0]} where n < 100");
+        if beside {
+            let lock = RwLock::new(db);
+            Database::maintain(&lock, &compact).unwrap().unwrap();
+            db = lock.into_inner().unwrap();
+        } else {
+            db.execute(&compact).unwrap();
+        }
+        db.set_graph_saves(1, 0);
+        exec(&mut db, "put a {n: -1, v: [5.0, 4.0, 3.0, 2.0]}");
+        exec(&mut db, "put b {n: -1, v: [5.0, 4.0, 3.0]}");
+        let (saved, durable) = db.save_graphs().unwrap();
+        assert_eq!(saved, 2);
+        exec(&mut db, "put b {n: -2, v: [7.0, 4.0, 3.0]}");
+        durable.unwrap()().unwrap();
+        db.sync().unwrap();
+        drop(db);
+        files.push(std::fs::read(&path).unwrap());
+        let db = fennec_core::fs::open(&path).unwrap();
+        assert_eq!(db.collection("a").unwrap().vectors["v"].dead(), 0);
+        assert_eq!(rows(&db, "get b where n < 0").len(), 2);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+    assert!(
+        files[0] == files[1],
+        "beside, the compact wrote another file"
+    );
+    let _ = std::fs::remove_dir(&dir);
+}
+
 #[test]
 fn a_schema_change_meanwhile_is_reported_rather_than_built_over() {
     let db = RwLock::new(seeded());

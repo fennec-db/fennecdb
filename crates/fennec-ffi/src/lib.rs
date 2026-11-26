@@ -575,11 +575,11 @@ pub unsafe extern "C" fn fennec_close(
         // Stopped before the lock is taken: a compact rewriting the file
         // finishes first, its file in place, rather than be cut off; a
         // rebuild of a worn graph, and a compact still rebuilding its
-        // graphs -- every worn one -- give up at their next step, a
-        // fraction of a second, the graphs and the file as they stood --
-        // waited out, a close on an app's UI thread as it went to the
-        // background waited the seconds a rebuild of 20 000 x 768 takes on
-        // a phone.
+        // graphs -- every one with a tombstone, worn or not -- give up at
+        // their next step, a fraction of a second, the graphs and the file
+        // as they stood -- waited out, a close on an app's UI thread as it
+        // went to the background waited the seconds a rebuild of 20 000 x
+        // 768 takes on a phone.
         drop(n.compactor.lock().unwrap_or_else(|e| e.into_inner()).take());
         let mut db = n.db.write().unwrap_or_else(|e| e.into_inner());
         n.closed.store(true, Ordering::Release);

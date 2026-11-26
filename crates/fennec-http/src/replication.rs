@@ -861,8 +861,8 @@ impl Sink for Tee {
         }
         Ok(())
     }
-    fn append_deferred(&mut self, bytes: &[u8]) -> fennec_core::error::Result<()> {
-        self.file.append_deferred(bytes)
+    fn append_deferred(&mut self, record: Vec<u8>, from: usize) -> fennec_core::error::Result<()> {
+        self.file.append_deferred(record, from)
     }
     fn sync_existing(&mut self) -> fennec_core::error::Result<()> {
         self.file.sync_existing()
