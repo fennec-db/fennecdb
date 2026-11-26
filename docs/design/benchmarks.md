@@ -433,7 +433,14 @@ its own queue at every second; a lane behind its schedule says so on the
 minute's line (`r_behind_s`, `r_behind_max_s`) and in the notes. At the peak, as fast as answered, the pool
 runs closed and the lane follows it, its rate each second its share of
 what the pool did (`seconds`), a lane more than a second behind moved up
-rather than left a backlog to burst through. The peak is the rate's
+rather than left a backlog to burst through -- the reads the move skips
+dropped, never sent, and counted: the minute's line says the lane's
+share of what was answered and the reads dropped (`lane_ops`,
+`lane_dropped`), and the peak's `:end` the same over its minutes
+(`peak_lane_share` against the 4% the soak's rate asks,
+`peak_lane_dropped`), with a line of its own: a peak whose lane could
+not keep up measured fewer reads through the replica than a fraction of
+it asks. The peak is the rate's
 measure, and the lanes change it: in one pool the closed loop's
 connections spent most of their time in the reads' wait for the sync,
 so the peak was the pool's arithmetic -- 32 connections, 4% of them 200
@@ -451,6 +458,19 @@ more, the VM's load 12-16. So a phase at a fraction of the peak now runs
 about two and a half times the operations it ran, and a long run's
 figures from before the lanes -- its rate, its file's growth and its
 compactions -- are not this one's at the same fraction.
+
+The lane costs open files: a connection of the harness's is two (its
+socket and the reader's clone of it), and the pool's 32, the lane's 128
+twice from a kill until the replica is back, the 64 streams and some 64
+beside are some 700 (`fds_needed`), against about 200 in one pool --
+past macOS's default soft limit of 256, where every connect fails
+(`EMFILE`) and counts as the server's error. `run-soak.sh` raises the
+soft limit to what the run holds within the hard limit, and refuses to
+start, naming both, where it cannot; `ycsb soak` holds its own limit to
+its count before anything starts (exit 2). One file a connection -- the
+reader writing through its own socket -- would make it some 420, still
+past 256 at a restart: not enough alone, and `http.rs`'s client is every
+bench's.
 
 **What a restart's operations waited for.** The fourth dry run of
 2026-11-24 -- 120 minutes at 1 240 a second, 80% of its peak's slowest
@@ -720,7 +740,9 @@ for `sleep`, charged to its own cgroup and never the server's; a `docker
 exec` a look was no option, a sizing loop of one every 100 ms having
 slowed a server 30-57%. It ends with the server's processes at a kill or
 a death, its last look already read, and is started again a second
-after, until the server runs again. The minute's line takes each
+after, until the server runs again; its life's figures begin again with
+each start of its server's, the replica's found stopped and started
+among them. The minute's line takes each
 server's most anonymous memory and dirty pages in the minute
 (`anon_peak`, `dirty_peak`, `r_anon_peak`, `r_dirty_peak`), its least
 page cache (`file_min`, `r_file_min`), the life's most (`anon_peak_life`,
@@ -826,7 +848,10 @@ process for more than a second, and the 20 minutes of mismatches after
 it re-read the same lost writes. A server gone that the run did not kill
 is now found as it happens, from Docker's events of the primary's
 container -- one `docker events` process the run long, its `die` and
-`oom` (`follow_events`), on which the minute's wait wakes -- and by the
+`oom` (`follow_events`), on which the minute's wait wakes, under a shell
+that ends it once `ycsb` lets go of its input, a killed `ycsb` too
+(`tied`): it writes only on an event, and outlived a killed run until
+its next line found no reader -- and by the
 container's state at each minute's end and at each kill, before its
 announcement and again before `docker kill` is sent (`dead`): a kill
 that finds its server dead is not sent, the death stands for it
@@ -854,25 +879,58 @@ taken on this host) -- one between minutes, one in the compact the kill
 of minute 6 waited for, one in the compact the kill of minute 3 was to
 land in -- were each timed inside the 0.23-0.24 s the call took, 9-10 ms
 after the last answer before them, and Docker's `die` came 177-185 ms
-after. A server read answering more than a second after a
-close was alive then: that close is no death (`CLOSE_SLOP`). The death's
+after; on the review round's, of the same day (six minutes at 2 000 a
+second, the host's load 15-30), one sent between minutes
+was timed 36 ms into the 0.21 s the call took, 9 ms after the last
+answer and no answer read after its close, Docker's `die` 161 ms after. A server read answering more than 50 ms after a close was alive
+then: that close is no death's, and is let go at the next close
+(`CLOSE_SLOP`, `Shared::closed`). With the slop at a second, a close
+that was no death's -- a client's refused connect, a subscription's, a
+connection thread's panic -- with answers to 0.9 s after it and the
+server then hung 30 s and OOM-killed, stood for the death, and the
+writes answered 29 s before it were excused; 50 ms is five times the
+gap the dry run measured, and too short a slop only moves the time to
+the next close, later -- stricter by an answer's few ms, never more
+lenient. An answer read after the close within the slop was written
+before the death, which is then taken at that answer: never before the
+last answer (`death_late_ms` how late it came). A connect that timed
+out is no close (`a_close`): the server may be alive and slow. The death's
 window in the checker is the death's time to the server answering
 again, so a write a read then shows gone is judged from when the server
 went, still held to `--loss-ms`; the failures it cut before it was found
 are moved from the errors to `down` (`death_down`), and a compact or a
 backup it cut is its (`compact_died`, `backup_died`), each the death's,
 never a failure of its own -- told from a compact the kill cut by when
-the kill was sent (`kill_sent`), not by the restart's window, which the
-announcement opens a second before it: the dry run's death in that
-second was counted as the kill's cut, and its run held for `WAIT_MAX` on
-a compact no longer under way, until the wait for the kill's compact
-looked at Docker's events too. The report counts it as a failure of its own,
+the kill was sent (`kill_sent`, stored before `docker kill`), not by the
+restart's window, which the announcement opens a second before it: the
+dry run's death in that second was counted as the kill's cut, and its
+run held for `WAIT_MAX` on a compact no longer under way, until the wait
+for the kill's compact looked at Docker's events too (`compact_wait`).
+Docker sets a container's state as it reaps the process, after its
+sockets close, so a death in the moment before the send -- an OOM kill
+in the very compact the kill was to land in -- is still running to the
+looks before it: `docker kill` then finds it not running, or kills
+nothing. After Docker's wait the kill reads the server's end
+(`gone_before`): the kernel's OOM kill (`OOMKilled`, set from the same
+event as Docker's `oom`, and cleared at a start), `docker kill` finding
+it not running, or its `FinishedAt` before the send by more than the
+clock probe's round trip -- unless it was read answering more than the
+slop after the send, alive then, a step of the VM's clock otherwise
+failing the run's own kill as a death -- make it a death, timed by
+itself, the kill not counted (`kill_died`). A side job cut after
+`kill_sent` waits for that verdict (`kill_judged`, `cut_by`, 200 s at
+the most) before it says whose its cut was. The report counts it as a failure of its own,
 apart from the planned kills: "no server died, none OOM-killed" names
 each death -- its minute, how it ended, the kill due, what timed it --
 with the mismatches and the writes a read showed gone from its line to
 the next restart's, each a loss past what `--sync` allows; the schedule's
 line counts a kill the death stood for, a compact or backup it cut, with
-it, and its restart's verify beside the kills'.
+it, and its restart's verify beside the kills'. Every restart verifies
+the file, a death's as a kill's, so the verifies owed are the kills and
+the deaths but those a kill found (`(kills + died) - kill_died`): a run
+from before this, re-judged, whose deaths' restarts were verified alike,
+now passes the count it failed when only the kills were owed -- and
+still fails for the death itself.
 
 **The mix**, over 32 connections and a lane of 128 for the reads through
 the replica (above): 36% read and 37% update of YCSB's records
@@ -1014,7 +1072,9 @@ cut short keeps what it measured, each line stamped with the harness's
 start (`started`, so a run id used again is told apart: the report judges
 the latest attempt) and the primary's `life` (its restarts before it):
 `ops`, `ops_s` against `rate`, `idle_workers` (connections that ended no
-operation in the minute); `behind_s`, how far the open loop is behind its
+operation in the minute), `lane_ops` (the replica lane's among them) and
+`lane_dropped` (the reads the peak's lane dropped, more than a second
+behind); `behind_s`, how far the open loop is behind its
 schedule at the minute's end -- the pool's median connection's lag behind
 the operation it waits for or works on, none where it is ahead
 (`r_behind_s` the replica lane's), and the most of each read a second
@@ -1092,7 +1152,8 @@ gone that the run did not kill, the kernel's OOM kills of it), and a
 death's own (`death_oom`, `death_exit`, `death_at_s`, `death_source` --
 1 the first connection it closed, 2 Docker's `die`, 3 its `FinishedAt`, 4
 the minute's look -- `death_kill_due_s`, `death_announced_ms` (found in
-the kill's announced second), `death_answer_ms`, `death_docker_ms`,
+the kill's announced second), `death_answer_ms`, `death_late_ms` (an
+answer read after the first close, within `CLOSE_SLOP`), `death_docker_ms`,
 `death_down`, `death_anon`, `death_dirty`, `death_sync_ms`); the clock's
 `clock_off_ms`, `clock_rtt_ms` and `clock_step`; and what else used the
 machine: `load1`, `load5`, `others_host` (this host's other processes, in
@@ -1105,7 +1166,7 @@ published ports, which Docker Desktop's `initd` does in the VM, the
 kernel's vsock work, and the run's look, verify and backup containers --
 about a core all through the third dry run, 2.6 times the server's own
 CPU for the same `/_health` requests where measured beside one). `:start` says
-the run's settings (`replica_threads`, `replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute) and `peak_auto_compacts`, `:end` closes a
+the run's settings (`replica_threads`, `replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute), `peak_auto_compacts`, `peak_lane_share` and `peak_lane_dropped`, `:end` closes a
 finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
 `p99_restart` and `restart_ops`, `p99_restart_replica` and
 `restart_replica_ops`, `p99_restart_behind` and
@@ -1255,7 +1316,10 @@ look with the watch gone; no window of the
 replica's open past what a compaction of its file plausibly takes
 (`r_compacts_overlong`, `r_compact_bound_ms`); and the open
 loop back on its schedule (`behind_s` a second
-at most) at some look of every stretch as long as the kill interval -- a
+at most) at some look of every stretch as long as the kill interval, the
+replica lane's too where the run had one (`r_behind_s`: its 4% on a
+schedule of its own, which a replica that never keeps up with leaves
+behind with the pool on time) -- a
 compact's or a restart's backlog drains, at 80% of the peak a kill's in
 four times as long as the server was gone, and a loop behind for longer was asked for more than
 the server answers, from which on every latency the run writes is its

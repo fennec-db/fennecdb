@@ -254,13 +254,27 @@ const REPLICA_SLOW_MS: u64 = 100;
 const MAX_CONNECTIONS: u64 = 320;
 
 /// How long after a close the server may still be read answering before
-/// that close is taken for no death (`Shared::closed`): an answer the
-/// server wrote before it died is read a few ms after another connection
-/// saw it close, and a server answering a second after a close was alive.
-const CLOSE_SLOP: u64 = 1_000_000_000;
+/// that close is taken for no death (`Shared::closed`). An answer the
+/// server wrote before it died can be read after another connection saw
+/// it close -- each connection's bytes come through Docker's port
+/// forwarding on a relay of its own, and the thread holding it waits for
+/// a core among the harness's 250 -- but within milliseconds: the dry run
+/// of 2026-11-26's three deaths had their first close 9-10 ms after the
+/// last answer before it. A close the server answered past is no death's
+/// -- a client's refused connect, a subscription's, a connection thread's
+/// panic -- and is let go at the next close. Kept longer, it stands for a
+/// death that came after it: a slop of a second took a close 0.9 s before
+/// a server that then hung 30 s and was OOM-killed for its time, and
+/// excused writes answered half a minute before it went. Too short a slop
+/// only moves a death's time to the next close, later: the judge stricter
+/// by an answer's few ms, never more lenient (the writes a read shows
+/// gone are excused from the death's time back, and `death_time` never
+/// takes one before the last answer). 50 ms is five times the gap the dry
+/// run measured, and a twentieth of the second.
+const CLOSE_SLOP: u64 = 50_000_000;
 
 /// How long a side job that failed waits for a death to be found before it
-/// counts its failure as its own (`Side::died_in`): the death is found from
+/// counts its failure as its own (`cut_by`): the death is found from
 /// Docker's `die` event at once, or from the container's state, which
 /// Docker sets as it reaps the process -- milliseconds after its sockets
 /// close, which is what the job saw.
@@ -1234,30 +1248,38 @@ impl Source {
 }
 
 /// The time a death of the primary's writes are judged from, in ns from the
-/// run's start, where it was read from, and the last answer before it.
+/// run's start, where it was read from, and the last answer read before
+/// that time.
 ///
 /// The first connection the server closed after its last answer, where
 /// there is one: the process's sockets close in its exit, before Docker
 /// reaps it, and the soak holds 64 streams and its workers' connections
 /// open, so it is the death to a few ms -- on the clock every write's
-/// answer is timed on. `closed` is that close and the last answer read
-/// before it (`Shared::closed`), `answered` the last answer read at all:
-/// a server read answering more than `CLOSE_SLOP` after a close was alive
-/// then, and that close no death. Docker's times (`docker`: its `die`
+/// answer is timed on. `closed` is that close (`Shared::closed`),
+/// `answered` the last answer read at all: a server read answering more
+/// than `CLOSE_SLOP` after a close was alive then, and that close no
+/// death; one read within it was written before the death, which is
+/// taken at that answer where it came after the close -- never before the
+/// last answer, as a time before the real death excuses writes the server
+/// held for longer than `--loss-ms`. Docker's times (`docker`: its `die`
 /// event, or `FinishedAt`) are the VM's clock, which this process knows
 /// only by the minute's probe, to its round trip and between steps; and
 /// they are the reap, after the process's teardown, its sockets' close
 /// among it: taken where nothing closed, and said beside the close where
 /// something did. With neither, the minute's look before it (`look`).
 fn death_time(
-    closed: (u64, u64),
+    closed: u64,
     answered: u64,
     docker: Option<(u64, Source)>,
     look: u64,
 ) -> (u64, Source, Option<u64>) {
-    let (c, before) = closed;
+    let c = closed;
     if c != u64::MAX && answered <= c.saturating_add(CLOSE_SLOP) {
-        return (c, Source::Close, (before > 0).then_some(before));
+        return (
+            c.max(answered),
+            Source::Close,
+            (answered > 0).then_some(answered),
+        );
     }
     match docker {
         Some((d, s)) => (d, s, None),
@@ -3232,29 +3254,43 @@ struct Shared {
     r_due: AtomicU64,
     r_every: AtomicU64,
     pool_ops: AtomicU64,
+    /// The lane's reads answered since the minute's line took them, and,
+    /// at the peak, those its schedule dropped -- in thousandths of a
+    /// read: a lane more than a second behind is moved up to a second
+    /// behind, the reads it skips never sent (`work`).
+    lane_ops: AtomicU64,
+    lane_dropped_milli: AtomicU64,
     /// `t0` on the wall clock, unix ns, and the VM's clock less this host's
     /// at the latest probe (`clock_probe`), ns: what Docker's times, the
     /// VM's, are read on this process's clock by (`vm_ns`).
     t0_wall: u64,
     clock_off: std::sync::atomic::AtomicI64,
+    /// That probe's round trip, ns: what bounds the offset's error.
+    clock_rtt: AtomicU64,
     /// The latest a primary's connection was read answering -- a worker's
-    /// answer, a stream's event -- and the first close of one since, with
-    /// the latest answer before it (`u64::MAX` while none): a death's time
-    /// (`death_time`).
+    /// answer, a stream's event -- and the first close of one since
+    /// (`u64::MAX` while none): a death's time (`death_time`).
     answered: AtomicU64,
-    closed: Mutex<(u64, u64)>,
+    closed: AtomicU64,
     /// When each connection that failed outside a restart's window failed
     /// since the minute's line took the errors: those from a death on are
     /// its, `down` and not errors, once it is found (`death_errors`).
     cut_errors: Mutex<Vec<u64>>,
     /// The deaths found, by their time: what a side job cut by one asks
-    /// (`Side::died_in`).
+    /// (`cut_by`).
     deaths: Mutex<Vec<u64>>,
     /// When the last kill the schedule sent was sent (0 before any): a
     /// compact cut after it is the kill's, one cut before it -- in the
     /// announced second, the server dead before the kill -- the death's.
     /// The restart's window cannot tell them: the announcement opens it.
+    /// Stored before `docker kill` is sent, so that a job its cut ends
+    /// finds it; and a death in the moment before the send, which Docker's
+    /// inspect showed running, is found only after Docker's wait
+    /// (`gone_before`): until the kill sent at `kill_sent` is judged
+    /// (`kill_judged`, its time once it was the kill's), a job it cut
+    /// waits to say whose (`cut_by`).
     kill_sent: AtomicU64,
+    kill_judged: AtomicU64,
     /// Each server's cgroup a second (`watch_memory`): the primary's, then
     /// the replica's.
     mem: [Mutex<Mem>; 2],
@@ -3358,12 +3394,16 @@ impl Shared {
             r_due: AtomicU64::new(0),
             r_every: AtomicU64::new((1e9 / r_rate) as u64),
             pool_ops: AtomicU64::new(0),
+            lane_ops: AtomicU64::new(0),
+            lane_dropped_milli: AtomicU64::new(0),
             t0_wall,
             clock_off: std::sync::atomic::AtomicI64::new(0),
+            clock_rtt: AtomicU64::new(0),
             answered: AtomicU64::new(0),
-            closed: Mutex::new((u64::MAX, 0)),
+            closed: AtomicU64::new(u64::MAX),
             cut_errors: Mutex::new(Vec::new()),
             kill_sent: AtomicU64::new(0),
+            kill_judged: AtomicU64::new(0),
             deaths: Mutex::new(Vec::new()),
             mem: [Mutex::new(Mem::default()), Mutex::new(Mem::default())],
             behind: Mutex::new(Behind::default()),
@@ -3380,18 +3420,20 @@ impl Shared {
 
     /// A primary's connection read answering at `t`.
     fn answered(&self, t: u64) {
-        self.answered.fetch_max(t, Ordering::Relaxed);
+        self.answered.fetch_max(t, Ordering::SeqCst);
     }
 
     /// A primary's connection found closed -- cut, refused, a stream ended
     /// -- at `t`: the first since the server was last read answering is
-    /// kept, with that answer (`death_time`).
+    /// kept (`death_time`), and one the server was read answering past by
+    /// more than `CLOSE_SLOP` is let go for this one -- it was no death's.
     fn closed(&self, t: u64) {
-        let mut c = self.closed.lock().unwrap();
-        let a = self.answered.load(Ordering::Relaxed);
-        if c.0 == u64::MAX || a > c.0.saturating_add(CLOSE_SLOP) {
-            *c = (t, a);
-        }
+        let a = self.answered.load(Ordering::SeqCst);
+        let _ = self
+            .closed
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
+                (c == u64::MAX || a > c.saturating_add(CLOSE_SLOP)).then_some(t)
+            });
     }
 
     /// A time Docker gives, unix ns on the VM's clock, in ns from `t0` on
@@ -3618,8 +3660,15 @@ impl Worker<'_> {
                 &self.sh.addr
             };
             let c = if replica { &mut self.rc } else { &mut self.c };
+            // A connect's own failure, kept: one refused is a close, one
+            // that timed out is not (`a_close`) -- the server may be
+            // alive and slow, and a close taken for its death's time.
+            let mut unconnected = None;
             if c.is_none() {
-                *c = http::Http::try_connect(addr, Duration::from_secs(60)).ok();
+                match http::Http::try_connect(addr, Duration::from_secs(60)) {
+                    Ok(x) => *c = Some(x),
+                    Err(e) => unconnected = Some(e),
+                }
                 if !replica {
                     self.life = None;
                 }
@@ -3632,7 +3681,7 @@ impl Worker<'_> {
                     }
                     Err(e) => Err(e),
                 },
-                None => Err(std::io::Error::other("no connection")),
+                None => Err(unconnected.unwrap_or_else(|| std::io::Error::other("no connection"))),
             };
             let t = self.sh.ns();
             // A connection's server is the one that answered it first,
@@ -4118,9 +4167,11 @@ fn pool_u(r: f64, lanes: bool) -> f64 {
     }
 }
 
-/// Whether a request's failure is its connection gone -- closed, cut,
-/// refused, or no connection to send it on -- rather than a wait that ran
-/// out: what a death does to every connection at once.
+/// Whether a request's failure is its connection gone -- closed, cut or
+/// refused -- rather than a wait that ran out: what a death does to every
+/// connection at once. A connect that timed out is no close: the server
+/// may be alive and slow, and the close would be taken for a death's time
+/// (`Shared::closed`).
 fn a_close(e: &std::io::Error) -> bool {
     use std::io::ErrorKind as K;
     matches!(
@@ -4131,7 +4182,7 @@ fn a_close(e: &std::io::Error) -> bool {
             | K::ConnectionRefused
             | K::BrokenPipe
             | K::NotConnected
-    ) || e.to_string() == "no connection"
+    )
 }
 
 /// `{"affected":1}`'s count.
@@ -4195,11 +4246,17 @@ fn work(sh: &Shared, w: usize) {
                 // one more than a second behind is moved up: its share of
                 // the pool's operations, never a backlog of its own that a
                 // slower pool would see it burst through.
-                if sh.rate == 0.0 {
-                    sh.r_due
-                        .fetch_max(sh.ns().saturating_sub(1_000_000_000), Ordering::Relaxed);
-                }
                 let step = sh.r_every.load(Ordering::Relaxed);
+                if sh.rate == 0.0 {
+                    // The reads the move skips are counted: dropped, never
+                    // sent, the peak's lane short of its share by them.
+                    let floor = sh.ns().saturating_sub(1_000_000_000);
+                    let was = sh.r_due.fetch_max(floor, Ordering::Relaxed);
+                    if was < floor {
+                        sh.lane_dropped_milli
+                            .fetch_add(dropped_milli(floor - was, step), Ordering::Relaxed);
+                    }
+                }
                 let d = sh.r_due.fetch_add(step, Ordering::Relaxed);
                 slot.due.store(d, Ordering::Relaxed);
                 let due = sh.t0 + Duration::from_nanos(d);
@@ -4233,6 +4290,8 @@ fn work(sh: &Shared, w: usize) {
         slot.done.fetch_add(1, Ordering::Relaxed);
         if !in_lane {
             sh.pool_ops.fetch_add(1, Ordering::Relaxed);
+        } else if ok {
+            sh.lane_ops.fetch_add(1, Ordering::Relaxed);
         }
         let at = due.saturating_duration_since(sh.t0).as_nanos() as u64;
         let (id, from, to) = *sh.r_window.lock().unwrap();
@@ -4261,6 +4320,13 @@ fn work(sh: &Shared, w: usize) {
             sh.ops.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// The reads a move of the lane's schedule by `skipped` ns skips, one due
+/// every `step` ns, in thousandths of a read: the moves are many and small,
+/// a whole read's count of each would round most to none.
+fn dropped_milli(skipped: u64, step: u64) -> u64 {
+    (skipped as u128 * 1000 / step.max(1) as u128).min(u64::MAX as u128) as u64
 }
 
 /// An SSE `data:` line of a subscription: its change, rows and deletions.
@@ -4322,8 +4388,9 @@ fn subscribe(sh: &Shared, i: usize) {
         })();
         let mut ended = String::from("refused");
         // Its connection closed or refused, rather than answered with a
-        // status: what a death's time is read from (`death_time`).
-        let mut gone = opened.is_err();
+        // status: what a death's time is read from (`death_time`). A
+        // connect that timed out is none (`a_close`).
+        let mut gone = matches!(&opened, Err(e) if a_close(e));
         if let Ok(s) = opened {
             let conn = me.conns.fetch_add(1, Ordering::SeqCst) + 1;
             let at = sh.ns();
@@ -4618,7 +4685,7 @@ struct Doings {
     compact_busy: AtomicU64,
     /// Compacts a kill cut: asked, under way, the server killed.
     compact_killed: AtomicU64,
-    /// Compacts and backups a death of the primary cut (`Side::died_in`):
+    /// Compacts and backups a death of the primary cut (`cut_by`):
     /// the death's, counted with it, never a failure of their own.
     compact_died: AtomicU64,
     backup_died: AtomicU64,
@@ -4778,34 +4845,76 @@ struct Side {
     kit: Kit,
 }
 
-impl Side {
-    /// Whether the primary died in a job of `[s, ...]` that failed: a death
-    /// found since `s` (`Shared::deaths`), or the server not running with
-    /// no restart's window open -- looked for `DEATH_WAIT` at the most, as
-    /// the job sees its connection close before the run finds the death.
-    /// In a window the server is down for a kill or a death found before,
-    /// and only a death found says which. The long run's compact of minute
-    /// 300 counted as a failure of its own, the death that cut it its
-    /// cause.
-    fn died_in(&self, s: u64) -> bool {
-        let until = Instant::now() + DEATH_WAIT;
-        loop {
-            if self.sh.deaths.lock().unwrap().iter().any(|&d| d >= s) {
-                return true;
-            }
-            if !self.sh.restarting(self.sh.ns())
-                && self
-                    .kit
-                    .exit(&self.kit.server())
-                    .is_some_and(|x| !x.running)
-            {
-                return true;
-            }
-            if Instant::now() >= until {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(250));
+/// What cut a side job that failed (`cut_by`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutBy {
+    /// The run's kill, which the schedule lands in a compact: no failure.
+    Kill,
+    /// A death of the primary's: the death's, never the job's own.
+    Death,
+}
+
+/// How long a side job cut after the run's kill was sent waits for that
+/// kill to be judged its or a death's (`Shared::kill_judged`): the kill's
+/// `docker kill` and `docker wait` are bounded at 60 s and 120 s, the
+/// inspect after them is one more call.
+const KILL_JUDGE_WAIT: Duration = Duration::from_secs(200);
+
+/// What cut a side job of `[s, ...]` that failed, `close` where its
+/// connection went rather than a wait running out: a death found since
+/// `s` (`Shared::deaths`); the run's kill, sent since, once the kill's
+/// path judged it its own (`kill_judged`) -- a death in the moment before
+/// the send is found only after Docker's wait (`gone_before`), and the
+/// job, cut by it, saw its connection close after `kill_sent` was stored
+/// all the same; with no kill sent since, a closed connection and the
+/// server not running with no restart's window open (`stopped`: Docker's
+/// word), looked for `death_wait` at the most, as the job sees its
+/// connection close before the run finds the death; and in a restart's
+/// window with nothing else found, the kill's, as before the deaths were
+/// told apart. `None`: a failure of the job's own. The long run's compact
+/// of minute 300 counted as a failure of its own, the death that cut it
+/// its cause.
+fn cut_by(
+    sh: &Shared,
+    s: u64,
+    close: bool,
+    stopped: &dyn Fn() -> bool,
+    death_wait: Duration,
+    kill_wait: Duration,
+) -> Option<CutBy> {
+    let t = Instant::now();
+    loop {
+        if sh.deaths.lock().unwrap().iter().any(|&d| d >= s) {
+            return Some(CutBy::Death);
         }
+        let sent = sh.kill_sent.load(Ordering::SeqCst);
+        if sent >= s {
+            if sh.kill_judged.load(Ordering::SeqCst) >= sent || t.elapsed() >= kill_wait {
+                return Some(CutBy::Kill);
+            }
+        } else {
+            if !close || t.elapsed() >= death_wait {
+                break;
+            }
+            if !sh.restarting(sh.ns()) && stopped() {
+                return Some(CutBy::Death);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50).min(death_wait));
+    }
+    sh.restarting(sh.ns()).then_some(CutBy::Kill)
+}
+
+impl Side {
+    /// What cut a job of `[s, ...]` that failed (`cut_by`), Docker asked
+    /// whether the server runs.
+    fn cut_by(&self, s: u64, close: bool) -> Option<CutBy> {
+        let stopped = || {
+            self.kit
+                .exit(&self.kit.server())
+                .is_some_and(|x| !x.running)
+        };
+        cut_by(&self.sh, s, close, &stopped, DEATH_WAIT, KILL_JUDGE_WAIT)
     }
 
     fn compact(&self, for_kill: bool) {
@@ -4850,22 +4959,27 @@ impl Side {
                     self.doings.compact_busy.fetch_add(1, Ordering::Relaxed);
                     say("compact refused: the server's own was writing its file".into());
                 }
-                // Cut by a kill the schedule landed in it: what the run means
-                // it to meet, not a failure -- the file must verify after.
-                Err(_) if sh.kill_sent.load(Ordering::SeqCst) >= asked => {
-                    self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
-                }
-                // Cut by a death of the primary's: the death's -- before
-                // the kill's window, which the announcement opens a second
-                // before the kill: the dry run's death in that second was
-                // counted as the kill's cut.
-                Err(e) if a_close(&e) && self.died_in(asked) => {
-                    say(format!("compact cut by the primary's death: {e}"));
-                    self.doings.compact_died.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(_) if sh.restarting(sh.ns()) => {
-                    self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
-                }
+                Err(e) => match self.cut_by(asked, a_close(&e)) {
+                    // Cut by a kill the schedule landed in it: what the run
+                    // means it to meet, not a failure -- the file must
+                    // verify after.
+                    Some(CutBy::Kill) => {
+                        self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Cut by a death of the primary's: the death's -- before
+                    // the kill's window, which the announcement opens a
+                    // second before the kill, or in the moment before the
+                    // kill's send: the dry run's death in that second was
+                    // counted as the kill's cut.
+                    Some(CutBy::Death) => {
+                        say(format!("compact cut by the primary's death: {e}"));
+                        self.doings.compact_died.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => {
+                        sh.note(format!("compact failed: {e}"));
+                        self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
                 other => {
                     sh.note(format!("compact failed: {other:?}"));
                     self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
@@ -4946,7 +5060,7 @@ impl Side {
                 "rm -f /data/restored.fennec",
                 Duration::from_secs(120),
             );
-        } else if !backed && self.died_in(s) {
+        } else if !backed && self.cut_by(s, true) == Some(CutBy::Death) {
             // Its stream from the primary cut by the primary's death: the
             // death's, not the backup's.
             say(format!("backup {id} cut by the primary's death"));
@@ -6029,19 +6143,39 @@ impl DockerEv {
     }
 }
 
+/// `program` with `args` under a shell that ends it once this process
+/// lets go of the shell's input -- dropped, or this process gone, killed
+/// as it may be: a `docker events` follows forever and writes only on an
+/// event, so with nothing to end it, it outlived a killed `ycsb` until
+/// its next line found no reader. Only the program holds the output: it
+/// ending closes it, the reader sees the end, and the shell is let go.
+fn tied(program: &str, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.args([
+        "-c",
+        "\"$@\" </dev/null & p=$!; exec >/dev/null; read -r x; kill $p 2>/dev/null; wait $p",
+        "sh",
+        program,
+    ])
+    .args(args)
+    .stdin(std::process::Stdio::piped());
+    c
+}
+
 /// Follows Docker's events of the primary's container for the run's
 /// length -- one `docker events` process, no polling -- and hands each
 /// `die` and `oom` to the minute's loop (`events`): a death between two
 /// minutes is found as it happens, not at the next minute's look, which
 /// the failures it cut meanwhile were counted as errors before. Started
-/// again 5 s after it ends.
+/// again 5 s after it ends; ended with this process (`tied`).
 fn follow_events(sh: &Shared, kit: &Kit, events: mpsc::Sender<DockerEv>) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let server = kit.server();
     let filter = format!("container={server}");
     while !sh.stop.load(Ordering::Relaxed) {
-        let child = Command::new("docker")
-            .args([
+        let child = tied(
+            "docker",
+            &[
                 "events",
                 "--filter",
                 &filter,
@@ -6051,11 +6185,11 @@ fn follow_events(sh: &Shared, kit: &Kit, events: mpsc::Sender<DockerEv>) {
                 "event=oom",
                 "--format",
                 "{{.TimeNano}} {{.Action}} {{.Actor.Attributes.name}} {{index .Actor.Attributes \"exitCode\"}}",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
+            ],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
         if let Ok(mut child) = child {
             let (tx, lines) = mpsc::channel::<(u64, String)>();
             if let Some(out) = child.stdout.take() {
@@ -6082,7 +6216,8 @@ fn follow_events(sh: &Shared, kit: &Kit, events: mpsc::Sender<DockerEv>) {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            let _ = child.kill();
+            // Its input let go: the shell ends `docker events`, then itself.
+            drop(child.stdin.take());
             let _ = child.wait();
         }
         let until = Instant::now() + Duration::from_secs(5);
@@ -6092,12 +6227,81 @@ fn follow_events(sh: &Shared, kit: &Kit, events: mpsc::Sender<DockerEv>) {
     }
 }
 
-/// The primary as Docker has it now, Docker's events read so far kept in
-/// `evs`: its `Exit` where it is not running -- a death, the run's kill
-/// not sent.
-fn dead(bench: &Kit, events: &mpsc::Receiver<DockerEv>, evs: &mut Vec<DockerEv>) -> Option<Exit> {
+/// The primary as Docker has it now (`look`, `docker inspect`), Docker's
+/// events read so far kept in `evs` -- a death's `die` and `oom` for its
+/// line: its `Exit` where it is not running -- a death, the run's kill
+/// not sent. Docker sets the state as it reaps the process, after its
+/// sockets close: a death of the moment before a look is found after it
+/// (`gone_before`).
+fn dead(
+    look: impl FnOnce() -> Option<Exit>,
+    events: &mpsc::Receiver<DockerEv>,
+    evs: &mut Vec<DockerEv>,
+) -> Option<Exit> {
     evs.extend(events.try_iter());
-    bench.exit(&bench.server()).filter(|x| !x.running)
+    look().filter(|x| !x.running)
+}
+
+/// The run's kill of minute `m`, sent at `k`: noted first (`kill_sent`),
+/// so that a side job its end cuts finds it, then `docker kill` and
+/// Docker's wait for the end. Hands back when the wait ended, the server's
+/// state then (`docker inspect`), and whether `docker kill` found it not
+/// running: what tells the kill's end from a death of the moment before
+/// it (`gone_before`).
+fn send_kill(bench: &Kit, sh: &Shared, m: u64, k: u64) -> (u64, Option<Exit>, bool) {
+    // What the replica must hold before reads go through it again
+    // (`restart`): the newest change answered before the kill.
+    sh.replica_target
+        .store(sh.max_seq.load(Ordering::SeqCst), Ordering::SeqCst);
+    sh.kill_sent.store(k.max(1), Ordering::SeqCst);
+    let (ok, out) = docker_within(
+        Duration::from_secs(60),
+        &["kill", "--signal", "KILL", &bench.server()],
+    );
+    let not_running = !ok && out.to_ascii_lowercase().contains("is not running");
+    if !ok {
+        sh.note(format!("docker kill at minute {m}: {out}"));
+    }
+    let (ok, out) = docker_within(Duration::from_secs(120), &["wait", &bench.server()]);
+    if !ok {
+        sh.note(format!("docker wait at minute {m}: {out}"));
+    }
+    let killed = sh.ns();
+    (killed, bench.exit(&bench.server()), not_running)
+}
+
+/// Whether the server the run's kill, sent at `k`, found gone had died
+/// before it was sent: a death, not the kill -- its writes judged from its
+/// own time (`died`), earlier than `k`, and the run failed for it. The
+/// looks before the send (`dead`) read Docker's state, which Docker sets
+/// as it reaps the process, after its sockets close: a death in the moment
+/// before the send -- an OOM kill in the compact the kill was to land in
+/// -- is still running to them, and `docker kill` then finds it not
+/// running, or kills nothing. So after Docker's wait: the kernel's OOM
+/// kill (`OOMKilled`, which Docker sets from the same event as its `oom`
+/// and clears at a start); `docker kill` finding it not running
+/// (`not_running`); or its end (`FinishedAt`, `finished` on this process's
+/// clock by the latest probe) before the send by more than the probe's
+/// round trip (`err`), which bounds the clock's error -- unless the server
+/// was read answering more than `CLOSE_SLOP` after the send (`answered`),
+/// alive then: a step of the VM's clock since the minute's probe would
+/// otherwise put a kill's end before its send, and the run's own kill
+/// fail it as a death.
+fn gone_before(
+    exit: &Exit,
+    not_running: bool,
+    finished: Option<u64>,
+    err: u64,
+    answered: u64,
+    k: u64,
+) -> bool {
+    if exit.running {
+        return false;
+    }
+    exit.oom
+        || not_running
+        || (finished.is_some_and(|f| f.saturating_add(err) < k)
+            && answered <= k.saturating_add(CLOSE_SLOP))
 }
 
 /// The first minute from `m` on with a kill on the run's schedule: the
@@ -6116,6 +6320,45 @@ fn next_kill(m: u64, o: &Opts) -> Option<u64> {
         .iter()
         .any(|d| matches!(d, Doing::Kill { .. }))
     })
+}
+
+/// Why the wait for the compact a kill is to land in ended (`compact_wait`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactWait {
+    /// Docker's `die` of the primary: the dry run's second death, sent a
+    /// second into the kill's compact, held the run here for `WAIT_MAX`,
+    /// the compact's cut counted as the kill's, no compact left under way
+    /// to end.
+    Died,
+    /// The compact under way a second: the kill lands in it.
+    UnderWay,
+    /// It ended within the second: killed without.
+    Ended,
+    /// None of its own under way within `WAIT_MAX`: killed without.
+    Timeout,
+}
+
+/// Whether the wait for the compact the kill is to land in ends, and why:
+/// `evs` Docker's events read since it began, `since` when the compact
+/// under way was asked (`u64::MAX` while none is), `now`, whether it
+/// ended (`ended`) and how long the wait has been.
+fn compact_wait(
+    evs: &[DockerEv],
+    since: u64,
+    now: u64,
+    ended: bool,
+    waited: Duration,
+) -> Option<CompactWait> {
+    if evs.iter().any(|e| e.die) {
+        return Some(CompactWait::Died);
+    }
+    if since != u64::MAX && now.saturating_sub(since) >= 1_000_000_000 {
+        return Some(CompactWait::UnderWay);
+    }
+    if ended {
+        return Some(CompactWait::Ended);
+    }
+    (waited >= WAIT_MAX).then_some(CompactWait::Timeout)
 }
 
 /// A death of the primary the run did not cause, found now: its time read
@@ -6149,6 +6392,25 @@ fn died(
     sampler: Option<Sampler>,
     longest: &mut u64,
 ) -> u64 {
+    let (from, at, m) = found_dead(sh, doings, o, exit, evs, look, kill_due, announced);
+    restart(bench, sh, doings, (from, at, m), None, sampler, o, longest)
+}
+
+/// [`died`] but its restart, which is Docker's: the death timed, said and
+/// counted, its restart's window open from `from` with its time `at` for
+/// the kill's -- what the checker judges the writes a read later shows
+/// gone from (`Shared::kills`) -- and its minute. Hands back the three.
+#[allow(clippy::too_many_arguments)]
+fn found_dead(
+    sh: &Shared,
+    doings: &Doings,
+    o: &Opts,
+    exit: Exit,
+    evs: &mut Vec<DockerEv>,
+    look: u64,
+    kill_due: Option<u64>,
+    announced: Option<u64>,
+) -> (u64, u64, u64) {
     let event = evs.iter().rev().find(|e| e.die).map(|e| e.vm);
     let oom_event = evs
         .iter()
@@ -6163,9 +6425,15 @@ fn died(
             .and_then(|v| sh.vm_ns(v))
             .map(|t| (t, Source::Finished)),
     };
-    let closed = *sh.closed.lock().unwrap();
+    let closed = sh.closed.load(Ordering::SeqCst);
     let (at, source, answered) =
         death_time(closed, sh.answered.load(Ordering::SeqCst), docker, look);
+    // An answer read after the close it is timed by, within the slop: how
+    // late -- what `CLOSE_SLOP` is measured against.
+    let late = match (source, answered) {
+        (Source::Close, Some(a)) if a > closed => Some(a - closed),
+        _ => None,
+    };
     sh.deaths.lock().unwrap().push(at);
     // Its restart's window opened first -- from the kill's announcement
     // where it was found in it, the window that opened, from whichever
@@ -6178,8 +6446,8 @@ fn died(
     {
         let mut w = sh.windows.lock().unwrap();
         match w.last_mut() {
-            Some(x) if announced == Some(x.0) && x.1 == u64::MAX => x.0 = from,
-            _ => w.push((from, u64::MAX, u64::MAX)),
+            Some(x) if announced == Some(x.0) && x.2 == u64::MAX => *x = (from, at, u64::MAX),
+            _ => w.push((from, at, u64::MAX)),
         }
     }
     sh.restart_to.store(u64::MAX, Ordering::SeqCst);
@@ -6210,9 +6478,13 @@ fn died(
         (at % 60_000_000_000) as f64 / 1e9,
         exit.said(&o.memory),
         source.said(),
-        match answered {
-            Some(a) => format!(", {:.0} ms after its last answer", ms(at, a)),
-            None => String::new(),
+        match (answered, late) {
+            (Some(_), Some(l)) => format!(
+                ", its last answer read {:.0} ms after the first close",
+                l as f64 / 1e6
+            ),
+            (Some(a), None) => format!(", {:.0} ms after its last answer", ms(at, a)),
+            (None, _) => String::new(),
         },
         match (source, docker) {
             (Source::Close, Some((t, _))) => format!(
@@ -6266,6 +6538,9 @@ fn died(
     if let Some(a) = answered {
         doings.figure("death_answer_ms", format!("{:.0}", ms(at, a)));
     }
+    if let Some(l) = late {
+        doings.figure("death_late_ms", format!("{:.0}", l as f64 / 1e6));
+    }
     if let Some((t, _)) = docker {
         doings.figure("death_docker_ms", format!("{:.0}", ms(t, at)));
     }
@@ -6277,7 +6552,7 @@ fn died(
         behind_s(sh.pool_slots(), sh.ns()).is_some_and(|b| b > ON_SCHEDULE_S),
         Ordering::SeqCst,
     );
-    restart(bench, sh, doings, (from, at, m), false, sampler, o, longest)
+    (from, at, m)
 }
 
 /// The replica's compaction counter (`fennec_auto_compactions_total`) as
@@ -6692,7 +6967,48 @@ fn replica_compaction(sh: &Shared, edge: Option<Edge>, count: Count) {
     say(said);
 }
 
+/// The file descriptors the run holds at the most: two a connection of
+/// `http::Http`'s (its socket and the reader's clone of it); the pool's
+/// one each, the replica lane's two -- to the replica, and to the primary
+/// from a kill until the replica is back -- or, with no lane, the pool's
+/// two; one a subscription's stream; and `FDS_BESIDE` for the rest. The
+/// lane took the run from about 200 to some 380, and 640 at a restart,
+/// past macOS's default soft limit of 256: a connect past it fails
+/// (`EMFILE`), counted as the server's error.
+fn fds_needed(o: &Opts) -> u64 {
+    let https = match o.replica_threads {
+        0 => 2 * o.threads,
+        r => o.threads + 2 * r,
+    };
+    2 * https as u64 + o.subscriptions as u64 + FDS_BESIDE
+}
+
+/// What else the run holds beside its connections: the standard three, the
+/// side job's connection, the minute's scrapes and probes, the watches'
+/// and `docker`'s pipes, the seconds' log and the results' appends.
+const FDS_BESIDE: u64 = 64;
+
+/// This process's soft limit on open files, as a shell it starts inherits
+/// it (`ulimit -n`): `None` where none, or unread.
+fn open_files_limit() -> Option<u64> {
+    let out = std::process::Command::new("sh")
+        .args(["-c", "ulimit -n"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 fn run(o: &Opts) {
+    // Held to the limit before anything starts: past it, every connect
+    // fails as the servers' error, the run hours on (run-soak.sh raises
+    // it).
+    let need = fds_needed(o);
+    if let Some(have) = open_files_limit().filter(|&have| have < need) {
+        eprintln!(
+            "the soft limit on open files is {have}, under the {need} the run holds at a restart: raise it (`ulimit -n {need}`; run-soak.sh does)"
+        );
+        std::process::exit(2);
+    }
     if let Some(p) = &o.progress {
         *PROGRESS.lock().unwrap() = std::fs::OpenOptions::new()
             .create(true)
@@ -6883,8 +7199,9 @@ fn run(o: &Opts) {
     let _ = sh.repl_token.set(bench.token.clone());
     // The VM's clock against this host's before the first death can need
     // it (`vm_ns`).
-    if let Some((off, _)) = clock_probe(&addr) {
+    if let Some((off, rtt)) = clock_probe(&addr) {
         sh.clock_off.store((off * 1e6) as i64, Ordering::Relaxed);
+        sh.clock_rtt.store((rtt * 1e6) as u64, Ordering::Relaxed);
     }
     let mut handles = Vec::new();
     for w in 0..o.threads + o.replica_threads {
@@ -6956,6 +7273,10 @@ fn run(o: &Opts) {
     let mut auto = [(0u64, 0u64); 2];
     let mut totals = (0u64, 0u64, 0u64);
     let mut peak = Vec::new();
+    // The peak's reads through the replica lane, of every operation, and
+    // those its schedule dropped (in thousandths), over the minutes its
+    // mean is taken over.
+    let mut peak_lane = (0u64, 0u64, 0u64);
     let mut last = sh.t0;
     let mut life = 0u64;
     let mut env_failed = None;
@@ -6990,7 +7311,7 @@ fn run(o: &Opts) {
                     if !ev.die {
                         continue;
                     }
-                    if let Some(x) = dead(&bench, &events, &mut evs) {
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
                         let look = (m - 1) * 60_000_000_000;
                         let back = died(
                             &bench,
@@ -7021,7 +7342,7 @@ fn run(o: &Opts) {
         }
         // And by its state, where Docker's events said nothing: died
         // between the minute's looks, timed by what closed.
-        if let Some(x) = dead(&bench, &events, &mut evs) {
+        if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
             let look = (m - 1) * 60_000_000_000;
             let back = died(
                 &bench,
@@ -7088,6 +7409,8 @@ fn run(o: &Opts) {
             idle += (s.done.swap(0, Ordering::Relaxed) == 0) as u64;
         }
         let ops = sh.ops.swap(0, Ordering::Relaxed);
+        let lane_ops = sh.lane_ops.swap(0, Ordering::Relaxed);
+        let lane_dropped = sh.lane_dropped_milli.swap(0, Ordering::Relaxed);
         // The checker: every read that ended before the earliest
         // operation in flight, what no later read needs let go of, past
         // the window a kill could still take back.
@@ -7196,9 +7519,10 @@ fn run(o: &Opts) {
             (Some(a), Some(b)) => clock_stepped(a, b),
             _ => false,
         };
-        if let Some((off, _)) = clock {
+        if let Some((off, rtt)) = clock {
             clock_prev = clock;
             sh.clock_off.store((off * 1e6) as i64, Ordering::Relaxed);
+            sh.clock_rtt.store((rtt * 1e6) as u64, Ordering::Relaxed);
         }
         // What the VM's CPUs did beside the two servers' cgroups -- the
         // run's own look, verify and backup containers among it -- in
@@ -7280,6 +7604,8 @@ fn run(o: &Opts) {
             ("ops_s", format!("{:.0}", ops as f64 / secs)),
             ("rate", format!("{:.0}", o.rate)),
             ("idle_workers", idle.to_string()),
+            ("lane_ops", lane_ops.to_string()),
+            ("lane_dropped", (lane_dropped / 1000).to_string()),
             (
                 "r_compacts_watched",
                 sh.r_compacts_seen.swap(0, Ordering::Relaxed).to_string(),
@@ -7592,6 +7918,20 @@ fn run(o: &Opts) {
             Some(b) if b >= 1.0 => format!("{tail}, the replica lane {b:.0} s behind"),
             _ => tail,
         };
+        // At the peak the lane follows the pool, and what it could not
+        // keep up with it dropped: its share of what was answered, which
+        // the soak's rate asks 4% of.
+        let tail = match (o.peak && o.replica_threads > 0, ops) {
+            (true, 1..) => format!(
+                "{tail}; the replica lane {:.1}% of them{}",
+                lane_ops as f64 * 100.0 / ops as f64,
+                match lane_dropped / 1000 {
+                    0 => String::new(),
+                    d => format!(", {d} of its reads dropped, more than a second behind"),
+                }
+            ),
+            _ => tail,
+        };
         let tail = match h.r_compact_own.n {
             0 => tail,
             _ => format!(
@@ -7623,9 +7963,15 @@ fn run(o: &Opts) {
         }
         if o.peak && m > 1 {
             peak.push((m, ops as f64, secs));
+            peak_lane.0 += lane_ops;
+            peak_lane.1 += ops;
+            peak_lane.2 += lane_dropped;
         }
         if !rup {
             sh.note(format!("the replica was found stopped at minute {m}"));
+            // Its looks a second, the next life's from here: its life's
+            // most is its own, never the one before's.
+            sh.mem[1].lock().unwrap().restarted();
             let _ = docker(&["start", &bench.replica()]);
         }
         // The minute's doings, after its line: their cost shows in the next.
@@ -7665,7 +8011,7 @@ fn run(o: &Opts) {
                     // its kill of minute 300 waited for -- is a death,
                     // timed by itself and never by the kill, which is
                     // not sent.
-                    if let Some(x) = dead(&bench, &events, &mut evs) {
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
                         let back = died(
                             &bench,
                             &sh,
@@ -7732,33 +8078,29 @@ fn run(o: &Opts) {
                         let t = Instant::now();
                         let seen = evs.len();
                         loop {
-                            // Dead in it: the dry run's second death, sent
-                            // a second into the kill's compact, held the
-                            // run here for `WAIT_MAX`, the compact's cut
-                            // counted as the kill's, no compact left under
-                            // way to end.
                             evs.extend(events.try_iter());
-                            if evs[seen..].iter().any(|e| e.die) {
-                                break;
-                            }
-                            let since = sh.compact_since.load(Ordering::SeqCst);
-                            if since != u64::MAX && sh.ns().saturating_sub(since) >= 1_000_000_000 {
-                                break;
-                            }
-                            if ended() != before {
-                                sh.note(format!(
+                            let wait = compact_wait(
+                                &evs[seen..],
+                                sh.compact_since.load(Ordering::SeqCst),
+                                sh.ns(),
+                                ended() != before,
+                                t.elapsed(),
+                            );
+                            match wait {
+                                None => {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                    continue;
+                                }
+                                Some(CompactWait::Ended) => sh.note(format!(
                                     "the compact the kill at minute {m} was to land in ended within a second: killed without"
-                                ));
-                                break;
-                            }
-                            if t.elapsed() >= WAIT_MAX {
-                                sh.note(format!(
+                                )),
+                                Some(CompactWait::Timeout) => sh.note(format!(
                                     "the kill at minute {m} found no compact of its own under way within {} s: killed without",
                                     WAIT_MAX.as_secs()
-                                ));
-                                break;
+                                )),
+                                Some(CompactWait::Died | CompactWait::UnderWay) => {}
                             }
-                            std::thread::sleep(Duration::from_millis(20));
+                            break;
                         }
                     }
                     // The announced second: operations due from `from` on
@@ -7767,7 +8109,7 @@ fn run(o: &Opts) {
                     std::thread::sleep(Duration::from_nanos(k.saturating_sub(sh.ns())));
                     // Dead in that second, or in the compact the kill was
                     // to land in: the death's, the kill not sent.
-                    if let Some(x) = dead(&bench, &events, &mut evs) {
+                    if let Some(x) = dead(|| bench.exit(&bench.server()), &events, &mut evs) {
                         let back = died(
                             &bench,
                             &sh,
@@ -7790,12 +8132,60 @@ fn run(o: &Opts) {
                         continue;
                     }
                     let k = sh.ns();
+                    let (killed, exit, not_running) = send_kill(&bench, &sh, m, k);
+                    // Dead in the moment before the send, which Docker's
+                    // state showed running to the look above: told after
+                    // Docker's wait (`gone_before`), the death's, timed by
+                    // itself, the kill not counted.
+                    let finished = exit
+                        .as_ref()
+                        .and_then(|x| x.finished)
+                        .and_then(|v| sh.vm_ns(v));
+                    let before = exit.filter(|x| {
+                        gone_before(
+                            x,
+                            not_running,
+                            finished,
+                            sh.clock_rtt.load(Ordering::Relaxed),
+                            sh.answered.load(Ordering::SeqCst),
+                            k,
+                        )
+                    });
+                    if let Some(x) = before {
+                        sh.note(format!(
+                            "the kill at minute {m} found its server gone before it was sent: a death"
+                        ));
+                        evs.extend(events.try_iter());
+                        let back = died(
+                            &bench,
+                            &sh,
+                            &doings,
+                            o,
+                            x,
+                            &mut evs,
+                            from,
+                            Some(m),
+                            Some(from),
+                            sampler,
+                            &mut restart_ms_max,
+                        );
+                        evs.extend(events.try_iter());
+                        evs.retain(|e| e.at > back);
+                        kill_died.fetch_add(1, Ordering::Relaxed);
+                        life += 1;
+                        prev_majflt = None;
+                        prev_oom = 0;
+                        continue;
+                    }
+                    // The kill's own: a side job it cut is the kill's
+                    // (`cut_by`).
+                    sh.kill_judged.store(k.max(1), Ordering::SeqCst);
                     let back = restart(
                         &bench,
                         &sh,
                         &doings,
                         (from, k, m),
-                        true,
+                        Some(killed),
                         sampler,
                         o,
                         &mut restart_ms_max,
@@ -7992,6 +8382,19 @@ fn run(o: &Opts) {
         v.push(("peak_slowest_at", at.to_string()));
         let own = auto[0].0 + auto[0].1;
         v.push(("peak_auto_compacts", own.to_string()));
+        // The lane's share of the peak, beside the 4% the soak's rate
+        // asks of it: a peak whose lane dropped reads it could not serve
+        // measured fewer of them, and its rate's fraction asks more.
+        if o.replica_threads > 0 {
+            let share = peak_lane.0 as f64 * 100.0 / peak_lane.1.max(1) as f64;
+            v.push(("peak_lane_share", format!("{share:.2}")));
+            v.push(("peak_lane_dropped", (peak_lane.2 / 1000).to_string()));
+            say(format!(
+                "the peak: {mean:.0} a second, its slowest {PEAK_STRETCH} minutes {slowest:.0}; the replica lane {share:.1}% of it, its share {:.0}%, {} of its reads dropped, more than a second behind",
+                REPLICA_SHARE * 100.0,
+                peak_lane.2 / 1000
+            ));
+        }
         println!("peak {slowest:.0}");
         println!("peak_mean {mean:.0}");
         println!("peak_slowest_at {at}");
@@ -8030,51 +8433,47 @@ fn run(o: &Opts) {
 /// volumes kept. After it, no read goes through the replica until the
 /// replica is connected and holds the newest change answered before the
 /// kill (`replica_back_ms`, bounded by `--replica-back-max`). `kill`, the
-/// run's own kill to send; a death (`died`) is gone already, its `k` its
-/// time. Hands back when the server was started again, in ns: Docker's
-/// events of the process before are the kill's or the death's.
+/// run's own kill, sent at `k` (`send_kill`), and when Docker's wait for
+/// its end ended; a death (`died`) is gone already, its `k` its time.
+/// Hands back when the server was started again, in ns: Docker's events of
+/// the process before are the kill's or the death's.
 #[allow(clippy::too_many_arguments)]
 fn restart(
     bench: &Kit,
     sh: &Shared,
     doings: &Doings,
     at: (u64, u64, u64),
-    kill: bool,
+    kill: Option<u64>,
     sampler: Option<Sampler>,
     o: &Opts,
     longest: &mut u64,
 ) -> u64 {
     let (from, k, m) = at;
     {
+        // The kill's window, opened as it was announced: its time the
+        // send's. A death's is opened by `found_dead`, its time there.
         let mut w = sh.windows.lock().unwrap();
         match w.last_mut() {
-            Some(x) if x.0 == from && x.1 == u64::MAX => x.1 = k,
+            Some(x) if x.0 == from && x.2 == u64::MAX => {
+                if kill.is_some() {
+                    x.1 = k;
+                }
+            }
             _ => w.push((from, k, u64::MAX)),
         }
     }
     sh.restart_to.store(u64::MAX, Ordering::SeqCst);
     sh.restart_from.store(from, Ordering::SeqCst);
     sh.replica_ok.store(false, Ordering::SeqCst);
-    let target = sh.max_seq.load(Ordering::SeqCst);
-    sh.replica_target.store(target, Ordering::SeqCst);
-    if kill {
-        sh.kill_sent.store(k.max(1), Ordering::SeqCst);
-        let (ok, out) = docker_within(
-            Duration::from_secs(60),
-            &["kill", "--signal", "KILL", &bench.server()],
-        );
-        if !ok {
-            // Looked at just before it was sent (`dead`): a death in the
-            // moment between is taken for the kill, its writes judged from
-            // the kill's time, later by that moment.
-            sh.note(format!("docker kill at minute {m}: {out}"));
-        }
-        let (ok, out) = docker_within(Duration::from_secs(120), &["wait", &bench.server()]);
-        if !ok {
-            sh.note(format!("docker wait at minute {m}: {out}"));
-        }
+    // The newest change answered before the kill was sent (`send_kill`
+    // read it then), or before the death.
+    if kill.is_none() {
+        sh.replica_target
+            .store(sh.max_seq.load(Ordering::SeqCst), Ordering::SeqCst);
     }
-    let killed = sh.ns();
+    let target = sh.replica_target.load(Ordering::SeqCst);
+    let killed = kill.unwrap_or_else(|| sh.ns());
+    let kill = kill.is_some();
     if kill {
         say(format!(
             "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
@@ -9732,49 +10131,71 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         0 => 30,
         k => k,
     });
-    let looked: Vec<(u64, f64)> = minutes
-        .iter()
-        .filter_map(|(k, m)| Some((*k, get(m, "behind_s")?)))
-        .collect();
-    // Each stretch of lines behind (over a second), from its first to its
-    // last, and the most it was behind.
-    let mut stretches: Vec<(u64, u64, f64)> = Vec::new();
-    for &(k, b) in &looked {
-        if b <= ON_SCHEDULE_S {
-            continue;
-        }
-        match stretches.last_mut() {
-            Some(x) if x.1 + 1 == k => {
-                x.1 = k;
-                x.2 = x.2.max(b);
+    // Each lane alike: the pool's (`behind_s`) on every line, and the
+    // replica lane's (`r_behind_s`) where the run had one -- its 4% of the
+    // rate on a schedule of its own, which a replica that never keeps up
+    // with them leaves behind without the pool's lag showing it.
+    // Each line's lag, and each long stretch of lines behind: its first
+    // and last minute and the most it was behind.
+    type Lags = (Vec<(u64, f64)>, Vec<(u64, u64, f64)>);
+    let lag = |name: &str| -> Lags {
+        let looked: Vec<(u64, f64)> = minutes
+            .iter()
+            .filter_map(|(k, m)| Some((*k, get(m, name)?)))
+            .collect();
+        // Each stretch of lines behind (over a second), from its first to
+        // its last, and the most it was behind.
+        let mut stretches: Vec<(u64, u64, f64)> = Vec::new();
+        for &(k, b) in &looked {
+            if b <= ON_SCHEDULE_S {
+                continue;
             }
-            _ => stretches.push((k, k, b)),
+            match stretches.last_mut() {
+                Some(x) if x.1 + 1 == k => {
+                    x.1 = k;
+                    x.2 = x.2.max(b);
+                }
+                _ => stretches.push((k, k, b)),
+            }
         }
-    }
-    let long: Vec<&(u64, u64, f64)> = stretches
-        .iter()
-        .filter(|x| x.1 - x.0 + 1 >= every)
-        .collect();
-    let most = looked.iter().map(|x| x.1).fold(0.0f64, f64::max);
+        stretches.retain(|x| x.1 - x.0 + 1 >= every);
+        (looked, stretches)
+    };
+    let (looked, long) = lag("behind_s");
+    let (r_looked, r_long) = lag("r_behind_s");
+    let most = |l: &[(u64, f64)]| l.iter().map(|x| x.1).fold(0.0f64, f64::max);
+    let behind = |lane: &str, long: &[(u64, u64, f64)]| {
+        long.iter()
+            .map(|x| {
+                format!(
+                    "{lane} from minute {} to {}, {:.0} s at the most",
+                    x.0, x.1, x.2
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     v.push((
         CRITERIA[19],
-        !looked.is_empty() && looked.len() as u64 == n && long.is_empty(),
-        match (looked.is_empty(), long.is_empty()) {
+        !looked.is_empty() && looked.len() as u64 == n && long.is_empty() && r_long.is_empty(),
+        match (looked.is_empty(), long.is_empty() && r_long.is_empty()) {
             (true, _) => "not judged: no line says how far behind its schedule the loop was".into(),
             (false, true) => format!(
-                "back on it within every {every} minutes, {most:.1} s behind at the most{}",
+                "back on it within every {every} minutes, {:.1} s behind at the most{}{}",
+                most(&looked),
+                match r_looked.is_empty() {
+                    true => String::new(),
+                    false => format!(", the replica lane {:.1} s", most(&r_looked)),
+                },
                 match looked.len() as u64 == n {
                     true => String::new(),
                     false => format!("; {} of {n} lines say how far", looked.len()),
                 }
             ),
-            (false, false) => format!(
-                "behind {}",
-                long.iter()
-                    .map(|x| format!("from minute {} to {}, {:.0} s at the most", x.0, x.1, x.2))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
+            (false, false) => {
+                let mut said = behind("behind", &long);
+                said.extend(behind("the replica lane behind", &r_long));
+                said.join("; ")
+            }
         },
     ));
     // The reads held by the replica's own compactions, and their workers'
@@ -11152,6 +11573,17 @@ mod tests {
                 Box::new(|m, x| {
                     if (31..=70).contains(&m) {
                         x.insert("behind_s", 100.0);
+                    }
+                }),
+                vec![CRITERIA[19]],
+            ),
+            (
+                // The pool on its schedule, the replica lane's 4% never
+                // kept up with: its own lag fails it.
+                "the replica lane behind its schedule from minute 31 on",
+                Box::new(|m, x| {
+                    if m > 0 && m < u64::MAX {
+                        x.insert("r_behind_s", if m > 30 { 40.0 } else { 0.0 });
                     }
                 }),
                 vec![CRITERIA[19]],
@@ -14252,30 +14684,38 @@ mod tests {
         // close, nothing answered after it: the close, Docker's die a
         // reap later beside it.
         assert_eq!(
-            death_time((d, d - 3 * ms), d - 3 * ms, docker, 0),
+            death_time(d, d - 3 * ms, docker, 0),
             (d, Source::Close, Some(d - 3 * ms))
         );
         // An answer the server wrote before it died, read a few ms after
-        // another connection closed: still that close.
+        // another connection closed: the death taken at that answer,
+        // never before it -- a time before the last answer would excuse
+        // writes the server held longer than `--loss-ms`.
         assert_eq!(
-            death_time((d, d - 3 * ms), d + 10 * ms, docker, 0).1,
-            Source::Close
+            death_time(d, d + 10 * ms, docker, 0),
+            (d + 10 * ms, Source::Close, Some(d + 10 * ms))
         );
-        // A server read answering a second and more after a close was
-        // alive then: that close was no death, Docker's time is taken.
-        assert_eq!(
-            death_time((d, d - 3 * ms), d + CLOSE_SLOP + ms, docker, 0),
-            (d + 15 * ms, Source::Event, None)
-        );
+        for a in [d - 3 * ms, d, d + ms, d + CLOSE_SLOP] {
+            let (t, source, _) = death_time(d, a, docker, 0);
+            assert_eq!(source, Source::Close);
+            assert!(t >= a, "a death at {t} before its last answer at {a}");
+        }
+        // Read answering past the slop -- tens of ms: the review's case,
+        // answers 0.9 s after a close that was no death's -- alive then,
+        // that close no death's: Docker's time is taken.
+        assert!(CLOSE_SLOP <= 100 * ms);
+        for a in [d + CLOSE_SLOP + ms, d + 900 * ms] {
+            assert_eq!(
+                death_time(d, a, docker, 0),
+                (d + 15 * ms, Source::Event, None)
+            );
+        }
         // Nothing closed: Docker's; nor that: the minute's look before.
         assert_eq!(
-            death_time((u64::MAX, 0), d, Some((d, Source::Finished)), 7).1,
+            death_time(u64::MAX, d, Some((d, Source::Finished)), 7).1,
             Source::Finished
         );
-        assert_eq!(
-            death_time((u64::MAX, 0), d, None, 7),
-            (7, Source::Look, None)
-        );
+        assert_eq!(death_time(u64::MAX, d, None, 7), (7, Source::Look, None));
         // How long before the kill due: the long run's came 12.3 s after
         // its kill of minute 300 was due, in the compact it waited for.
         let (said, s) = before_kill(d, Some(300));
@@ -14296,49 +14736,124 @@ mod tests {
     }
 
     #[test]
+    fn a_close_the_server_answered_past_is_let_go_for_the_next() {
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let ms = 1_000_000u64;
+        let c = 60_000 * ms;
+        let closed = || sh.closed.load(Ordering::SeqCst);
+        assert_eq!(closed(), u64::MAX);
+        sh.answered(c - 5 * ms);
+        sh.closed(c);
+        assert_eq!(closed(), c);
+        // An answer written before the death, read within the slop, and
+        // the death's other closes: the first kept.
+        sh.answered(c + 10 * ms);
+        sh.closed(c + 12 * ms);
+        sh.closed(c + 40 * ms);
+        assert_eq!(closed(), c);
+        // The review's case: a close that was no death's -- a refused
+        // connect, a connection thread's panic -- the server answering
+        // 0.9 s past it, then hung and OOM-killed 30 s after it: let go
+        // for the death's own close, the death timed by that.
+        sh.answered(c + 900 * ms);
+        assert_eq!(closed(), c, "let go at the next close, not at an answer");
+        let death = c + 30_000 * ms;
+        sh.closed(death);
+        sh.closed(death + 3 * ms);
+        assert_eq!(closed(), death);
+        assert_eq!(
+            death_time(closed(), sh.answered.load(Ordering::SeqCst), None, 0),
+            (death, Source::Close, Some(c + 900 * ms))
+        );
+        // Answered again past it after the restart: the next close the
+        // next death's.
+        sh.answered(death + 9_000 * ms);
+        sh.closed(death + 20_000 * ms);
+        assert_eq!(closed(), death + 20_000 * ms);
+        // A connect that timed out is no close; one refused, or a
+        // connection cut, is.
+        use std::io::{Error, ErrorKind};
+        assert!(!a_close(&Error::from(ErrorKind::TimedOut)));
+        assert!(!a_close(&Error::from(ErrorKind::WouldBlock)));
+        assert!(!a_close(&Error::other("no connection")));
+        assert!(a_close(&Error::from(ErrorKind::ConnectionRefused)));
+        assert!(a_close(&Error::from(ErrorKind::UnexpectedEof)));
+    }
+
+    /// A Checker with one kill or death, `at` to `back`, a write answered
+    /// at `answered` and a read at `back` showing it gone.
+    fn judged(kills: Vec<(u64, u64)>, answered: u64, back: u64) -> Checker {
+        let ms = 1_000_000u64;
+        let mut c = Checker::new(
+            100,
+            Kills {
+                at: kills,
+                loss: 650 * ms,
+            },
+            60_000 * ms,
+            1_000 * ms,
+            &[],
+        );
+        c.take(vec![write(7, 3, 42, answered - 2 * ms, answered, None)]);
+        c.take(vec![row(
+            7,
+            back + 100 * ms,
+            back + 101 * ms,
+            base_digests(7),
+        )]);
+        c.hold(60_000 * ms, 0, 60_000 * ms, &[]);
+        c
+    }
+
+    #[test]
     fn a_death_s_lost_writes_are_judged_from_its_time() {
         let ms = 1_000_000u64;
-        // The long run's shape: the primary gone at `death`, its last
-        // answer 3 ms before; the kill the run had due sent 1.1 s after
-        // -- its fence, then the announced second -- and the server back
-        // 4 s after that.
-        let death = 10_000 * ms;
-        let k = death + 1_100 * ms;
+        // The long run's shape, through what `died` does but its restart
+        // (`found_dead`): the primary gone at `death`, OOM-killed, its last
+        // answer 3 ms before; found as the kill due at minute 1 was to be
+        // sent 1.1 s after -- its fence, then the announced second -- the
+        // minute's look 50 s before; the server back 4 s after that.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let death = 50_000 * ms;
+        let (look, k) = (death - 50_000 * ms, death + 1_100 * ms);
         let back = k + 4_000 * ms;
-        let (at, source, _) = death_time((death, death - 3 * ms), death - 3 * ms, None, 0);
-        assert_eq!((at, source), (death, Source::Close));
-        let check = |kill: u64, answered: u64| {
-            let mut c = Checker::new(
-                100,
-                Kills {
-                    at: vec![(kill, back)],
-                    loss: 650 * ms,
-                },
-                60_000 * ms,
-                1_000 * ms,
-                &[],
-            );
-            c.take(vec![write(7, 3, 42, answered - 2 * ms, answered, None)]);
-            c.take(vec![row(
-                7,
-                back + 100 * ms,
-                back + 101 * ms,
-                base_digests(7),
-            )]);
-            c.hold(60_000 * ms, 0, 60_000 * ms, &[]);
-            c
+        sh.answered(death - 3 * ms);
+        sh.closed(death);
+        sh.closed(death + 2 * ms);
+        let exit = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: None,
         };
+        let (from, at, m) =
+            found_dead(&sh, &doings, &o, exit, &mut Vec::new(), look, Some(1), None);
+        assert_eq!((from, at, m), (death, death, 1));
+        assert_eq!(doings.deaths.load(Ordering::SeqCst), 1);
+        assert_eq!(doings.oom.load(Ordering::SeqCst), 1);
+        // A failure from the death on is `down` (its window open), the
+        // restart closes the window as the server answers again.
+        assert!(sh.restarting(death));
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
+        let kills = sh.kills();
+        assert_eq!(kills, vec![(death, back)]);
         // Answered 150 ms before the death and gone: within what `--sync
         // 250` allows, judged from the death.
-        let c = check(at, death - 150 * ms);
+        let c = judged(kills.clone(), death - 150 * ms, back);
         assert_eq!(
             (c.mismatches, c.lost_writes, c.lost_ms_max),
             (0, 1, Some(150))
         );
+        // Still held to `--sync`'s bound: one answered 700 ms before the
+        // death and gone is a loss past it -- excused were the death timed
+        // by the minute's look before it.
+        let c = judged(kills, death - 700 * ms, back);
+        assert_eq!((c.mismatches, c.lost_ms_max), (1, Some(700)));
         // Judged from the kill the run had due, as the long run judged its
         // seven: 1 250 ms, past the 650 a kill may take -- the harness's
         // own wait counted as the server's loss.
-        let c = check(k, death - 150 * ms);
+        let c = judged(vec![(k, back)], death - 150 * ms, back);
         assert_eq!(c.mismatches, 1);
         assert!(
             c.examples[0]
@@ -14346,10 +14861,347 @@ mod tests {
             "{}",
             c.examples[0]
         );
-        // Still held to `--sync`'s bound: one answered 700 ms before the
-        // death and gone is a loss past it whatever timed the death.
-        let c = check(at, death - 700 * ms);
-        assert_eq!((c.mismatches, c.lost_ms_max), (1, Some(700)));
+    }
+
+    #[test]
+    fn a_kill_that_finds_its_server_gone_before_its_send_is_a_death() {
+        let ms = 1_000_000u64;
+        let k = 600_000 * ms;
+        let rtt = 3 * ms;
+        let gone = |oom| Exit {
+            running: false,
+            oom,
+            code: Some(137),
+            finished: None,
+        };
+        // OOM-killed in the moment before the send, Docker's state still
+        // running to the look before it: after the wait, `OOMKilled`.
+        assert!(gone_before(
+            &gone(true),
+            false,
+            Some(k + 200 * ms),
+            rtt,
+            k + 100 * ms,
+            k
+        ));
+        // `docker kill` found it not running.
+        assert!(gone_before(&gone(false), true, None, rtt, k, k));
+        // Its end before the send by more than the probe's error, nothing
+        // answered after it.
+        assert!(gone_before(
+            &gone(false),
+            false,
+            Some(k - 20 * ms),
+            rtt,
+            k - 30 * ms,
+            k
+        ));
+        // Within the probe's error, or after the send: the kill's.
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            Some(k - 2 * ms),
+            rtt,
+            k - 30 * ms,
+            k
+        ));
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            Some(k + 180 * ms),
+            rtt,
+            k + 120 * ms,
+            k
+        ));
+        // Before the send by Docker's clock but read answering past the
+        // slop after it: alive then, the VM's clock stepped -- the kill's.
+        assert!(!gone_before(
+            &gone(false),
+            false,
+            Some(k - 500 * ms),
+            rtt,
+            k + 120 * ms,
+            k
+        ));
+        // Nothing read: the kill's. Running still: no end at all.
+        assert!(!gone_before(&gone(false), false, None, rtt, 0, k));
+        let up = Exit {
+            running: true,
+            ..gone(true)
+        };
+        assert!(!gone_before(&up, true, Some(k - 500 * ms), rtt, 0, k));
+
+        // The review's case through the kill's path: announced at `from`,
+        // the kill's compact asked 10 ms later, the server OOM-killed in
+        // it 950 ms in, the kill sent 50 ms after that: a death, timed by
+        // its first close, its window the announcement's.
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let (doings, o) = (Doings::default(), opts());
+        let from = k - 1_000 * ms;
+        sh.windows.lock().unwrap().push((from, u64::MAX, u64::MAX));
+        let death = from + 950 * ms;
+        sh.answered(death - 4 * ms);
+        sh.closed(death);
+        sh.kill_sent.store(k, Ordering::SeqCst);
+        let x = gone(true);
+        assert!(gone_before(
+            &x,
+            false,
+            None,
+            rtt,
+            sh.answered.load(Ordering::SeqCst),
+            k
+        ));
+        let (_, at, _) = found_dead(
+            &sh,
+            &doings,
+            &o,
+            x,
+            &mut Vec::new(),
+            from,
+            Some(10),
+            Some(from),
+        );
+        assert_eq!(at, death);
+        sh.windows.lock().unwrap().last_mut().unwrap().2 = k + 4_000 * ms;
+        assert_eq!(sh.kills(), vec![(death, k + 4_000 * ms)]);
+        assert_eq!(sh.windows.lock().unwrap().len(), 1);
+        // The compact it cut, asked before the send and its connection
+        // seen to close after `kill_sent` was stored: the death's, the
+        // kill never judged its own.
+        let quick = Duration::from_millis(20);
+        assert_eq!(
+            cut_by(&sh, from + 10 * ms, true, &|| false, quick, quick),
+            Some(CutBy::Death)
+        );
+    }
+
+    #[test]
+    fn a_job_cut_after_the_kill_was_sent_is_the_kill_s_once_the_kill_is_judged_its_own() {
+        let sh = Arc::new(Shared::new(
+            &opts(),
+            "127.0.0.1:1".into(),
+            "127.0.0.1:1".into(),
+            &[],
+        ));
+        let ms = 1_000_000u64;
+        let quick = Duration::from_millis(20);
+        let (running, stopped) = (|| false, || true);
+        // A compact asked at `s`, the kill sent after it -- `kill_sent`
+        // stored before `docker kill` -- and judged its own: the kill's.
+        let s = 5_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        sh.kill_judged.store(s + 1_000 * ms, Ordering::SeqCst);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+        // Not judged yet: the job waits for its verdict, a death found
+        // meanwhile -- the moment before the send -- the death's.
+        let s = 10_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        let t = {
+            let sh = Arc::clone(&sh);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                sh.deaths.lock().unwrap().push(s + 900 * ms);
+            })
+        };
+        let long = Duration::from_secs(30);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, long),
+            Some(CutBy::Death)
+        );
+        t.join().unwrap();
+        // Judged the kill's meanwhile: the kill's.
+        let s = 20_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        let t = {
+            let sh = Arc::clone(&sh);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                sh.kill_judged.store(s + 1_000 * ms, Ordering::SeqCst);
+            })
+        };
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, long),
+            Some(CutBy::Kill)
+        );
+        t.join().unwrap();
+        // Never judged within its bound: the kill's, as before.
+        let s = 22_000 * ms;
+        sh.kill_sent.store(s + 1_000 * ms, Ordering::SeqCst);
+        assert_eq!(
+            cut_by(&sh, s, true, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+        // No kill since: a death found since, the job's connection closed
+        // or not, is the death's.
+        sh.deaths.lock().unwrap().push(25_000 * ms);
+        assert_eq!(
+            cut_by(&sh, 24_000 * ms, false, &running, quick, quick),
+            Some(CutBy::Death)
+        );
+        // None found: the server not running with no window open, the
+        // death not found yet -- where its connection closed; a wait that
+        // ran out is nobody's, Docker not asked.
+        let s = 30_000 * ms;
+        assert_eq!(
+            cut_by(&sh, s, true, &stopped, quick, quick),
+            Some(CutBy::Death)
+        );
+        assert_eq!(cut_by(&sh, s, true, &running, quick, quick), None);
+        assert_eq!(cut_by(&sh, s, false, &stopped, quick, quick), None);
+        // In a restart's window with nothing found: the kill's, the
+        // server down for it whatever Docker says.
+        sh.windows.lock().unwrap().push((0, u64::MAX, u64::MAX));
+        assert_eq!(
+            cut_by(&sh, s, true, &stopped, quick, quick),
+            Some(CutBy::Kill)
+        );
+        assert_eq!(
+            cut_by(&sh, s, false, &running, quick, quick),
+            Some(CutBy::Kill)
+        );
+    }
+
+    #[test]
+    fn a_look_finds_a_death_where_docker_says_not_running_and_keeps_its_events() {
+        let (tx, rx) = mpsc::channel();
+        let mut evs = Vec::new();
+        let oom = DockerEv {
+            at: 5,
+            vm: 7,
+            die: false,
+            exit: None,
+        };
+        tx.send(oom).unwrap();
+        let up = Exit {
+            running: true,
+            ..Exit::default()
+        };
+        // Running, or unread: none; the events read all the same, for the
+        // death's line once there is one.
+        assert_eq!(dead(|| Some(up), &rx, &mut evs), None);
+        assert_eq!(evs, vec![oom]);
+        assert_eq!(dead(|| None, &rx, &mut evs), None);
+        let gone = Exit {
+            running: false,
+            oom: true,
+            code: Some(137),
+            finished: Some(9),
+        };
+        let die = DockerEv {
+            die: true,
+            exit: Some(137),
+            ..oom
+        };
+        tx.send(die).unwrap();
+        assert_eq!(dead(|| Some(gone), &rx, &mut evs), Some(gone));
+        assert_eq!(evs, vec![oom, die]);
+    }
+
+    #[test]
+    fn the_wait_for_a_kill_s_compact_ends_on_a_die() {
+        let s = 1_000_000_000u64;
+        let die = DockerEv {
+            at: 1,
+            vm: 1,
+            die: true,
+            exit: Some(137),
+        };
+        let oom = DockerEv {
+            die: false,
+            exit: None,
+            ..die
+        };
+        let zero = Duration::ZERO;
+        assert_eq!(compact_wait(&[], u64::MAX, 5 * s, false, zero), None);
+        // An oom alone: its die is what ends the process.
+        assert_eq!(compact_wait(&[oom], u64::MAX, 5 * s, false, zero), None);
+        // The die: at once, whatever else -- the dry run's second death
+        // held the run here for `WAIT_MAX`.
+        assert_eq!(
+            compact_wait(&[oom, die], u64::MAX, 5 * s, false, zero),
+            Some(CompactWait::Died)
+        );
+        assert_eq!(
+            compact_wait(&[die], 4 * s, 5 * s, true, WAIT_MAX),
+            Some(CompactWait::Died)
+        );
+        // Under way a second: the kill lands in it.
+        assert_eq!(
+            compact_wait(&[], 4 * s, 5 * s, false, zero),
+            Some(CompactWait::UnderWay)
+        );
+        assert_eq!(compact_wait(&[], 4 * s + 1, 5 * s, false, zero), None);
+        assert_eq!(
+            compact_wait(&[], u64::MAX, 5 * s, true, zero),
+            Some(CompactWait::Ended)
+        );
+        assert_eq!(
+            compact_wait(&[], u64::MAX, 5 * s, false, WAIT_MAX),
+            Some(CompactWait::Timeout)
+        );
+    }
+
+    #[test]
+    fn a_tied_child_ends_once_its_input_is_let_go() {
+        use std::process::Stdio;
+        let mut c = tied("sh", &["-c", "echo $$; exec sleep 60"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(c.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid = line.trim().to_string();
+        let alive = |pid: &str| {
+            std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(alive(&pid));
+        // As this process ending lets go of it.
+        drop(c.stdin.take());
+        c.wait().unwrap();
+        assert!(!alive(&pid), "the tied child {pid} outlived its shell");
+    }
+
+    #[test]
+    fn the_run_s_open_files_are_counted_from_its_connections() {
+        let with = |r: &str| {
+            Opts::parse(&[
+                "--sync".into(),
+                "250".into(),
+                "--rate".into(),
+                "100".into(),
+                "--replica-threads".into(),
+                r.into(),
+            ])
+        };
+        // The pool's 32 one connection each, the lane's 128 two at a
+        // restart, two files a connection, the 64 streams and 64 beside.
+        assert_eq!(fds_needed(&with("128")), 2 * (32 + 2 * 128) + 64 + 64);
+        assert_eq!(fds_needed(&with("0")), 2 * (2 * 32) + 64 + 64);
+        // Past macOS's default of 256 either way with the lane: run-soak.sh
+        // raises it.
+        assert!(fds_needed(&with("128")) > 256);
+        assert!(open_files_limit().is_none_or(|n| n > 0));
+    }
+
+    #[test]
+    fn the_peak_s_lane_counts_the_reads_its_move_drops() {
+        let s = 1_000_000_000u64;
+        // A read every 10 ms: a move of 2.5 s drops 250, one of 3 ms a
+        // thousandth of each of 300.
+        assert_eq!(dropped_milli(5 * s / 2, s / 100), 250_000);
+        assert_eq!(dropped_milli(3_000_000, s / 100), 300);
+        assert_eq!(dropped_milli(s, 0), 1_000_000_000_000);
     }
 
     #[test]

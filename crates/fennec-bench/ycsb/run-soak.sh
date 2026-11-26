@@ -140,6 +140,27 @@ bytes() {
         printf "%.0f\n", n }'
 }
 
+# Every connection the soak holds is two open files (`ycsb soak`'s
+# `fds_needed`, which refuses to start under fewer): the pool's, the
+# replica lane's twice at a restart -- to the replica and to the primary
+# -- or the pool's twice with no lane, a file a stream, and 64 beside:
+# some 700, past macOS's default soft limit of 256, where a connect fails
+# and counts as the server's error. Raised to it within the hard limit,
+# or refused before anything starts.
+if [ "$REPLICA_THREADS" = 0 ]; then
+    fds=$((2 * 2 * THREADS + SUBSCRIPTIONS + 64))
+else
+    fds=$((2 * (THREADS + 2 * REPLICA_THREADS) + SUBSCRIPTIONS + 64))
+fi
+soft=$(ulimit -S -n)
+if [ "$soft" != unlimited ] && [ "$soft" -lt "$fds" ]; then
+    if ! ulimit -S -n "$fds" 2>/dev/null; then
+        echo "the soft limit on open files is $soft, the hard $(ulimit -H -n): the soak holds $fds (THREADS, REPLICA_THREADS, SUBSCRIPTIONS)" >&2
+        exit 2
+    fi
+    echo "the soft limit on open files raised from $soft to $fds, what the soak holds"
+fi
+
 limit=$(bytes "$MEMORY")
 # A record is 1.1 KB in the file, which the updates grow until a compact.
 live=$((RECORDS * 1100))
