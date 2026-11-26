@@ -51,8 +51,10 @@
 //! server's cgroup is read a second (`watch_memory`) and the open loop's
 //! lag too (`seconds`), the minute's line taking their most. After each
 //! restart, until the loop is back on its schedule and the replica holds
-//! the change answered then (`catch_up`), a read through the replica held
-//! past its wait is the restart's, and the lane is moved up.
+//! the change answered then (`catch_up`), within `--replica-back-max` of
+//! the one and `--catchup-max` of the server answering again, a read
+//! through the replica held past its wait while the replica's change
+//! advanced is the restart's, and the lane is moved up.
 //!
 //! A minute's line (`results/soak.tsv`, family `soak`, cell
 //! `<sync>:<label>:m<minute>`) is appended as the minute ends: a run cut
@@ -3153,14 +3155,15 @@ struct Closes {
 /// backlog the open loop sends the primary once it answers again, until the
 /// loop is back on its schedule and the replica holds the newest change
 /// answered then. A read through the replica sent in it that the replica
-/// held past its wait and answered 504 is the restart's, `down`
-/// (`Shared::catch_504`), and the lane's schedule is moved up meanwhile
-/// (`lane_due`). The dry run of 2026-11-26 counted 185 such 504s in the
-/// minute after its planned kill, every error it had there: the replica was
-/// back 517 ms after the server answered, at the change the kill left,
-/// then some 7 000 changes behind the writes of the pool's backlog -- past
-/// the 5 s a read waits -- while the lane sent its own backlog of reads,
-/// 128 at a time, each waiting for the newest change.
+/// held past its wait and answered 504 while the replica's change was
+/// advancing is the restart's, `down` (`Shared::catch_504`), and the lane's
+/// schedule is moved up meanwhile (`lane_due`). The dry run of 2026-11-26
+/// counted 185 such 504s in the minute after its planned kill, every error
+/// it had there: the replica was back 517 ms after the server answered, at
+/// the change the kill left, then some 7 000 changes behind the writes of
+/// the pool's backlog -- past the 5 s a read waits -- while the lane sent
+/// its own backlog of reads, 128 at a time, each waiting for the newest
+/// change. It is bounded twice (`CatchMax`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Catch {
     /// The restart's minute, and its window's start: the first send whose
@@ -3193,6 +3196,10 @@ enum CatchEnd {
     /// `--replica-back-max` passed after the loop came back, the replica
     /// short of that change: a 504 after it is an error.
     Bound,
+    /// `--catchup-max` passed after the server answered again, the loop
+    /// not back on its schedule or the replica short of the change then:
+    /// a 504 after it is an error.
+    Long,
     /// The next restart began first.
     Cut,
     /// The run ended first.
@@ -3233,23 +3240,41 @@ impl Catch {
 
     /// The replica read holding the change `held` at `now` (`None` where
     /// it could not be read): whether that ends the catch-up -- the change
-    /// the loop's return named held, or `bound` (`--replica-back-max`)
-    /// past that return without it.
-    fn settle(&mut self, now: u64, held: Option<u64>, bound: u64) -> bool {
-        let Some((at, target)) = self.on else {
-            return false;
-        };
+    /// the loop's return named held, or one of its bounds (`max`) passed
+    /// without it: `--replica-back-max` from that return, or, the loop
+    /// back or not, `--catchup-max` from the server answering again.
+    fn settle(&mut self, now: u64, held: Option<u64>, max: CatchMax) -> bool {
         if self.to != u64::MAX {
             return false;
         }
-        self.end = match held.is_some_and(|h| h >= target) {
-            true => CatchEnd::Caught,
-            false if now.saturating_sub(at) >= bound => CatchEnd::Bound,
-            false => return false,
+        let past = |since: u64, bound: u64| since != u64::MAX && now.saturating_sub(since) >= bound;
+        self.end = match self.on {
+            Some((_, target)) if held.is_some_and(|h| h >= target) => CatchEnd::Caught,
+            Some((at, _)) if past(at, max.replica) => CatchEnd::Bound,
+            _ if past(self.back, max.whole) => CatchEnd::Long,
+            _ => return false,
         };
         self.to = now;
         true
     }
+}
+
+/// A restart's catch-up's two bounds (`Catch::settle`), ns. The replica's,
+/// `--replica-back-max` from the loop's return, holds a replica that
+/// follows too slowly once the backlog is sent. The whole catch-up's,
+/// `--catchup-max` from the server answering again -- the run's bound on a
+/// replica catching up with a backlog of writes, the end's as here -- holds
+/// one that never ends: a 504 is the restart's only while the replica's
+/// change advances (`Shared::catch_504`), and a loop drains a kill's backlog
+/// in four times as long as the server was gone (at 80% of the peak), so a
+/// kill met with the loop far behind -- the third round's dry run met its
+/// kill of minute 60 166 s behind, some 11 minutes to drain -- would keep
+/// one open, its slow replica's 504s the restart's, the whole time; the
+/// open loop's own verdict fails the loop only past a kill interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CatchMax {
+    replica: u64,
+    whole: u64,
 }
 
 /// The VM's clock as a probe read it (`clock_probe`, `CLOCK_PROBE`).
@@ -3493,6 +3518,12 @@ struct Shared {
     /// (`lane_due`).
     catches: Mutex<Vec<Catch>>,
     catching: AtomicBool,
+    /// The replica's change as `catch_up` last read it and when that read
+    /// began, and the latest time its change is known to have advanced
+    /// after (`r_seen`), 0 before any: a replica's 504 in a catch-up is the
+    /// restart's only while it is within the read's wait (`catch_504`).
+    r_read: Mutex<Option<(u64, u64)>>,
+    r_advanced: AtomicU64,
     /// Each server's cgroup a second (`watch_memory`): the primary's, then
     /// the replica's.
     mem: [Mutex<Mem>; 2],
@@ -3613,6 +3644,8 @@ impl Shared {
             kill_death: AtomicU64::new(0),
             catches: Mutex::new(Vec::new()),
             catching: AtomicBool::new(false),
+            r_read: Mutex::new(None),
+            r_advanced: AtomicU64::new(0),
             deaths: Mutex::new(Vec::new()),
             mem: [Mutex::new(Mem::default()), Mutex::new(Mem::default())],
             behind: Mutex::new(Behind::default()),
@@ -3934,20 +3967,45 @@ impl Shared {
 
     /// A read through the replica sent at `s` that the replica held past
     /// its wait and answered 504: the restart's where `s` falls in a
-    /// catch-up (`Catch`) -- counted `down` and to it -- and an error
-    /// otherwise, the replica caught up or no restart behind it. By its
-    /// send, not its answer: the replica answers a 504 the full wait after
-    /// it, and those of reads sent as the catch-up ended come after its end.
-    fn catch_504(&self, s: u64) -> bool {
+    /// catch-up (`Catch`) and the replica's change advanced within the
+    /// wait before now (`r_advanced`) -- counted `down` and to it, `Some((m,
+    /// true))` -- and an error otherwise: `Some((m, false))` in the catch-up
+    /// of minute `m` with the replica's change standing still, a stall the
+    /// backlog does not explain, `None` with no restart behind it or the
+    /// replica caught up. By its send, not its answer: the replica answers
+    /// a 504 the full wait after it, and those of reads sent as the
+    /// catch-up ended come after its end.
+    fn catch_504(&self, s: u64) -> Option<(u64, bool)> {
         let mut c = self.catches.lock().unwrap();
-        match c.iter_mut().rev().find(|x| s >= x.from && s <= x.to) {
-            Some(x) => {
-                x.down += 1;
-                self.down.fetch_add(1, Ordering::SeqCst);
-                true
-            }
-            None => false,
+        let x = c.iter_mut().rev().find(|x| s >= x.from && s <= x.to)?;
+        // Read before `now`: the advance it stands for came before now.
+        let advanced = self.r_advanced.load(Ordering::SeqCst);
+        let wait = fennec_http::AFTER_WAIT.as_nanos() as u64;
+        if advanced == 0 || advanced.saturating_add(wait) < self.ns() {
+            return Some((x.minute, false));
         }
+        x.down += 1;
+        self.down.fetch_add(1, Ordering::SeqCst);
+        Some((x.minute, true))
+    }
+
+    /// The replica read holding change `seq` by a read of its status begun
+    /// at `at` (`catch_up`; `None`, not read): a change past the one the
+    /// read before it found came after that read began, the latest such
+    /// time kept (`r_advanced`). The read's start, not its answer: the
+    /// status says the change as of some moment of the call, and a call
+    /// can take seconds behind a server's backlog.
+    fn r_seen(&self, at: u64, seq: Option<u64>) {
+        let Some(seq) = seq else {
+            return;
+        };
+        let mut r = self.r_read.lock().unwrap();
+        if let Some((was_at, was)) = *r {
+            if seq > was {
+                self.r_advanced.fetch_max(was_at, Ordering::SeqCst);
+            }
+        }
+        *r = Some((at, seq));
     }
 
     /// The lane's reads a move of its schedule skipped in an open
@@ -4014,9 +4072,6 @@ impl Worker<'_> {
                 &self.sh.addr
             };
             let c = if replica { &mut self.rc } else { &mut self.c };
-            // The request's send: what tells a replica's 504 of a
-            // restart's catch-up from one after it (`catch_504`).
-            let sent = self.sh.ns();
             // A connect's own failure, kept: one refused is a close, one
             // that timed out is not (`a_close`) -- the server may be
             // alive and slow, and a close taken for its death's time.
@@ -4030,6 +4085,10 @@ impl Worker<'_> {
                     self.life = None;
                 }
             }
+            // The request's send, once connected -- a connect may take up
+            // to its 60 s: what tells a replica's 504 of a restart's
+            // catch-up from one after it (`catch_504`).
+            let sent = self.sh.ns();
             let got = match c.as_mut() {
                 Some(c) => match c.try_query_with(text, params, headers) {
                     Ok((status, body)) => {
@@ -4092,15 +4151,31 @@ impl Worker<'_> {
                     }
                     // A read the replica held past its wait while it caught
                     // up after a restart -- the writes of the loop's
-                    // backlog ahead of it -- is the restart's.
-                    if replica && status == 504 && self.sh.catch_504(sent) {
+                    // backlog ahead of it, its change advancing -- is the
+                    // restart's.
+                    let catch = match replica && status == 504 {
+                        true => self.sh.catch_504(sent),
+                        false => None,
+                    };
+                    if let Some((_, true)) = catch {
                         return Answer::Refused(status);
                     }
                     // Any other: what each server said of replication as
                     // it answered.
                     let sh = self.sh;
                     self.sh.failed(t, false, || match replica && status == 504 {
-                        true => format!("{}{}", said(), sh.replication_said()),
+                        true => format!(
+                            "{}{}{}",
+                            said(),
+                            match catch {
+                                Some((m, _)) => format!(
+                                    "; sent in the catch-up of minute {m}'s restart, the replica's change not seen to advance in the {} s before",
+                                    fennec_http::AFTER_WAIT.as_secs()
+                                ),
+                                None => String::new(),
+                            },
+                            sh.replication_said()
+                        ),
                         false => said(),
                     });
                     return Answer::Refused(status);
@@ -5077,6 +5152,37 @@ struct Doings {
 impl Doings {
     fn figure(&self, name: &'static str, value: String) {
         self.figures.lock().unwrap().push((name, value));
+    }
+}
+
+/// The figures said since the last line (`Doings::figure`) onto the line
+/// `v` being written: a minute's, or the end's for those said after the
+/// last minute's -- a catch-up the run's end cut, or one said within its
+/// wait of the end (`catch_look`), whose 504s the "no error" verdict
+/// counts. The kill's: one kill a minute at the most, a death beside it the
+/// rarer still -- the last said of each kept. A restart's catch-up's, of
+/// which a minute may end two: their counts added, their times the worst
+/// kept -- -1, a bound passed (`catchup_replica_ms`), over any -- never a
+/// later one's over an earlier's.
+fn figures_onto(doings: &Doings, v: &mut Vec<(&str, String)>) {
+    let figures = std::mem::take(&mut *doings.figures.lock().unwrap());
+    for (name, x) in figures {
+        let mut was = None;
+        v.retain(|(k, s)| match *k == name {
+            true => {
+                was = Some(s.clone());
+                false
+            }
+            false => true,
+        });
+        let num = |s: &str| s.parse::<i64>().unwrap_or(0);
+        let x = match (name, was) {
+            ("catchup_down" | "catchup_moved", Some(w)) => (num(&w) + num(&x)).to_string(),
+            ("catchup_replica_ms", Some(w)) if num(&w) < 0 || num(&x) < 0 => "-1".into(),
+            ("catchup_replica_ms" | "catchup_on_ms", Some(w)) => num(&w).max(num(&x)).to_string(),
+            _ => x,
+        };
+        v.push((name, x));
     }
 }
 
@@ -6489,15 +6595,19 @@ fn seconds(sh: &Shared, log: Option<PathBuf>) {
 }
 
 /// How often a restart's catch-up is looked at (`catch_up`): the replica's
-/// status asked four times a second while the replica is short of the
-/// change, a 504 of a read sent in the quarter second after it held it
-/// still the restart's.
+/// status asked four times a second from the restart's start until every
+/// read sent in its catch-up had its wait. An advance of the replica's
+/// change is dated by the start of the read before the one that found it
+/// (`Shared::r_seen`): looked at this often, a replica advancing steadily
+/// is known to have within the last half second or so, well within the 5
+/// s a 504 is judged over; and a 504 of a read sent in the quarter second
+/// after the replica held the change is still the restart's.
 const CATCH_EVERY: Duration = Duration::from_millis(250);
 
 /// Each restart's catch-up (`Catch`) followed to its end at a look every
 /// `CATCH_EVERY` (`catch_look`), and said once it is over: the replica's
 /// change read from its `/_replication/status`.
-fn catch_up(sh: &Shared, kit: &Kit, doings: &Doings, bound: u64) {
+fn catch_up(sh: &Shared, kit: &Kit, doings: &Doings, max: CatchMax) {
     let wait = fennec_http::AFTER_WAIT.as_nanos() as u64 + 1_000_000_000;
     let mut held = || {
         kit.status(kit.replica_port)
@@ -6506,8 +6616,8 @@ fn catch_up(sh: &Shared, kit: &Kit, doings: &Doings, bound: u64) {
     };
     loop {
         let stop = sh.stop.load(Ordering::Relaxed);
-        for x in catch_look(sh, doings, bound, wait, stop, &mut held) {
-            say(catch_said(&x, bound));
+        for x in catch_look(sh, doings, max, wait, stop, &mut held) {
+            say(catch_said(&x, max));
         }
         if stop {
             break;
@@ -6516,21 +6626,26 @@ fn catch_up(sh: &Shared, kit: &Kit, doings: &Doings, bound: u64) {
     }
 }
 
-/// One look at the latest restart's catch-up (`catch_up`): the loop's lag
-/// and whether reads go through the replica again, then -- the loop back
-/// on its schedule -- the replica's change (`held`), read outside the lock
-/// a 504 is judged under. How long the replica took from the loop's return
-/// is written as it ends (`catchup_replica_ms`, -1 where `bound`,
-/// `--replica-back-max`, passed first). Handed back to be said, with the
-/// 504s it took and the lane's reads it moved up (`catchup_down`,
-/// `catchup_moved`): each ended catch-up once every read sent in it has had
-/// `wait` -- the replica's wait, `fennec_http::AFTER_WAIT`, and a second --
-/// to come back; at the run's end (`stop`) each at once, one still open
-/// cut by it.
+/// One look at the restarts' catch-ups (`catch_up`): the loop's lag and
+/// whether reads go through the replica again, then -- while one is not
+/// yet said, from its window's start, before the loop is back too -- the
+/// replica's change (`held`), read outside the lock a 504 is judged under:
+/// whether it advances (`Shared::r_seen`), and whether the latest, open,
+/// is over by it or past a bound (`max`, `Catch::settle`), at the time
+/// taken before the read, so that no read sent while the status call ran
+/// -- its timeouts 10 s -- counts as the restart's. How long the replica
+/// took from the loop's return is written as it ends
+/// (`catchup_replica_ms`, -1 where a bound passed first). Handed back to
+/// be said, with the 504s it took and the lane's reads it moved up
+/// (`catchup_down`, `catchup_moved`): each ended catch-up once every read
+/// sent in it has had `wait` -- the replica's wait,
+/// `fennec_http::AFTER_WAIT`, and a second -- to come back; at the run's
+/// end (`stop`) each at once, one still open cut by it, its figures the
+/// end line's (`figures_onto`).
 fn catch_look(
     sh: &Shared,
     doings: &Doings,
-    bound: u64,
+    max: CatchMax,
     wait: u64,
     stop: bool,
     held: &mut dyn FnMut() -> Option<u64>,
@@ -6539,19 +6654,22 @@ fn catch_look(
     let through = sh.replica_ok.load(Ordering::SeqCst) && !sh.restarting(now);
     let behind = behind_s(sh.pool_slots(), now);
     let newest = sh.max_seq.load(Ordering::SeqCst);
-    let open = {
+    let (open, unsaid) = {
         let mut c = sh.catches.lock().unwrap();
-        c.last_mut().filter(|x| x.to == u64::MAX).and_then(|x| {
+        let unsaid = c.iter().any(|x| !x.said);
+        let open = c.last_mut().filter(|x| x.to == u64::MAX).map(|x| {
             x.on_schedule(now, behind, through, newest);
-            x.on.map(|_| x.from)
-        })
+            x.from
+        });
+        (open, unsaid)
     };
-    if let (Some(from), false) = (open, stop) {
+    if unsaid && !stop {
+        let at = sh.ns();
         let held = held();
-        let now = sh.ns();
+        sh.r_seen(at, held);
         let mut c = sh.catches.lock().unwrap();
-        if let Some(x) = c.last_mut().filter(|x| x.from == from) {
-            if x.settle(now, held, bound) {
+        if let Some(x) = c.last_mut().filter(|x| Some(x.from) == open) {
+            if x.settle(at, held, max) {
                 sh.catching.store(false, Ordering::SeqCst);
                 let ms = match (x.end, x.on) {
                     (CatchEnd::Caught, Some((on, _))) => ((x.to - on) / 1_000_000) as i64,
@@ -6594,12 +6712,12 @@ fn catch_look(
 
 /// A restart's catch-up on its line (`catch_up`): how long the loop took to
 /// be back on its schedule from the server answering again, and the
-/// replica to hold the change answered then from there -- or that it did
-/// not within `bound` (`--replica-back-max`), its 504s errors from there,
-/// or the next restart or the run's end came first -- and the reads
-/// through the replica a 504 answered in it, the restart's, and the
-/// lane's it moved up.
-fn catch_said(x: &Catch, bound: u64) -> String {
+/// replica to hold the change answered then from there -- or which of its
+/// bounds (`max`) passed first, its 504s errors from there, or that the
+/// next restart or the run's end came first -- both bounds named, and the
+/// reads through the replica a 504 answered in it while the replica's
+/// change advanced, the restart's, and the lane's it moved up.
+fn catch_said(x: &Catch, max: CatchMax) -> String {
     let s = |a: u64, b: u64| a.saturating_sub(b) as f64 / 1e9;
     let back = match x.back {
         u64::MAX => "the server not answering again".to_string(),
@@ -6623,10 +6741,17 @@ fn catch_said(x: &Catch, bound: u64) -> String {
             "over: {back}, the replica holding change {seq}, the newest answered then, {:.1} s after that",
             s(x.to, on)
         ),
-        (CatchEnd::Bound, Some((_, seq))) => format!(
-            "NOT over: {back}, the replica short of change {seq}, the newest answered then, {} s after that (--replica-back-max): a 504 from there an error",
-            bound / 1_000_000_000
+        (CatchEnd::Bound, Some((on, seq))) => format!(
+            "NOT over within --replica-back-max: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after that, a 504 from there an error",
+            s(x.to, on)
         ),
+        (CatchEnd::Long, Some((_, seq))) => format!(
+            "NOT over within --catchup-max: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after the server answered again, a 504 from there an error",
+            s(x.to, x.back)
+        ),
+        (CatchEnd::Long, None) => {
+            format!("NOT over within --catchup-max: {back}, a 504 from there an error")
+        }
         (_, Some((on, seq))) => format!(
             "{end}: {back}, the replica short of change {seq}, the newest answered then, {:.1} s after that",
             s(x.to, on)
@@ -6634,8 +6759,10 @@ fn catch_said(x: &Catch, bound: u64) -> String {
         (_, None) => format!("{end}: {back}"),
     };
     format!(
-        "minute {}: the restart's catch-up {how}; {} reads through the replica a 504 answered in it, the restart's, counted as down; {} of the lane's due in it moved up, never sent",
+        "minute {}: the restart's catch-up {how}; held to {} s from the loop's return (--replica-back-max) and {} s from the server answering again (--catchup-max); {} reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; {} of the lane's due in it moved up, never sent",
         x.minute,
+        max.replica / 1_000_000_000,
+        max.whole / 1_000_000_000,
         x.down,
         x.moved_milli / 1000
     )
@@ -7868,9 +7995,12 @@ fn run(o: &Opts) {
     let doings = Arc::new(Doings::default());
     {
         let (sh, kit, doings) = (Arc::clone(&sh), bench.0.clone(), Arc::clone(&doings));
-        let bound = o.replica_back_max.saturating_mul(1_000_000_000);
+        let max = CatchMax {
+            replica: o.replica_back_max.saturating_mul(1_000_000_000),
+            whole: o.catchup_max.saturating_mul(1_000_000_000),
+        };
         handles.push(std::thread::spawn(move || {
-            catch_up(&sh, &kit, &doings, bound)
+            catch_up(&sh, &kit, &doings, max)
         }));
     }
     let (jobs, side_jobs) = mpsc::channel::<Job>();
@@ -8495,13 +8625,7 @@ fn run(o: &Opts) {
         ] {
             v.push((name, n.swap(0, Ordering::Relaxed).to_string()));
         }
-        // The kill's figures: one kill a minute at the most, a death beside
-        // it the rarer still -- the last said of each kept.
-        let figures = std::mem::take(&mut *doings.figures.lock().unwrap());
-        for (name, x) in figures {
-            v.retain(|(k, _)| *k != name);
-            v.push((name, x));
-        }
+        figures_onto(&doings, &mut v);
         v.push(("r_died", (!rup as u8).to_string()));
         // The replica, kept from reads after a restart until it said it
         // held the newest change: looked at again each minute.
@@ -8976,6 +9100,9 @@ fn run(o: &Opts) {
         ("env_failed", (env_failed.is_some() as u8).to_string()),
     ];
     v.extend(kept.end());
+    // What was said after the last minute's line: the catch-ups the run's
+    // end cut or that ended within their wait of it (`catch_look`).
+    figures_onto(&doings, &mut v);
     if let Some(ms) = checker.lost_ms_max.take() {
         v.push(("lost_ms_max", ms.to_string()));
     }
@@ -10225,6 +10352,8 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         v.push((c, ok, detail.trim_end_matches("; ").to_string()));
     }
     let steps = broke(&|m| get(m, "clock_step") == Some(1.0));
+    // The end line's among them: the catch-ups said after the last minute's.
+    let catch_down = total("catchup_down");
     for (c, key) in [(CRITERIA[9], "errors"), (CRITERIA[10], "mismatches")] {
         let total = sum(key);
         let at_end = end
@@ -10255,7 +10384,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                     _ => String::new(),
                 },
                 // A restart's catch-up's 504s are its own (`Catch`), said.
-                match (key, sum("catchup_down")) {
+                match (key, catch_down) {
                     ("errors", d) if d > 0.0 => format!(
                         "; {d:.0} reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
                     ),
@@ -10301,12 +10430,17 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         .filter_map(|(_, m)| get(m, "replica_back_ms"))
         .fold(0.0f64, f64::max);
     // And caught up with the writes of the loop's backlog after it, held
-    // to the same bound from the loop's return (`Catch`): -1 where it was
-    // still short of the change answered then as the bound passed.
-    let short = broke(&|m| get(m, "catchup_replica_ms").is_some_and(|x| x < 0.0));
+    // to the same bound from the loop's return and to `--catchup-max` from
+    // the server's (`CatchMax`): -1 where one passed first. The end line's
+    // too: a catch-up's said after the last minute's line.
+    let past = |m: &HashMap<String, f64>| get(m, "catchup_replica_ms").is_some_and(|x| x < 0.0);
+    let short = broke(&past);
+    let short_end = end.is_some_and(past);
     let caught_most = minutes
         .iter()
-        .filter_map(|(_, m)| get(m, "catchup_replica_ms"))
+        .map(|(_, m)| *m)
+        .chain(end)
+        .filter_map(|m| get(m, "catchup_replica_ms"))
         .fold(0.0f64, f64::max);
     let follow = start.and_then(|m| Some((get(m, "follow_s")?, get(m, "follow_max")?)));
     let catchup = end.and_then(|m| get(m, "catchup_s"));
@@ -10317,11 +10451,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         lagging.is_empty()
             && late_back.is_empty()
             && short.is_empty()
+            && !short_end
             && follow.is_some_and(|(s, max)| s >= 0.0 && s <= max)
             && catchup.is_some_and(|s| s >= 0.0 && s <= catchup_max)
             && differs == Some(0.0),
         format!(
-            "connected and within {lag_max:.0} s of the primary{}; followed in {}; back after a restart within {:.1} s at most, the bound {:.0} s{}, and holding the change answered as the loop was back on its schedule within {:.1} s of it at most{}; caught up at the end in {}; {}",
+            "connected and within {lag_max:.0} s of the primary{}; followed in {}; back after a restart within {:.1} s at most, the bound {:.0} s{}, and holding the change answered as the loop was back on its schedule within {:.1} s of it at most{}{}; caught up at the end in {}; {}",
             minutes_said(&lagging),
             follow.map_or("?".into(), |(s, _)| format!("{s:.0} s")),
             back_most / 1e3,
@@ -10333,7 +10468,14 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             caught_most / 1e3,
             match short.is_empty() {
                 true => String::new(),
-                false => format!(" (NOT within the bound at minutes {})", list(&short)),
+                false => format!(
+                    " (NOT within it, or --catchup-max of the server answering again, at minutes {})",
+                    list(&short)
+                ),
+            },
+            match short_end {
+                true => " (NOT within it, or --catchup-max of the server answering again, in a catch-up said after the last minute)",
+                false => "",
             },
             catchup.map_or("? (no end line)".into(), |s| format!("{s:.0} s of {catchup_max:.0}")),
             match differs {
@@ -12180,6 +12322,15 @@ mod tests {
                 vec![CRITERIA[12]],
             ),
             (
+                "a catch-up said after the last minute's line past its bound",
+                Box::new(|m, x| {
+                    if m == u64::MAX {
+                        x.insert("catchup_replica_ms", -1.0);
+                    }
+                }),
+                vec![CRITERIA[12]],
+            ),
+            (
                 "a restart too long",
                 Box::new(|m, x| {
                     if m == 91 {
@@ -13208,8 +13359,14 @@ mod tests {
     fn a_restart_s_catch_up_ends_with_the_loop_on_its_schedule_and_the_replica_holding_the_change_then(
     ) {
         let s = 1_000_000_000u64;
-        let bound = 60 * s;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        let bounds = "held to 60 s from the loop's return (--replica-back-max) and 300 s from the server answering again (--catchup-max); ";
         let mut x = Catch::new(3, 100 * s);
+        // Down: nothing to hold, and no bound running.
+        assert!(!x.settle(10_000 * s, None, max));
         x.back = 104 * s;
         // Within the grace the reads go to the primary: the loop on its
         // schedule names no change yet.
@@ -13219,7 +13376,7 @@ mod tests {
         // restart's backlog: not yet; and nothing to hold before it.
         x.on_schedule(110 * s, Some(4.0), true, 1_000);
         assert_eq!(x.on, None);
-        assert!(!x.settle(110 * s, Some(2_000), bound));
+        assert!(!x.settle(110 * s, Some(2_000), max));
         // Back on its schedule: the newest change answered then is the
         // replica's to hold, a later look never moving it.
         x.on_schedule(118 * s, Some(0.8), true, 8_000);
@@ -13227,16 +13384,16 @@ mod tests {
         x.on_schedule(119 * s, Some(0.1), true, 9_000);
         assert_eq!(x.on, Some((118 * s, 8_000)));
         // Short of it, then not read, then holding it: over.
-        assert!(!x.settle(119 * s, Some(7_999), bound));
-        assert!(!x.settle(120 * s, None, bound));
-        assert!(x.settle(121 * s, Some(8_000), bound));
+        assert!(!x.settle(119 * s, Some(7_999), max));
+        assert!(!x.settle(120 * s, None, max));
+        assert!(x.settle(121 * s, Some(8_000), max));
         assert_eq!((x.end, x.to), (CatchEnd::Caught, 121 * s));
-        assert!(!x.settle(122 * s, Some(8_000), bound));
+        assert!(!x.settle(122 * s, Some(8_000), max));
         x.down = 185;
         x.moved_milli = 1_203_400;
         assert_eq!(
-            catch_said(&x, bound),
-            "minute 3: the restart's catch-up over: the loop back on its schedule 14.0 s after the server answered again, the replica holding change 8000, the newest answered then, 3.0 s after that; 185 reads through the replica a 504 answered in it, the restart's, counted as down; 1203 of the lane's due in it moved up, never sent"
+            catch_said(&x, max),
+            format!("minute 3: the restart's catch-up over: the loop back on its schedule 14.0 s after the server answered again, the replica holding change 8000, the newest answered then, 3.0 s after that; {bounds}185 reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; 1203 of the lane's due in it moved up, never sent")
         );
         // Short of it `--replica-back-max` after the loop's return: over,
         // a 504 from there an error. At the peak the loop keeps no
@@ -13244,23 +13401,47 @@ mod tests {
         let mut y = Catch::new(4, 200 * s);
         y.back = 203 * s;
         y.on_schedule(210 * s, None, true, 5);
-        assert!(!y.settle(269 * s, Some(4), bound));
-        assert!(y.settle(270 * s, Some(4), bound));
+        assert!(!y.settle(269 * s, Some(4), max));
+        assert!(y.settle(270 * s, Some(4), max));
         assert_eq!((y.end, y.to), (CatchEnd::Bound, 270 * s));
-        assert!(catch_said(&y, bound).starts_with(
-            "minute 4: the restart's catch-up NOT over: the loop back on its schedule 7.0 s after the server answered again, the replica short of change 5, the newest answered then, 60 s after that (--replica-back-max): a 504 from there an error; 0 reads"
-        ));
-        // A loop never back on its schedule leaves it open -- the open
-        // loop's own verdict fails that -- to the next restart.
+        assert_eq!(
+            catch_said(&y, max),
+            format!("minute 4: the restart's catch-up NOT over within --replica-back-max: the loop back on its schedule 7.0 s after the server answered again, the replica short of change 5, the newest answered then, 60.0 s after that, a 504 from there an error; {bounds}0 reads through the replica a 504 answered in it while the replica's change advanced, the restart's, counted as down; 0 of the lane's due in it moved up, never sent")
+        );
+        // A loop never back on its schedule -- 11 minutes to drain a kill's
+        // backlog met 166 s behind -- its replica's 504s the restart's while
+        // its change advances: over `--catchup-max` after the server
+        // answered, a 504 from there an error, whatever the replica holds.
         let mut z = Catch::new(5, 300 * s);
         z.back = 304 * s;
         z.on_schedule(400 * s, Some(30.0), true, 5);
-        assert!(!z.settle(1_000 * s, None, bound));
-        z.to = 1_500 * s;
-        z.end = CatchEnd::Cut;
-        assert!(catch_said(&z, bound).starts_with(
-            "minute 5: the restart's catch-up cut by the next restart: the loop not back on its schedule, with reads through the replica again, in the 1196.0 s after the server answered again; "
+        assert!(!z.settle(603 * s, Some(1_000), max));
+        assert!(z.settle(604 * s, Some(1_000), max));
+        assert_eq!((z.end, z.to), (CatchEnd::Long, 604 * s));
+        assert!(catch_said(&z, max).starts_with(&format!(
+            "minute 5: the restart's catch-up NOT over within --catchup-max: the loop not back on its schedule, with reads through the replica again, in the 300.0 s after the server answered again, a 504 from there an error; {bounds}"
+        )));
+        // Back on it late, the replica's own bound not yet over: the
+        // whole one ends it all the same.
+        let mut l = Catch::new(6, 400 * s);
+        l.back = 404 * s;
+        l.on_schedule(650 * s, Some(0.5), true, 70);
+        assert!(!l.settle(703 * s, Some(69), max));
+        assert!(l.settle(704 * s, Some(69), max));
+        assert_eq!((l.end, l.to), (CatchEnd::Long, 704 * s));
+        assert!(catch_said(&l, max).starts_with(
+            "minute 6: the restart's catch-up NOT over within --catchup-max: the loop back on its schedule 246.0 s after the server answered again, the replica short of change 70, the newest answered then, 300.0 s after the server answered again, a 504 from there an error; "
         ));
+        // The next restart first: cut by it.
+        let mut c = Catch::new(7, 900 * s);
+        c.back = 904 * s;
+        c.on_schedule(1_000 * s, Some(30.0), true, 5);
+        assert!(!c.settle(1_100 * s, None, max));
+        c.to = 1_104 * s;
+        c.end = CatchEnd::Cut;
+        assert!(catch_said(&c, max).starts_with(&format!(
+            "minute 7: the restart's catch-up cut by the next restart: the loop not back on its schedule, with reads through the replica again, in the 200.0 s after the server answered again; {bounds}"
+        )));
     }
 
     #[test]
@@ -13276,7 +13457,11 @@ mod tests {
                 "{\"error\":\"change 9 has not reached this server in the wait\"}".into(),
             )
         });
-        let sh = Shared::new(&opts(), addr.clone(), addr, &[]);
+        let mut sh = Shared::new(&opts(), addr.clone(), addr, &[]);
+        // A run 100 s in: a replica's change can have advanced long ago.
+        sh.t0 = sh.t0.checked_sub(Duration::from_secs(100)).unwrap();
+        let sh = sh;
+        let s = 1_000_000_000u64;
         let mut w = Worker {
             sh: &sh,
             slot: &sh.slots[0],
@@ -13296,98 +13481,161 @@ mod tests {
         assert!(!w.read(5, true));
         assert_eq!(counts(), (1, 0));
         // A kill's restart, the server back: its catch-up open from the
-        // window's start, the replica behind the backlog's writes -- the
-        // restart's, `down`, counted to it.
+        // window's start. The replica's change never seen to advance: a
+        // stall, not a catch-up -- an error, said as one in it.
         let from = sh.ns();
         sh.catch_open(3, from);
         sh.catch_back(from + 1);
         assert!(!w.read(5, true));
+        assert_eq!(counts(), (2, 0));
+        let said = sh.notes.lock().unwrap().last().cloned().unwrap();
+        assert!(
+            said.contains("; sent in the catch-up of minute 3's restart, the replica's change not seen to advance in the 5 s before"),
+            "{said}"
+        );
+        // Seen to advance, but past the wait: still standing.
+        sh.r_seen(sh.ns() - 8 * s, Some(100));
+        sh.r_seen(sh.ns() - 7 * s, Some(101));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (3, 0));
+        // A read now finding it further on knows only that it moved after
+        // the read before began, 7 s ago: still an error, and so after one
+        // finding it where it was; the next further on, that it moved after
+        // that one began, just now.
+        sh.r_seen(sh.ns(), Some(102));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (4, 0));
+        sh.r_seen(sh.ns(), Some(102));
+        assert!(!w.read(5, true));
+        assert_eq!(counts(), (5, 0));
+        sh.r_seen(sh.ns(), Some(103));
+        // The replica behind the backlog's writes and catching up: the
+        // restart's, `down`, counted to it.
+        assert!(!w.read(5, true));
         assert!(!w.read(6, true));
-        assert_eq!(counts(), (1, 2));
+        assert_eq!(counts(), (5, 2));
         // A read sent in it whose 504 comes after it ended, by the wait:
         // the restart's still, by its send.
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
         std::thread::scope(|scope| {
             let late = scope.spawn(|| w.read(77, true));
             std::thread::sleep(Duration::from_millis(100));
             let mut c = sh.catches.lock().unwrap();
             let x = c.last_mut().unwrap();
             x.on_schedule(sh.ns(), Some(0.2), true, 40);
-            assert!(x.settle(sh.ns(), Some(40), 60_000_000_000));
+            assert!(x.settle(sh.ns(), Some(40), max));
             drop(c);
             assert!(!late.join().unwrap());
         });
-        assert_eq!(counts(), (1, 3));
+        assert_eq!(counts(), (5, 3));
         assert_eq!(sh.catches.lock().unwrap()[0].down, 3);
         // After it, the replica caught up: an error.
         assert!(!w.read(7, true));
-        assert_eq!(counts(), (2, 3));
+        assert_eq!(counts(), (6, 3));
         // A 504 of the primary's is never a catch-up's. (The fake serves a
         // connection at a time: the replica's let go.)
         let from = sh.ns();
         sh.catch_open(4, from);
         w.rc = None;
         assert!(!w.read(8, false));
-        assert_eq!(counts(), (3, 3));
+        assert_eq!(counts(), (7, 3));
         assert_eq!(sh.catches.lock().unwrap()[1].down, 0);
     }
 
     #[test]
-    fn a_restart_s_catch_up_is_looked_at_once_reads_go_through_the_replica_and_said_once_over() {
+    fn a_restart_s_catch_up_follows_the_replica_from_its_start_and_is_said_once_over() {
         let mut sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
         // A run 100 s in: a restart's grace can be over.
         sh.t0 = sh.t0.checked_sub(Duration::from_secs(100)).unwrap();
         let sh = sh;
         let doings = Doings::default();
         let s = 1_000_000_000u64;
-        let bound = 60 * s;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
         let figures = || std::mem::take(&mut *doings.figures.lock().unwrap());
         let reads = std::cell::Cell::new(0);
         let look = |wait: u64, stop: bool, held: u64| {
-            catch_look(&sh, &doings, bound, wait, stop, &mut || {
+            catch_look(&sh, &doings, max, wait, stop, &mut || {
                 reads.set(reads.get() + 1);
                 Some(held)
             })
         };
+        // No restart: the replica not asked.
+        assert!(look(0, false, 40).is_empty());
+        assert_eq!(reads.get(), 0);
         // The kill's window open: its catch-up from the window's start, the
-        // lane moved up.
+        // lane moved up, and the replica asked from there -- its change
+        // standing while the primary is down: a 504 then a stall's.
         let from = sh.ns();
         sh.windows.lock().unwrap().push((from, from, u64::MAX));
         sh.catch_open(3, from);
         assert!(sh.catching.load(Ordering::SeqCst));
-        // Down, then back within the grace, the loop on its schedule (no
-        // connection behind it): the replica not asked.
-        assert!(look(0, false, 0).is_empty());
+        assert!(look(0, false, 50).is_empty());
+        assert!(look(0, false, 50).is_empty());
+        assert_eq!(reads.get(), 2);
+        assert_eq!(sh.r_advanced.load(Ordering::SeqCst), 0);
+        // Back within the grace, the loop on its schedule (no connection
+        // behind it): no change named yet, but the replica asked, following
+        // the primary's writes -- seen to advance after the look before
+        // began.
         let back = sh.ns();
         sh.windows.lock().unwrap()[0].2 = back;
         sh.catch_back(back);
-        assert!(look(0, false, 0).is_empty());
+        assert!(look(0, false, 60).is_empty());
+        let advanced = sh.r_advanced.load(Ordering::SeqCst);
+        assert!(
+            advanced >= from && advanced < back,
+            "{from} {advanced} {back}"
+        );
         // Past the grace, the pool 3 s behind with its backlog: not yet.
         sh.windows.lock().unwrap()[0].2 = back - GRACE - s;
         let lagging = sh.ns().saturating_sub(3 * s);
         for slot in sh.pool_slots() {
             slot.due.store(lagging, Ordering::SeqCst);
         }
-        assert!(look(0, false, 0).is_empty());
+        assert!(look(0, false, 70).is_empty());
         // On it, but the replica kept from reads since the kill: not yet.
         for slot in sh.pool_slots() {
             slot.due.store(sh.ns(), Ordering::SeqCst);
         }
         sh.replica_ok.store(false, Ordering::SeqCst);
-        assert!(look(0, false, 0).is_empty());
-        assert_eq!(reads.get(), 0);
+        assert!(look(0, false, 80).is_empty());
+        assert_eq!(sh.catches.lock().unwrap()[0].on, None);
+        assert_eq!(reads.get(), 5);
+        assert!(sh.r_advanced.load(Ordering::SeqCst) > advanced);
         // Reads through it again: the newest change answered then named,
-        // the replica short of it, then holding it -- said only once the
-        // reads sent in it had their wait.
+        // the replica short of it, then holding it -- over at the time
+        // taken before its status was asked: a read sent while the call
+        // ran, its timeouts 10 s, is no longer the restart's -- and said
+        // only once the reads sent in it had their wait.
         sh.replica_ok.store(true, Ordering::SeqCst);
         sh.max_seq.store(8_000, Ordering::SeqCst);
         assert!(look(0, false, 7_000).is_empty());
         sh.max_seq.store(9_000, Ordering::SeqCst);
-        assert!(look(3_600 * s, false, 8_000).is_empty());
+        let asked = std::cell::Cell::new(0);
+        let mut slow = || {
+            asked.set(sh.ns());
+            std::thread::sleep(Duration::from_millis(20));
+            Some(8_000)
+        };
+        assert!(catch_look(&sh, &doings, max, 3_600 * s, false, &mut slow).is_empty());
         assert!(!sh.catching.load(Ordering::SeqCst));
-        assert!(look(3_600 * s, false, 8_000).is_empty());
-        assert_eq!(reads.get(), 2);
         let x = sh.catches.lock().unwrap()[0];
         assert_eq!((x.end, x.on.map(|o| o.1)), (CatchEnd::Caught, Some(8_000)));
+        assert!(
+            x.to <= asked.get(),
+            "over at {}, asked at {}",
+            x.to,
+            asked.get()
+        );
+        // Not yet said: the replica still asked, for the 504s to come.
+        assert!(look(3_600 * s, false, 8_100).is_empty());
+        assert_eq!(reads.get(), 7);
         let f = figures();
         assert!(
             f.iter()
@@ -13395,16 +13643,20 @@ mod tests {
             "{f:?}"
         );
         assert!(f.iter().any(|(k, _)| *k == "catchup_on_ms"), "{f:?}");
-        assert_eq!(look(0, false, 0).len(), 1);
-        assert!(look(0, false, 0).is_empty());
+        assert_eq!(look(0, false, 8_200).len(), 1);
+        assert_eq!(reads.get(), 8);
+        // Every catch-up said: the replica no longer asked.
+        assert!(look(0, false, 8_300).is_empty());
+        assert_eq!(reads.get(), 8);
         assert!(figures().iter().any(|(k, _)| *k == "catchup_down"));
-        // The next restart's, the replica short of the change past the
-        // bound -- a nanosecond here: -1; and one open at the run's end
-        // cut by it, both said at once.
+        // The next restart's, the replica short of the change past its
+        // bound -- a nanosecond here: -1.
         sh.catch_open(4, sh.ns());
+        sh.catch_back(sh.ns());
         sh.catches.lock().unwrap()[1].on = Some((sh.ns(), 10_000));
         std::thread::sleep(Duration::from_millis(1));
-        assert!(catch_look(&sh, &doings, 1, 3_600 * s, false, &mut || Some(9_999)).is_empty());
+        let tight = CatchMax { replica: 1, ..max };
+        assert!(catch_look(&sh, &doings, tight, 3_600 * s, false, &mut || Some(9_999)).is_empty());
         assert_eq!(sh.catches.lock().unwrap()[1].end, CatchEnd::Bound);
         let f = figures();
         assert!(
@@ -13412,13 +13664,134 @@ mod tests {
                 .any(|(k, v)| *k == "catchup_replica_ms" && v == "-1"),
             "{f:?}"
         );
+        // The one after, the loop never back on its schedule as the whole
+        // catch-up's bound passed: -1 too.
         sh.catch_open(5, sh.ns());
+        sh.catch_back(sh.ns());
+        for slot in sh.pool_slots() {
+            slot.due
+                .store(sh.ns().saturating_sub(30 * s), Ordering::SeqCst);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        let whole = CatchMax { whole: 1, ..max };
+        assert!(catch_look(&sh, &doings, whole, 3_600 * s, false, &mut || Some(9_999)).is_empty());
+        let x = sh.catches.lock().unwrap()[2];
+        assert_eq!((x.end, x.on), (CatchEnd::Long, None));
+        let f = figures();
+        assert!(
+            f.iter()
+                .any(|(k, v)| *k == "catchup_replica_ms" && v == "-1"),
+            "{f:?}"
+        );
+        // And one open at the run's end cut by it, all said at once, the
+        // replica not asked.
+        sh.catch_open(6, sh.ns());
+        let before = reads.get();
         let said = look(3_600 * s, true, 0);
         assert_eq!(
             said.iter().map(|x| (x.minute, x.end)).collect::<Vec<_>>(),
-            vec![(4, CatchEnd::Bound), (5, CatchEnd::RunEnd)]
+            vec![
+                (4, CatchEnd::Bound),
+                (5, CatchEnd::Long),
+                (6, CatchEnd::RunEnd)
+            ]
         );
+        assert_eq!(reads.get(), before);
         assert!(!sh.catching.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_restart_cuts_the_catch_up_still_open_and_its_504s_stay_its_own() {
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        let doings = Doings::default();
+        let s = 1_000_000_000u64;
+        let max = CatchMax {
+            replica: 60 * s,
+            whole: 300 * s,
+        };
+        // The replica catching up; the loop never back on its schedule
+        // with reads through it.
+        sh.r_seen(sh.ns(), Some(1));
+        sh.r_seen(sh.ns(), Some(2));
+        sh.replica_ok.store(false, Ordering::SeqCst);
+        sh.catch_open(3, sh.ns());
+        let from = sh.ns();
+        assert_eq!(sh.catch_504(from), Some((3, true)));
+        // The next restart, the first still open: cut where it begins.
+        sh.catch_open(4, from + 1);
+        let c = sh.catches.lock().unwrap().clone();
+        assert_eq!((c[0].to, c[0].end, c[0].down), (from + 1, CatchEnd::Cut, 1));
+        assert_eq!((c[1].to, c[1].end), (u64::MAX, CatchEnd::Open));
+        // A read sent before the cut is the first's, one after the next's.
+        assert_eq!(sh.catch_504(from), Some((3, true)));
+        assert_eq!(sh.catch_504(from + 2), Some((4, true)));
+        // Said once its reads had their wait, as cut; the next open.
+        let said = catch_look(&sh, &doings, max, 0, false, &mut || Some(2));
+        assert_eq!(said.len(), 1);
+        assert!(catch_said(&said[0], max).starts_with(
+            "minute 3: the restart's catch-up cut by the next restart: the server not answering again; "
+        ));
+        assert_eq!(said[0].down, 2);
+        assert!(sh.catching.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn two_catch_ups_in_a_minute_add_their_reads_and_keep_their_worst() {
+        let doings = Doings::default();
+        let line = |v: &[(&str, String)]| -> Vec<(String, String)> {
+            let mut l: Vec<_> = v.iter().map(|(k, x)| (k.to_string(), x.clone())).collect();
+            l.sort();
+            l
+        };
+        let pairs = |p: &[(&str, &str)]| -> Vec<(String, String)> {
+            let mut l: Vec<_> = p
+                .iter()
+                .map(|(k, x)| (k.to_string(), x.to_string()))
+                .collect();
+            l.sort();
+            l
+        };
+        // The first past a bound, the second over in 2.5 s: the -1 kept,
+        // never the later one's over it; the reads of both. A kill's own
+        // figure: the last said.
+        let mut v: Vec<(&str, String)> = vec![("ops", "10".into())];
+        for (k, x) in [
+            ("kill_ms", "400"),
+            ("catchup_replica_ms", "-1"),
+            ("catchup_on_ms", "9000"),
+            ("catchup_down", "185"),
+            ("catchup_moved", "12"),
+            ("kill_ms", "300"),
+            ("catchup_replica_ms", "2500"),
+            ("catchup_on_ms", "4000"),
+            ("catchup_down", "7"),
+            ("catchup_moved", "3"),
+        ] {
+            doings.figure(k, x.into());
+        }
+        figures_onto(&doings, &mut v);
+        assert_eq!(
+            line(&v),
+            pairs(&[
+                ("ops", "10"),
+                ("kill_ms", "300"),
+                ("catchup_replica_ms", "-1"),
+                ("catchup_on_ms", "9000"),
+                ("catchup_down", "192"),
+                ("catchup_moved", "15"),
+            ])
+        );
+        assert!(doings.figures.lock().unwrap().is_empty());
+        // Both over, the other way round: the longer kept.
+        let mut v: Vec<(&str, String)> = Vec::new();
+        for (k, x) in [
+            ("catchup_replica_ms", "2500"),
+            ("catchup_replica_ms", "700"),
+        ] {
+            doings.figure(k, x.into());
+        }
+        figures_onto(&doings, &mut v);
+        assert_eq!(line(&v), pairs(&[("catchup_replica_ms", "2500")]));
     }
 
     #[test]
@@ -16676,6 +17049,10 @@ mod tests {
             }
             if m == u64::MAX {
                 x.insert("memory_limit", 512.0 * 1048576.0);
+                // A catch-up said after the last minute's line, on the end
+                // line: its 504s counted with the minutes'.
+                x.insert("catchup_down", 20.0);
+                x.insert("catchup_replica_ms", 1_500.0);
             }
         });
         // Its own criterion alone: the kills, the verifies, the compacts
@@ -16702,7 +17079,7 @@ mod tests {
         );
         assert!(
             said(CRITERIA[9]).ends_with(
-                "; 96 connections a death of the primary cut before it was found counted with it, as down; 185 reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
+                "; 96 connections a death of the primary cut before it was found counted with it, as down; 205 reads through the replica a 504 answered in a restart's catch-up counted with it, as down"
             ),
             "{}",
             said(CRITERIA[9])

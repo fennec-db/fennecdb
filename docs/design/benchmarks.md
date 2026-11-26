@@ -730,7 +730,7 @@ nothing, and the containers' logs went with them.
 
 **A restart's catch-up.** The replica is read again once it says it is
 connected and holds the newest change answered before the kill, and the
-grace after the server answered is over (below); but the open loop then
+grace after the server answered is over (`GRACE`, above); but the open loop then
 sends the primary its backlog, the restart's length of writes at once,
 and a replica that follows at the rate the primary writes is that far
 behind until the loop is back on its schedule. The third round's dry
@@ -747,25 +747,49 @@ run before the lane had 96 at one kill. So each restart has a catch-up
 its schedule (`ON_SCHEDULE_S`, the pool's lag) with reads going through
 the replica again, and the replica holds the newest change answered
 then -- looked at four times a second (`CATCH_EVERY`), the replica's
-`/_replication/status` asked once the loop is back. A read through the
+`/_replication/status` asked from the window's start, before the loop is
+back too, until every read sent in it had its wait. A read through the
 replica sent in it that a 504 answers is the restart's, `down`
 (`Shared::catch_504`), told by its send, not its answer, which comes the
-wait after; one sent after it, or with no restart behind it, stays an
-error. It is bounded: the replica short of that change
-`--replica-back-max` after the loop came back ends it (`catchup_replica_ms`
--1), a 504 from there is an error, and "the replica followed, came back,
-caught up and holds the rows" fails that restart. Its lane's schedule is
-moved up meanwhile, a second behind at the most as at the peak
-(`lane_due`): the reads due while the primary was gone, and those the
-504s held the lane behind by, are dropped and counted, never sent at once
-into a replica the backlog has put behind. Its line says it once every
-read sent in it had its wait: how long the loop took to be back on its
-schedule from the server answering again, how long the replica took
-from there to hold the change, the reads a 504 answered in it, the
-restart's, and the lane's it moved up -- or that it was not over within
-the bound, or was cut by the next restart or the run's end. A loop never
-back on its schedule leaves it open to the next restart, its 504s the
-restart's: the open loop's own verdict fails that run.
+wait after -- but only while the replica is catching up: its change seen
+to advance within the wait before the 504 came (`Shared::r_seen`), the
+advance dated by the start of the status read before the one that found
+it, the latest it is known to have come after. A replica whose change
+stood still the wait through is stalled, not behind a backlog, and its
+504 is an error in a catch-up too, said as one: before, every 504 sent in
+a catch-up until the loop was back counted as down whatever held it, and
+a stall then passed "no error" and, a 504 recording no latency, the
+restarts' and the replica's own criteria with it. One sent after the catch-up, or with no restart behind
+it, stays an error. Its end is the time taken before the status read
+that ended it, so that no read sent while that call ran -- its timeouts
+10 s -- is the restart's; and a read's send is taken once it is
+connected, after a connect that may take 60 s. It is bounded twice
+(`CatchMax`): the replica short of that change `--replica-back-max` after
+the loop came back ends it, and so does `--catchup-max` after the server
+answered again, the loop back or not -- the run's bound on a replica
+catching up with a backlog of writes, at its end as here, which holds a
+catch-up that keeps advancing but never ends: a loop drains a kill's
+backlog in four times as long as the server was gone (at 80% of the
+peak), the third round's dry run met its kill of minute 60 166 s behind,
+some 11 minutes to drain, and the open loop's own verdict fails only a
+loop behind for a whole kill interval. Either ends it with
+`catchup_replica_ms` -1, a 504 from there is an error, and "the replica
+followed, came back, caught up and holds the rows" fails that restart.
+Its lane's schedule is moved up meanwhile, a second behind at the most as
+at the peak (`lane_due`): the reads due while the primary was gone, and
+those the 504s held the lane behind by, are dropped and counted, never
+sent at once into a replica the backlog has put behind. Its line says it
+once every read sent in it had its wait: how long the loop took to be
+back on its schedule from the server answering again, how long the
+replica took from there to hold the change, the reads a 504 answered in
+it while the replica's change advanced, the restart's, and the lane's it
+moved up -- or which bound passed first, both named on every line, or
+that it was cut by the next restart or the run's end. Its figures go on
+the line of the minute it was said in, two of one minute adding their
+counts and keeping their worst -- -1 over any time, the longer time --
+rather than the later's (`figures_onto`), and those said after the last
+minute's line, a catch-up the run's end cut or one that ended within its
+wait of it, on the end line, which the verdicts read with the minutes'.
 
 **Each server's memory a second.** The minute's look is one sample a
 minute: the long run's primary read 304 MB of anonymous memory at its
@@ -1244,11 +1268,14 @@ run's doings in the minute (`kill`, `kill_died`, `verify`,
 `sweep_failed`) and a kill's parts, each timed apart -- docker's kill and
 wait (`kill_ms`), the verify (`verify_ms`) and the server's own part,
 `docker start` to answering (`start_ms`) -- with `kill_compacting`,
-`kill_sync_ms` and `replica_back_ms`; a restart's catch-up (below) --
-`catchup_on_ms` from the server answering again to the loop on its
-schedule, `catchup_replica_ms` from there to the replica holding the
-change answered then (-1 past `--replica-back-max`), and, once every read
-sent in it had its wait, `catchup_down` and `catchup_moved`; `died`, `oom` and `r_died` (a server
+`kill_sync_ms` and `replica_back_ms`; a restart's catch-up ("A restart's
+catch-up" above) -- `catchup_on_ms` from the server answering again to
+the loop on its schedule, `catchup_replica_ms` from there to the replica
+holding the change answered then (-1 past `--replica-back-max` from there
+or `--catchup-max` from the server answering again), and, once every read
+sent in it had its wait, `catchup_down` and `catchup_moved` -- two of a
+minute's adding their counts and keeping their worst, those said after
+the last minute on `:end`; `died`, `oom` and `r_died` (a server
 gone that the run did not kill, the kernel's OOM kills of it), and a
 death's own (`death_oom`, `death_exit`, `death_at_s`, `death_source` --
 1 its burst of closes (an older run's first close), 2 Docker's `die`, 3 its `FinishedAt`, 4
@@ -1268,7 +1295,7 @@ kernel's vsock work, and the run's look, verify and backup containers --
 about a core all through the third dry run, 2.6 times the server's own
 CPU for the same `/_health` requests where measured beside one). `:start` says
 the run's settings (`replica_threads`, `replication_buffer` and the VM's `cpus` among them) and the load before it (`load_before`), the peak's `:end` its `peak_ops_s` (the mean), `peak_slowest_ops_s` and `peak_slowest_at` (the slowest stretch and its first minute), `peak_auto_compacts`, `peak_lane_share` and `peak_lane_dropped`, `:end` closes a
-finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`,
+finished run: totals (the mismatches of the last minutes' reads and events, held only at the end, said apart from the end's read's where the volumes are kept), `swept` against `keys`, the replica's `catchup_s`, the figures of a restart's catch-up said after the last minute's line (`catchup_down`, `catchup_replica_ms` and the rest),
 `p99_restart` and `restart_ops`, `p99_restart_replica` and
 `restart_replica_ops`, `p99_restart_behind` and
 `restart_behind_ops`, `p99_r_compact` and `r_compact_ops`,
@@ -1369,12 +1396,14 @@ status other than a 2xx is one wherever it falls, and so is a connection
 error or a 503 saying when to come back outside a restart's window, which
 within one is `down`, and so is one a death cut before it was found,
 said (`death_down`), and a read through the replica a 504 answered in a
-restart's catch-up (`catchup_down`); no mismatch (and the minutes the VM's clock stepped
+restart's catch-up while the replica's change advanced (`catchup_down`,
+the end line's among them); no mismatch (and the minutes the VM's clock stepped
 said beside it); every stream held and all 64 open each minute; the
 replica connected each minute and within 5 s of the primary, its first
 follow within 1 800 s, back after each restart within `--replica-back-max`
 and holding the change answered as the loop came back on its schedule
-within it of that (`catchup_replica_ms`), caught up at the end within 300
+within it of that and within `--catchup-max` of the server answering
+again (`catchup_replica_ms`, the end line's too), caught up at the end within 300
 s, and holding the primary's rows; every
 restart within `--restart-max` (120 s) and the restarts' operations' p99
 within the longest restart they were due in and two seconds at the
