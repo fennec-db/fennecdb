@@ -563,6 +563,32 @@ read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
 
+A compact walks a collection's ids four times -- `Store::live_len` for the
+data record's length, `image_index`, which asks `live_len` again, and
+`write_live` -- and each takes every id's location from the walk itself
+(`IdIndex::walk`), as `Store::compacted` and the copy in turn's buckets
+do; `relocate_live` and the copy's `places` walk the dense slots
+themselves. Each walk took the ids alone and looked each one up again: 49
+instructions a row of the perf gate's `file-compact`, 26 of them
+`live_len`'s, 15 `image_index`'s and 8 `write_live`'s. Counted as the gate
+counts (aarch64 musl, in Docker), `file-compact` went 6.89 -> 6.40 million
+(-7.1%), `core-group`'s scan 0.3% under main, and no other workload above
+main's by more than 2 instructions an op. The walk's `next` walks the
+dense slots and nothing else while they last, the sparse ids asked for
+out of line (`sparse_at`), and the walks that give the ids alone
+(`Store::iter_ids`, `ids`) are the same walk.
+`store::tests::the_walk_gives_each_id_its_location_in_the_order_ids_came`
+holds it to the walk before, a lookup an id, and a program writing one
+file through checkpoints and each kind of compact -- under the lock,
+beside the database, in turn -- wrote main's files, byte for byte. Handed
+the walk's own address, the sparse ids' call kept the slots and the id in
+memory through every caller's loop: 60 000 instructions more of
+`file-compact`. The code shrank: built as CI's build job builds them
+(x86_64 musl), `.text` lost 4 160 bytes of `fennec`, 2 240 of
+`fennec-server` and 4 288 of `make small`'s, each file 4 096 bytes
+smaller; the browser module grew 107 bytes raw, its gzip and brotli
+inside the noise (+31, -52).
+
 ### Dead bytes are whole frames
 
 A version written over or deleted adds its whole frame to `dead_bytes`,

@@ -526,34 +526,38 @@ impl IdIndex {
         out
     }
 
-    /// The ids in ascending order, lazily: the dense part is sorted by
-    /// position, and every sparse id is above it (see the invariant). Only
-    /// the sparse ids, usually none, are collected and sorted up front.
+    /// The ids in ascending order, lazily: [`Self::walk`]'s.
+    #[inline]
     fn iter(&self) -> impl Iterator<Item = DocId> + '_ {
-        let mut extra: Vec<DocId> = self.sparse.keys().copied().collect();
-        extra.sort_unstable();
-        self.dense
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.is_empty())
-            .map(|(i, _)| i as u64 + 1)
-            .chain(extra)
+        self.walk(0).map(|(id, _)| id)
     }
 
-    /// [`Self::iter`] from `from` on: the dense part from its slot, the
-    /// sparse ids at or above it. Only a native scan starts from an id
-    /// (`Expr::conjunct_id_floor`); `iter` keeps its own walk, which as
-    /// this one from 1 was 75 bytes brotli of the browser module.
+    /// [`Self::iter`] from `from` on. Only a native scan starts from an id
+    /// (`Expr::conjunct_id_floor`).
+    #[inline]
     fn iter_from(&self, from: DocId) -> impl Iterator<Item = DocId> + '_ {
-        let mut extra: Vec<DocId> = self.sparse.keys().copied().filter(|&k| k >= from).collect();
-        extra.sort_unstable();
+        self.walk(from).map(|(id, _)| id)
+    }
+
+    /// The ids from `from` on and their locations, ascending: the dense
+    /// part from `from`'s slot, sorted by position, then the sparse ids at
+    /// or above `from`, every one above the dense part (see the invariant).
+    /// Only the sparse ids, usually none, are collected and sorted up front.
+    /// One constructor out of line, and one `next` for every walk.
+    #[inline(never)]
+    fn walk(&self, from: DocId) -> Walk<'_> {
+        let mut ids: Vec<DocId> = self.sparse.keys().copied().filter(|&k| k >= from).collect();
+        ids.sort_unstable();
         let skip = (from.max(1) - 1).min(self.dense.len() as u64) as usize;
-        self.dense[skip..]
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.is_empty())
-            .map(move |(i, _)| (skip + i) as u64 + 1)
-            .chain(extra)
+        Walk {
+            dense: self.dense[skip..].iter(),
+            id: skip as u64 + 1,
+            apart: Apart {
+                map: &self.sparse,
+                ids,
+                at: 0,
+            },
+        }
     }
 
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
@@ -571,6 +575,63 @@ impl IdIndex {
                 *l = f(id, *l);
             }
         }
+    }
+}
+
+/// [`IdIndex::walk`]: the dense slots that hold a location, then the
+/// sparse ids, each id with its location. A `next` walks the dense slots
+/// and nothing else while they last, and the sparse ids are asked for out
+/// of line, so none of their state is carried through a caller's loop. The
+/// location comes with the id, so a walk that reads it -- a compact's, an
+/// image's -- does not look the id up again: `live_len` (asked twice),
+/// `image_index` and `write_live` each asked `get` of every id `iter`
+/// gave, 49 instructions a row of the perf gate's `file-compact` (aarch64
+/// musl): 26 of them `live_len`'s, 15 `image_index`'s and 8 `write_live`'s.
+struct Walk<'a> {
+    /// The dense slots not walked yet.
+    dense: std::slice::Iter<'a, Loc>,
+    /// The id of the next of them.
+    id: DocId,
+    apart: Apart<'a>,
+}
+
+/// The sparse ids a [`Walk`] gives once its dense slots are done.
+struct Apart<'a> {
+    map: &'a HashMap<DocId, Loc>,
+    /// The ids of `map` the walk lists, ascending.
+    ids: Vec<DocId>,
+    /// The next of them to give.
+    at: usize,
+}
+
+/// The sparse id `at` of `ids` and its location. Each is a key of `map`,
+/// which the walk borrows, so none goes missing. Handed the walk's parts,
+/// never its place: as a method of [`Apart`] taking `&mut self` it took the
+/// walk's address, and a caller's loop kept the slots and the id in memory,
+/// loaded and stored again each row -- 60 000 instructions more of the
+/// perf gate's `file-compact`, 6.4 million, and 0.3% of `core-group`'s scan.
+#[inline(never)]
+fn sparse_at(map: &HashMap<DocId, Loc>, ids: &[DocId], at: usize) -> Option<(DocId, Loc)> {
+    let id = *ids.get(at)?;
+    Some((id, *map.get(&id)?))
+}
+
+impl Iterator for Walk<'_> {
+    type Item = (DocId, Loc);
+
+    #[inline]
+    fn next(&mut self) -> Option<(DocId, Loc)> {
+        for &l in self.dense.by_ref() {
+            let id = self.id;
+            self.id += 1;
+            if !l.is_empty() {
+                return Some((id, l));
+            }
+        }
+        let a = &mut self.apart;
+        let next = sparse_at(a.map, &a.ids, a.at);
+        a.at += 1;
+        next
     }
 }
 
@@ -1924,15 +1985,10 @@ impl Store {
         let mut head = Vec::with_capacity(16);
         let (mut id_was, mut pos_was, mut to) = (0, 0, 0);
         let mut ends = Vec::with_capacity(self.index.len().div_ceil(INDEX_SHARE));
-        let mut written = 0;
-        for id in self.index.iter() {
-            let Some(l) = self.index.get(id) else {
-                continue;
-            };
+        for (written, (id, l)) in self.index.walk(0).enumerate() {
             if written > 0 && written % INDEX_SHARE == 0 {
                 ends.push([(out.len() - from) as u64, id_was, pos_was]);
             }
-            written += 1;
             let pos = match live {
                 true => {
                     head.clear();
@@ -2247,10 +2303,8 @@ impl Store {
         fresh.cleared.clone_from(&self.dropped);
         let reclaims = self.reclaims();
         let mut out = Vec::new();
-        let ids = self.index.ids();
-        fresh.reserve(ids.len());
-        for id in ids {
-            let loc = self.index.get(id).unwrap();
+        fresh.reserve(self.index.len());
+        for (id, loc) in self.index.walk(0) {
             let payload = self.payload(loc)?;
             // The walk that copies nothing first, natively: the browser
             // module compacts when its page asks, and is smaller without it.
@@ -2280,10 +2334,7 @@ impl Store {
     pub fn live_len(&self) -> usize {
         let mut head = Vec::with_capacity(16);
         let mut total = 0usize;
-        for id in self.index.iter() {
-            let Some(loc) = self.index.get(id) else {
-                continue;
-            };
+        for (id, loc) in self.index.walk(0) {
             head.clear();
             head.push(OP_PUT);
             put_uvarint(&mut head, id);
@@ -2298,10 +2349,7 @@ impl Store {
     /// gathered in memory on the way.
     pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
         let mut head = Vec::with_capacity(16);
-        for id in self.index.iter() {
-            let Some(loc) = self.index.get(id) else {
-                continue;
-            };
+        for (id, loc) in self.index.walk(0) {
             let payload = self.payload(loc)?;
             head.clear();
             head.push(OP_PUT);
@@ -3046,6 +3094,125 @@ mod tests {
         let ids = st.ids();
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "not sorted");
         assert_eq!(ids.len(), 504);
+    }
+
+    /// The walk gives every id with its location in the order the walk
+    /// before it gave the ids, which looked each one up: the dense slots
+    /// that hold one by position, then the sparse ids ascending -- here
+    /// beside dense ids written, deleted, written again and taken over from
+    /// the sparse map, slots emptied at the dense part's end, and from
+    /// every place a scan may start. So what a compact and an image write
+    /// is what they wrote: `write_live`'s bytes and `live_len` are held to
+    /// that walk's too.
+    #[test]
+    fn the_walk_gives_each_id_its_location_in_the_order_ids_came() {
+        // The walk `IdIndex::iter` was, and a lookup of each id.
+        fn looked_up(ix: &IdIndex, from: DocId) -> Vec<(DocId, Loc)> {
+            let mut extra: Vec<DocId> = ix.sparse.keys().copied().filter(|&k| k >= from).collect();
+            extra.sort_unstable();
+            let skip = (from.max(1) - 1).min(ix.dense.len() as u64) as usize;
+            ix.dense[skip..]
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| !l.is_empty())
+                .map(move |(i, _)| (skip + i) as u64 + 1)
+                .chain(extra)
+                .map(|id| (id, ix.get(id).unwrap()))
+                .collect()
+        }
+        let payload = |id: u64, v: u64| {
+            let mut p = format!("<{id}:{v}>").into_bytes();
+            p.resize(5 + (id * 31 + v * 7) as usize % 200, b'a' + (id % 26) as u8);
+            p
+        };
+        let mut st = Store::new();
+        // Sparse ids: a run whose steps are within the dense part's gap,
+        // which it takes over once it reaches the first, then ids each
+        // past the gap from the one before.
+        let far = |k: u64| match k < 20 {
+            true => 10_000 + k * 3_001,
+            false => 1_000_000 + k * 5_003,
+        };
+        // Sparse ids first, out of their order, then a dense part growing
+        // over none of them.
+        for k in (0..40u64).rev() {
+            st.append(OP_PUT, far(k), &payload(far(k), 0));
+        }
+        st.append(OP_PUT, u64::MAX - 1, &payload(7, 0));
+        for id in 1..=300u64 {
+            st.append(OP_PUT, id, &payload(id, 0));
+        }
+        let mut stages = Vec::new();
+        let mut check = |st: &Store, stage: &str| {
+            let ix = &st.index;
+            assert!(!ix.sparse.is_empty() && !ix.dense.is_empty(), "{stage}");
+            let all = looked_up(ix, 0);
+            assert_eq!(all.len(), ix.len(), "{stage}");
+            assert!(all.windows(2).all(|w| w[0].0 < w[1].0), "{stage}");
+            let mut froms = vec![0, 1, 2, 150, 299, 300, 301, 4_000, u64::MAX - 1, u64::MAX];
+            froms.extend((0..40).flat_map(|k| [far(k) - 1, far(k), far(k) + 1]));
+            froms.push(ix.dense.len() as u64);
+            froms.push(ix.dense.len() as u64 + 1);
+            for from in froms {
+                let want = looked_up(ix, from);
+                let got: Vec<(DocId, Loc)> = ix.walk(from).collect();
+                assert_eq!(got.len(), want.len(), "{stage}, from {from}");
+                for (g, w) in got.iter().zip(&want) {
+                    assert!(g.0 == w.0 && g.1 == w.1, "{stage}, from {from}: {g:?}");
+                }
+                let ids: Vec<DocId> = want.iter().map(|w| w.0).collect();
+                assert_eq!(st.iter_ids_from(from).collect::<Vec<_>>(), ids, "{stage}");
+            }
+            // Spent, a walk stays spent.
+            let mut walk = ix.walk(0);
+            walk.by_ref().for_each(drop);
+            assert!(walk.next().is_none() && walk.next().is_none(), "{stage}");
+            assert_eq!(st.ids(), all.iter().map(|w| w.0).collect::<Vec<_>>());
+            assert_eq!(st.iter_ids().collect::<Vec<_>>(), st.ids());
+            // The bytes a compact writes of the documents, and their length.
+            let mut want = Vec::new();
+            for &(id, loc) in &all {
+                let body = st.payload(loc).unwrap();
+                want.push(OP_PUT);
+                put_uvarint(&mut want, id);
+                put_uvarint(&mut want, body.len() as u64);
+                want.extend_from_slice(body);
+            }
+            let mut wrote = Vec::new();
+            st.write_live(&mut wrote).unwrap();
+            assert!(wrote == want, "{stage}: write_live");
+            assert_eq!(st.live_len(), want.len(), "{stage}");
+            stages.push(stage.to_string());
+        };
+        check(&st, "written");
+        // Rewritten, deleted -- the dense part's last slots among them --
+        // and written again.
+        for id in (1..=300u64).step_by(7) {
+            st.append(OP_PUT, id, &payload(id, 1));
+        }
+        for id in (2..=300u64).step_by(5).chain(290..=300) {
+            st.append(OP_DEL, id, &[]);
+        }
+        for k in (0..40u64).step_by(3) {
+            st.append(OP_PUT, far(k), &payload(far(k), 1));
+        }
+        for k in (21..40u64).step_by(4) {
+            st.append(OP_DEL, far(k), &[]);
+        }
+        st.append(OP_PUT, 12, &payload(12, 2));
+        check(&st, "rewritten");
+        // The dense part grows a gap at a time to the first sparse id and
+        // takes over the run within its gap, leaving the rest sparse.
+        for id in [4_000, 8_000, far(0) + 1] {
+            st.append(OP_PUT, id, &payload(id, 3));
+        }
+        assert_eq!(st.index.dense.len() as u64, far(19));
+        assert_eq!(st.index.sparse.len(), 16);
+        check(&st, "taken over");
+        // Compacted, the order holds.
+        let st = st.compacted().unwrap();
+        check(&st, "compacted");
+        assert_eq!(stages.len(), 4);
     }
 
     /// A store takes its frames in from a file that holds them only where

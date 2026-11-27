@@ -321,10 +321,7 @@ impl Store {
             len: 0,
             n: 0,
         };
-        for id in self.index.iter() {
-            let Some(l) = self.index.get(id) else {
-                continue;
-            };
+        for (id, l) in self.index.walk(0) {
             let framed = after(0, id, l.len as u64) + l.len as u64;
             if b.n > 0 && b.len + framed > cap as u64 {
                 if all.len() + 1 >= most {
