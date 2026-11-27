@@ -728,8 +728,9 @@ sparse part, a walk of a million ids took 17% longer while any id was
 below the floor; it takes 2.05 ms with five there as with none.
 
 **Their walk.** The walk takes them from a list of them and their
-locations, sorted once an id is added and kept until the next is
-(`Under::sorted`, `Sorted`), from its place found by halving, so a walk
+locations, sorted once after each add, at the first walk reaching them,
+and kept until the next add (`Under::sorted`, `Sorted`), from its place
+found by halving, so a walk
 costs the array and the ids below the floor, read in turn, and a scan
 from an id the halving and what it gives. Sorted at every walk, as a
 first version had them, their ids made every scan pay for them again
@@ -753,6 +754,33 @@ the other way: a tree's code in every binary for a path seldom taken --
 one for the sparse map made the browser module 4.4 KB larger -- and a
 lookup of one of them a walk down the tree, where the hash is one probe.
 
+**Sorted once after each add.** So adds and walks taking turns sort them
+all at every walk: the walk after the u-th add sorts u ids, about
+u² log u over u adds, where main's walk sorts nothing. The drop bounds
+it: F/8 to F/4 ids lie below a floor F before it drops, so a step costs
+the sort of that many at most -- 4.6 ms with 114 688 below a floor of
+600 001, the most the drop leaves there, and 8.2 to 8.4 with 229 375,
+the most it leaves below 1 200 001 (the figures above) -- no worse than
+the first version, which sorted at every walk whatever was added. An
+order kept as each add lands -- a tree, or the list merged at each add
+-- would take it away, and is not made: the path is seldom taken, and
+the full browser module stands about a hundred bytes inside
+`site/build.py`'s tolerance of `sizes.json`.
+
+**A copy takes the list as it stands** (`Clone for Under`): a pin's
+copy of the index (`Store::pinned`), and a compact's beside the
+database, walk the list they were handed. Copied without it, as the
+fourth round had it, every long read a server pinned -- each clones the
+index -- sorted the ids again in its copy, 8.2 ms against the walk's 1.8
+at 229 375 (the fourth review's reading of the figures above), and the
+pin's charge left out the 20 bytes an id its walk then allocated. A pin
+of an index whose list an add let go still sorts its own at its first
+walk, outside the lock, and the pin's charge counts that list at the
+map's length as it counts one copied sorted (`Store::pinned_bytes`):
+sorted in the index as the pin is taken, the sort would hold the writers
+under the lock the pin is there to let go of. The list's length is the
+index's, so a copy is held to the bytes the index is.
+
 **Their room.** The map is apart from the one past the end so that its
 room is theirs: in one map, 252 ids below a floor took a map of 649 far
 ids past its doubling, 2 048 buckets where main's held 1 024. Once its
@@ -762,17 +790,23 @@ out in main's room, each id into its slot (`IdIndex::over_floor`,
 `IdIndex::dropped`): the index then never holds more than main's while
 ids lie below the floor. The list is sorted at a walk, a read, which asks
 no drop, so it is counted before it is there and at its most, an id and
-a location, 20 bytes, for each id the map has room for: it never holds
-more ids than the map had, and the map's room a delete never shrinks. Its capacity is the buckets'
-where the map grows, the only write that adds to its bytes, which asks
-the drop at once; a delete since may leave a tombstone, which hashbrown
-counts out of its capacity but not out of its buckets. It is asked at
+a location, 20 bytes, for each id the map has room for. The bound holds
+because the check at the map's last growth counted the buckets' full
+capacity: the map's capacity is the buckets' whole where it grows, the
+only write that adds to its bytes, which asks the drop at once, and the
+list never holds more ids than those buckets have room for. A delete
+since may leave a tombstone, which hashbrown counts out of the capacity
+(`room` in `over_floor`) but not out of its buckets, so a later write's
+check may count a room shorter than the list; the bytes the growth's
+check counted still hold them. It is asked at
 every write below the floor, a write over one of them too: hashbrown
 makes room before it looks, and 448 ids filling 512 buckets under a floor
 of 2 001, 21 864 bytes with their box and their list's room, took 1 024
 buckets at a write over one of them, 43 624 bytes where the floor saved
-24 000. The map and the list hold 51 to 97 bytes an id, so the floor
-drops once an eighth to a quarter of its ids are written below it. Counted by
+24 000. The map and the list hold about 49 to 97 bytes an id -- 25 a
+bucket at 8/7 to 16/7 buckets an id, and the list's 20 for each of one
+to two ids' room an id -- so the floor drops once an eighth to a quarter
+of its ids are written below it. Counted by
 the ids alone, a map whose deletes left half its room to tombstones could
 double past the slots: hashbrown grows a map whose ids fill half its
 room. Dropped to the lowest id below it rather than to 1, the next writes
@@ -917,7 +951,10 @@ tests, and a drop in an allocation of its length it and four (each at
 7e453643, before the counting allocator). Tests of their own hold the
 reviews' cases: the queue reopened past the gap, the compact followed by
 ids two apart, the drop's room, a rebuild's floor, a write over an id
-below the floor and a walk over ids deleted below it.
+below the floor, a walk over ids deleted below it, and a pin's copy
+walking the list its index sorted, its length kept where a sort would
+have dropped a deleted id, and the pin's charge the same whether the
+list was sorted yet or not (`a_pin_walks_the_list_its_index_sorted`).
 
 A `sessions`-like churn, 1 million ids given and 3 000 live at any time,
 in a queue and in `@ttl` sweeps of 55: main's index 12 582 912 bytes at

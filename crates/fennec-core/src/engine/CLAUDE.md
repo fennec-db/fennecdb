@@ -113,7 +113,12 @@ the map under the write lock, 1.2 s at 10 million rows. The array's
 allocation stays within main's room past the floor (`IdIndex::room`,
 `grow`, `cut`), so the index's bytes are at or under main's for every
 order of writes. A lookup stays a subtraction and a compare, and a walk
-costs the array and the ids below the floor, never their sort again;
+costs the array and the ids below the floor, read from a list sorted
+once after each add, which a pin's copy takes as it stands
+(`Clone for Under`, charged sorted or not by `Store::pinned_bytes`):
+adds and walks taking turns sort them all at every walk, where main sorts
+nothing, the drop bounding them at F/8 to F/4 ids below a floor F, 4.6 ms
+a walk at 114 688, the most below 600 001.
 `store::id_floor_tests` drives main's own index beside it and holds every
 id read back, the layout main's and the bytes, as a counting allocator
 reads them, at or under main's after every write.
