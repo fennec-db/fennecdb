@@ -1391,7 +1391,23 @@ back within it, said apart: a task the engine cuts in shares runs them on
 a thread a CPU but the one that asked, joined before it returns
 (`vector::spread` under `std::thread::scope`, `fennec_core::threads`), and
 the second dry run failed the primary on one look, minute 17, 7 more on
-the VM's 8 CPUs, back the next minute and 0 within each life; no error -- a
+the VM's 8 CPUs, back the next minute and 0 within each life -- each of the
+two judged on the looks no compaction holds, the memory's quiet ones
+(`quiet_look`), the median theirs and the looks left out counted on its
+line, each server's: a compaction, the server's own or the run's, holds
+descriptors and a thread of its own while it writes, let go of as it ends
+-- its side file (`<file>.beside`), past the page cache's room its
+scratch file (`<file>.sorting`, unlinked and open while it deals), and on
+Linux below the step's ceiling a step's fdatasync thread with the copy of
+the file's descriptor it syncs, held until the thread is joined
+(`fs::Steps`, since #698). P6's run of 2026-11-26 at 50% failed the
+replica on four looks, minutes 21, 103, 142 and 394, each in a compaction
+of its own and 3 descriptors over its median of 9 (those three at once),
+9 again at the next look, and the 80% phase did not run for it; its
+lines judged again by the report (`ycsb soak report`), 23 looks of each
+server's left out, pass every criterion, the replica 9 to 10 at the
+rest. A descriptor or a thread a compaction leaves open is at the next
+quiet look, and one more each life at a life's last five; no error -- a
 status other than a 2xx is one wherever it falls, and so is a connection
 error or a 503 saying when to come back outside a restart's window, which
 within one is `down`, and so is one a death cut before it was found,

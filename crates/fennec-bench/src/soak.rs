@@ -9773,9 +9773,11 @@ fn compacted(m: &HashMap<String, f64>) -> bool {
     g("compacting") > 0.0 || g("auto_compacts") > 0.0 || g("compact") > 0.0
 }
 
-/// A memory look that says something of a leak: none with a compact
-/// writing at the look (`begin_beside` clones each store), none in a
-/// minute the server or the run compacted.
+/// A look that says something of a leak: none with a compact writing at
+/// the look (`begin_beside` clones each store, and the compact holds
+/// descriptors and a thread of its own until it ends), none in a minute
+/// the server or the run compacted. The memory, thread and descriptor
+/// criteria each leave the others out.
 fn quiet_look(m: &HashMap<String, f64>, replica: bool) -> bool {
     let g = |k: &str| m.get(k).copied().unwrap_or(0.0);
     match replica {
@@ -10259,6 +10261,24 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // failed; a thread left over is at the next look too. The second dry
     // run of 2026-11-23 failed the primary on one look, minute 17, 7 more
     // on the VM's 8 CPUs, back at 6 the next minute, 0 within each life.
+    //
+    // A look in a compaction -- the server's own or the run's, as the
+    // memory criteria leave out (`quiet_look`) -- is left out, and said
+    // how many: a compaction holds descriptors and a thread of its own
+    // while it writes, each let go of as it ends. Its side file
+    // (`<file>.beside`, `fs::SideFile`, from `begin_beside` to the swap);
+    // past the page cache's room its scratch file (`<file>.sorting`,
+    // `fs::Scratch`, unlinked at once and open while it deals); and on
+    // Linux, below the step's ceiling, the copy of a file's descriptor a
+    // step's fdatasync syncs on a thread of its own, held with that thread
+    // until it is joined (`fs::Steps`, since #698). P6's run of 2026-11-26
+    // failed the replica on four looks, minutes 21, 103, 142 and 394, each
+    // in a compaction of its own -- 3 descriptors more, the three at once
+    // -- and back at the next look. A descriptor or a thread a compaction
+    // leaves behind is at the next quiet look, and a growth across lives
+    // at a life's last five; the median is the quiet looks' alone, so a
+    // run that compacts most minutes is judged on the level it keeps
+    // between them.
     let cpus = settings.map_or(0, |s| s.cpus) as f64;
     for (c, key, conn, rkey, rconn) in [
         (
@@ -10272,15 +10292,30 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     ] {
         let mut detail = String::new();
         let mut ok = true;
-        for (who, k, cn) in [("the primary", key, conn), ("the replica", rkey, rconn)] {
-            let net: Vec<(u64, f64)> = minutes
+        for (who, k, cn, replica) in [
+            ("the primary", key, conn, false),
+            ("the replica", rkey, rconn, true),
+        ] {
+            let (net, held): (Vec<(u64, f64, bool)>, Vec<_>) = minutes
                 .iter()
-                .filter_map(|(m, x)| Some((*m, get(x, k)? - get(x, cn)?)))
-                .collect();
+                .filter_map(|(m, x)| Some((*m, get(x, k)? - get(x, cn)?, quiet_look(x, replica))))
+                .partition(|x| x.2);
+            let left = match held.is_empty() {
+                true => String::new(),
+                false => {
+                    let (lo, hi) = held
+                        .iter()
+                        .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(x.1), b.max(x.1)));
+                    format!(
+                        ", {} looks in its compactions left out ({lo:.0} to {hi:.0})",
+                        held.len()
+                    )
+                }
+            };
             let sorted: Vec<f64> = net.iter().map(|x| x.1).collect();
             if sorted.is_empty() {
                 ok = false;
-                write!(detail, "{who}: none; ").unwrap();
+                write!(detail, "{who}: none outside a compaction{left}; ").unwrap();
                 continue;
             }
             let mid = median(&sorted);
@@ -10308,7 +10343,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
             write!(
                 detail,
-                "{who}: median {mid:.0}, {lo:.0} to {hi:.0}{}{}",
+                "{who}: median {mid:.0}, {lo:.0} to {hi:.0}{left}{}{}",
                 minutes_said(&off),
                 match spread.is_empty() {
                     true => String::new(),
@@ -10325,6 +10360,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 for (life, xs) in &lives {
                     let net: Vec<f64> = settled(xs)
                         .iter()
+                        .filter(|(_, m)| quiet_look(m, false))
                         .filter_map(|(_, m)| Some(get(m, k)? - get(m, cn)?))
                         .collect();
                     if net.len() < 10 {
@@ -12084,6 +12120,56 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_s_descriptors_are_left_out_and_the_same_peak_elsewhere_fails() {
+        // P6's run of 2026-11-26 at 50%: the replica 3 descriptors over
+        // its median at four looks, each in a compaction of its own --
+        // its side file, its scratch file and a step's copy of a
+        // descriptor -- ended in the next minute and let go of by then.
+        const AT: [u64; 4] = [21, 103, 142, 394];
+        let run = |inside: bool| {
+            synthetic(480, &move |m, x| {
+                if AT.contains(&m) {
+                    x.insert("r_fds", 63.0);
+                    if inside {
+                        x.insert("r_compacting", 1.0);
+                    }
+                }
+                if inside && AT.iter().any(|a| m == a + 1) {
+                    x.insert("r_auto_compacts", 1.0);
+                    x.insert("r_compacts_watched", 1.0);
+                    x.insert("r_compact_ms", 20_000.0);
+                }
+            })
+        };
+        let fds = |text: &str| {
+            let j = judge(text, None);
+            let v = j[0].verdicts.iter().find(|v| v.0 == CRITERIA[8]).unwrap();
+            (v.1, v.2.clone())
+        };
+        assert_eq!(failing(&run(true)), Vec::<&str>::new());
+        let (ok, said) = fds(&run(true));
+        assert!(ok, "{said}");
+        // Each server's looks in a compaction said: the primary's the
+        // schedule's compacts, the replica's its own, both lines of each.
+        assert!(
+            said.contains(
+                "the primary: median 20, 20 to 20, 23 looks in its compactions left out (20 to 20)"
+            ) && said.contains(
+                "the replica: median 27, 27 to 27, 8 looks in its compactions left out (27 to 30)"
+            ),
+            "{said}"
+        );
+        // The same peaks at looks in no compaction: the old rule's verdict.
+        assert_eq!(failing(&run(false)), vec![CRITERIA[8]]);
+        let (ok, said) = fds(&run(false));
+        assert!(!ok);
+        assert!(
+            said.contains("the replica: median 27, 27 to 30; minutes 21, 103, 142, 394"),
+            "{said}"
+        );
+    }
+
+    #[test]
     fn the_report_passes_a_good_run_and_fails_each_criterion_alone() {
         let none: &dyn Fn(u64, &mut HashMap<&'static str, f64>) = &|_, _| {};
         assert_eq!(failing(&synthetic(480, none)), Vec::<&str>::new());
@@ -12196,9 +12282,11 @@ mod tests {
                 vec![CRITERIA[6]],
             ),
             (
+                // Two quiet looks: 201's line holds the compact of minute
+                // 200, a look the criterion leaves out.
                 "the same threads at two looks",
                 Box::new(|m, x| {
-                    if m == 200 || m == 201 {
+                    if m == 202 || m == 203 {
                         x.insert("threads", 147.0);
                     }
                 }),
@@ -12236,6 +12324,30 @@ mod tests {
                 Box::new(|m, x| {
                     if m > 0 && m < u64::MAX {
                         x.insert("r_fds", 60.0 + (m / 40) as f64);
+                    }
+                }),
+                vec![CRITERIA[8]],
+            ),
+            (
+                // Three more in the replica's compaction, left out, and
+                // still there at the quiet look after it.
+                "descriptors a compaction of the replica's left open",
+                Box::new(|m, x| {
+                    if m == 200 {
+                        x.insert("r_compacting", 1.0);
+                    }
+                    if m == 200 || m == 201 {
+                        x.insert("r_fds", 63.0);
+                    }
+                }),
+                vec![CRITERIA[8]],
+            ),
+            (
+                // Three more at a look of the primary's in no compaction.
+                "descriptors over the band outside a compaction",
+                Box::new(|m, x| {
+                    if m == 70 {
+                        x.insert("fds", 123.0);
                     }
                 }),
                 vec![CRITERIA[8]],
@@ -12719,6 +12831,29 @@ mod tests {
                     if m == 200 {
                         x.insert("r_rss_anon", 98e6);
                         x.insert("r_compacting", 1.0);
+                    }
+                }),
+            ),
+            (
+                // Its side file, its scratch file and a step's copy of a
+                // descriptor at the look, let go of by the next.
+                "the descriptors the replica's compaction holds",
+                Box::new(|m, x| {
+                    if m == 200 {
+                        x.insert("r_fds", 63.0);
+                        x.insert("r_compacting", 1.0);
+                    }
+                }),
+            ),
+            (
+                // A compact of the primary's open at two looks, its
+                // descriptors and threads over the band at both.
+                "the descriptors and threads the primary's compact holds",
+                Box::new(|m, x| {
+                    if m == 70 || m == 71 {
+                        x.insert("fds", 123.0);
+                        x.insert("threads", 143.0);
+                        x.insert("compacting", 1.0);
                     }
                 }),
             ),
