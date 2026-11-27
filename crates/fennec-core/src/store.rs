@@ -256,24 +256,18 @@ fn adopt_in_turn(
     at: u64,
     len: u64,
 ) -> Option<(IdIndex, DocId)> {
-    let (mut id, mut end) = (0, 0);
-    if count == 0 {
-        return (p == docs.len()).then_some((IdIndex::default(), 0));
-    }
-    let (pos, n) = index_entry(docs, &mut p, &mut id, &mut end, len)?;
-    // The array starts at the first id, the lowest: from 1, a file whose
-    // ids all lie past the gap -- a queue's once compacted -- put every one
-    // of them in the sparse map.
-    let mut fresh = IdIndex::from_floor(id);
+    let mut fresh = IdIndex::default();
     // A frame is three bytes at the least: a count past that is not this
     // record's, and is not reserved for.
     fresh.reserve(count.min(len / 3) as usize);
-    fresh.push_above(id, Loc::mapped(at + pos, n as u32));
-    for _ in 1..count {
+    let (mut id, mut end) = (0, 0);
+    for _ in 0..count {
         let (pos, n) = index_entry(docs, &mut p, &mut id, &mut end, len)?;
         fresh.push_above(id, Loc::mapped(at + pos, n as u32));
     }
-    (p == docs.len()).then_some((fresh.or_as_mains().counted(), id))
+    fresh.or_as_mains();
+    fresh.counted();
+    (p == docs.len()).then_some((fresh, id))
 }
 
 /// Documents of an image's index an open reads at a time on a thread.
@@ -350,12 +344,13 @@ fn adopt_shares(
     // SAFETY: every share wrote each of its slots -- its documents' and
     // the gaps between them -- or said it had not, which returned above.
     unsafe { dense.set_len(top as usize) };
-    let fresh = IdIndex {
+    let mut fresh = IdIndex {
         dense,
         count: count as usize,
         ..IdIndex::default()
     };
-    Some((fresh.counted(), top))
+    fresh.counted();
+    Some((fresh, top))
 }
 
 /// Document id -> location mapping.
@@ -413,14 +408,18 @@ struct IdIndex {
 }
 
 impl Default for IdIndex {
+    /// Out of line, and the two maps of one hasher: a `RandomState` drawn
+    /// for each, in each place an index is made, was 200 bytes there.
+    #[inline(never)]
     fn default() -> Self {
+        let keys = std::hash::RandomState::new();
         IdIndex {
             dense: Vec::new(),
             floor: 1,
             front: 0,
-            sparse: HashMap::new(),
+            sparse: HashMap::with_hasher(keys.clone()),
             sparse_floor: 0,
-            under: HashMap::new(),
+            under: HashMap::with_hasher(keys),
             count: 0,
         }
     }
@@ -437,9 +436,10 @@ const MAX_DENSE_GAP: u64 = 4096;
 const CUT_FROM: usize = 128;
 
 /// The share of the ids a floor cut that may be written back below it, in
-/// `under`, before it drops to 1 ([`IdIndex::dropped`]): a fifth. A map entry takes 28 to 57 bytes -- 25 a bucket, an eighth of
-/// them empty at the most and half of them once it doubles -- where the
-/// floor saved 12 a slot, so a fifth of them costs no more than it saved.
+/// `under`, before it drops to 1 ([`IdIndex::dropped`]): a fifth. A map
+/// entry takes 28 to 57 bytes -- 25 a bucket, an eighth of them empty at
+/// the most and half of them once it doubles -- where the floor saved 12 a
+/// slot, so a fifth of them costs no more than it saved.
 /// Held to the floor until a rebuild, every id the cut gave back written
 /// again held 4.2 times main's index: 928 ids under a floor of 929.
 const BELOW_SHARE: u64 = 5;
@@ -453,13 +453,12 @@ fn half(len: usize) -> usize {
 }
 
 impl IdIndex {
-    /// An empty index whose array starts at `floor`: an open reading the
-    /// ids of an image in order starts it at the first ([`adopt_in_turn`]).
-    fn from_floor(floor: DocId) -> IdIndex {
-        IdIndex {
-            floor: floor.max(1),
-            ..IdIndex::default()
-        }
+    /// An empty index's array started at `floor`: an open reading the ids
+    /// of an image in order starts it at the first ([`adopt_in_turn`]), a
+    /// compact at the first it keeps.
+    fn start_at(&mut self, floor: DocId) {
+        debug_assert!(self.is_empty() && self.dense.is_empty());
+        self.floor = floor.max(1);
     }
 
     /// Allocated bytes. Approximate for `HashMap`: hashbrown also keeps one
@@ -489,17 +488,21 @@ impl IdIndex {
             let l = self.dense[i];
             return if l.is_empty() { None } else { Some(l) };
         }
-        self.apart(id).get(&id).copied()
+        self.get_apart(id)
     }
 
-    /// The map an id outside the array is in: `under` below the floor, the
-    /// sparse map past the end.
-    #[inline(always)]
-    fn apart(&self, id: DocId) -> &HashMap<DocId, Loc> {
-        match id < self.floor {
+    /// [`Self::get`] of an id outside the array: in `under` below the
+    /// floor, the sparse map past the end. Out of line, as
+    /// [`Self::remove_apart`]: a map's probe in each of the many places a
+    /// lookup is inlined, for one map or the other, grew the shell's code
+    /// by more than the floor's own.
+    #[inline(never)]
+    fn get_apart(&self, id: DocId) -> Option<Loc> {
+        let map = match id < self.floor {
             true => &self.under,
             false => &self.sparse,
-        }
+        };
+        map.get(&id).copied()
     }
 
     /// `loc` into slot `i`, the first half's count kept.
@@ -522,14 +525,15 @@ impl IdIndex {
         let len = self.dense.len();
         let (from, upto) = (half(len), half(to).min(len));
         if from < upto {
-            self.front += self.dense[from..upto]
-                .iter()
-                .filter(|l| !l.is_empty())
-                .count();
+            self.front += self.held(from, upto);
         }
         self.dense.resize(to, Loc::EMPTY);
     }
 
+    /// Never inlined, as main's, at 2 KB, never was: at half that size it
+    /// went into a compact's and an open's loops, 1.4 KB more of the
+    /// shell's code each.
+    #[inline(never)]
     fn insert(&mut self, id: DocId, loc: Loc) {
         if let Some(i) = self.slot(id) {
             self.put_slot(i, loc);
@@ -550,19 +554,27 @@ impl IdIndex {
             return;
         }
         if id < self.floor {
-            if self.under.insert(id, loc).is_none() {
-                self.count += 1;
-                if self.over_floor() {
-                    self.dropped();
-                }
-            }
-            return;
+            return self.insert_under(id, loc);
         }
         if self.sparse.is_empty() || id < self.sparse_floor {
             self.sparse_floor = id;
         }
         if self.sparse.insert(id, loc).is_none() {
             self.count += 1;
+        }
+    }
+
+    /// [`Self::insert`] of an id below the floor: into `under`, and the
+    /// floor dropped once those cost more than it saves. Out of line, as
+    /// [`Self::get_apart`].
+    #[cold]
+    #[inline(never)]
+    fn insert_under(&mut self, id: DocId, loc: Loc) {
+        if self.under.insert(id, loc).is_none() {
+            self.count += 1;
+            if self.over_floor() {
+                self.dropped();
+            }
         }
     }
 
@@ -613,13 +625,17 @@ impl IdIndex {
             self.front -= front as usize;
             return Some(old);
         }
-        let old = match id < self.floor {
-            true => self.under.remove(&id),
-            false => self.sparse.remove(&id),
+        self.remove_apart(id)
+    }
+
+    #[inline(never)]
+    fn remove_apart(&mut self, id: DocId) -> Option<Loc> {
+        let map = match id < self.floor {
+            true => &mut self.under,
+            false => &mut self.sparse,
         };
-        if old.is_some() {
-            self.count -= 1;
-        }
+        let old = map.remove(&id);
+        self.count -= old.is_some() as usize;
         old
     }
 
@@ -658,16 +674,30 @@ impl IdIndex {
             None => len,
         };
         let k = (first as u64).min(next_id - self.floor) as usize;
-        self.dense.drain(..k);
-        self.floor += k as u64;
-        let left = self.dense.len();
-        if self.dense.capacity() > 8 * left.max(CUT_FROM) {
-            self.dense.shrink_to(2 * left);
+        match self.dense.capacity() > 8 * (len - k).max(CUT_FROM) {
+            true => self.relay(0, k),
+            false => {
+                self.dense.drain(..k);
+                self.floor += k as u64;
+            }
         }
         self.front = match first < len {
-            true => self.held(half(left)),
+            true => self.held(0, half(self.dense.len())),
             false => 0,
         };
+    }
+
+    /// The array laid again in an allocation of its own length: `down`
+    /// empty slots before it, its first `cut` slots dropped, the floor
+    /// moved to match. The drop, the take of ids below the floor, the
+    /// rebuild's cut and a cut leaving room of eight times its length
+    /// each lay it so, in one copy.
+    fn relay(&mut self, down: usize, cut: usize) {
+        let mut fresh = Vec::with_capacity(down + self.dense.len() - cut);
+        fresh.resize(down, Loc::EMPTY);
+        fresh.extend_from_slice(&self.dense[cut..]);
+        self.dense = fresh;
+        self.floor = self.floor + cut as u64 - down as u64;
     }
 
     /// Whether the ids below the floor cost more in `under` than the slots
@@ -694,44 +724,36 @@ impl IdIndex {
     #[inline(never)]
     fn dropped(&mut self) {
         self.lower(1);
-        self.front = self.held(half(self.dense.len()));
+        self.front = self.held(0, half(self.dense.len()));
     }
 
     /// The array laid out from `low`, below the floor, to the same end, and
-    /// the ids of `under` from `low` on put in, its room fitted to those
-    /// left: a map gives back nothing on its own, and room an earlier floor
-    /// paid for would be held to a lower one.
+    /// the ids of `under` from `low` on put in, those left in a map of
+    /// their own size: a map gives back nothing on its own, and room an
+    /// earlier floor paid for would be held to a lower one. Made again
+    /// rather than shrunk: `retain` and `shrink_to_fit` were 1.4 KB of the
+    /// browser module's code for the one map.
     fn lower(&mut self, low: DocId) {
-        let down = (self.floor - low) as usize;
-        let mut fresh = Vec::with_capacity(down + self.dense.len());
-        fresh.resize(down, Loc::EMPTY);
-        fresh.extend_from_slice(&self.dense);
-        self.dense = fresh;
-        self.floor = low;
-        self.under.retain(|&k, l| {
-            let below = k < low;
-            if !below {
-                self.dense[(k - low) as usize] = *l;
+        self.relay((self.floor - low) as usize, 0);
+        let mut left = HashMap::with_hasher(self.under.hasher().clone());
+        for (k, l) in std::mem::take(&mut self.under) {
+            match k < low {
+                true => drop(left.insert(k, l)),
+                false => self.dense[(k - low) as usize] = l,
             }
-            below
-        });
-        self.under.shrink_to_fit();
+        }
+        self.under = left;
     }
 
-    /// The sparse map's room let go of where it holds less than half of it:
-    /// a map gives back nothing as ids leave it.
-    fn let_go_of_room(&mut self) {
-        if self.sparse.capacity() > 2 * self.sparse.len() {
-            self.sparse.shrink_to_fit();
-        }
-        if self.under.capacity() > 2 * self.under.len() {
-            self.under.shrink_to_fit();
-        }
-    }
-
-    /// How many of the first `n` slots hold a location.
-    fn held(&self, n: usize) -> usize {
-        self.dense[..n].iter().filter(|l| !l.is_empty()).count()
+    /// How many of the slots from `from` to `to` hold a location. One copy
+    /// for the cut, the drop, the rebuild and the growth of the array,
+    /// which asks it of one slot every other new id.
+    #[inline(never)]
+    fn held(&self, from: usize, to: usize) -> usize {
+        self.dense[from..to]
+            .iter()
+            .filter(|l| !l.is_empty())
+            .count()
     }
 
     /// The array laid out again from its lowest id, where that changes it:
@@ -743,6 +765,7 @@ impl IdIndex {
     /// compact ask it, outside any block: never a write, which would lower
     /// the floor under a queue each time a row is written below it.
     /// `next_id`: the floor is never raised past the next new id.
+    #[inline(never)]
     fn rebuild(&mut self, next_id: DocId) {
         let mut lowered = !self.under.is_empty() && self.lowered();
         // The far ids left below a floor the take lowered, held to it as a
@@ -755,17 +778,11 @@ impl IdIndex {
         let lead = self.dense.iter().position(|l| !l.is_empty()).unwrap_or(len);
         let k = (lead as u64).min(next_id.saturating_sub(self.floor)) as usize;
         if k > 0 || self.dense.capacity() - len > len {
-            let mut fresh = Vec::with_capacity(len - k);
-            fresh.extend_from_slice(&self.dense[k..]);
-            self.dense = fresh;
-            self.floor += k as u64;
+            self.relay(0, k);
         }
         if lowered || k > 0 {
-            self.front = self.held(half(self.dense.len()));
+            self.front = self.held(0, half(self.dense.len()));
         }
-        // Once the ids below the floor are in the array, or the far ids
-        // gone, the map's room for them is let go of too.
-        self.let_go_of_room();
     }
 
     /// The ids below the floor taken back into the array, the floor lowered
@@ -775,9 +792,11 @@ impl IdIndex {
     #[inline(never)]
     fn lowered(&mut self) -> bool {
         let mut keys: Vec<DocId> = self.under.keys().copied().collect();
-        keys.sort_unstable_by(|a, b| b.cmp(a));
+        // Ascending, walked from the top: a descending sort was another
+        // copy of the sort, 4 KB of the browser module.
+        keys.sort_unstable();
         let mut low = self.floor;
-        for k in keys {
+        for k in keys.into_iter().rev() {
             if k == 0 || low - k > MAX_DENSE_GAP {
                 break;
             }
@@ -810,6 +829,10 @@ impl IdIndex {
     /// [`Self::insert`] of an id above every one the index holds -- an
     /// image's index read in order: the next id pushed onto the dense
     /// array, with no slot to ask first, and any other inserted. The first
+    /// starts the array: from 1, a file whose ids all lie past the gap -- a
+    /// queue's once compacted -- put every one of them in the sparse map.
+    /// Asked there, past the push, rather than of a first id read before
+    /// the loop, which made two copies of the loop's reading. The first
     /// half's count is left behind: the caller counts it once the ids are
     /// in ([`Self::counted`]).
     #[cfg(not(target_arch = "wasm32"))]
@@ -818,12 +841,16 @@ impl IdIndex {
         if id == self.floor + self.dense.len() as u64 && self.sparse.is_empty() {
             self.dense.push(loc);
             self.count += 1;
+        } else if self.count == 0 {
+            self.start_at(id);
+            self.dense.push(loc);
+            self.count += 1;
         } else {
             self.insert(id, loc);
         }
     }
 
-    /// An index laid out from its lowest id ([`Self::from_floor`]) as main's
+    /// An index laid out from its lowest id ([`Self::start_at`]) as main's
     /// open lays it out -- every id in the map -- where that holds less: its
     /// lowest id past the gap, which main's array from 1 never reaches, and
     /// fewer ids than half its array's slots. Ids a little under the gap
@@ -831,11 +858,18 @@ impl IdIndex {
     /// laid out from the first, 43 MB for 1 000 rows main's map held in 25
     /// KB; a queue's, its rows in turn, are 12 bytes a row in the array and
     /// 25 or more in the map.
-    fn or_as_mains(mut self) -> IdIndex {
+    fn or_as_mains(&mut self) {
         let held = self.count - self.sparse.len() - self.under.len();
-        if self.floor <= MAX_DENSE_GAP + 1 || held * 2 >= self.dense.len() {
-            return self;
+        if self.floor > MAX_DENSE_GAP + 1 && held * 2 < self.dense.len() {
+            self.as_mains();
         }
+    }
+
+    /// Every id of the array put in the map, the floor back at 1: main's
+    /// open's layout ([`Self::or_as_mains`]).
+    #[cold]
+    #[inline(never)]
+    fn as_mains(&mut self) {
         let floor = self.floor;
         for (i, l) in std::mem::take(&mut self.dense).into_iter().enumerate() {
             if !l.is_empty() {
@@ -845,15 +879,13 @@ impl IdIndex {
         self.sparse_floor = floor;
         self.floor = 1;
         self.front = 0;
-        self
     }
 
     /// The first half's held slots counted afresh, after
     /// [`Self::push_above`] or an array written slot by slot.
     #[cfg(not(target_arch = "wasm32"))]
-    fn counted(mut self) -> IdIndex {
-        self.front = self.held(half(self.dense.len()));
-        self
+    fn counted(&mut self) {
+        self.front = self.held(0, half(self.dense.len()));
     }
 
     /// Returns the ids in ascending order.
@@ -887,9 +919,10 @@ impl IdIndex {
     fn walk(&self, from: DocId) -> Walk<'_> {
         let mut ids: Vec<DocId> = self.under.keys().copied().filter(|&k| k >= from).collect();
         let below = ids.len();
+        // One sort: every id below the floor is below every one past the
+        // end.
         ids.extend(self.sparse.keys().copied().filter(|&k| k >= from));
-        ids[..below].sort_unstable();
-        ids[below..].sort_unstable();
+        ids.sort_unstable();
         let skip = from.saturating_sub(self.floor).min(self.dense.len() as u64) as usize;
         let (dense, id) = (self.dense[skip..].iter(), self.floor + skip as u64);
         let (dense, id, after, after_id) = match below {
@@ -914,25 +947,30 @@ impl IdIndex {
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
     /// order.
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
-        let mut below: Vec<DocId> = self.under.keys().copied().collect();
-        below.sort_unstable();
-        for id in below {
-            if let Some(l) = self.under.get_mut(&id) {
-                *l = f(id, *l);
-            }
-        }
+        relocate_apart(&mut self.under, &mut f);
         let floor = self.floor;
         for (i, l) in self.dense.iter_mut().enumerate() {
             if !l.is_empty() {
                 *l = f(floor + i as u64, *l);
             }
         }
-        let mut extra: Vec<DocId> = self.sparse.keys().copied().collect();
-        extra.sort_unstable();
-        for id in extra {
-            if let Some(l) = self.sparse.get_mut(&id) {
-                *l = f(id, *l);
-            }
+        relocate_apart(&mut self.sparse, &mut f);
+    }
+}
+
+/// [`IdIndex::relocate`] of a map's ids, ascending: one copy, handed `f`
+/// by reference, where a copy for each caller's `f` of each map's part grew
+/// the shell's code -- the maps' ids are few and seldom there.
+#[inline(never)]
+fn relocate_apart(map: &mut HashMap<DocId, Loc>, f: &mut dyn FnMut(DocId, Loc) -> Loc) {
+    if map.is_empty() {
+        return;
+    }
+    let mut ids: Vec<DocId> = map.keys().copied().collect();
+    ids.sort_unstable();
+    for id in ids {
+        if let Some(l) = map.get_mut(&id) {
+            *l = f(id, *l);
         }
     }
 }
@@ -2715,9 +2753,10 @@ impl Store {
     /// builds beside it.
     pub fn compacted(&self) -> Result<Store> {
         let mut fresh = Store::new();
-        // From the lowest id, as an open lays the array out.
-        if let Some((first, _)) = self.index.walk(0).next() {
-            fresh.index = IdIndex::from_floor(first);
+        // From the lowest id, as an open lays the array out: asked before
+        // the walk, which a test of each row would slow.
+        if let Some(first) = self.index.iter().next() {
+            fresh.index.start_at(first);
         }
         fresh.next_id = self.next_id;
         fresh.dropped.clone_from(&self.dropped);
@@ -2738,7 +2777,7 @@ impl Store {
                 false => fresh.append(OP_PUT, id, payload),
             };
         }
-        fresh.index = std::mem::take(&mut fresh.index).or_as_mains();
+        fresh.index.or_as_mains();
         Ok(fresh)
     }
 
