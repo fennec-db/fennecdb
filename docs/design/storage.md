@@ -744,17 +744,51 @@ copying the array, as many times as a fifth fits into the floor.
 
 **What the drop costs.** It writes main's array whole under the write
 lock -- the floor's empty slots, the array after them, each id below the
-floor into its slot, in main's room: 4.9 ms at a million rows and 44 to
-65 ms at ten million (native, medians of 11 and of 3 over three runs).
-Main's own growth at those sizes copies nothing: the allocator remaps a
-large array's pages, 0.02 to 0.19 ms at 2^20 rows and 0.004 at 2^23. So
-the drop is a stall main does not have, and it is paid for before it
-comes: the map must outgrow the floor's slots first, 229 377 ids written
-below a floor of 600 001 and 1 835 009 below one of 6 000 001, 21 to 35
-ns a write; the cut that raised the floor left it at half of main's
-array at least, and the new rows since pay a slot each. A write past
-main's reach moved the whole index paid for by nothing: 41 ms at a
-million rows and 1.20 s at ten million (below).
+floor into its slot -- into main's room, while the array it replaces is
+still allocated: at its peak the index holds both, up to twice main's
+array, 402 MB at ten million rows where main's holds 201. It comes after
+F/5 to 2F/5 writes below a floor F, whatever the array's length: it
+weighs the map against the floor's slots, not against the array. So a
+floor cut early and held by a live row stays where it is as the table
+grows, and a few writes below it copy the whole array: 100 of 200 rows
+deleted early, the floor cut to 101, the table grown to ten million rows
+with row 101 live, so never cut again -- a dead letter holding a queue's
+start (`queues.html`) has this shape -- and 29 puts of ids below 101
+copy ten million slots. That copy took 5.5
+ms (the third review's measure: the index alone, ten million slots and 29
+ids to put in, a release build on an M1 Mac, the time of the one
+write). A drop with many ids below its floor takes longer, the map's ids
+put into their slots in hash order: 4.9 ms at a million rows and 44 to
+65 ms at ten million, 229 377 ids below a floor of 600 001 and 1 835 009
+below one of 6 000 001 (a store's write, native, medians of 11 and of 3
+over three runs). Main's own growth at those sizes copies nothing: the
+allocator remaps a large array's pages, 0.02 to 0.19 ms at 2^20 rows and
+0.004 at 2^23. So the drop is a stall main does not have.
+
+What bounds it is what bounds `Vec`'s doubling: the writes since the cut
+before it. The floor is above 1 only after a cut, a running one or a
+rebuild's, and a drop leaves it at 1, so a drop follows a cut of its own,
+one at most a cut. A cut needs the array's first half empty, so it leaves
+the floor at half of main's array at least, F - 1 >= L/2 for main's L
+slots then, from wherever the floor stood; where the next new id holds it
+lower, the slots past that id are a block's put back, grown by its
+writes. The drop copies main's array as it stands, its L slots and those
+it gained since: the writes below the floor, a fifth of F at least, pay
+for the 2F, ten slots each, and each slot gained since was a new row, or
+an id within the gap past the end, that main's array grew by and zeroed
+too. The next drop needs the next cut, and that cut the first half of
+the array empty again. A write past main's reach moved the whole index
+paid for by nothing: 41 ms at a million rows and 1.20 s at ten million
+(below).
+
+**What a cut costs.** A cut moves the live rows down, within the
+allocation (`drain`) or into a new one (`relay`): a queue holding ten
+million live rows copies about ten million slots at each cut, one for
+about every ten million deletes, 6 to 12 ms (the third review's measure,
+the index alone, release, the same Mac). Main has no such stall, but
+neither does it give the memory back: its array keeps a slot for every id
+it gave. Each slot a cut moves is matched by one it drops, the first half
+at least, each a row deleted since the cut before or an id never given.
 
 **Open, checkpoint, compact.** Each lays the index out as main's would
 and cuts it by the running cut's rule (`Store::rebuild_ids`,
@@ -792,8 +826,9 @@ every tenant's attach and every compact in memory arming it again, where
 main did that work at its open. Nor was its growth main's: a compact of
 100 rows from 10 001, then ids two apart, doubled to 102 400 slots by
 25 651 ids, 1.23 MB against main's map's 820 KB. Laid out as main's,
-those ids are in the map, and the index moves nothing whole mid-service
-but at the drop, which the writes below the floor pay for.
+those ids are in the map. Mid-service the index moves the live rows at a
+cut and main's array whole at a drop, each paid for by the writes since
+the cut before it (above).
 
 **What it costs.** An id written below a raised floor reads through a
 map -- a hash, where main had a slot -- until the next open, checkpoint

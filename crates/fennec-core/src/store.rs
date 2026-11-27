@@ -854,15 +854,20 @@ impl IdIndex {
     /// The floor dropped to 1 in one step and every id below it put in:
     /// main's array, its room main's, from where the index grows as main's
     /// does. A write's alone, once the ids below the floor cost more than
-    /// the slots it saved ([`Self::over_floor`]). Its copy is paid for: the
-    /// ids written below the floor, a fifth of its slots at least, and the
-    /// cut that raised it, which left the floor half of main's array at
-    /// least, pay for those slots, and the new rows since for the rest.
-    /// Dropped to the lowest id below it instead, the next writes below
-    /// dropped it again, each copying the array, as many times as a fifth
-    /// fits into the floor. No write lowers the floor a step at a time:
-    /// #696's layout did, and its reviews each found an order of writes
-    /// that walked or copied the array again for it.
+    /// the slots it saved ([`Self::over_floor`]): F/5 to 2F/5 writes below
+    /// a floor F, whatever the array's length, so a floor cut early and
+    /// held by a live row lets 29 writes below 101 copy ten million slots,
+    /// 5.5 ms, the old array held beside main's room meanwhile. Its copy is
+    /// paid for as `Vec`'s doubling is, by the writes since the cut before
+    /// it, and one at most a cut: the floor is above 1 only after a cut,
+    /// which left it at half of main's array then at least, so the writes
+    /// below it pay for those slots, and each slot the array gained since
+    /// was a new row of main's too. Dropped to the lowest id below it
+    /// instead, the next writes below dropped it again, each copying the
+    /// array, as many times as a fifth fits into the floor. No write lowers
+    /// the floor a step at a time: #696's layout did, and its reviews each
+    /// found an order of writes that walked or copied the array again for
+    /// it.
     #[cold]
     #[inline(never)]
     fn dropped(&mut self) {
