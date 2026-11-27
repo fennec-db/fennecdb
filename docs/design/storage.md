@@ -563,6 +563,35 @@ read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
 
+A compact walks a collection's ids four times -- `Store::live_len` for the
+data record's length, `image_index`, which asks `live_len` again, and
+`write_live` -- and each takes every id's location from the walk itself
+(`IdIndex::walk`), as `Store::compacted` and the copy in turn's buckets
+do; `relocate_live` and the copy's `places` walk the dense slots
+themselves. Each walk took the ids alone and looked each one up again: 64
+instructions a row of the perf gate's `file-compact` as CI counts it
+(x86_64 musl), 36 of them `live_len`'s, 12 `image_index`'s and 16
+`write_live`'s. `file-compact` went 7.74 -> 7.10 million (-8.3%; aarch64
+-7.4%), `core-lookup` 0.9% under main (aarch64 0.1%), and no other
+workload above main's by more than 2 instructions an op. The walk's
+`next` walks the dense slots and nothing else while they last, the
+sparse ids asked for out of line (`Apart::next`), and the walks that give
+the ids alone (`Store::iter_ids`, `ids`) are the same walk.
+`store::tests::the_walk_gives_each_id_its_location_in_the_order_ids_came`
+holds it to the walk before, a lookup an id, and a program writing one
+file through checkpoints and each kind of compact -- under the lock,
+beside the database, in turn -- wrote main's files, byte for byte. How
+the sparse part hands its pair back moved the walks by as much as the
+lookups: a `Loc` by value came back through memory, and every caller's
+loop stored each dense slot's location there too (-7.1%, aarch64 -6.2%);
+handed the walk's parts rather than its place, the slots stayed in
+registers that x86_64's loops then spilled (-6.6%, aarch64 -7.1%); by
+reference the pair comes back in registers. The code shrank: built as
+CI's build job builds them, `.text` lost 5 568 bytes of `fennec`, 2 880
+of `fennec-server` and 5 536 of `make small`'s, each file 4 096 bytes
+smaller; the browser module grew 161 bytes raw, its gzip and brotli
+inside the noise (+3, +28).
+
 ### Dead bytes are whole frames
 
 A version written over or deleted adds its whole frame to `dead_bytes`,
