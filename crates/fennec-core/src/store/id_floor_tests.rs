@@ -696,6 +696,11 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
         let at = want.partition_point(|&i| i < from);
         assert_eq!(got, want[at..], "{what}: from {from}");
     }
+    // A walk gives each id's location as a lookup reads it: the list of
+    // the ids below the floor keeps theirs through writes over them.
+    for (id, l) in st.index.walk(0) {
+        assert_eq!(Some(l), st.loc(id), "{what}: id {id}'s location in a walk");
+    }
     let ix = &st.index;
     assert!(ix.front_end <= half(ix.dense.len()), "{what}: front's end");
     let held = ix.dense[..ix.front_end]
@@ -1357,19 +1362,24 @@ fn a_rebuild_leaves_no_small_floor() {
 
 /// A write over an id below the floor grows its map as a new id does --
 /// hashbrown makes room before it looks -- and is held to the floor's
-/// slots alike: 448 ids filling 512 buckets under a floor of 1 601, 16 472
+/// slots alike: 448 ids filling 512 buckets under a floor of 2 001, 21 864
 /// bytes with their box and the walks' list's room, one written again took
-/// the map to 1 024 buckets, 32 856 bytes where the floor saved 19 200,
+/// the map to 1 024 buckets, 43 624 bytes where the floor saved 24 000,
 /// with no drop asked.
 #[test]
 fn a_write_over_an_id_below_the_floor_is_held_to_its_slots() {
     let mut r = Run::new();
-    r.block(false, |r| (0..3_200).for_each(|_| _ = r.put_new()));
-    let old = r.oldest(1_600);
+    r.block(false, |r| (0..4_000).for_each(|_| _ = r.put_new()));
+    let old = r.oldest(2_000);
     r.block(false, |r| old.into_iter().for_each(|id| r.del(id)));
     r.block(false, |r| (1..=448).for_each(|id| r.put(id)));
     let ix = &r.st.index;
-    assert_eq!((ix.floor, ix.below()), (1_601, (448, 448)));
+    assert_eq!(
+        std::mem::size_of::<Under>(),
+        88,
+        "the box the figures count"
+    );
+    assert_eq!((ix.floor, ix.below()), (2_001, (448, 448)));
     r.block(false, |r| r.put(5));
     assert_eq!((r.st.index.floor, r.st.index.below().0), (1, 0), "dropped");
     r.judge("written over");
@@ -1395,7 +1405,7 @@ fn a_walk_passes_over_ids_deleted_below_the_floor() {
             .under
             .as_ref()
             .and_then(|u| u.sorted.get())
-            .map(|s| s.len())
+            .map(|s| s.ids.len())
     };
     assert_eq!(list(&st), Some(5), "sorted at the walk");
     // Deleted: the list kept, the ids passed over -- the last two of it
@@ -1435,10 +1445,12 @@ fn a_walk_passes_over_ids_deleted_below_the_floor() {
         assert_eq!(st.iter_ids_from(41).next(), Some(id));
     }
     assert_eq!(st.ids()[..3], [41, 42, 601]);
-    // A write over one of them keeps it.
+    // A write over one of them keeps it, its location written there too.
     st.append(OP_PUT, 42, &payload(42, 3));
     assert_eq!(list(&st), Some(2));
     assert_eq!(st.raw(42).unwrap(), Some(&payload(42, 3)[..]));
+    let walked = st.index.walk(0).find(|e| e.0 == 42).map(|e| e.1);
+    assert_eq!(walked, st.loc(42));
 }
 
 /// The oracle the tests hold the index's bytes to reads a map's own
