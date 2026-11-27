@@ -284,10 +284,8 @@ impl Store {
         };
         // The sparse ids sorted once, as `IdIndex::iter` sorts them, each
         // bucket given its run of them.
-        let mut sparse: Vec<(DocId, u32)> = self
-            .index
-            .sparse
-            .iter()
+        let mut sparse: Vec<(DocId, u32)> = (self.index.under.iter())
+            .chain(&self.index.sparse)
             .map(|(&id, l)| (id, l.len))
             .collect();
         sparse.sort_unstable_by_key(|e| e.0);
@@ -352,8 +350,8 @@ impl Store {
     /// in their bucket, by id, from 0: `sparse` every sparse id and its
     /// length, ascending, of which the bucket's run is found by halving.
     fn places(&self, first: DocId, end: DocId, sparse: &[(DocId, u32)]) -> Places {
-        let dense = &self.index.dense;
-        let slot = |id: DocId| (id.max(1) - 1).min(dense.len() as u64) as usize;
+        let (dense, floor) = (&self.index.dense, self.index.floor);
+        let slot = |id: DocId| id.saturating_sub(floor).min(dense.len() as u64) as usize;
         let (lo, hi) = (slot(first), slot(end));
         let mut at = 0u64;
         let mut placed = |id: DocId, len: u32| {
@@ -361,23 +359,29 @@ impl Store {
             at += after(0, id, len as u64) + len as u64;
             here as u32
         };
+        // In id order: the sparse ids below the floor, the dense slots,
+        // then those past the end.
+        let from = sparse.partition_point(|e| e.0 < first);
+        let to = sparse.partition_point(|e| e.0 < end);
+        let below = sparse.partition_point(|e| e.0 < floor).clamp(from, to);
+        let mut s: Vec<(DocId, u32)> = Vec::with_capacity(to - from);
+        for &(id, len) in &sparse[from..below] {
+            s.push((id, placed(id, len)));
+        }
         let mut d = Vec::with_capacity(hi - lo);
         for (i, l) in dense[lo..hi].iter().enumerate() {
             d.push(match l.is_empty() {
                 true => TAKEN,
-                false => placed((lo + i) as u64 + 1, l.len),
+                false => placed(floor + (lo + i) as u64, l.len),
             });
         }
-        let from = sparse.partition_point(|e| e.0 < first);
-        let to = sparse.partition_point(|e| e.0 < end);
-        let sparse = sparse[from..to]
-            .iter()
-            .map(|&(id, len)| (id, placed(id, len)))
-            .collect();
+        for &(id, len) in &sparse[below..to] {
+            s.push((id, placed(id, len)));
+        }
         Places {
-            first: lo as u64 + 1,
+            first: floor + lo as u64,
             dense: d,
-            sparse,
+            sparse: s,
         }
     }
 
@@ -1108,6 +1112,36 @@ mod tests {
                 sparse >= 3,
                 "budget {budget}: {sparse} buckets of sparse ids"
             );
+            same_in_turn(&st, budget, &path);
+        }
+        assert!(!path.exists());
+    }
+
+    /// A store whose floor a cut raised, ids written again below it and
+    /// others far past its end, copied in turn as the walk by id writes it:
+    /// the ids below the floor first, each bucket given its run of them.
+    #[test]
+    fn ids_below_a_raised_floor_go_to_their_places() {
+        let mut st = Store::new();
+        for id in 1..=600u64 {
+            let len = 20 + (id * 7 % 90) as usize;
+            st.append(OP_PUT, id, &vec![b'a' + (id % 26) as u8; len]);
+        }
+        let mut st = mapped(&st);
+        for id in 1..=400u64 {
+            st.append(OP_DEL, id, &[]);
+        }
+        st.cut_ids();
+        assert_eq!(st.index.floor, 401);
+        for id in [5, 250, 120, 399] {
+            st.append(OP_PUT, id, &[b'u'; 33]);
+        }
+        for far in [1 << 40, (1 << 40) + 5] {
+            st.append(OP_PUT, far, &[b'f'; 50]);
+        }
+        assert_eq!((st.index.under.len(), st.index.sparse.len()), (4, 2));
+        let (_dir, path) = temp("under");
+        for budget in [1, 900, 3_000, 1 << 20] {
             same_in_turn(&st, budget, &path);
         }
         assert!(!path.exists());

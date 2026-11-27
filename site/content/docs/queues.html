@@ -526,6 +526,14 @@ for (;;) {
     holding a million leased or delayed jobs and three ready claims the
     three, where a walk testing each job's time would pass every leased
     one.</li>
+  <li><b>The ids' index starts at the oldest job held,</b> not at the
+    first ever given: a job's id is the highest given plus 1, and as the
+    oldest jobs are acked the run of ids before the first left is cut. A
+    queue holding 3 000 jobs through a million ids holds 96 KB of it where
+    it held 12 MB, a slot for every id ever given, and 35 KB after a
+    restart. A dead letter left in the queue, or a job delayed for days,
+    holds that start where it is until it goes; a restart then keeps the
+    jobs after it apart, by the jobs held.</li>
 </ul>
 
 <h2 id="compared">Compared</h2>

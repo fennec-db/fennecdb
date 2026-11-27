@@ -1882,33 +1882,43 @@ impl Block {
     /// no record, and gone at the next open. The block's own, rather than
     /// the database's, so that a write asks it while it holds its
     /// collection: looked up again, it was a search of the names a write.
-    fn remember(
-        &mut self,
-        cid: u32,
-        id: DocId,
-        was: Option<crate::store::Loc>,
-        mark: crate::store::Mark,
-    ) {
+    ///
+    /// The block's first write to a collection is where its store's id
+    /// index is cut, where due (`Store::cut_ids`): the block before it has
+    /// landed or been put back, and nothing of this one is in the store, so
+    /// no put-back points an id below the floor a cut raised. At the end
+    /// of the block that made it due, the cut needed its collection looked
+    /// up by its number; here the store is in hand.
+    fn remember(&mut self, cid: u32, id: DocId, store: &mut Store, mark: crate::store::Mark) {
         if !self.marks.iter().any(|(c, _)| *c == cid) {
+            store.cut_ids_before(&mark);
             self.marks.push((cid, mark));
         }
-        self.was.push(Undo::Doc(cid, id, was));
+        self.was.push(Undo::Doc(cid, id, store.loc(id)));
     }
 
     /// [`Self::remember`] for a frame a replica applies ([`Database::apply`]),
     /// the store's mark taken only before the first of its collection's
     /// frames in the record -- its marks from `since` on -- so that a
     /// record is put back without those landed before it.
+    ///
+    /// The first frame for a collection since the records before it
+    /// landed -- no record held unlanded writes it, so no put-back reaches
+    /// it -- is where its store's id index is cut, where due, as a block's
+    /// first write is ([`Self::remember`]).
     #[inline(always)]
     fn remember_frame(
         &mut self,
         cid: u32,
         id: DocId,
         was: Option<crate::store::Loc>,
-        store: &Store,
+        store: &mut Store,
         since: usize,
     ) {
         if !self.marks[since..].iter().any(|(c, _)| *c == cid) {
+            if !self.marks[..since].iter().any(|(c, _)| *c == cid) {
+                store.cut_ids();
+            }
             self.marks.push((cid, store.mark()));
         }
         self.was.push(Undo::Doc(cid, id, was));
@@ -7387,6 +7397,7 @@ impl Database {
         }
         for (name, mut store) in fresh {
             if let Some(c) = self.collections.get_mut(&name) {
+                store.rebuild_ids();
                 store.set_dropped(&c.schema.dropped);
                 c.store = store;
             }
@@ -8094,6 +8105,12 @@ impl Database {
         // A cursor sitting exactly here (a quiet restart) gets an empty
         // answer; everything else is reseeded.
         self.changes.reset(seq_base + seq_seen);
+        // Each id index from its lowest id (`Store::rebuild_ids`): a file
+        // replayed write by write spans every id it ever gave, and an id a
+        // write put below a floor is taken back in.
+        for c in self.collections.values_mut() {
+            c.store.rebuild_ids();
+        }
         // Indexes are derived data: a graph restored from the file takes the
         // writes after its record; everything else is rebuilt from the
         // documents.
@@ -9438,7 +9455,7 @@ impl Database {
             // Remembered before the frame changes anything, as a write is
             // ([`Block::remember`]): a panic in its upkeep of the indexes
             // puts it back whole, and the record with it.
-            self.spare.remember_frame(cid, id, was, &c.store, since);
+            self.spare.remember_frame(cid, id, was, &mut c.store, since);
             c.store.append_frame(op, id, frame, plen);
             if let Some(old) = &old {
                 c.unindex_doc(old, new.as_ref());
@@ -12072,7 +12089,7 @@ impl Database {
                 // finds it to put back. Passed over below, it is forgotten.
                 // The hooks keep the id it is remembered by ([`ask_hooks`]).
                 if let Some(b) = &mut self.block {
-                    b.remember(cid, doc.id, c.store.loc(doc.id), mark);
+                    b.remember(cid, doc.id, &mut c.store, mark);
                 }
                 // Before anything is written, as a taken id is refused above
                 // -- and the id handed out above handed out again, as a block
@@ -15864,7 +15881,8 @@ impl Database {
         };
         // Remembered before the row leaves the indexes ([`Block::remember`]).
         if let Some(b) = &mut self.block {
-            b.remember(cid, id, c.store.loc(id), c.store.mark());
+            let mark = c.store.mark();
+            b.remember(cid, id, &mut c.store, mark);
         }
         c.unindex_doc(&old, Some(&doc));
         let frame = c.store.append(OP_PUT, id, &payload);
@@ -15950,7 +15968,8 @@ impl Database {
         // and before the hooks, beside which it costs no second look at the
         // row: a refusal ends the statement, and its entry puts back nothing.
         if let Some(b) = &mut self.block {
-            b.remember(cid, id, c.store.loc(id), c.store.mark());
+            let mark = c.store.mark();
+            b.remember(cid, id, &mut c.store, mark);
         }
         if let Some(doc) = &gone {
             for h in hooks {

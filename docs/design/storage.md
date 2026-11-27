@@ -641,6 +641,138 @@ grew it 141; on aarch64 macOS fennec-server's code grew 128 bytes and
 `fennec`'s shrank 128, both files the same size to the byte. CI's perf
 job holds the cost.
 
+### The id floor
+
+**A collection's id index sheds its dead ids alike, in memory.** The
+index (`IdIndex`, `store.rs`) is a dense array of locations, 12 bytes a
+slot, beside a map for the ids too far from it. Through 0.2.0 the array
+spanned id 1 to the highest id, so a collection whose ids climb while its
+oldest rows go -- `sessions` under `@ttl`, a queue, an outbox -- held a
+slot for every id it ever gave: at 55 ids a second, 57 MB a day for a
+few thousand live rows. Nothing gave it back: a compact's relocation kept
+the array, and an open built it from 1 again.
+
+Now the array starts at a floor, at first 1, `dense[id - floor]`, and a
+lookup is still a subtraction and a compare (`IdIndex::slot`). The floor
+rises only by a cut, once the array's first half holds no location: the
+empty run it starts with is half of it or more (`IdIndex::cut_due`). The
+cut drops that run up to the first held slot, so each slot is cut once
+and no more are moved than are cut, and never past the next new id,
+which a block put back lowers below the slots its writes grew the array
+to: those are the next new rows'. The held slots of the first half are
+counted as writes land (`front`), so asking is a compare: a walk to the
+first held slot, asked after every delete of it, walked the run behind
+it again each time a row written there was deleted. An array of fewer
+than 128 slots is not cut (`CUT_FROM`): a small table's lowest ids are
+the ones written again, and cut at two slots, a table of two rows whose
+first is deleted and put again kept it in the map. The cut keeps the
+allocation, room for twice a queue's rows: shrunk at each cut, an array
+grown again past where the floor started held more than main's, which
+doubled from there. Only room of more than eight times what is left,
+which no queue's doubling leaves and a drop's array from 1 does (below),
+is given back.
+
+**Never inside a block.** The cut runs at a block's first write to a
+collection (`Block::remember` asks `Store::cut_ids_before`), where the
+block before it has landed or been put back and nothing of this one is in
+the store, and on a replica at the first frame for a collection since its
+records last landed (`remember_frame`), where no record held unlanded
+writes it. A cut inside a block would meet its deletes: put back, a
+deleted row's id points below the raised floor. Asked at the end of the
+block that made it due, the cut needed the collection looked up by its
+number; at the first write the store is in hand. A block's first write
+asks it with the mark taken before the write, so the floor never passes
+an id the write may have been handed already, which a refusal hands out
+again.
+
+**Below the floor.** No write lowers the floor a step. An id written
+below it -- only an id from outside, every new one is the highest given
+plus 1 -- is kept in a map of its own (`under`) until an open, a
+checkpoint or a compact takes it back in. Every walk gives those ids
+first (`IdIndex::walk`, `relocate`, and `in_turn::places`, which lays
+them before the dense slots): every walk gives the ids ascending, as
+main's does. The map is apart from the one past the end so that its room
+is theirs: in one map, 252 ids below a floor took a map of 649 far ids
+past its doubling, 2 048 buckets where main's held 1 024. Where a fifth
+of the ids the floor cut come back below it (`BELOW_SHARE`), or a map's
+first room -- four ids, 100 bytes -- where the floor saved fewer than 20
+slots, the floor drops to 1 in one step, main's array, each id into its
+slot (`IdIndex::over_floor`, `IdIndex::dropped`): a map entry takes 28 to
+57 bytes, 25 a bucket and an eighth to half of them empty, where a cut
+slot saved 12, so a fifth of them costs no more than the cut saved. Held
+in the map until a rebuild, 928 ids written back under a floor of 929
+held 4.2 times main's index, and one id under a floor of 8 a map of 100
+bytes where 7 slots saved 84. The drop's copy costs the floor and the
+array's length: the writes below the floor pay for the first, five a
+slot at most, and the cut or rebuild that raised the floor since the
+last drop for the second. Dropped to the lowest id below it instead, the
+next writes below dropped it again, each copying the array, as many
+times as a fifth fits into the floor.
+
+**Open, checkpoint, compact.** Each lays the array out from its lowest
+id (`Store::rebuild_ids`, `IdIndex::rebuild`): the ids below the floor
+taken back in, from the floor down while each is within the gap (4 096)
+of the one above it, a far one staying in the map as an id far past the
+end stays in its own, held to the floor as a write's is, the floor
+dropped where they cost more; the empty run the array starts with cut
+whole; its allocation and the maps' room given back where less than half
+is used.
+An open of an image's index starts the array at its first id
+(`adopt_in_turn`) and a compact's copy at the first it keeps
+(`Store::compacted`). Laid out from an id main's array never reaches --
+past the gap from 1 -- an array holding fewer ids than half its slots is
+laid out as main's open lays it, every id in the map (`or_as_mains`):
+times in seconds an hour apart took 3 600 slots a row from the first, 43
+MB for 1 000 rows main's map held in 25 KB.
+
+**What it costs.** An id written below a raised floor reads through a map
+-- a hash, where main had a slot -- until the next open, checkpoint or
+compact, or the drop. Memory is never above main's for the same writes
+wherever main's array spans this one's:
+`store::id_floor_tests::the_id_index_holds_every_workload_under_mains_memory_and_reads_back`
+drives a store, a model knowing only the live ids and the next id
+`allocate_id` gives, and main's index side by side through phases drawn
+from a seed -- queues and `@ttl` sweeps, stacks and outboxes beside
+long-lived rows, batches deleted in each order, ids from outside
+ascending, descending and at random, a pending row at 2^52 beside a
+primary's rows, blocks put back (a refused descending delete of the
+oldest rows among them), reseeds, clones, checkpoints in memory and on
+the file, opens and relocations -- and after each holds every live id to
+read back, in order from any id, and the index's bytes -- the array's
+slots and each map's buckets for the most ids it held -- at or under
+main's, and at each block's first write the empty run the array starts
+with under half of it; 600 seeds of 60 phases pass, 5 573 cuts and
+386 055 ids written below a floor among them. Where the array ends past
+main's -- laid by an open from a lowest id main's array never reached,
+pending rows at 2^52 or ids from outside, main's rows all in its map --
+the layout is another and is measured, not held: at most 5.89 times
+main's in those draws, 11 pending rows left in an array of 188 slots,
+2 356 bytes where main's map held 400, and 1.43 times at 519 rows of a
+stack over 3 061 slots. A long-lived row at the array's start holds the
+floor where it is: no cut while it lives, as on main, until an open,
+which puts the climbing rows past the gap in the map, as main's open
+does.
+
+A `sessions`-like churn, 1 million ids given and 3 000 live at any time,
+in a queue and in `@ttl` sweeps of 55: main's index 12 582 912 bytes at
+its peak and at the end, 111 268 after an open; this one's 98 304 at its
+peak and at the end (the room for twice the live rows), 36 004 and 36 196
+after an open.
+
+**Why this design.** #696 tried one dense window that lowered, rebased and
+cut both its ends, with two remembered holes and a look that moved the
+array to the largest run. Each of its first five reviews found an order of
+writes nobody had tried, and the sixth's property test five more on the way
+-- a block of pushes and pops put back walking a run once a row, a batch
+walking past an older hole, a write a quarter of the array below the floor
+and its delete copying the array a pair, an emptied array restarted at the
+old end spanning to it from every id written downward, a bound left unknown
+after a swap -- and the last review judged it not worth its 540 lines and 8
+to 16 KB. A paged array, reviewed on paper, met the same kind of pathology
+in its window's rules. Every one came from a write moving the window; here
+a write moves the floor only by a cut, up, or the drop to 1, in one step
+that the writes below it paid for, and only a rebuild lays it out again.
+
 ### Dropped places
 
 **A compact keeps every place a collection's documents hold.** `alter

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) and the id index's floor (`IdIndex` in `store.rs`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -91,6 +91,20 @@ refusing one made by other places. From the first store it changes until
 each points at the new file, a panic, a store refusing or a file the sink
 cannot map fails the database (`compact_unwound`, `repoint`); a refusal the
 server's compaction meets again is logged once and counted.
+
+A collection's id index sheds its dead ids alike, in memory: its array
+starts at a [floor](../../../../docs/design/storage.md#the-id-floor) a cut
+raises once its first half holds no id (`IdIndex::cut_due`, a count kept as
+writes land, never a walk), never past the next new id. The cut runs at a
+block's first write to the collection (`Block::remember`) or a replica's
+first frame for it since its records landed (`remember_frame`), never
+inside a block: a put-back would point an id below it. No write lowers it a
+step: an id written below it waits in `under` until an open, a checkpoint
+or a compact lays the array out from its lowest id (`Store::rebuild_ids`),
+or they cost more than the slots it saved and it drops to 1 at once
+(`IdIndex::dropped`). A lookup stays a subtraction and a compare;
+`store::id_floor_tests` holds every id read back and the index's bytes at
+or under main's wherever its array spans this one's.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room
