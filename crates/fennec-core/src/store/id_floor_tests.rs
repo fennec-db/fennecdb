@@ -101,6 +101,17 @@ impl MainIds {
         self.in_dense(id)
     }
 
+    /// Main's index of `ids`, each inserted in id order: a file replayed
+    /// write by write over its live rows, and a compact in memory
+    /// (`Store::compacted` as it was).
+    fn inserted(ids: &[(DocId, Loc)]) -> MainIds {
+        let mut m = MainIds::default();
+        for &(id, l) in ids {
+            m.insert(id, l);
+        }
+        m
+    }
+
     /// Main's open of an image's index read in turn (`adopt_in_turn` as it
     /// was): room for the documents reserved, each pushed in id order.
     fn opened(ids: &[(DocId, Loc)], len: u64) -> MainIds {
@@ -192,9 +203,10 @@ struct Run {
     room: [usize; 2],
     /// How many ids were written below the floor.
     belows: usize,
-    /// Where main's open put every row in the map: the most the store held
-    /// over main's index, and what it was.
-    over: (f64, String),
+    /// How many times an array laid out past main's reach was laid out as
+    /// main's, and how many phases ended with one past it.
+    as_mains: usize,
+    pasts: usize,
 }
 
 impl Run {
@@ -214,7 +226,8 @@ impl Run {
             peak: [0; 2],
             room: [0; 2],
             belows: 0,
-            over: (0.0, String::new()),
+            as_mains: 0,
+            pasts: 0,
         }
     }
 
@@ -287,7 +300,9 @@ impl Run {
 
     fn write(&mut self, id: DocId) {
         self.version += 1;
+        let past = self.st.index.peak != 0;
         self.st.append(OP_PUT, id, &payload(id, self.version));
+        self.as_mains += (past && self.st.index.peak == 0) as usize;
         let l = self.st.loc(id).unwrap();
         self.main.insert(id, l);
         self.model.live.insert(id, self.version);
@@ -376,15 +391,19 @@ impl Run {
         fresh.rebuild_ids();
         let ids: Vec<(DocId, Loc)> = fresh.index.walk(0).collect();
         self.main = match walked {
-            true => {
-                let mut m = MainIds::default();
-                for &(id, l) in &ids {
-                    m.insert(id, l);
-                }
-                m
-            }
+            true => MainIds::inserted(&ids),
             false => MainIds::opened(&ids, len),
         };
+        self.st = fresh;
+        (self.peak, self.room) = ([0; 2], [0; 2]);
+        self.peaks();
+    }
+
+    /// A compact in memory (`Store::compacted`): the store's rows copied
+    /// into a fresh one, as main's copy inserted each.
+    fn compacted(&mut self) {
+        let fresh = self.st.compacted().unwrap();
+        self.main = MainIds::inserted(&fresh.index.walk(0).collect::<Vec<_>>());
         self.st = fresh;
         (self.peak, self.room) = ([0; 2], [0; 2]);
         self.peaks();
@@ -450,30 +469,34 @@ impl Run {
                 m.sparse.capacity()
             )
         };
-        // Memory never above main's for the same writes, wherever main's
-        // array spans the store's: the ids written below the floor too,
-        // which the floor's drop holds under the slots it saved. Where the
-        // store's array ends past main's -- laid by an open from a lowest
-        // id main's array never reached, or over rows main's end's gap
-        // left in its map -- main's layout is another, its rows in one
-        // map, and the store's is measured, not judged.
-        let real = self.real();
-        let main = self.main.bytes();
+        // Memory never above main's for the same writes, in any order:
+        // where main's array reaches the store's, it ends where main's
+        // does and the ids written below the floor are held under the
+        // slots the floor saved, by its drop; where it lies past that
+        // reach, main holds every id in its map and the array is held to
+        // twice the most of them it held, with no map beside it.
+        let (real, main) = (self.real(), self.main.bytes());
+        assert!(real <= main, "{what}: {}", shown(&self.main));
         let end = ix.floor - 1 + ix.dense.len() as u64;
-        match end <= self.main.dense.len() as u64 {
-            true => assert!(real <= main, "{what}: {}", shown(&self.main)),
-            false => {
-                let r = real as f64 / main as f64;
-                if r > self.over.0 {
-                    self.over = (
-                        r,
-                        format!(
-                            "{what}: {} rows, {}",
-                            self.model.live.len(),
-                            shown(&self.main)
-                        ),
-                    );
-                }
+        match ix.peak {
+            0 => assert!(
+                end <= self.main.dense.len() as u64,
+                "{what}: the end is main's"
+            ),
+            _ => {
+                assert!(
+                    ix.sparse.is_empty() && ix.under.is_empty(),
+                    "{what}: a map past main's reach"
+                );
+                assert!(
+                    self.main.dense.is_empty(),
+                    "{what}: main's array reaches it"
+                );
+                assert!(
+                    ix.dense.len() <= 2 * ix.peak,
+                    "{what}: past twice its most ids"
+                );
+                self.pasts += 1;
             }
         }
         // A new id lands where main's does: in the array where its is.
@@ -514,7 +537,11 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
     }
     let ix = &st.index;
     assert!(ix.front_end <= half(ix.dense.len()), "{what}: front's end");
-    assert_eq!(ix.front, ix.held(0, ix.front_end), "{what}: front");
+    let held = ix.dense[..ix.front_end]
+        .iter()
+        .filter(|l| !l.is_empty())
+        .count();
+    assert_eq!(ix.front, held, "{what}: front");
     let end = ix.floor - 1 + ix.dense.len() as u64;
     for &k in ix.sparse.keys() {
         assert!(k > end, "{what}: sparse id {k} not past the end {end}");
@@ -539,7 +566,7 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
 fn phase(r: &mut Run, g: &mut Rng) -> &'static str {
     let back = g.chance(6);
     let n = 1 + g.below(200) as usize;
-    match g.below(15) {
+    match g.below(17) {
         // A queue: new rows at the end, the oldest taken off.
         0 => {
             for _ in 0..1 + g.below(20) {
@@ -687,6 +714,24 @@ fn phase(r: &mut Run, g: &mut Rng) -> &'static str {
             r.relocate(g.chance(2));
             "relocate"
         }
+        // Ids from outside past the end, a stride apart -- times in
+        // seconds an hour apart, the gap and either side of it among them --
+        // in one block or a block each.
+        14 => {
+            let stride = [2, 64, 1_000, 3_600, 4_095, 4_096, 4_097, 10_000][g.below(8) as usize];
+            let top = r.model.next_id - 1;
+            let ids: Vec<DocId> = (1..=1 + g.below(60)).map(|k| top + k * stride).collect();
+            match g.chance(2) {
+                true => r.block(back, |r| ids.into_iter().for_each(|id| r.put(id))),
+                false => ids.into_iter().for_each(|id| r.block(false, |r| r.put(id))),
+            }
+            "strided"
+        }
+        // A compact in memory.
+        15 => {
+            r.compacted();
+            "compacted"
+        }
         // A clone, read as it was after a phase of writes.
         13 => {
             let (clone, model) = (r.st.clone(), r.model.clone());
@@ -727,8 +772,7 @@ fn the_id_index_holds_every_workload_under_mains_memory_and_reads_back() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
-    let mut over = (0.0, String::new());
-    let (mut cuts, mut belows) = (0, 0);
+    let (mut cuts, mut belows, mut as_mains, mut pasts) = (0, 0, 0, 0);
     for seed in 1..=seeds {
         let mut g = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let mut r = Run::new();
@@ -736,20 +780,21 @@ fn the_id_index_holds_every_workload_under_mains_memory_and_reads_back() {
             let what = phase(&mut r, &mut g);
             r.judge(&format!("seed {seed}, phase {p} ({what})"));
         }
-        cuts += r.cuts;
-        if r.over.0 > over.0 {
-            over = r.over;
-        }
-        belows += r.belows;
+        (cuts, belows) = (cuts + r.cuts, belows + r.belows);
+        (as_mains, pasts) = (as_mains + r.as_mains, pasts + r.pasts);
     }
     assert!(cuts > seeds as usize, "the phases cut: {cuts}");
     assert!(
         belows > seeds as usize,
         "the phases wrote below the floor: {belows}"
     );
+    assert!(
+        pasts > seeds as usize && as_mains > 0,
+        "the phases laid arrays out past main's reach: {pasts}, {as_mains} as main's"
+    );
     if std::env::var_os("FENNEC_ID_FLOOR_SEEDS").is_some() {
         eprintln!("{cuts} cuts, {belows} ids written below the floor");
-        eprintln!("over main's map, at most {:.2}x: {}", over.0, over.1);
+        eprintln!("{pasts} phases ended past main's reach, {as_mains} laid out as main's");
     }
 }
 
@@ -835,6 +880,13 @@ fn an_id_below_the_floor_is_held_apart_until_a_rebuild() {
     }
     let ids = st.ids();
     assert_eq!(ids[..4], [7, 599, 600, 601]);
+    // Past those, the dense slots are the walk's own loop's.
+    let mut walk = st.index.walk(0);
+    walk.by_ref().take(3).for_each(drop);
+    assert_eq!(
+        (walk.dense.len(), walk.next().map(|e| e.0)),
+        (400, Some(601))
+    );
     assert_eq!(
         st.iter_ids_from(8).take(3).collect::<Vec<_>>(),
         [599, 600, 601]
@@ -903,9 +955,163 @@ fn an_open_lays_ids_past_the_gap_out_from_the_lowest_where_they_fill_the_array()
         (st.index.floor, st.index.dense.len(), st.index.sparse.len()),
         (1, 0, 1_000)
     );
-    // Within the gap of 1, they lie in the array main's did too.
-    let low: Vec<DocId> = (0..100).map(|k| 1 + k * 3).collect();
-    assert_eq!(opened(&low).index.sparse.len(), 0);
+    // Within the gap of 1, they lie in the array main's did too, from 1.
+    let low: Vec<DocId> = (0..100).map(|k| 1_000 + k * 3).collect();
+    let st = opened(&low);
+    assert_eq!(
+        (st.index.floor, st.index.sparse.len(), st.index.peak),
+        (1, 0, 0)
+    );
+}
+
+/// Ids from outside in seconds -- 1 000 at once at 1.7e9, then one an hour
+/// -- compacted in memory or opened from an image: main held every one in
+/// its map, and the array laid out from the first is held to it. Grown by
+/// any gap under 4 096, it took 361 000 slots for the 100 hours, 7.07 MB
+/// where main's map held the 1 100 rows in 51 KB.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ids_an_hour_apart_past_the_gap_cost_no_more_than_mains_map() {
+    let t = 1_700_000_000u64;
+    for open in [false, true] {
+        let mut r = Run::new();
+        r.block(false, |r| (t..t + 1_000).for_each(|id| r.put(id)));
+        match open {
+            false => r.compacted(),
+            true => r.reseed(false),
+        }
+        let ix = &r.st.index;
+        assert_eq!((ix.floor, ix.peak, ix.dense.len()), (t, 1_000, 1_000));
+        r.judge("laid out");
+        for k in 1..=100 {
+            r.block(false, |r| r.put(t + 999 + k * 3_600));
+            r.judge(&format!("hour {k}"));
+        }
+        let ix = &r.st.index;
+        assert_eq!((ix.floor, ix.dense.len(), ix.sparse.len()), (1, 0, 1_100));
+        assert_eq!(ix.sparse_floor, r.main.sparse_floor, "main's map's floor");
+    }
+}
+
+/// An array laid out past main's reach holds no map: an id below its
+/// floor, or past the gap from its end, lays the index out as main's --
+/// the floor at 1, every id in the map, its floor main's -- and puts the id
+/// where main's does. Main's map's floor is its lowest id since it was last
+/// empty: here the rows written after every row was deleted.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_array_past_mains_reach_is_laid_out_as_mains_for_a_map() {
+    for (id, dense) in [(3, 3), (5_000, 0), (1 << 52, 0)] {
+        let mut r = Run::new();
+        r.block(false, |r| {
+            (0..400).for_each(|_| {
+                r.put_new();
+            })
+        });
+        let old = r.oldest(200);
+        r.block(false, |r| old.into_iter().for_each(|id| r.del(id)));
+        r.reseed(false);
+        assert_eq!(r.st.index.peak, 0, "within the gap");
+        // A queue past the gap, opened.
+        for _ in 0..31 {
+            r.block(false, |r| {
+                (0..200).for_each(|_| {
+                    r.put_new();
+                })
+            });
+            let old = r.oldest(200);
+            r.block(false, |r| old.into_iter().for_each(|id| r.del(id)));
+        }
+        r.reseed(false);
+        let first = r.oldest(1)[0];
+        let ix = &r.st.index;
+        assert!(first > MAX_DENSE_GAP);
+        assert_eq!((ix.floor, ix.peak, ix.mains), (first, 200, first));
+        r.judge("opened");
+        // Emptied and written again from the middle, in one block: main's
+        // map's floor is the lowest of those rows.
+        let all = r.oldest(200);
+        let mid = first + 100;
+        r.block(false, |r| {
+            all.into_iter().for_each(|id| r.del(id));
+            r.put(mid);
+            r.put(mid - 50);
+        });
+        assert_eq!((r.st.index.peak, r.st.index.mains), (200, mid - 50));
+        r.judge("written again");
+        r.block(false, |r| r.put(id));
+        r.judge(&format!("{id} written"));
+        let ix = &r.st.index;
+        assert_eq!((ix.floor, ix.peak, ix.dense.len()), (1, 0, dense));
+        assert_eq!(ix.sparse_floor, r.main.sparse_floor, "main's map's floor");
+        judge_store(&r.st, &r.model, "laid out as main's");
+    }
+}
+
+/// An id below a floor within the gap of 2^64 is told apart before the
+/// gap past the end is: else its slot was `floor + at`, wrapped, the id
+/// given back as one past the top -- and a panic where overflows are
+/// checked.
+#[test]
+fn an_id_below_a_floor_near_the_top_of_the_ids_is_held_apart() {
+    let top = DocId::MAX - 10;
+    let loc = |n: u32| Loc {
+        seg: 0,
+        off: n,
+        len: 1,
+    };
+    // An array main's reaches, its floor up there: `under`'s.
+    let mut ix = IdIndex::default();
+    ix.floor = top;
+    ix.insert(top, loc(1));
+    ix.insert(5, loc(2));
+    assert_eq!((ix.ids(), ix.under.len()), (vec![5, top], 1));
+    assert_eq!((ix.get(5), ix.get(top)), (Some(loc(2)), Some(loc(1))));
+    // One laid out past main's reach: laid out as main's.
+    let mut ix = IdIndex::default();
+    ix.start_at(top, 1);
+    ix.insert(top, loc(1));
+    ix.insert(5, loc(2));
+    assert_eq!((ix.ids(), ix.floor, ix.dense.len()), (vec![5, top], 1, 5));
+    assert_eq!((ix.get(5), ix.get(top)), (Some(loc(2)), Some(loc(1))));
+}
+
+/// A rebuild cuts the run the array starts with only where a running cut
+/// would, its first half empty, and copies nothing else; the first half is
+/// looked at only up to its first held slot.
+#[test]
+fn a_rebuild_cuts_the_lead_only_where_a_running_cut_would() {
+    let mut st = rows(10_000);
+    st.cut_ids();
+    assert_eq!(
+        (st.index.front, st.index.front_end),
+        (1, 1),
+        "one slot looked at"
+    );
+    st.append(OP_DEL, 1, &[]);
+    let at = st.index.dense.as_ptr();
+    st.rebuild_ids();
+    assert_eq!(
+        (st.index.floor, st.index.dense.as_ptr()),
+        (1, at),
+        "no copy"
+    );
+    for id in 2..=4_999 {
+        st.append(OP_DEL, id, &[]);
+    }
+    st.rebuild_ids();
+    assert_eq!(
+        (st.index.floor, st.index.dense.as_ptr()),
+        (1, at),
+        "under half"
+    );
+    // One write below such a floor is no drop: a floor of 2 to 20 left by
+    // a rebuild dropped to 1 on it, a copy of the array.
+    st.append(OP_DEL, 5_000, &[]);
+    st.rebuild_ids();
+    assert_eq!((st.index.floor, st.index.dense.len()), (5_001, 5_000));
+    st.append(OP_PUT, 1, &payload(1, 1));
+    assert_eq!((st.index.floor, st.index.under.len()), (5_001, 1));
 }
 
 mod database {
@@ -1011,6 +1217,58 @@ mod database {
             (ix(&db).floor, ix(&db).sparse.len(), ix(&db).len()),
             (1, 0, 1_001)
         );
+    }
+
+    /// Every record a primary appends, in order.
+    #[derive(Clone, Default)]
+    struct Records(std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+    impl crate::engine::Sink for Records {
+        fn append(&mut self, bytes: &[u8]) -> crate::error::Result<()> {
+            self.0.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+        fn rewrite(&mut self, _: &[u8]) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A replica cuts at a record's first frame for a collection, never at
+    /// a later one: a record whose frames empty the first half and that is
+    /// then refused puts its deletes back into the array, with the floor
+    /// where it was. Cut at the frame after the deletes, the put-back
+    /// pointed a deleted id below the floor.
+    #[test]
+    fn a_replica_cuts_at_no_frame_inside_a_record() {
+        const REC_DATA: u8 = 3;
+        let sink = Records::default();
+        let mut primary = Database::with_sink(Box::new(sink.clone()));
+        filled(&mut primary, 1_000);
+        let mut replica = Database::new();
+        replica.apply(&sink.0.lock().unwrap().concat()).unwrap();
+        let cid = replica.collection("s").unwrap().id;
+        let frames = |ops: &[(u8, DocId)]| {
+            let body: Vec<u8> = ops
+                .iter()
+                .flat_map(|&(op, id)| Store::frame(op, id, &[]))
+                .collect();
+            crate::engine::record(REC_DATA, cid, &body)
+        };
+        // Lands: ids 1 to 499 deleted, id 500 the first half's last.
+        let oldest: Vec<(u8, DocId)> = (1..=499).map(|id| (OP_DEL, id)).collect();
+        replica.apply(&frames(&oldest)).unwrap();
+        assert_eq!(ix(&replica).floor, 1);
+        // Id 500 deleted, a frame after it, then one no write makes: the
+        // record is put back whole.
+        let refused = frames(&[(OP_DEL, 500), (OP_DEL, 900), (9, 901)]);
+        assert!(replica.apply(&refused).is_err());
+        let ix = ix(&replica);
+        assert_eq!(
+            (ix.floor, ix.under.len(), ix.len()),
+            (1, 0, 501),
+            "put back below a floor"
+        );
+        assert!(replica.collection("s").unwrap().store.contains(500));
     }
 
     /// An open and a compact lay the array out from the lowest id, and

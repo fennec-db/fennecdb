@@ -660,14 +660,15 @@ cut drops that run up to the first held slot, so each slot is cut once
 and no more are moved than are cut, and never past the next new id,
 which a block put back lowers below the slots its writes grew the array
 to: those are the next new rows'. The held slots of the first half are
-counted as writes into them land (`front`), and the slots the array grew
-into its first half since are counted when a cut is asked of a first
-half whose counted slots hold none, each once between two cuts: a walk
-to the first held slot, asked after every delete of it, walked the run
-behind it again each time a row written there was deleted, the middle
-slot looked at as each new row grew the array cost an open of a file 11
-instructions a row, and counting at every block's first write a block of
-one new row 18 a row. An array of fewer than 128 slots is not cut
+counted as writes into them land (`front`); where none it counts is held
+when a cut is asked, the count is taken on from where it stopped to the
+first held slot (`IdIndex::counted_empty`), each slot looked at once
+between two cuts: a walk to the first held slot, asked after every
+delete of it, walked the run behind it again each time a row written
+there was deleted, the middle slot looked at as each new row grew the
+array cost an open of a file 11 instructions a row, counting at every
+block's first write a block of one new row 18 a row, and counting the
+first half whole after an open 0.1 ms of a million rows' 1.07. An array of fewer than 128 slots is not cut
 (`CUT_FROM`): a small table's lowest ids are the ones written again, and
 cut at two slots, a table of two rows whose first is deleted and put
 again kept it in the map. The cut keeps the allocation, room for twice a
@@ -695,7 +696,11 @@ plus 1 -- is kept in a map of its own (`under`) until an open, a
 checkpoint or a compact takes it back in. Every walk gives those ids
 first (`IdIndex::walk`, `relocate`, and `in_turn::places`, which lays
 them before the dense slots): every walk gives the ids ascending, as
-main's does. The map is apart from the one past the end so that its room
+main's does. A walk gives them from its sparse part, out of line, and
+then hands the dense slots to its own loop (`Walk::next`): given a slot
+at a time by the sparse part, a walk of a million ids took 17% longer
+while any id was below the floor; it takes 2.05 ms with five there as
+with none. The map is apart from the one past the end so that its room
 is theirs: in one map, 252 ids below a floor took a map of 649 far ids
 past its doubling, 2 048 buckets where main's held 1 024. Where a fifth
 of the ids the floor cut come back below it (`BELOW_SHARE`), or a map's
@@ -713,49 +718,94 @@ last drop for the second. Dropped to the lowest id below it instead, the
 next writes below dropped it again, each copying the array, as many
 times as a fifth fits into the floor.
 
-**Open, checkpoint, compact.** Each lays the array out from its lowest
-id (`Store::rebuild_ids`, `IdIndex::rebuild`): the ids below the floor
-taken back in, from the floor down while each is within the gap (4 096)
-of the one above it, a far one staying in the map as an id far past the
-end stays in its own, held to the floor as a write's is, the floor
+**Open, checkpoint, compact.** Each lays the array out again from its
+lowest id (`Store::rebuild_ids`, `IdIndex::rebuild`): the ids below the
+floor taken back in, from the floor down while each is within the gap (4
+096) of the one above it, a far one staying in the map as an id far past
+the end stays in its own, held to the floor as a write's is, the floor
 dropped where they cost more; the empty run the array starts with cut
-whole; its allocation and the maps' room given back where less than half
-is used.
-An open of an image's index starts the array at its first id
-(`adopt_in_turn`) and a compact's copy at the first it keeps
-(`Store::compacted`). Laid out from an id main's array never reaches --
-past the gap from 1 -- an array holding fewer ids than half its slots is
-laid out as main's open lays it, every id in the map (`or_as_mains`):
-times in seconds an hour apart took 3 600 slots a row from the first, 43
-MB for 1 000 rows main's map held in 25 KB.
+where a running cut would cut it, its first half empty
+(`IdIndex::cut_due`); the allocation given back where less than half of
+it is used. Cut whatever its length, the run copied the array for a
+single slot: an open of a million rows whose id 1 was deleted took 1.65
+ms where main's took 1.07, each checkpoint after the oldest row's delete
+copied it again (15.7 ms at 10 million rows), and the floors of 2 to 20
+it left were dropped to 1 by one write below them, another copy, 14 ms
+at 10 million rows. That open now takes main's time, 0.92 ms against
+0.93 (native, the median of 31), and so does one with every row live,
+whose first half is no longer counted as it opens (above).
 
-**What it costs.** An id written below a raised floor reads through a map
--- a hash, where main had a slot -- until the next open, checkpoint or
-compact, or the drop. Memory is never above main's for the same writes
-wherever main's array spans this one's:
+**Past main's reach.** An open of an image's index whose first id lies
+past the gap from 1 starts the array there (`adopt_in_turn`,
+`IdIndex::start_at`), and so does a compact's copy whose first kept id
+does (`Store::compacted`); a first id within the gap starts nothing, the
+array main's from 1. Main's array never reaches such an id: main's open
+put every one in its map, where a queue's rows take 25 bytes and more
+each and the array 12, and main holds them in that one map from then on,
+8 buckets of 25 bytes at least for every 7 ids it held at once, while no
+id within the gap of 1 is written. So such an array (`peak` not 0) holds
+no map and grows only while its slots stay within the most ids it held
+at once and the ids it holds -- twice the most at most, 24 bytes an id
+(`IdIndex::past`). The most is the open's count from its first id on, so
+that a lowest id 100 below a queue of 100 rows is not an array of 2 rows
+over 102 slots; and the ids held count, not twice the most alone, so
+that the ids an open pushes after a gap, a slot each with no test, keep
+it within twice: one grew an array of 3 rows to 7 slots. A write it
+cannot take so -- an id below the floor, one past the gap from its end,
+or a gap that would take it past that bound -- lays the index
+out as main's (`IdIndex::as_mains`): every id into the map, the floor
+back at 1, the map's floor main's, its lowest id since it was last empty
+(`mains`), so that the array takes over far ids at the writes main's
+does; from there it is main's index write for write. That copy is the
+one main's open made, put off until a write needs it, at most once an
+open or a compact: a write below a million rows from id 10 001 took 16.3
+ms, where main's open of them took 41.7 and this one's 4.8. Grown by any
+gap under 4 096, as the first version of this layout let it, 1 000 rows
+at 1.7e9 -- times in seconds -- compacted and then written an hour apart
+grew the array 3 600 slots a row, 7.07 MB for 1 100 rows main's map held
+in 51 KB; judged only at the open's end, the same rows laid out at once
+took 3 600 slots each before they were put in the map, 43 MB for a
+moment. They take the map at the first hour's write now, 37 632 bytes
+where main's index holds 49 632, its open's array reserved and never
+used. Two other rules were weighed. A floor past the gap does not tell
+such an array: a cut raises past it the floor of an array main's spans,
+which a write past the end grows as main's grows -- held in the map
+there, the ids took buckets where main took slots. And ids such an array
+cannot take kept in a map beside it hold the array's slots and the map's
+buckets at once, where main's one map held both in turn: 1 000 rows'
+array, all but its first deleted, beside 1 000 new rows in the map is 63
+KB where main's map holds 51.
+
+**What it costs.** An id written below a raised floor reads through a
+map -- a hash, where main had a slot -- until the next open, checkpoint
+or compact, or the drop; and a write an array past main's reach cannot
+take copies it into main's map (above). Memory is never above main's for
+the same writes, in any order, counting an array's slots and each map's
+buckets for the most ids it held, 12 and 25 bytes. Where main's array
+reaches this one (`peak` 0), both end at the same id -- each grows by
+the same rule from the same end, and a cut, a drop and a rebuild move
+only the floor -- so its slots are main's less the floor's, its sparse
+map holds what main's does, and `under` no more buckets than the slots
+the floor saved (the drop above). Past that reach, main's array is empty
+and every id in its map, and this one holds no map and at most two slots
+for each id main's map held at once: 24 bytes where main's holds 28.6 at
+least, 100 for one to three ids and 200 for four to seven.
 `store::id_floor_tests::the_id_index_holds_every_workload_under_mains_memory_and_reads_back`
-drives a store, a model knowing only the live ids and the next id
-`allocate_id` gives, and main's index side by side through phases drawn
-from a seed -- queues and `@ttl` sweeps, stacks and outboxes beside
-long-lived rows, batches deleted in each order, ids from outside
-ascending, descending and at random, a pending row at 2^52 beside a
-primary's rows, blocks put back (a refused descending delete of the
-oldest rows among them), reseeds, clones, checkpoints in memory and on
-the file, opens and relocations -- and after each holds every live id to
-read back, in order from any id, and the index's bytes -- the array's
-slots and each map's buckets for the most ids it held -- at or under
-main's, and at each block's first write the empty run the array starts
-with under half of it; 600 seeds of 60 phases pass, 5 573 cuts and
-386 055 ids written below a floor among them. Where the array ends past
-main's -- laid by an open from a lowest id main's array never reached,
-pending rows at 2^52 or ids from outside, main's rows all in its map --
-the layout is another and is measured, not held: at most 5.89 times
-main's in those draws, 11 pending rows left in an array of 188 slots,
-2 356 bytes where main's map held 400, and 1.43 times at 519 rows of a
-stack over 3 061 slots. A long-lived row at the array's start holds the
-floor where it is: no cut while it lives, as on main, until an open,
-which puts the climbing rows past the gap in the map, as main's open
-does.
+holds it: a store, a model knowing only the live ids and the next id
+`allocate_id` gives, and main's index driven side by side through phases
+drawn from a seed -- queues and `@ttl` sweeps, stacks and outboxes
+beside long-lived rows, batches deleted in each order, ids from outside
+ascending, descending and at random, ids past the end a stride apart (2,
+64, 1 000, 3 600, 4 095 to 4 097 and 10 000), a pending row at 2^52
+beside a primary's rows, blocks put back (a refused descending delete of
+the oldest rows among them), reseeds, clones, checkpoints in memory and
+on the file, compacts in memory, opens and relocations -- and after each
+every live id reads back, in order from any id, the index's bytes are at
+or under main's whatever its layout, and at each block's first write the
+empty run the array starts with is under half of it; its 40 seeds of 60
+phases pass by default, and `FENNEC_ID_FLOOR_SEEDS` runs more. A long-lived row at the array's start holds the floor where it is:
+no cut while it lives, as on main, until an open, which puts the
+climbing rows past the gap in the map, as main's open does.
 
 A `sessions`-like churn, 1 million ids given and 3 000 live at any time,
 in a queue and in `@ttl` sweeps of 55: main's index 12 582 912 bytes at
@@ -764,9 +814,12 @@ peak and at the end (the room for twice the live rows), 36 004 and 36 196
 after an open.
 
 The perf gate's 25 workloads, against main as CI counts them (x86_64
-musl, callgrind, five runs a side): none more than 0.26% dearer
-(`core-group`, the floor subtracted in each of its reads), `file-open`
-0.51% cheaper. Three costs a first version paid are gone: the middle
+musl, callgrind, five runs a side): none more than 0.04% dearer,
+`core-group` 0.06% cheaper, `core-filter-limit` 0.34% and `file-open`
+0.45%. A lookup reads its location by reference (`IdIndex::get_ref`):
+a `Loc` handed back by value out of line came back through a stack
+slot, where the dense slot's was merged into it, 3 instructions a row
+of `core-group`. Three costs a first version paid are gone: the middle
 slot looked at as each new row grew the array, the first half counted
 at every block's first write (`front` above), and a call to look a new
 row's id up in two empty maps, 21 instructions a row (`IdIndex::get`
@@ -794,7 +847,8 @@ after a swap -- and the last review judged it not worth its 540 lines and 8
 to 16 KB. A paged array, reviewed on paper, met the same kind of pathology
 in its window's rules. Every one came from a write moving the window; here
 a write moves the floor only by a cut, up, or the drop to 1, in one step
-that the writes below it paid for, and only a rebuild lays it out again.
+that the writes below it paid for -- past main's reach, by the layout as
+main's, once -- and only a rebuild lays it out again.
 
 ### Dropped places
 

@@ -94,17 +94,22 @@ server's compaction meets again is logged once and counted.
 
 A collection's id index sheds its dead ids alike, in memory: its array
 starts at a [floor](../../../../docs/design/storage.md#the-id-floor) a cut
-raises once its first half holds no id (`IdIndex::cut_due`, a count brought
-up to date when asked, never a walk), never past the next new id. The cut
-runs at a block's first write to the collection (`Block::remember`) or a
-replica's first frame for it since its records landed (`remember_frame`),
-never inside a block: a put-back would point an id below it. No write
-lowers it a step: an id written below it waits in `under` until an open, a
-checkpoint or a compact lays the array out from its lowest id
-(`Store::rebuild_ids`), or they cost more than the slots it saved and it
-drops to 1 at once (`IdIndex::dropped`). A lookup stays a subtraction and a
-compare; `store::id_floor_tests` holds every id read back and the index's
-bytes at or under main's wherever its array spans this one's.
+raises once its first half holds no id (`IdIndex::cut_due`, a count taken
+on to the first held slot when asked, never a walk), never past the next
+new id; an open's, a checkpoint's or a compact's rebuild
+(`Store::rebuild_ids`) cuts only there too. The cut runs at a block's first
+write to the collection (`Block::remember`) or a replica's first frame for
+it since its records landed (`remember_frame`), never inside a block: a
+put-back would point an id below it. No write lowers it a step: an id
+written below it waits in `under` until a rebuild lays the array out from
+its lowest id, or they cost more than the slots it saved and it drops to 1
+at once (`IdIndex::dropped`). An open or a compact whose lowest id lies
+past the gap from 1, which main's array never reaches, lays the array out
+from it (`IdIndex::start_at`) with no map beside it, held to twice the most
+ids it held; a write it cannot take so lays the index out as main's, main's
+map's floor kept (`IdIndex::past`, `IdIndex::as_mains`). A lookup stays a
+subtraction and a compare; `store::id_floor_tests` holds every id read back
+and the index's bytes at or under main's for every order of writes.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room
