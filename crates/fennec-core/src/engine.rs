@@ -8105,9 +8105,9 @@ impl Database {
         // A cursor sitting exactly here (a quiet restart) gets an empty
         // answer; everything else is reseeded.
         self.changes.reset(seq_base + seq_seen);
-        // Each id index from its lowest id (`Store::rebuild_ids`): a file
-        // replayed write by write spans every id it ever gave, and an id a
-        // write put below a floor is taken back in.
+        // Each id index laid out as main's and cut (`Store::rebuild_ids`):
+        // a file replayed write by write spans every id it ever gave, from
+        // 1, where its first half holds none of them.
         for c in self.collections.values_mut() {
             c.store.rebuild_ids();
         }

@@ -284,10 +284,16 @@ impl Store {
         };
         // The sparse ids sorted once, as `IdIndex::iter` sorts them, each
         // bucket given its run of them.
-        let mut sparse: Vec<(DocId, u32)> = (self.index.under.iter())
-            .chain(&self.index.sparse)
-            .map(|(&id, l)| (id, l.len))
-            .collect();
+        let mut sparse: Vec<(DocId, u32)> = Vec::new();
+        for map in self
+            .index
+            .under
+            .as_deref()
+            .into_iter()
+            .chain([&self.index.sparse])
+        {
+            sparse.extend(map.iter().map(|(&id, l)| (id, l.len)));
+        }
         sparse.sort_unstable_by_key(|e| e.0);
         let done = match buckets.len() {
             0 => return Ok(false),
@@ -1139,7 +1145,7 @@ mod tests {
         for far in [1 << 40, (1 << 40) + 5] {
             st.append(OP_PUT, far, &[b'f'; 50]);
         }
-        assert_eq!((st.index.under.len(), st.index.sparse.len()), (4, 2));
+        assert_eq!((st.index.below().0, st.index.sparse.len()), (4, 2));
         let (_dir, path) = temp("under");
         for budget in [1, 900, 3_000, 1 << 20] {
             same_in_turn(&st, budget, &path);
