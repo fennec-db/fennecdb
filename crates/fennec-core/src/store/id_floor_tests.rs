@@ -1505,7 +1505,11 @@ fn a_pin_walks_the_list_its_index_sorted() {
         assert_eq!(Some(l), pin.loc(id), "id {id}'s location in the pin's walk");
     }
     for (id, l) in st.index.walk(0) {
-        assert_eq!(Some(l), st.loc(id), "id {id}'s location in the index's walk");
+        assert_eq!(
+            Some(l),
+            st.loc(id),
+            "id {id}'s location in the index's walk"
+        );
     }
 }
 
