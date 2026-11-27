@@ -6,6 +6,121 @@
 //! array is a suffix of.
 
 use super::*;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+/// fennec-core's unit tests' allocator: `System`'s, counting the bytes
+/// each thread holds -- every allocation's size as asked, less each one let
+/// go -- so that an index's bytes are read as the allocator gave them, never
+/// as the code under test counts them. Counted by its own `map_bytes`, as
+/// the store's index was, a `map_bytes` halved passed this file's every
+/// test: the figure the drop weighs and the figure the test held to main's
+/// halved alike. A thread's own count, so that the tests running beside
+/// this one move none of its figures; only differences of it are read. The
+/// index is the crate's own, so only this binary reaches it: a binary of
+/// its own could not.
+struct Counting;
+
+thread_local! {
+    /// The bytes this thread was handed less those it let go, wrapping: an
+    /// allocation another thread lets go is taken off that thread's.
+    static HELD: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The thread's count moved by `add` and `less`. A `const` thread local of
+/// a `Cell`, which holds no destructor: reached from the allocator, it
+/// allocates nothing and is never gone, a thread's last frees too.
+fn noted(add: usize, less: usize) {
+    HELD.with(|h| h.set(h.get().wrapping_add(add).wrapping_sub(less)));
+}
+
+// SAFETY: each method hands `System` the arguments it was handed, under
+// the contract `GlobalAlloc` gives them, and gives back what it answered;
+// the count beside it allocates nothing.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the layout `alloc` was handed, nonzero in size by its contract.
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            noted(layout.size(), 0);
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: as `alloc`.
+        let p = unsafe { System.alloc_zeroed(layout) };
+        if !p.is_null() {
+            noted(layout.size(), 0);
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: a block this allocator, so `System`, handed out with
+        // `layout`, as `dealloc`'s contract says.
+        unsafe { System.dealloc(ptr, layout) };
+        noted(0, layout.size());
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: a block `System` handed out with `layout`, and a new size
+        // `realloc`'s contract holds, as it was handed them.
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        if !p.is_null() {
+            noted(new_size, layout.size());
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// The bytes what `make` makes holds of the allocator, while it is held.
+fn asked<T>(make: impl FnOnce() -> T) -> usize {
+    let before = HELD.with(Cell::get);
+    let made = make();
+    let bytes = HELD.with(Cell::get).wrapping_sub(before);
+    drop(made);
+    bytes
+}
+
+thread_local! {
+    /// The bytes last read of each map, by where it lies: its capacity and
+    /// length then, and its bytes ([`map_real`]).
+    static READ: std::cell::RefCell<Vec<[usize; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A map's bytes as the allocator gave them: its clone's, which hashbrown
+/// allocates with the map's own buckets, tombstones and all
+/// ([`the_oracle_reads_a_maps_own_bytes`]). Read again only where its
+/// capacity or its length moved since it was last read there: its buckets
+/// grow only where its capacity does, to a figure past any it had, and a
+/// clone of every map after every write made the property test seven times
+/// slower. A map put where another lay -- a store reopened in the run's
+/// place -- is forgotten first ([`forget_maps`]).
+fn map_real(map: &HashMap<DocId, Loc>) -> usize {
+    let at = map as *const HashMap<DocId, Loc> as usize;
+    let seen = [at, map.capacity(), map.len()];
+    let known = READ.with(|r| r.borrow().iter().find(|e| e[..3] == seen).map(|e| e[3]));
+    if let Some(bytes) = known {
+        return bytes;
+    }
+    let bytes = asked(|| map.clone());
+    READ.with(|r| {
+        let mut r = r.borrow_mut();
+        r.retain(|e| e[0] != at);
+        r.push([at, seen[1], seen[2], bytes]);
+    });
+    bytes
+}
+
+/// Every map's last reading forgotten: the run's store or main's index
+/// laid out anew where the old one lay.
+fn forget_maps() {
+    READ.with(|r| r.borrow_mut().clear());
+}
 
 /// xorshift64*: reproducible from a seed, and enough to spray the orders.
 struct Rng(u64);
@@ -168,18 +283,22 @@ impl MainIds {
         m
     }
 
-    /// Its array's allocation and its map's.
+    /// Its array's allocation and its map's, as the allocator gave them.
     fn bytes(&self) -> usize {
-        self.dense.capacity() * std::mem::size_of::<Loc>() + map_bytes(self.sparse.capacity())
+        self.dense.capacity() * std::mem::size_of::<Loc>() + map_real(&self.sparse)
     }
 }
 
-/// The store's index's allocations, as [`MainIds::bytes`] counts main's:
-/// its array's, and both maps' buckets for their capacity.
+/// The store's index's allocations, as [`MainIds::bytes`] reads main's:
+/// its array's, its maps', and where ids are below the floor their box and
+/// the walks' list of them, as the allocator gave them -- the list sorted
+/// at a walk, a read, so held after the walks too ([`Run::judge`]).
 fn bytes(ix: &IdIndex) -> usize {
     ix.dense.capacity() * std::mem::size_of::<Loc>()
-        + map_bytes(ix.sparse.capacity())
-        + map_bytes(ix.below().1)
+        + map_real(&ix.sparse)
+        + ix.under.as_ref().map_or(0, |u| {
+            std::mem::size_of::<Under>() + map_real(&u.map) + asked(|| u.sorted.get().cloned())
+        })
 }
 
 /// The store's index held to main's after every write: its bytes at or
@@ -284,6 +403,7 @@ struct Run {
 
 impl Run {
     fn new() -> Run {
+        forget_maps();
         let st = Store::new();
         let main = MainIds::new(st.index.sparse.hasher());
         Run {
@@ -463,6 +583,7 @@ impl Run {
             false => assert!(fresh.adopt_index(&base, at, len, &index)),
         }
         fresh.raise_next_id(self.model.next_id);
+        forget_maps();
         let ids: Vec<(DocId, Loc)> = fresh.index.walk(0).collect();
         let keys = fresh.index.sparse.hasher();
         self.main = match walked {
@@ -479,6 +600,7 @@ impl Run {
     /// into a fresh one, as main's copy inserted each.
     fn compacted(&mut self) {
         let fresh = self.st.compacted().unwrap();
+        forget_maps();
         let ids: Vec<(DocId, Loc)> = fresh.index.walk(0).collect();
         self.main = MainIds::compacted(fresh.index.sparse.hasher(), &ids);
         self.st = fresh;
@@ -561,10 +683,14 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
             "{what}: id {id}"
         );
     }
+    // Forty walks from ids it holds and forty from after one at most,
+    // each read to the end: one every 97 ids of a run's largest tables made
+    // the judging quadratic, most of the test's time.
+    let (on, after) = (97.max(want.len() / 40), 89.max(want.len() / 40));
     for from in [0, 1, want.len() as u64 / 2, 1 << 52]
         .into_iter()
-        .chain(want.iter().step_by(97).copied())
-        .chain(want.iter().step_by(89).map(|i| i + 1))
+        .chain(want.iter().step_by(on).copied())
+        .chain(want.iter().step_by(after).map(|i| i + 1))
     {
         let got: Vec<DocId> = st.iter_ids_from(from).collect();
         let at = want.partition_point(|&i| i < from);
@@ -581,7 +707,7 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
     for &k in ix.sparse.keys() {
         assert!(k > end, "{what}: sparse id {k} not past the end {end}");
     }
-    for &k in ix.under.iter().flat_map(|u| u.keys()) {
+    for &k in ix.under.iter().flat_map(|u| u.map.keys()) {
         assert!(
             k < ix.floor,
             "{what}: id {k} not under the floor {}",
@@ -601,7 +727,7 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
 fn phase(r: &mut Run, g: &mut Rng) -> &'static str {
     let back = g.chance(6);
     let n = 1 + g.below(200) as usize;
-    match g.below(17) {
+    match g.below(18) {
         // A queue: new rows at the end, the oldest taken off.
         0 => {
             for _ in 0..1 + g.below(20) {
@@ -766,6 +892,50 @@ fn phase(r: &mut Run, g: &mut Rng) -> &'static str {
         15 => {
             r.compacted();
             "compacted"
+        }
+        // A floor raised, and ids below it written and deleted in no
+        // order, a walk now and then: their map grows with tombstones in
+        // it, its capacity short of its buckets, and the walks' list of
+        // them passes over ids deleted since it was sorted.
+        17 => {
+            r.block(false, |r| (0..n * 4).for_each(|_| _ = r.put_new()));
+            let half = r.model.next_id / 2;
+            let old: Vec<DocId> = r.model.live.range(..=half).map(|(&id, _)| id).collect();
+            r.block(false, |r| old.into_iter().for_each(|id| r.del(id)));
+            r.put_new_block();
+            let floor = r.st.index.floor;
+            let mut below: Vec<DocId> = Vec::new();
+            for step in 0..(floor / 8).min(150) {
+                if r.st.index.floor < floor {
+                    break;
+                }
+                let k = 1 + g.below(32) as usize;
+                let mut ids = Vec::new();
+                let mut dels = Vec::new();
+                for _ in 0..k {
+                    match below.is_empty() || !g.chance(3) {
+                        true => {
+                            let id = 1 + g.below(floor - 1);
+                            if !r.model.live.contains_key(&id) && !ids.contains(&id) {
+                                ids.push(id);
+                            }
+                        }
+                        false => dels.push(below.swap_remove(g.below(below.len() as u64) as usize)),
+                    }
+                }
+                below.extend_from_slice(&ids);
+                r.block(false, |r| {
+                    ids.into_iter().for_each(|id| r.put(id));
+                    dels.into_iter().for_each(|id| r.del(id));
+                });
+                if step % 4 == 3 {
+                    let from = 1 + g.below(floor);
+                    let at = r.model.live.range(from..).next().map(|(&id, _)| id);
+                    assert_eq!(r.st.iter_ids_from(from).next(), at, "from {from}");
+                    held(&r.st.index, &r.main, "a walk below the floor");
+                }
+            }
+            "tombstones below the floor"
         }
         // A clone, read as it was after a phase of writes.
         13 => {
@@ -1187,21 +1357,126 @@ fn a_rebuild_leaves_no_small_floor() {
 
 /// A write over an id below the floor grows its map as a new id does --
 /// hashbrown makes room before it looks -- and is held to the floor's
-/// slots alike: 448 ids filling 512 buckets under a floor of 1 101, one
-/// written again took the map to 1 024 buckets, 25 616 bytes where the
-/// floor saved 13 200, with no drop asked.
+/// slots alike: 448 ids filling 512 buckets under a floor of 1 601, 16 472
+/// bytes with their box and the walks' list's room, one written again took
+/// the map to 1 024 buckets, 32 856 bytes where the floor saved 19 200,
+/// with no drop asked.
 #[test]
 fn a_write_over_an_id_below_the_floor_is_held_to_its_slots() {
     let mut r = Run::new();
-    r.block(false, |r| (0..2_200).for_each(|_| _ = r.put_new()));
-    let old = r.oldest(1_100);
+    r.block(false, |r| (0..3_200).for_each(|_| _ = r.put_new()));
+    let old = r.oldest(1_600);
     r.block(false, |r| old.into_iter().for_each(|id| r.del(id)));
     r.block(false, |r| (1..=448).for_each(|id| r.put(id)));
     let ix = &r.st.index;
-    assert_eq!((ix.floor, ix.below()), (1_101, (448, 448)));
+    assert_eq!((ix.floor, ix.below()), (1_601, (448, 448)));
     r.block(false, |r| r.put(5));
     assert_eq!((r.st.index.floor, r.st.index.below().0), (1, 0), "dropped");
     r.judge("written over");
+}
+
+/// A walk passes over an id below the floor deleted since their list was
+/// sorted, and where the list ends with such ids, gives the dense slots
+/// after it: a delete keeps the list, which a walk would else sort again.
+#[test]
+fn a_walk_passes_over_ids_deleted_below_the_floor() {
+    let mut st = rows(1_000);
+    for id in 1..=600 {
+        st.append(OP_DEL, id, &[]);
+    }
+    st.cut_ids();
+    assert_eq!(st.index.floor, 601);
+    for id in [9, 3, 500, 7, 599] {
+        st.append(OP_PUT, id, &payload(id, 1));
+    }
+    assert_eq!(st.ids()[..6], [3, 7, 9, 500, 599, 601]);
+    let list = |st: &Store| {
+        st.index
+            .under
+            .as_ref()
+            .and_then(|u| u.sorted.get())
+            .map(|s| s.len())
+    };
+    assert_eq!(list(&st), Some(5), "sorted at the walk");
+    // Deleted: the list kept, the ids passed over -- the last two of it
+    // too, the dense slots given after them.
+    for id in [7, 500, 599] {
+        st.append(OP_DEL, id, &[]);
+    }
+    assert_eq!(list(&st), Some(5), "kept by the deletes");
+    assert_eq!(st.ids()[..4], [3, 9, 601, 602]);
+    assert_eq!(st.ids().len(), 402);
+    let mut walk = st.index.walk(0);
+    walk.by_ref().take(3).for_each(drop);
+    assert_eq!(
+        (walk.dense.len(), walk.next().map(|e| e.0)),
+        (399, Some(602))
+    );
+    for (from, first) in [
+        (4, 9),
+        (8, 9),
+        (10, 601),
+        (500, 601),
+        (601, 601),
+        (700, 700),
+    ] {
+        assert_eq!(st.iter_ids_from(from).next(), Some(first), "from {from}");
+    }
+    // Every id below the floor deleted: the walk starts at the dense slots.
+    for id in [3, 9] {
+        st.append(OP_DEL, id, &[]);
+    }
+    assert!(st.index.under.is_none());
+    assert_eq!(st.ids()[0], 601);
+    // A new id lets the list go, and the next walk sorts it again.
+    for id in [42, 41] {
+        st.append(OP_PUT, id, &payload(id, 2));
+        assert_eq!(list(&st), None, "let go by a new id");
+        assert_eq!(st.iter_ids_from(41).next(), Some(id));
+    }
+    assert_eq!(st.ids()[..3], [41, 42, 601]);
+    // A write over one of them keeps it.
+    st.append(OP_PUT, 42, &payload(42, 3));
+    assert_eq!(list(&st), Some(2));
+    assert_eq!(st.raw(42).unwrap(), Some(&payload(42, 3)[..]));
+}
+
+/// The oracle the tests hold the index's bytes to reads a map's own
+/// allocation, tombstones and all: a map grown, deleted from and written
+/// again, its bytes counted as it was built, against its clone's, and read
+/// again where it moved.
+#[test]
+fn the_oracle_reads_a_maps_own_bytes() {
+    let mut g = Rng(0x5eed);
+    let mut live: Vec<DocId> = Vec::with_capacity(40_000);
+    let l = Loc {
+        seg: 0,
+        off: 0,
+        len: 1,
+    };
+    let mut map: HashMap<DocId, Loc> = HashMap::default();
+    // The readings' own list allocated before the count starts.
+    map_real(&map);
+    let before = HELD.with(Cell::get);
+    for step in 0..40_000u64 {
+        match live.is_empty() || !g.chance(3) {
+            true => {
+                let id = 1 + g.below(1 << 40);
+                if map.insert(id, l).is_none() {
+                    live.push(id);
+                }
+            }
+            false => {
+                let id = live.swap_remove(g.below(live.len() as u64) as usize);
+                map.remove(&id);
+            }
+        }
+        if step % 31 == 0 {
+            let own = HELD.with(Cell::get).wrapping_sub(before);
+            assert_eq!(asked(|| map.clone()), own, "step {step}");
+            assert_eq!(map_real(&map), own, "step {step}, read again");
+        }
+    }
 }
 
 /// The sparse map's floor is main's, whatever order its ids come in: an

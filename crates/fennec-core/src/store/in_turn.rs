@@ -289,6 +289,7 @@ impl Store {
             .index
             .under
             .as_deref()
+            .map(|u| &u.map)
             .into_iter()
             .chain([&self.index.sparse])
         {

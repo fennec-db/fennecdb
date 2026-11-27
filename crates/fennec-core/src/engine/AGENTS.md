@@ -102,18 +102,21 @@ block's first write to the collection (`Block::remember`) or a replica's
 first frame for it since its records landed (`remember_frame`), never
 inside a block: a put-back would point an id below it. No write lowers it
 a step: an id written below it waits in `under` until a rebuild, or until
-that map's buckets pass the floor's slots in bytes, asked at every write
-below it, and it drops to 1 in main's room (`IdIndex::over_floor`,
-`IdIndex::dropped`). An open, a checkpoint and a compact lay the index
+that map's buckets and its walks' sorted list (`Under::sorted`, counted at
+its most) pass the floor's slots in bytes, asked at every write below it,
+and it drops to 1 in main's room (`IdIndex::over_floor`,
+`IdIndex::dropped`), a copy paid for by the writes since the cut before
+it, one at most a cut. An open, a checkpoint and a compact lay the index
 out as main's would and cut it by the same rule (`Store::rebuild_ids`),
 never as a layout of their own: one past main's reach moved every id into
 the map under the write lock, 1.2 s at 10 million rows. The array's
 allocation stays within main's room past the floor (`IdIndex::room`,
 `grow`, `cut`), so the index's bytes are at or under main's for every
-order of writes. A lookup stays a subtraction and a compare;
+order of writes. A lookup stays a subtraction and a compare, and a walk
+costs the array and the ids below the floor, never their sort again;
 `store::id_floor_tests` drives main's own index beside it and holds every
-id read back, the layout main's and the bytes at or under main's after
-every write.
+id read back, the layout main's and the bytes, as a counting allocator
+reads them, at or under main's after every write.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room

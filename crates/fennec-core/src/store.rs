@@ -412,8 +412,7 @@ struct IdIndex {
     /// collection 488 bytes, and `Names::at` searched by a stride of 520,
     /// which LLVM multiplies by shifts and adds where it multiplied 440,
     /// three instructions a step: `http-put-keyed` 0.2% dearer than main.
-    #[allow(clippy::box_collection)]
-    under: Option<Box<HashMap<DocId, Loc>>>,
+    under: Option<Box<Under>>,
     count: usize,
     /// While the floor is above 1, the slots main's array has room for: its
     /// allocation, which grows as `Vec`'s does from the same writes
@@ -443,6 +442,51 @@ impl Default for IdIndex {
             under: None,
             count: 0,
             room: 0,
+        }
+    }
+}
+
+/// The ids written below the floor ([`IdIndex::under`]): a map for their
+/// lookups and their ids ascending for the walks, sorted at the first walk
+/// that reaches them after an id was added and kept until the next is.
+/// Sorted at every walk, they made each scan pay for them again: a walk of
+/// 829 000 ids, 229 375 of them below a floor of 600 001, took 8.2 ms
+/// where laid out from 1 it took 1.8, until a rebuild or the drop. An
+/// ordered map in their place would pay a tree's code in every binary for
+/// a path seldom taken (one for the sparse map made the browser module 4.4
+/// KB larger), and a lookup of one of them a walk down the tree.
+struct Under {
+    map: HashMap<DocId, Loc>,
+    /// The ids of `map` ascending, those deleted since among them -- a walk
+    /// passes over an id the map no longer holds, so a delete keeps the
+    /// list: let go at every delete, the rest would be sorted again by the
+    /// scan after each of a queue's dead letters taken out. Never longer than
+    /// the map's room, which a delete does not shrink and an add, the only
+    /// write that lets the list go, may grow: its 8 bytes an id are
+    /// counted against the floor's slots with the map's buckets
+    /// ([`IdIndex::over_floor`]).
+    sorted: std::sync::OnceLock<Box<[DocId]>>,
+}
+
+impl Under {
+    /// The ids ascending, sorted now where an id was added since they last
+    /// were: allocated to their number, as a walk's sort of them was.
+    fn sorted(&self) -> &[DocId] {
+        self.sorted.get_or_init(|| {
+            let mut ids: Vec<DocId> = self.map.keys().copied().collect();
+            ids.sort_unstable();
+            ids.into_boxed_slice()
+        })
+    }
+}
+
+impl Clone for Under {
+    /// The map alone: the list is sorted again where a walk of the clone
+    /// asks for it.
+    fn clone(&self) -> Self {
+        Under {
+            map: self.map.clone(),
+            sorted: std::sync::OnceLock::new(),
         }
     }
 }
@@ -498,9 +542,12 @@ impl IdIndex {
     /// control byte per bucket.
     fn bytes(&self) -> usize {
         use std::mem::size_of;
+        let (under, sorted) = self.under.as_ref().map_or((0, 0), |u| {
+            (u.map.capacity(), u.sorted.get().map_or(0, |s| s.len()))
+        });
         self.dense.capacity() * size_of::<Loc>()
-            + (self.sparse.capacity() + self.under.as_ref().map_or(0, |u| u.capacity()))
-                * (size_of::<DocId>() + size_of::<Loc>() + 1)
+            + (self.sparse.capacity() + under) * (size_of::<DocId>() + size_of::<Loc>() + 1)
+            + sorted * size_of::<DocId>()
     }
 
     /// The slot of `id`, where the array holds one: one subtraction and a
@@ -548,7 +595,7 @@ impl IdIndex {
     #[inline(never)]
     fn get_apart(&self, id: DocId) -> Option<&Loc> {
         let map = match id < self.floor {
-            true => self.under.as_deref()?,
+            true => &self.under.as_deref()?.map,
             false => &self.sparse,
         };
         map.get(&id)
@@ -614,9 +661,17 @@ impl IdIndex {
     fn apart(&mut self, id: DocId, loc: Loc) {
         if id < self.floor {
             let keys = &self.sparse;
-            let under = (self.under)
-                .get_or_insert_with(|| Box::new(HashMap::with_hasher(keys.hasher().clone())));
-            self.count += under.insert(id, loc).is_none() as usize;
+            let under = self.under.get_or_insert_with(|| {
+                Box::new(Under {
+                    map: HashMap::with_hasher(keys.hasher().clone()),
+                    sorted: std::sync::OnceLock::new(),
+                })
+            });
+            if under.map.insert(id, loc).is_none() {
+                // A new id, which the walks' list does not hold.
+                under.sorted.take();
+                self.count += 1;
+            }
             if self.over_floor() {
                 self.dropped();
             }
@@ -721,9 +776,10 @@ impl IdIndex {
     fn remove_apart(&mut self, id: DocId) -> Option<Loc> {
         let old = match id < self.floor {
             true => {
+                // The walks' list kept: it passes over the id.
                 let under = self.under.as_mut()?;
-                let old = under.remove(&id);
-                if under.is_empty() {
+                let old = under.map.remove(&id);
+                if under.map.is_empty() {
                     self.under = None;
                 }
                 old
@@ -836,25 +892,32 @@ impl IdIndex {
     }
 
     /// Whether the ids below the floor cost more than the slots the floor
-    /// saves: their map's buckets, as many as its capacity takes
-    /// ([`map_bytes`]), past 12 bytes for each id below the floor. This
-    /// array's room is main's less those slots at most ([`Self::grow`],
-    /// [`Self::cut`]), so the index holds no more than main's while it
-    /// holds them. A map holds 28 to 57 bytes an id, so the floor drops
-    /// once a fifth to two fifths of its ids are written below it; counted
-    /// by the ids alone, a fifth, a map half full and the rest tombstones
-    /// could double past the slots, at 114 bytes an id.
+    /// saves: their box, their map's buckets, as many as its capacity takes
+    /// ([`map_bytes`]), and the walks' list of them, 8 bytes for each id
+    /// the map has room for, past 12 bytes for each id below the floor.
+    /// This array's room is main's less those slots at most
+    /// ([`Self::grow`], [`Self::cut`]), so the index holds no more than
+    /// main's while it holds them. The capacity is the buckets' where the
+    /// map grows, the only write that adds to its bytes, which asks this
+    /// at once; a delete since may leave a tombstone, which hashbrown
+    /// counts out of the capacity but not out of the buckets. The list is
+    /// sorted at a walk, a read, so it is counted before it is there, at
+    /// its most. The map and the list hold 37 to 73 bytes an id, so the
+    /// floor drops once a sixth to a third of its ids are written below it;
+    /// counted by the ids alone, a map half full and the rest tombstones
+    /// could double past the slots.
     #[inline]
     fn over_floor(&self) -> bool {
-        let room = self.under.as_ref().map_or(0, |u| u.capacity());
-        let slots = map_bytes(room).div_ceil(std::mem::size_of::<Loc>());
-        slots as u64 > self.floor - 1
+        use std::mem::size_of;
+        let room = self.under.as_ref().map_or(0, |u| u.map.capacity());
+        let bytes = size_of::<Under>() + map_bytes(room) + room * size_of::<DocId>();
+        bytes.div_ceil(size_of::<Loc>()) as u64 > self.floor - 1
     }
 
     /// The floor dropped to 1 in one step and every id below it put in:
     /// main's array, its room main's, from where the index grows as main's
     /// does. A write's alone, once the ids below the floor cost more than
-    /// the slots it saved ([`Self::over_floor`]): F/5 to 2F/5 writes below
+    /// the slots it saved ([`Self::over_floor`]): F/6 to F/3 writes below
     /// a floor F, whatever the array's length, so a floor cut early and
     /// held by a live row lets 29 writes below 101 copy ten million slots,
     /// 5.5 ms, the old array held beside main's room meanwhile. Its copy is
@@ -864,7 +927,7 @@ impl IdIndex {
     /// below it pay for those slots, and each slot the array gained since
     /// was a new row of main's too. Dropped to the lowest id below it
     /// instead, the next writes below dropped it again, each copying the
-    /// array, as many times as a fifth fits into the floor. No write lowers
+    /// array, as many times as a sixth fits into the floor. No write lowers
     /// the floor a step at a time: #696's layout did, and its reviews each
     /// found an order of writes that walked or copied the array again for
     /// it.
@@ -887,7 +950,7 @@ impl IdIndex {
         };
         self.relay(down, 0, room);
         if let Some(under) = self.under.take() {
-            for (&k, &l) in under.iter() {
+            for (&k, &l) in under.map.iter() {
                 self.dense[(k - low) as usize] = l;
             }
         }
@@ -921,7 +984,10 @@ impl IdIndex {
         // Main's first half, ids 1 to `half`: the array's slots in it.
         let half = mains - mains / 2;
         let front = (half + 1).saturating_sub(self.floor).min(len as u64) as usize;
-        let low = self.under.as_ref().and_then(|u| u.keys().min().copied());
+        let low = self
+            .under
+            .as_ref()
+            .and_then(|u| u.map.keys().min().copied());
         let first = match low {
             Some(low) => low,
             None if self.dense[..front].iter().any(|l| !l.is_empty()) => return,
@@ -958,7 +1024,7 @@ impl IdIndex {
     fn below(&self) -> (usize, usize) {
         self.under
             .as_ref()
-            .map_or((0, 0), |u| (u.len(), u.capacity()))
+            .map_or((0, 0), |u| (u.map.len(), u.map.capacity()))
     }
 
     fn len(&self) -> usize {
@@ -1013,26 +1079,27 @@ impl IdIndex {
         self.walk(from).map(|(id, _)| id)
     }
 
-    /// The ids from `from` on and their locations, ascending: the sparse
-    /// ids below the floor, the dense part from `from`'s slot, sorted by
-    /// position, then the sparse ids past it (see the invariant). Only the
-    /// sparse ids, usually none, are collected and sorted up front. One
-    /// constructor out of line, and one `next` for every walk: where ids
-    /// are below the floor, the walk's own loop is handed the dense slots
-    /// once it has given them ([`Walk::next`]). Given by the sparse part
-    /// after them, out of line a slot at a time, a walk of a million ids
-    /// took 2.58 ms where it takes 2.20.
+    /// The ids from `from` on and their locations, ascending: the ids
+    /// below the floor, the dense part from `from`'s slot, sorted by
+    /// position, then the sparse ids past it (see the invariant). The ids
+    /// below the floor come from their list, sorted once an id is added
+    /// ([`Under::sorted`]), from `from`'s place in it, found by halving; the
+    /// sparse ids, usually none, are collected and sorted up front, as
+    /// main's were. One constructor out of line, and one `next` for every
+    /// walk: where ids are below the floor, the walk's own loop is handed
+    /// the dense slots once it has given them ([`Walk::next`]). Given by
+    /// the sparse part after them, out of line a slot at a time, a walk of
+    /// a million ids took 2.58 ms where it takes 2.20.
     #[inline(never)]
     fn walk(&self, from: DocId) -> Walk<'_> {
         let mut ids = Vec::new();
-        if let Some(under) = &self.under {
-            keys_from(under, from, &mut ids);
+        if let Some(under) = self.under.as_deref().filter(|_| from < self.floor) {
+            let sorted = under.sorted();
+            ids.extend_from_slice(&sorted[sorted.partition_point(|&k| k < from)..]);
         }
         let below = ids.len();
-        // One sort: every id below the floor is below every one past the
-        // end.
         keys_from(&self.sparse, from, &mut ids);
-        ids.sort_unstable();
+        ids[below..].sort_unstable();
         let skip = from.saturating_sub(self.floor).min(self.dense.len() as u64) as usize;
         let (dense, id) = (self.dense[skip..].iter(), self.floor + skip as u64);
         let (dense, id, after, after_id) = match below {
@@ -1054,20 +1121,12 @@ impl IdIndex {
     }
 
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
-    /// order.
+    /// order. No id is below the floor: both callers, a checkpoint's
+    /// (`Store::relocate_image`) and a compact's (`Store::relocate_live`),
+    /// lay the index out first (`Store::rebuild_ids`), which takes every one
+    /// into the array, so the branch that walked them here was never taken.
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
-        // The ids below the floor first, seldom there. Handed to a function
-        // of its own by reference, `f` held its state in memory through the
-        // slots' loop: a compact's relocation 4 instructions a row more.
-        if let Some(under) = &mut self.under {
-            let mut below: Vec<DocId> = under.keys().copied().collect();
-            below.sort_unstable();
-            for id in below {
-                if let Some(l) = under.get_mut(&id) {
-                    *l = f(id, *l);
-                }
-            }
-        }
+        debug_assert!(self.under.is_none(), "relocated before a rebuild");
         let floor = self.floor;
         for (i, l) in self.dense.iter_mut().enumerate() {
             if !l.is_empty() {
@@ -1084,8 +1143,7 @@ impl IdIndex {
     }
 }
 
-/// The ids of `map` from `from` on onto `ids`: one copy of the loop for
-/// both maps a walk lists.
+/// The ids of `map` from `from` on onto `ids`.
 fn keys_from(map: &HashMap<DocId, Loc>, from: DocId, ids: &mut Vec<DocId>) {
     ids.extend(map.keys().copied().filter(|&k| k >= from));
 }
@@ -1114,8 +1172,8 @@ struct Apart<'a> {
     /// the walk is the size it was before `under`, which a reference more
     /// made a walk of the ids an instruction an id dearer.
     index: &'a IdIndex,
-    /// The ids of `under` the walk lists, then those of the sparse map,
-    /// ascending.
+    /// The ids of `under` the walk lists -- among them any deleted since
+    /// their list was sorted -- then those of the sparse map, ascending.
     ids: Vec<DocId>,
     /// The next of them to give.
     at: usize,
@@ -1129,8 +1187,12 @@ struct Apart<'a> {
 }
 
 impl<'a> Apart<'a> {
-    /// The next sparse id and its location. Each id is a key of its map,
-    /// which the walk borrows, so none goes missing. The location by
+    /// The next sparse id and its location. Each sparse id is a key of its
+    /// map, which the walk borrows, so none goes missing; an id below the
+    /// floor deleted since its list was sorted is passed over, and where
+    /// the last of them was, the dense slots are given from here until the
+    /// first held one, which hands the rest to the walk's loop
+    /// ([`Walk::next`]). The location by
     /// reference: the pair comes back in registers, where a `Loc` by value
     /// came back through memory and a caller's loop stored each dense
     /// slot's there too, to give both from one place -- `file-compact` 7.10%
@@ -1140,13 +1202,23 @@ impl<'a> Apart<'a> {
     /// loops paid for them in spills: 6.59%.
     #[inline(never)]
     fn next(&mut self) -> Option<(DocId, &'a Loc)> {
+        while self.at < self.below {
+            let id = self.ids[self.at];
+            self.at += 1;
+            if let Some(l) = self.index.under.as_deref()?.map.get(&id) {
+                return Some((id, l));
+            }
+        }
+        for l in self.dense.by_ref() {
+            let id = self.id;
+            self.id += 1;
+            if !l.is_empty() {
+                return Some((id, l));
+            }
+        }
         let id = *self.ids.get(self.at)?;
-        let map = match self.at < self.below {
-            true => self.index.under.as_deref()?,
-            false => &self.index.sparse,
-        };
         self.at += 1;
-        Some((id, map.get(&id)?))
+        Some((id, self.index.sparse.get(&id)?))
     }
 }
 
@@ -1163,7 +1235,8 @@ impl Iterator for Walk<'_> {
             }
         }
         let (id, l) = self.apart.next()?;
-        // The last id below the floor given: the dense slots, which come
+        // The last id below the floor given, or the first dense slot after
+        // the deleted ones its list ends with: the dense slots, which come
         // next, are the loop's above, a slot at a time in line.
         if self.apart.at == self.apart.below {
             self.dense = std::mem::take(&mut self.apart.dense);
