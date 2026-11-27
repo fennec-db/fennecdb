@@ -447,20 +447,28 @@ impl Default for IdIndex {
 }
 
 /// The ids written below the floor ([`IdIndex::under`]): a map for their
-/// lookups and a list of them for the walks, sorted at the first walk that
-/// reaches them after an id was added and kept until the next is. Sorted
-/// at every walk, they made each scan pay for them again: a walk of 829 000
-/// ids, 229 375 of them below a floor of 600 001, took 8.2 ms where laid
-/// out from 1 it took 1.8, until a rebuild or the drop. An ordered map in
-/// their place would pay a tree's code in every binary for a path seldom
-/// taken (one for the sparse map made the browser module 4.4 KB larger),
-/// and a lookup of one of them a walk down the tree.
+/// lookups and a list of them for the walks, sorted once after each add,
+/// at the first walk that reaches them, and kept until the next add; a
+/// copy takes it as it stands. Sorted at every walk, they made each scan
+/// pay for them again: a walk of 829 000 ids, 229 375 of them below a
+/// floor of 600 001, took 8.2 ms where laid out from 1 it took 1.8, until
+/// a rebuild or the drop. Adds and walks taking turns still sort them all
+/// at each walk, about u^2 log u over u adds where main sorts nothing:
+/// 4.6 ms a walk at the most the drop leaves below that floor, 114 688
+/// ids. An ordered map in their place would pay a tree's code in every
+/// binary for a path seldom taken (one for the sparse map made the
+/// browser module 4.4 KB larger), and a lookup of one of them a walk down
+/// the tree.
 struct Under {
     map: HashMap<DocId, Loc>,
-    /// The list, from the map. Never longer than the map's room, which a
-    /// delete does not shrink and an add, the only write that lets the list
-    /// go, may grow: its 20 bytes an id are counted against the floor's
-    /// slots with the map's buckets ([`IdIndex::over_floor`]).
+    /// The list, from the map, let go by an add alone. Its bytes stay
+    /// within what the drop weighed against the floor's slots: it holds the
+    /// ids the map held when it was sorted, never more than the map's
+    /// buckets have room for, and the check at the map's last growth
+    /// counted 20 bytes for each id those buckets have room for, their full
+    /// capacity ([`IdIndex::over_floor`]). A delete since may leave a
+    /// tombstone, which takes one off the map's `capacity()` and nothing
+    /// off its buckets.
     sorted: std::sync::OnceLock<Sorted>,
 }
 
@@ -506,12 +514,16 @@ impl Under {
 }
 
 impl Clone for Under {
-    /// The map alone: the list is sorted again where a walk of the clone
-    /// asks for it.
+    /// The map and the list as they stand: a pin's copy of the index
+    /// (`Store::pinned`) and a compact's beside the database walk the list
+    /// they were handed. Let go here, each long read a server pinned sorted
+    /// the ids again in its copy, 8.2 ms of a walk whose read took 1.8. The
+    /// copy's buckets are the map's and its list the list's length, so the
+    /// copy is held to the bytes the index is.
     fn clone(&self) -> Self {
         Under {
             map: self.map.clone(),
-            sorted: std::sync::OnceLock::new(),
+            sorted: self.sorted.clone(),
         }
     }
 }
@@ -938,15 +950,19 @@ impl IdIndex {
     /// the floor.
     /// This array's room is main's less those slots at most
     /// ([`Self::grow`], [`Self::cut`]), so the index holds no more than
-    /// main's while it holds them. The capacity is the buckets' where the
-    /// map grows, the only write that adds to its bytes, which asks this
-    /// at once; a delete since may leave a tombstone, which hashbrown
-    /// counts out of the capacity but not out of the buckets. The list is
-    /// sorted at a walk, a read, so it is counted before it is there, at
-    /// its most. The map and the list hold 51 to 97 bytes an id, so the
-    /// floor drops once an eighth to a quarter of its ids are written below it;
-    /// counted by the ids alone, a map half full and the rest tombstones
-    /// could double past the slots.
+    /// main's while it holds them. The capacity is the buckets' whole
+    /// where the map grows, the only write that adds to its bytes, which
+    /// asks this at once: that check bounds the bytes until the next
+    /// growth. A delete since may leave a tombstone, which hashbrown counts
+    /// out of the capacity but not out of the buckets, and the list holds
+    /// no more ids than those buckets have room for. The list is sorted at
+    /// a walk, a read, so it is counted before it is there, at its most.
+    /// The map and the list hold about 49 to 97 bytes an id -- 25 a bucket,
+    /// 8/7 to 16/7 buckets an id, and the list's 20 for each id the
+    /// buckets have room for, one to two an id -- so the floor drops once
+    /// an eighth to a quarter of its ids are written below it; counted by
+    /// the ids alone, a map half full and the rest tombstones could double
+    /// past the slots.
     #[inline]
     fn over_floor(&self) -> bool {
         use std::mem::size_of;
@@ -1124,7 +1140,7 @@ impl IdIndex {
     /// The ids from `from` on and their locations, ascending: the ids
     /// below the floor, the dense part from `from`'s slot, sorted by
     /// position, then the sparse ids past it (see the invariant). The ids
-    /// below the floor come from their list, sorted once an id is added
+    /// below the floor come from their list, sorted once after each add
     /// ([`Under::sorted`]), from `from`'s place in it, found by halving; the
     /// sparse ids, usually none, are collected and sorted up front, as
     /// main's were. One constructor out of line, and one `next` for every
@@ -2951,10 +2967,18 @@ impl Store {
         self.pinned_with(index)
     }
 
-    /// What [`Self::pinned`] copies: the id index.
+    /// What [`Self::pinned`] copies, the id index, and the list of the ids
+    /// below the floor where the index has not sorted it: the copy's first
+    /// walk sorts it there, an id and a location each. Left out, a pin of
+    /// an index whose adds had let its list go held 20 bytes an id more
+    /// than its budget was charged.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn pinned_bytes(&self) -> usize {
-        self.index.bytes()
+        use std::mem::size_of;
+        let unsorted = (self.index.under.as_deref())
+            .filter(|u| u.sorted.get().is_none())
+            .map_or(0, |u| u.map.len());
+        self.index.bytes() + unsorted * (size_of::<DocId>() + size_of::<Loc>())
     }
 
     /// A store the rewrite wrote no data record for: nothing live, and no

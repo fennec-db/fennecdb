@@ -1453,6 +1453,62 @@ fn a_walk_passes_over_ids_deleted_below_the_floor() {
     assert_eq!(walked, st.loc(42));
 }
 
+/// A pin's copy of an index whose list of the ids below the floor is
+/// sorted takes the list with it, and its walks sort nothing: let go, each
+/// long read a server pinned sorted the ids again in its copy. A pin of one
+/// whose list an add let go sorts its own at its first walk, and its charge
+/// counts that list as it counts one taken sorted.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_pin_walks_the_list_its_index_sorted() {
+    let mut st = rows(1_000);
+    for id in 1..=600 {
+        st.append(OP_DEL, id, &[]);
+    }
+    st.cut_ids();
+    assert_eq!(st.index.floor, 601);
+    for id in [9, 3, 500, 7, 599] {
+        st.append(OP_PUT, id, &payload(id, 1));
+    }
+    let list = |st: &Store| {
+        st.index
+            .under
+            .as_ref()
+            .and_then(|u| u.sorted.get())
+            .map(|s| s.ids.len())
+    };
+    assert_eq!(list(&st), None, "let go by the adds");
+    let charge = st.pinned_bytes();
+    // Pinned before any walk: the copy sorts its own, the index none.
+    let early = st.pinned();
+    assert_eq!(list(&early), None);
+    assert_eq!(early.ids()[..6], [3, 7, 9, 500, 599, 601]);
+    assert_eq!(list(&early), Some(5), "sorted in the copy");
+    assert_eq!(list(&st), None, "not in the index");
+    // Sorted by a walk of the index, the charge the same.
+    assert_eq!(st.ids()[..6], [3, 7, 9, 500, 599, 601]);
+    assert_eq!(list(&st), Some(5));
+    assert_eq!(st.pinned_bytes(), charge, "the list counted either way");
+    // A delete keeps the list, 7 emptied in it; a pin takes it so. Sorted
+    // again, the copy's list would hold the four ids left.
+    st.append(OP_DEL, 7, &[]);
+    let pin = st.pinned();
+    assert_eq!(list(&pin), Some(5), "taken with the copy");
+    assert_eq!(pin.ids()[..5], [3, 9, 500, 599, 601]);
+    assert_eq!(pin.iter_ids_from(4).next(), Some(9));
+    assert_eq!(list(&pin), Some(5), "walked, not sorted again");
+    // The copy's own: a write over 9 in the index moves none of it.
+    st.append(OP_PUT, 9, &payload(9, 2));
+    assert_eq!(pin.raw(9).unwrap(), Some(&payload(9, 1)[..]));
+    assert_eq!(st.raw(9).unwrap(), Some(&payload(9, 2)[..]));
+    for (id, l) in pin.index.walk(0) {
+        assert_eq!(Some(l), pin.loc(id), "id {id}'s location in the pin's walk");
+    }
+    for (id, l) in st.index.walk(0) {
+        assert_eq!(Some(l), st.loc(id), "id {id}'s location in the index's walk");
+    }
+}
+
 /// The oracle the tests hold the index's bytes to reads a map's own
 /// allocation, tombstones and all: a map grown, deleted from and written
 /// again, its bytes counted as it was built, against its clone's, and read
