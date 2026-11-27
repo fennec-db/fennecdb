@@ -54,8 +54,8 @@ its bundle.</p>
 <tr><td><code>fennec</code> with no default feature, no import, backup or MCP: <code>make small</code></td><td class="n"><b>2983 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">8375 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>842 KB</b></td><td class="n"><b>289 KB</b></td><td class="n">349 KB</td></tr>
-<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">611 KB</td><td class="n">215 KB</td><td class="n">255 KB</td></tr>
-<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">556 KB</td><td class="n">192 KB</td><td class="n">229 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">620 KB</td><td class="n">217 KB</td><td class="n">259 KB</td></tr>
+<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">560 KB</td><td class="n">194 KB</td><td class="n">231 KB</td></tr>
 <tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">284 KB</td><td class="n">74 KB</td><td class="n">88 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64: its one file, <code>fennec-server</code></td><td class="n">8.58 MB</td><td class="n">—</td><td class="n">—</td></tr>
@@ -176,7 +176,7 @@ WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 <p>A page that does not search text, needs no graph behind its vector
 search, or asks no facets, can load a smaller module built without what it
 does not use. With every feature the module is 288.9 KB brotli; with none,
-191.9 KB, 34% less, and a <code>near</code> still answers, every vector
+193.6 KB, 33% less, and a <code>near</code> still answers, every vector
 measured. The release ships the module with every feature; any other set
 is a build option.</p>
 
@@ -205,7 +205,7 @@ is a build option.</p>
 href="javascript.html#features">A smaller module</a>): <code>make wasm
 FEATURES="text sorted"</code>, <code>FEATURES=indexes</code> or
 <code>language</code> for a group. <code>make wasm-sizes</code> builds the
-module with every feature (842.9 KB on disk), with none (555.4 KB), with
+module with every feature (842.9 KB on disk), with none (559.8 KB), with
 each added to none and with every one but each, and measures each under
 gzip -9 and brotli -q 11. The two columns differ where features share
 code: the sort and the map the sparse index ranks through are the other

@@ -52,14 +52,14 @@ alone.
 ## Language features
 
 **The rest of the language is features too, and the smallest module is
-192 KB brotli.** `language` is what a page may go without past the
+194 KB brotli.** `language` is what a page may go without past the
 indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
 which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 (which marks what `match` found, so needs `text`) and `analytics` (the
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (555.4 KB, 191.9 brotli, against 842.9 and 288.9 with
+module with none (559.8 KB, 193.6 brotli, against 842.9 and 288.9 with
 every one) and left out of the full one, brotli added and saved:
 `vector` 20.6 and 18.5, `sorted` 8.4 and 22.9 (with `composite`), `composite` 11.1 and 10.6
 (beside it), `collate` 8.7 and 8.3, `text` 17.0 and 18.4

@@ -5,9 +5,9 @@
   "brotli": 295792
  },
  "none": {
-  "raw": 568717,
-  "gzip": 234439,
-  "brotli": 196534
+  "raw": 573229,
+  "gzip": 236384,
+  "brotli": 198235
  },
  "features": {
   "vector": {

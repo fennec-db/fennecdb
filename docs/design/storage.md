@@ -660,17 +660,21 @@ cut drops that run up to the first held slot, so each slot is cut once
 and no more are moved than are cut, and never past the next new id,
 which a block put back lowers below the slots its writes grew the array
 to: those are the next new rows'. The held slots of the first half are
-counted as writes land (`front`), so asking is a compare: a walk to the
-first held slot, asked after every delete of it, walked the run behind
-it again each time a row written there was deleted. An array of fewer
-than 128 slots is not cut (`CUT_FROM`): a small table's lowest ids are
-the ones written again, and cut at two slots, a table of two rows whose
-first is deleted and put again kept it in the map. The cut keeps the
-allocation, room for twice a queue's rows: shrunk at each cut, an array
-grown again past where the floor started held more than main's, which
-doubled from there. Only room of more than eight times what is left,
-which no queue's doubling leaves and a drop's array from 1 does (below),
-is given back.
+counted as writes into them land (`front`), and the slots the array grew
+into its first half since are counted when a cut is asked of a first
+half whose counted slots hold none, each once between two cuts: a walk
+to the first held slot, asked after every delete of it, walked the run
+behind it again each time a row written there was deleted, the middle
+slot looked at as each new row grew the array cost an open of a file 11
+instructions a row, and counting at every block's first write a block of
+one new row 18 a row. An array of fewer than 128 slots is not cut
+(`CUT_FROM`): a small table's lowest ids are the ones written again, and
+cut at two slots, a table of two rows whose first is deleted and put
+again kept it in the map. The cut keeps the allocation, room for twice a
+queue's rows: shrunk at each cut, an array grown again past where the
+floor started held more than main's, which doubled from there. Only room
+of more than eight times what is left, which no queue's doubling leaves
+and a drop's array from 1 does (below), is given back.
 
 **Never inside a block.** The cut runs at a block's first write to a
 collection (`Block::remember` asks `Store::cut_ids_before`), where the
@@ -758,6 +762,25 @@ in a queue and in `@ttl` sweeps of 55: main's index 12 582 912 bytes at
 its peak and at the end, 111 268 after an open; this one's 98 304 at its
 peak and at the end (the room for twice the live rows), 36 004 and 36 196
 after an open.
+
+The perf gate's 25 workloads, against main as CI counts them (x86_64
+musl, callgrind, five runs a side): none more than 0.26% dearer
+(`core-group`, the floor subtracted in each of its reads), `file-open`
+0.51% cheaper. Three costs a first version paid are gone: the middle
+slot looked at as each new row grew the array, the first half counted
+at every block's first write (`front` above), and a call to look a new
+row's id up in two empty maps, 21 instructions a row (`IdIndex::get`
+asks whether either holds an id first); `IdIndex::relocate` keeps the
+maps' parts in line, where handed to a function of their own its `f`
+lived in memory through the slots' loop, 4 instructions a row of a
+compact. As CI's x86_64 musl build makes them, `fennec` and `make
+small`'s are no larger, each one's code 1 344 bytes more inside the page
+it ends in, and `fennec-server` one page, 4 096 bytes, its code 1 728
+bytes and its unwind tables 1.3 KB more; the browser module 3 726 bytes,
+956 brotli. The rare paths -- the maps' lookups, an id written below the
+floor, the cut, the drop and the rebuild -- are out of line so that the
+many places a lookup is inlined do not each carry them: a first version
+with them in line made `fennec` 16 KB larger.
 
 **Why this design.** #696 tried one dense window that lowered, rebased and
 cut both its ends, with two remembered holes and a look that moved the

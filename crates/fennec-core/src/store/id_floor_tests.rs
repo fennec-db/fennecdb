@@ -513,7 +513,8 @@ fn judge_store(st: &Store, model: &Model, what: &str) {
         assert_eq!(got, want[at..], "{what}: from {from}");
     }
     let ix = &st.index;
-    assert_eq!(ix.front, ix.held(0, half(ix.dense.len())), "{what}: front");
+    assert!(ix.front_end <= half(ix.dense.len()), "{what}: front's end");
+    assert_eq!(ix.front, ix.held(0, ix.front_end), "{what}: front");
     let end = ix.floor - 1 + ix.dense.len() as u64;
     for &k in ix.sparse.keys() {
         assert!(k > end, "{what}: sparse id {k} not past the end {end}");
