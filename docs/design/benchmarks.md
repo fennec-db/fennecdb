@@ -1386,12 +1386,42 @@ never as a leak; threads and descriptors less the
 connections open within 2 of their run's median, for both, and the
 primary's within 2 from the median of a life's first five looks to its last
 five -- a leak of a few a life never leaves a run-wide band -- but a look
-over the band by no more than the VM's CPUs less one whose next look is
-back within it, said apart: a task the engine cuts in shares runs them on
+over the band by no more than the VM's CPUs less one whose next look,
+quiet or in a compaction, is back within its own, said apart: a task the engine cuts in shares runs them on
 a thread a CPU but the one that asked, joined before it returns
 (`vector::spread` under `std::thread::scope`, `fennec_core::threads`), and
 the second dry run failed the primary on one look, minute 17, 7 more on
-the VM's 8 CPUs, back the next minute and 0 within each life; no error -- a
+the VM's 8 CPUs, back the next minute and 0 within each life. The median
+is the quiet looks' alone (`quiet_look`, the memory's), and a look in a
+compaction, the server's own or the run's, is held to the band and what a
+compaction holds while it writes, let go of as it ends: 3 descriptors
+(`COMPACTION_FDS`) -- its side file (`<file>.beside`), past the page
+cache's room its scratch file (`<file>.sorting`, unlinked and open while
+it deals), and on Linux below the step's ceiling the copy of the file's
+descriptor a step's fdatasync syncs on a thread of its own, closed once
+the thread is joined (`fs::Steps`, since #698), one file's steps at a
+time -- and 1 thread, that step's (`COMPACTION_THREADS`). Within a life,
+a look in a compaction counts that much less in the last five's median
+and as it is in the first five's, the least the life can have grown, and
+the other way round for a fall. #700 first left those looks out, and a
+review's synthetic runs passed: the replica compacting at every look from
+minute 120, a descriptor more a compaction (27 to 87 by the end), judged
+on its 119 quiet looks, and with one quiet look in the run on that one;
+the primary compacting at all but five looks a half hour, 29 descriptors
+more by each life's end, its lives left out and the line saying 0 within
+a life. So a server with fewer than ten quiet looks, or fewer than half
+its looks, is not judged, nor are the primary's lives where none has ten
+settled looks, the line saying how many were: it fails as "NOT JUDGED,
+too few looks" where nothing else failed it. P6's run of 2026-11-26 at
+50% failed the replica on four looks, minutes 21, 103, 142 and 394, each
+in a compaction of its own and 3 descriptors over its median of 9 (those
+three at once), 9 again at the next look, and the 80% phase did not run
+for it; its lines judged again by the report (`ycsb soak report`) pass
+every criterion, the replica's descriptors 9 to 10 at its 457 quiet looks
+and 9 to 12 at the 23 in its compactions, all 16 of the primary's lives
+judged. A descriptor or a thread a compaction leaves open is at the next
+quiet look, and a few a life at the life's last five, against its first
+five, past 2; no error -- a
 status other than a 2xx is one wherever it falls, and so is a connection
 error or a 503 saying when to come back outside a restart's window, which
 within one is `down`, and so is one a death cut before it was found,
