@@ -581,12 +581,12 @@ impl IdIndex {
 /// [`IdIndex::walk`]: the dense slots that hold a location, then the
 /// sparse ids, each id with its location. A `next` walks the dense slots
 /// and nothing else while they last, and the sparse ids are asked for out
-/// of line, so none of their state is carried through a caller's loop. The
-/// location comes with the id, so a walk that reads it -- a compact's, an
-/// image's -- does not look the id up again: `live_len` (asked twice),
-/// `image_index` and `write_live` each asked `get` of every id `iter`
-/// gave, 49 instructions a row of the perf gate's `file-compact` (aarch64
-/// musl): 26 of them `live_len`'s, 15 `image_index`'s and 8 `write_live`'s.
+/// of line ([`Apart::next`]). The location comes with the id, so a walk
+/// that reads it -- a compact's, an image's -- does not look the id up
+/// again: `live_len` (asked twice), `image_index` and `write_live` each
+/// asked `get` of every id `iter` gave, 64 instructions a row of the perf
+/// gate's `file-compact` as CI counts it (x86_64 musl): 36 of them
+/// `live_len`'s, 12 `image_index`'s and 16 `write_live`'s.
 struct Walk<'a> {
     /// The dense slots not walked yet.
     dense: std::slice::Iter<'a, Loc>,
@@ -604,16 +604,22 @@ struct Apart<'a> {
     at: usize,
 }
 
-/// The sparse id `at` of `ids` and its location. Each is a key of `map`,
-/// which the walk borrows, so none goes missing. Handed the walk's parts,
-/// never its place: as a method of [`Apart`] taking `&mut self` it took the
-/// walk's address, and a caller's loop kept the slots and the id in memory,
-/// loaded and stored again each row -- 60 000 instructions more of the
-/// perf gate's `file-compact`, 6.4 million, and 0.3% of `core-group`'s scan.
-#[inline(never)]
-fn sparse_at(map: &HashMap<DocId, Loc>, ids: &[DocId], at: usize) -> Option<(DocId, Loc)> {
-    let id = *ids.get(at)?;
-    Some((id, *map.get(&id)?))
+impl<'a> Apart<'a> {
+    /// The next sparse id and its location. Each id is a key of the map,
+    /// which the walk borrows, so none goes missing. The location by
+    /// reference: the pair comes back in registers, where a `Loc` by value
+    /// came back through memory and a caller's loop stored each dense
+    /// slot's there too, to give both from one place -- `file-compact` 7.10%
+    /// under main where it is 8.27% (x86_64 musl, as CI counts it), 6.24%
+    /// where it is 7.40% (aarch64). Handed the walk's parts by value rather
+    /// than `&mut self`, the dense slots stayed in registers, and x86_64's
+    /// loops paid for them in spills: 6.59%.
+    #[inline(never)]
+    fn next(&mut self) -> Option<(DocId, &'a Loc)> {
+        let id = *self.ids.get(self.at)?;
+        self.at += 1;
+        Some((id, self.map.get(&id)?))
+    }
 }
 
 impl Iterator for Walk<'_> {
@@ -628,10 +634,7 @@ impl Iterator for Walk<'_> {
                 return Some((id, l));
             }
         }
-        let a = &mut self.apart;
-        let next = sparse_at(a.map, &a.ids, a.at);
-        a.at += 1;
-        next
+        self.apart.next().map(|(id, l)| (id, *l))
     }
 }
 
