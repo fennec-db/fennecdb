@@ -818,13 +818,15 @@ the array starts with is under half of it. Its 40 seeds of 60 phases
 pass by default, in 21 s of a debug build, and 1 000 with
 `FENNEC_ID_FLOOR_SEEDS` (`FENNEC_ID_FLOOR_SEED` runs the one a failure
 names), 4 930 cuts, 119 891 ids written below a floor and 141 drops
-among them. A sparse map's floor set to the array's floor or
-to the top of the ids, or not taken from the next id where the map was
-emptied, fails it and four tests beside it; so do growth past main's
-room, a cut keeping room past main's and a drop in an allocation of its
-length. Tests of their own hold the review's cases: the queue reopened
-past the gap, the compact followed by ids two apart, the drop's room, a
-rebuild's floor and a write over an id below the floor.
+among them. A sparse map's floor set to the array's floor or to the top
+of the ids, or not taken from the next id where the map was emptied,
+fails it and four tests beside it; growth past main's room fails it, a
+cut keeping room past main's it and five tests, a drop in an allocation
+of its length it and four, and a floor dropped by a fifth of the ids
+below it, not their map's buckets, the write over one of them. Tests of
+their own hold the review's cases: the queue reopened past the gap, the
+compact followed by ids two apart, the drop's room, a rebuild's floor and
+a write over an id below the floor.
 
 A `sessions`-like churn, 1 million ids given and 3 000 live at any time,
 in a queue and in `@ttl` sweeps of 55: main's index 12 582 912 bytes at
