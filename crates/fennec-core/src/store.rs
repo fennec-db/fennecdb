@@ -601,32 +601,40 @@ impl IdIndex {
         map.get(&id)
     }
 
-    /// `loc` into slot `i`, the first half's count kept.
+    /// `loc` into slot `i`, the first half's count kept, and what the slot
+    /// held handed back.
     #[inline(always)]
-    fn put_slot(&mut self, i: usize, loc: Loc) {
+    fn put_slot(&mut self, i: usize, loc: Loc) -> Option<Loc> {
         let front = i < self.front_end;
-        let slot = &mut self.dense[i];
-        if slot.is_empty() {
+        let old = std::mem::replace(&mut self.dense[i], loc);
+        if old.is_empty() {
             self.count += 1;
             self.front += front as usize;
+            return None;
         }
-        *slot = loc;
+        Some(old)
     }
 
-    /// Never inlined, as main's, at 2 KB, never was: at half that size it
-    /// went into a compact's and an open's loops, 1.4 KB more of the
-    /// shell's code each.
+    /// `id` pointed at `loc`, and where it pointed before handed back: a
+    /// write's and an open's frame count the version it leaves dead from
+    /// it, where each asked [`Self::get`] first -- a lookup in line before
+    /// the call, which the floor made 2 instructions a row dearer than
+    /// main's, one map more to ask past the end: `file-open` 0.13% over
+    /// main. Never inlined, as main's, at 2 KB, never was: at half that
+    /// size it went into a compact's and an open's loops, 1.4 KB more of
+    /// the shell's code each.
     #[inline(never)]
-    fn insert(&mut self, id: DocId, loc: Loc) {
+    fn insert(&mut self, id: DocId, loc: Loc) -> Option<Loc> {
         let (at, len) = (id.wrapping_sub(self.floor), self.dense.len() as u64);
         if at < len {
             let i = at as usize;
-            if self.dense[i].is_empty() {
+            let old = std::mem::replace(&mut self.dense[i], loc);
+            if old.is_empty() {
                 self.count += 1;
                 self.front += (i < self.front_end) as usize;
+                return None;
             }
-            self.dense[i] = loc;
-            return;
+            return Some(old);
         }
         // Past the end within the gap. Below the floor `at` wraps, which
         // is asked first: an array ending within the gap of 2^64 -- laid
@@ -647,7 +655,7 @@ impl IdIndex {
             self.dense.resize(to, Loc::EMPTY);
             self.dense[to - 1] = loc;
             self.count += 1;
-            return;
+            return None;
         }
         self.apart(id, loc)
     }
@@ -658,7 +666,7 @@ impl IdIndex {
     /// makes room before it looks and grows a full map for it; into the
     /// sparse map past. Out of line, as [`Self::get_apart`].
     #[inline(never)]
-    fn apart(&mut self, id: DocId, loc: Loc) {
+    fn apart(&mut self, id: DocId, loc: Loc) -> Option<Loc> {
         if id < self.floor {
             let keys = &self.sparse;
             let under = self.under.get_or_insert_with(|| {
@@ -667,7 +675,8 @@ impl IdIndex {
                     sorted: std::sync::OnceLock::new(),
                 })
             });
-            if under.map.insert(id, loc).is_none() {
+            let old = under.map.insert(id, loc);
+            if old.is_none() {
                 // A new id, which the walks' list does not hold.
                 under.sorted.take();
                 self.count += 1;
@@ -675,14 +684,14 @@ impl IdIndex {
             if self.over_floor() {
                 self.dropped();
             }
-            return;
+            return old;
         }
         if self.sparse.is_empty() || id < self.sparse_floor {
             self.sparse_floor = id;
         }
-        if self.sparse.insert(id, loc).is_none() {
-            self.count += 1;
-        }
+        let old = self.sparse.insert(id, loc);
+        self.count += old.is_none() as usize;
+        old
     }
 
     /// [`Self::insert`] past the end within the gap where a sparse id may
@@ -694,7 +703,7 @@ impl IdIndex {
     /// in one pass: taking only those at or below `id` meant one scan of
     /// the whole map per insert while the array grew through the run.
     #[inline(never)]
-    fn grow_over(&mut self, id: DocId, loc: Loc) {
+    fn grow_over(&mut self, id: DocId, loc: Loc) -> Option<Loc> {
         let floor = self.floor;
         let mut keys: Vec<DocId> = self.sparse.keys().copied().collect();
         keys.sort_unstable();
@@ -725,7 +734,7 @@ impl IdIndex {
             }
         }
         self.sparse_floor = keys.get(taken).copied().unwrap_or(DocId::MAX);
-        self.put_slot((id - floor) as usize, loc);
+        self.put_slot((id - floor) as usize, loc)
     }
 
     /// The array's allocation grown to hold `to` slots. At a floor of 1 the
@@ -1838,7 +1847,7 @@ impl Store {
     /// that is put back.
     pub fn point(&mut self, id: DocId, loc: Option<Loc>) {
         match loc {
-            Some(l) => self.index.insert(id, l),
+            Some(l) => drop(self.index.insert(id, l)),
             None => drop(self.index.remove(id)),
         }
     }
@@ -1993,17 +2002,14 @@ impl Store {
         // with the index still pointing at it.
         match op {
             OP_PUT => {
-                if let Some(old) = self.index.get(id) {
+                let loc = Loc {
+                    seg: seg_ix as u32,
+                    off: off as u32,
+                    len: payload_len as u32,
+                };
+                if let Some(old) = self.index.insert(id, loc) {
                     self.dead_bytes += dead_frame(id, old);
                 }
-                self.index.insert(
-                    id,
-                    Loc {
-                        seg: seg_ix as u32,
-                        off: off as u32,
-                        len: payload_len as u32,
-                    },
-                );
                 if id >= self.next_id {
                     self.next_id = id + 1;
                 }
@@ -2421,16 +2427,15 @@ impl Store {
             match op {
                 OP_PUT => {
                     written_id(id)?;
-                    if let Some(old) = self.index.get(id) {
-                        self.dead_bytes += dead_frame(id, old);
-                    }
                     let (seg, off) = self.copy_frame(frame, len, rest);
                     let loc = Loc {
                         seg,
                         off: off as u32,
                         len: len as u32,
                     };
-                    self.index.insert(id, loc);
+                    if let Some(old) = self.index.insert(id, loc) {
+                        self.dead_bytes += dead_frame(id, old);
+                    }
                     if id >= self.next_id {
                         self.next_id = id + 1;
                     }
@@ -2527,12 +2532,11 @@ impl Store {
             match op {
                 OP_PUT => {
                     written_id(id)?;
-                    if let Some(old) = self.index.get(id) {
+                    self.total_bytes += pos + plen - start;
+                    let loc = Loc::mapped(at + pos as u64, plen as u32);
+                    if let Some(old) = self.index.insert(id, loc) {
                         self.dead_bytes += dead_frame(id, old);
                     }
-                    self.total_bytes += pos + plen - start;
-                    self.index
-                        .insert(id, Loc::mapped(at + pos as u64, plen as u32));
                     if id >= self.next_id {
                         self.next_id = id + 1;
                     }
