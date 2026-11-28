@@ -1156,8 +1156,11 @@ announced span's, as the second after the announcement always was: a
 death in it is found as one in the kill's announced second, its
 operations the restart's. Bounded by `WAIT_MAX`; where no side file is
 seen -- the compact ended first, or none was written within the bound --
-the kill is sent without and its line says so (`kill_beside_ms` -1, how
-long after the compact was asked its side file was seen otherwise).
+the kill is sent without and its line says so (`kill_beside_ms` -1;
+otherwise how long after its request was sent its side file was seen,
+from the request out at the look that saw it -- the latest ask, the
+compact asked again 2 s after each time the server's own turned it away
+-- to that look's end, a look some 0.5 s of it).
 fennec-server compacts
 on its own besides (`--auto-compact`) -- at half the file dead: its live
 records, 1.0-1.1 GB, never fit the room the cgroup leaves the page cache
@@ -1342,14 +1345,15 @@ the earliest hour before it that holds the same schedule -- the same kills,
 one in a compact, the same compacts and backups at the same minutes of the
 hour: lines 61-120 of an 8-hour run, against 421-480 (`same_hour`), so
 that neither a restart's backlog nor a compact's tail weighs more in one
-than in the other -- and its compacts' p99, the median of the last hour's
-compacts', at most 1.25 times the median of every compact's before it
-from the second hour on (`compacts_judged`), the replica's own
-compactions, on no schedule, out of both figures; a two-hour run has no
-such hour and is not judged on it, and neither is an hour with no
-operation on its schedule, which has no steady p99 (written as 0, a last
-hour behind its schedule passed against any), nor the compacts' half
-where the last hour had no compact or fewer than three came before it.
+than in the other -- and its compacts' p99, the last hour's median
+compact at most 1.25 times that same hour's (`compacts_judged`,
+`hour_compact`), the replica's own compactions, on no schedule, out of
+both figures; a two-hour run has no such hour and is not judged on it,
+and neither is an hour with no operation on its schedule, which has no
+steady p99 (written as 0, a last hour behind its schedule passed against
+any); the compacts' half has nothing to judge where the hours' schedule
+asks no compact, and where either hour holds fewer than two it is NOT
+JUDGED and fails.
 A compact is a run of lines with compact operations, one of which counted
 a compact ended (`compact_p99s`: one the server's own turned away wrote
 nothing of the run's, and the compact a kill lands in has its operations
@@ -1365,24 +1369,38 @@ live size flat, no graph phase run, and its hours' p99 in compacts were
 8.4, 1.75, 2.6, 4.6, 9.1, 2.3, 4.6 and 6.3 s, no trend -- an hour's p99
 over its three compacts or so is its worst compact's tail, the reference
 hour was the run's quietest, and the last hour's came from one compact at
-minute 440 while other processes took 1.6 cores of this host. Of the two
-ways to judge it less noisily -- the last hour's p99 against the median
-of the earlier hours', or each compact against the run's median compact
--- the second is taken, as the median of the last hour's compacts against
-the median of the earlier ones: the first still holds the last hour by
-its worst compact, and that run fails it at 1.38x at the least (6.34 s
-against 4.6 s, the higher of its six hours' middle two), where the second
-moves with what most compacts do and never with one -- 1.62 s against
-2.30 s, 0.70x; its run at 50%, 0.38 s against 0.35 s, 1.08x, where the
-hours had it at 0.59x. Its purpose kept, a p99 doubling steadily
-over the run puts the last hour's median compact 1.28 times over the
-earlier ones' and fails (`each_compact_is_held_to_the_runs_median_compact`);
-the margin is thin for so slow a drift, and anything faster is wide of
-it. The compacts in minutes another process took a core or more of this
-host in are named on the line and judged as they are: one of them decides
-nothing against the median, and left out, a host busy through the last
-hour would leave nothing to judge -- a busy host can fail a run, never
-pass it. The file at most 2.2 times the live bytes every minute; the primary's
+minute 440 while other processes took 1.6 cores of this host. An hour's
+median compact moves with what most of its compacts do and never with
+one: the last hour's 1.62 s against minutes 61-120's 1.69 s, 0.96x; its
+run at 50%, 0.38 s against 0.38 s, 0.99x. #703 first held the last
+hour's median compact to the median of every compact from minute 61 to
+the last hour, and a review of it found that reference moved by the
+host: that run's busy compacts of minutes 241-401 (2.2-9.3 s, other
+processes at 0.5-1.2 cores) lifted it to 2.30 s, where the median of its
+quiet ones (under 0.3 cores) is 1.85 s, so that every last-hour compact made 1.75 times
+slower still passed at 1.23x and a drift of +50% from minute 61 to the
+end at 1.17x. Against minutes 61-120's, the hour the steady half holds
+the last to, a slowdown of the last hour's compacts by half fails at
+1.44x, three quarters at 1.68x, the +50% drift at 1.35x and a doubling
+over the run at 1.64x (`the_last_hours_compacts_are_held_to_the_same_hours`).
+The review measured the other ways too: the last two hours against hours
+2-3 fail that run at 2.69x, and a trend over every compact from minute 61
+reads 2.08x on the same host's load. An hour holds some three compacts,
+and the server's own compaction turns one away now and then (two of the
+23 at 50%, minutes 180 and 360); with two, the hour's compact is their
+mean (`hour_compact`, the median's middle two): the slower alone would
+hold it by one tail, a busy host's, and the quicker alone would pass an
+hour whose other compact is slow -- one twice as slow beside one at the
+reference fails at 1.50x, one 1.4 times as slow passes at 1.20x. One
+compact is one tail, and an hour with one or none is not judged; the half
+then fails, as the other criteria do on too few looks. The compacts in
+minutes another process took a core or more of this host in are named on
+the line and judged as they are, in either hour: a busy host slows the
+compacts it is in, so a busy last hour can fail a run and a busy
+reference hour can lift the bar -- with three compacts in an hour one of
+them decides nothing, and the line names them for a reader to weigh. The
+reference hour of P6's run at 50% held two (minutes 61 and 81, at 1.01
+and 1.03 cores), its median the quiet one's of minute 101, 0.38 s. The file at most 2.2 times the live bytes every minute; the primary's
 `rss_anon` beyond what the server holds by its own account grown less
 than 5% of its `rss_anon` within each life (it is killed every 30
 minutes) and between two compactions, from the median of a stretch's
@@ -1421,23 +1439,70 @@ MB higher in the three minutes each backup streamed (its connections 98 to
 after the stream ended the stretch, so that three of its last five
 quiet looks were the backup's -- its run at 50% had the backup's one look
 in a stretch's middle, +4.2%. Lines from before the stream was said
-(`backing_up`) take a backup's looks from the schedule: from the line
-after the minute it was asked in to the line that counted it, its restore
-and verify among them. So judged again, that run's lives pass, the most
-+0.3%, 14 of its 16 judged (two lost their tenth quiet look with the
-line that counted the backup); its run at 50% passes as it did, +4.2%.
-Neither the stretch nor the life is cut at a backup: what one leaves
-behind is at the quiet looks after it, and fails where they are a
-stretch's last five
-(`a_backups_looks_are_left_out_of_the_primarys_memory_and_what_it_leaves_behind_is_not`).
-Where a compaction ends the stretch a look after the backup, as at 80%,
-it is the step across that compaction, said beside the verdict as any
-is. Judged at the single look after a backup instead, against the three
+(`backing_up`) take a backup's looks from the schedule and the server's
+connections: from the line after the minute it was asked in to the line
+that counted it, those whose server had more connections than the run's
+median -- the stream's own, 99 against 98 in both of P6's runs, at
+exactly the looks a later line would have named; the line that counted it,
+its restore's and its verify's are past the stream, the connections and
+the memory back where they stood. #703 first left the whole of that span
+out, the line that counted it among it, and lost two lives their tenth
+quiet look. So judged again, that run's lives pass, the most +0.3%, all
+16 judged; its run at 50% passes as it did, +4.2%. Neither the stretch
+nor the life is cut at a backup, and what one leaves behind is judged
+backup by backup (`a_backups_looks_are_left_out_of_the_primarys_memory_and_each_backup_is_judged`):
+the median of the five quiet looks after its stream in its life, a
+compaction between them or not, against the median of the five before
+it, under 5% of its `rss_anon` at the five before. A review found the
+stretches alone blind to it: in each of the 80% run's four backups the
+server's own compaction came two or three looks after the stream
+(minutes 55-56, 175-176, 296 and 416), so that a stretch held at most one
+look after a backup, and 60 MB kept from each stream's end to its life's
+end passed at +0.3%, said only as a step of +61.4 MB across a
+compaction; the same 28 MB at 50%, its stretches going on, failed at
++22.8%. Judged backup by backup, all four fail at 80%, the most +46.9%,
+and 28 MB fails all four at 80% (the most +22.8%) and at 50% (+19.2%).
+A backup with fewer than five quiet looks before or after it in its life
+is said and not judged, and a run none of whose backups could be -- or
+none of whose looks saw a backup it counted stream -- fails as NOT
+JUDGED, as the other criteria do on too few looks. The check reaches
+across compactions, and a compaction steps the memory beyond what the
+server holds: the heap its engine let go of that the allocator kept,
+1-10 MB from the five quiet looks before one to the five after in both
+runs where the engine's own fell 11-27 MB at it, and 14 MB in the second
+dry run's (above). The 80% run's life 6 stood 9.7 MB higher beyond what
+it held in the five quiet looks after the server's own compaction of
+minute 195 than in the five before, the engine's own 14.5 MB lower and
+its anonymous memory 7.9 MB lower. A compaction's step comes with the
+engine's own falling under it and the anonymous memory not rising -- it
+fell 6-22 MB at those compactions; what a backup leaves behind raises
+both. So
+a backup is held to the lesser of the two rises -- beyond what the server
+holds, and of its anonymous memory less the feed, which the engine's own
+growing raises and a compaction's step does not. P6's backups read at
++1.7% at the most at 80% (beyond what the server holds alone, +2.0 to
++3.2%) and -1.6% at 50%. Taken at each other look of the two runs as
+though a backup had streamed there, beyond what the server holds alone
+rose 5% or more at 7 of 228 looks at 80% and 16 of 252 at 50%, the
+lesser of the two at 2 and 4 -- that step of life 6 at minutes 199-200,
+and at 50% life 14's rise of some 7 MB through minutes 433-436, its
+anonymous memory with it, which its stretch held to +4.2% from its first
+five looks to its last five: five looks a side move more than a stretch
+does, and a backup beside such a minute would fail the run. What the
+lesser gives up is a leak beside a compaction whose freed heap the
+allocator handed back: the anonymous memory's rise falls short of the
+leak by what was handed back -- 6-22 MB at those compactions, the
+anonymous memory less the feed +2.3 to -4.8 MB over the 80% run's
+backups, the rise beyond what it holds +2.7 to +4.3 MB -- and a leak
+that much over 5% passes there, the review's 28 MB still failing at
++16.5% at the least. Judged at the single look after a backup instead, against the three
 before it, the 80% run's life 9 failed at +6.9%: its look of minute 295
 came in the first seconds of the server's own compaction of 35 s, before
 its side file was seen, and one look decided -- what the medians of five
 are there to prevent. The line says how many looks it left out, and
-which. The replica's are not left out: the backup reads the primary. The third dry
+which, how many backups it judged and the most one rose, and names those
+at 5% or more and those not judged.
+The replica's are not left out: the backup reads the primary. The third dry
 run of 2026-11-24's replica stood 65-72 MB beyond its engine's through
 the second hour and 73-75 MB in the two to four looks after each of its
 three compactions, its engine's own down from 50-60 MB to 26-31 at each;
