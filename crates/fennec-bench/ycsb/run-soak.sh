@@ -22,7 +22,7 @@
 #
 #   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=30 RECORDS=1000000
 #   MEMORY=512m THREADS=32 REPLICA_THREADS=128 SUBSCRIPTIONS=64 KILL_EVERY=30
-#   COMPACT_EVERY=20 BACKUP_EVERY=120 BACKUP_AT=50 KILL_IN_COMPACT_EVERY=90
+#   COMPACT_EVERY=20 BACKUP_EVERY=120 BACKUP_AT=45 KILL_IN_COMPACT_EVERY=90
 #   LOSS_MS=650 (250; 0 under always) RESTART_MAX=120 RUN=p6 QUIET_LOAD=4
 #   KEEP_GOING=0 OUT=crates/fennec-bench/results/soak.tsv
 #   LOGS=$TMPDIR/<run's name>-logs (both servers' logs, kept as they go)
@@ -111,7 +111,12 @@ SUBSCRIPTIONS=${SUBSCRIPTIONS:-64}
 KILL_EVERY=${KILL_EVERY:-30}
 COMPACT_EVERY=${COMPACT_EVERY:-20}
 BACKUP_EVERY=${BACKUP_EVERY:-120}
-BACKUP_AT=${BACKUP_AT:-50}
+# Five minutes after a compact: the five quiet looks after a backup that
+# its memory is judged at (`ycsb soak report`) then come before the
+# server's own compaction, fifteen minutes after each compact at 80%. At
+# 50 they came to exactly five, across that compaction, the kill of the
+# life's last minute ending it (docs/design/benchmarks.md).
+BACKUP_AT=${BACKUP_AT:-45}
 KILL_IN_COMPACT_EVERY=${KILL_IN_COMPACT_EVERY:-90}
 RESTART_MAX=${RESTART_MAX:-120}
 RUN=${RUN:-p6}

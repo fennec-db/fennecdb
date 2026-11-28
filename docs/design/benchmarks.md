@@ -1125,7 +1125,9 @@ before its request is sent: under `--sync always` it is visible from when
 it lands, before its fsync and its answer.
 
 **The schedule.** `compact usertable` every 20 minutes; every 120 from
-minute 50 a backup over the replication stream (`fennec backup` into an
+minute 45 a backup -- five minutes after a compact, so that the looks its
+memory is judged at fit before the server's own compaction (the primary's
+memory, below) -- over the replication stream (`fennec backup` into an
 archive, its directory made first: into a path that is none it writes a
 database file of its own, which `fennec restore` takes for a sealed backup
 and refuses without a key) -- in a container of its own, the span its
@@ -1462,10 +1464,51 @@ end passed at +0.3%, said only as a step of +61.4 MB across a
 compaction; the same 28 MB at 50%, its stretches going on, failed at
 +22.8%. Judged backup by backup, all four fail at 80%, the most +46.9%,
 and 28 MB fails all four at 80% (the most +22.8%) and at 50% (+19.2%).
-A backup with fewer than five quiet looks before or after it in its life
-is said and not judged, and a run none of whose backups could be -- or
-none of whose looks saw a backup it counted stream -- fails as NOT
-JUDGED, as the other criteria do on too few looks. The check reaches
+Every backup the run counted is judged (`counted_backups`): the k-th
+counted is the k-th the schedule asked, its stream the looks that saw one
+from its ask to the line that counted it, and one no look saw stream --
+streamed, restored and verified between two looks -- is judged from the
+minute it was asked, an empty stream there: the five quiet looks before
+it at or before that minute, the five after it from the next on. #703
+first judged only the streams its looks saw: the fourth dry run of
+2026-11-24 asked its one backup at minute 50 and counted it on line 51,
+every look at 98 connections, and failed as NOT JUDGED for it, its lives
+passing at +1.4%; judged from minute 50 it passes, its backup at +1.7%,
+and 8 MB kept from line 51 to the life's end fails it at +7.0%. With one
+of the 80% run's four streams hidden by a review (minutes 291-293 at 98
+connections, the memory beyond what was held that of minute 290), the
+line said 3 of 3 backups judged; it judges 4 of 4 counted, naming the one
+judged from the minute it was asked, and 28 MB kept from minute 291 to
+the life's end fails it at +15.7%. The line names each backup by the minute it was asked; with
+no start line, by the line that counted it, and one no look saw stream is
+then placed by nothing and not judged. A backup with fewer than five
+quiet looks before or after it in its life is said and not judged, and a
+run none of whose counted backups could be fails as NOT JUDGED, as the
+other criteria do on too few looks: the third dry run of 2026-11-24
+does, its compact of minute 40 counting operations on every line to the
+kill of minute 60 (its p99 41 s at minute 50), so that no look after its
+backup of minute 50 in that life is quiet -- no minute to ask it at and
+no count of looks fits it. The looks after a backup are why it is asked
+at minute 45 (`BACKUP_AT`, `--backup-at`). At 50, as P6's runs had it,
+the 80% run's server compacted on its own some fifteen minutes after
+each of the run's compacts -- minutes 55-56, 175-176, 296 and 416 -- and the
+kill of minute 60 ended the life: the backups asked at 50 and 170 had
+exactly five quiet looks after their streams (54 and 57-60, 174 and
+177-180), the other two six, and a compaction a look longer would have
+left a backup unjudged. Asked at 45 on that run's lines, its stream three
+looks and counted on the fourth as each of its four was, every backup of
+the eight hours has nine quiet looks before it in its life and ten or
+eleven after, the five it is judged at all before the server's own
+compaction; at 50%, which compacted only on the schedule, ten before and
+fourteen after (fifteen and nine at 50). Nothing else of the schedule
+falls from four minutes before a backup to fourteen after it -- the
+compacts five minutes before and fifteen after, the kills fifteen either
+side, one in a compact at 270 among them
+(`the_schedule_queues_a_backup_beside_a_compact_and_owes_its_counts`) --
+its restore and verify are counted with it, on the line after its
+stream, and the hour the last is held to is still lines 61-120. Judging
+a backup at fewer looks after it was the other way, and five a side are
+what keep one look from deciding (below). The check reaches
 across compactions, and a compaction steps the memory beyond what the
 server holds: the heap its engine let go of that the allocator kept,
 1-10 MB from the five quiet looks before one to the five after in both
@@ -1479,7 +1522,13 @@ fell 6-22 MB at those compactions; what a backup leaves behind raises
 both. So
 a backup is held to the lesser of the two rises -- beyond what the server
 holds, and of its anonymous memory less the feed, which the engine's own
-growing raises and a compaction's step does not. P6's backups read at
+growing raises and a compaction's step does not. Each alone fails what
+the other lets through
+(`a_backup_is_held_to_the_lesser_rise_of_what_is_beyond_and_of_its_anonymous_memory`):
+held to its anonymous memory alone, the engine's own growing 8 MB across
+a backup and the anonymous memory with it fails at +8.0%, and P6's run at
+50% at +8.7%; held to what is beyond alone, a compaction after a backup
+letting go of 8 MB of the engine's own fails at +8.0%. P6's backups read at
 +1.7% at the most at 80% (beyond what the server holds alone, +2.0 to
 +3.2%) and -1.6% at 50%. Taken at each other look of the two runs as
 though a backup had streamed there, beyond what the server holds alone
@@ -1500,8 +1549,9 @@ before it, the 80% run's life 9 failed at +6.9%: its look of minute 295
 came in the first seconds of the server's own compaction of 35 s, before
 its side file was seen, and one look decided -- what the medians of five
 are there to prevent. The line says how many looks it left out, and
-which, how many backups it judged and the most one rose, and names those
-at 5% or more and those not judged.
+which, how many of the backups it counted it judged and the most one
+rose, and names those at 5% or more, those judged from the minute they
+were asked alone and those not judged.
 The replica's are not left out: the backup reads the primary. The third dry
 run of 2026-11-24's replica stood 65-72 MB beyond its engine's through
 the second hour and 73-75 MB in the two to four looks after each of its
