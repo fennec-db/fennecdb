@@ -1896,12 +1896,21 @@ impl Tenants {
         }
         let db = Arc::new(RwLock::new(db));
         crate::link::beside(&format!("tenant `{name}`"), &db);
-        let bytes = Arc::clone(&held);
-        crate::link::keep_held(
-            &format!("tenant `{name}`"),
-            &db,
-            Some(Arc::new(move || bytes.get(Kind::Bytes))),
-        );
+        // Kept by the process's compacter and graph keeper, but in a test's
+        // registry kept apart, whose rebuilds and compacts the test runs
+        // itself (`tests::keep_apart`).
+        #[cfg(test)]
+        let kept = !tests::kept_apart(&self.dir);
+        #[cfg(not(test))]
+        let kept = true;
+        if kept {
+            let bytes = Arc::clone(&held);
+            crate::link::keep_held(
+                &format!("tenant `{name}`"),
+                &db,
+                Some(Arc::new(move || bytes.get(Kind::Bytes))),
+            );
+        }
         crate::sweep::watch(&format!("tenant `{name}`"), &db);
         if let Some(w) = &self.warm {
             crate::warm::start(&format!("tenant `{name}`"), &db, w);
@@ -4416,11 +4425,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The registries, by their directories, whose tenants the process's
+    /// compacter and graph keeper never keep (`Tenants::open`).
+    static APART: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Keeps the tenants `reg` opens from here on from the process's
+    /// compacter, whose pass every 5 s rebuilds the worn graph of each
+    /// database it keeps (`link::rebuild`) -- in a test process, every
+    /// tenant any test opened. A test running its own rebuild of a worn
+    /// graph raced that pass: landing between the writes that wore the
+    /// graph and the read lock the test holds the rebuild under way with,
+    /// it rebuilt the graph whole, and the test found no tombstone left to
+    /// rebuild. The shutdown's test waits on two tenants' syncs there,
+    /// longer on Windows than the pass's 102 ms rebuild (run 46132736819);
+    /// on a Mac, 8 ms against 180, it never failed in 318 runs, but with
+    /// that wait 300 ms longer, beside five busy loops, 49 runs of 264 --
+    /// none of 263 kept apart.
+    fn keep_apart(reg: &Tenants) {
+        let mut apart = APART.lock().unwrap_or_else(|e| e.into_inner());
+        if !apart.contains(&reg.dir) {
+            apart.push(reg.dir.clone());
+        }
+    }
+
+    /// Whether the tenants opened in `dir` are kept apart ([`keep_apart`]).
+    pub(super) fn kept_apart(dir: &Path) -> bool {
+        let apart = APART.lock().unwrap_or_else(|e| e.into_inner());
+        apart.iter().any(|d| d == dir)
+    }
+
     /// `name` of `reg`, given the identity `id` where one is named
     /// (`create_as`): a `docs` graph worn at a floor of 10, its 300 rows
     /// written three times, a statement each -- 600 tombstones beside 300
-    /// live nodes.
+    /// live nodes -- which only the test rebuilds or compacts: `reg`'s
+    /// tenants are kept apart from the process's compacter
+    /// ([`keep_apart`]), before this one opens.
     fn worn_tenant(reg: &Tenants, name: &str, id: Option<u64>) -> Arc<Tenant> {
+        keep_apart(reg);
         let (t, _) = reg.create_as(name, id).unwrap();
         run(&t, "create collection docs (v vector<8> @hnsw(cosine))");
         let mut db = t.db.write().unwrap();
