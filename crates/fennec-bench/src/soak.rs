@@ -70,7 +70,7 @@ use super::{
     Hist, Rng, Scrambled, ALPINE, FIELDS, LOAD_BATCH, SEED,
 };
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write as _};
@@ -363,7 +363,7 @@ const HELP: &str = "ycsb soak --sync 250|always (--rate <ops/s> [--label 50] | -
     [--minutes 480] [--records 1000000] [--docs 20000] [--counters 1000] [--dim 16]
     [--memory 512m] [--threads 32] [--replica-threads 128] [--subscriptions 64] [--kill-every 30]
     [--kill-in-compact-every 90] [--compact-every 20] [--backup-every 120]
-    [--backup-at 50] [--ttl 60] [--slack 1] [--loss-ms 650|0] [--restart-max 120]
+    [--backup-at 45] [--ttl 60] [--slack 1] [--loss-ms 650|0] [--restart-max 120]
     [--replica-back-max 60] [--lag-max 5] [--catchup-max 300] [--recall-min 0.925]
     [--samples 3] [--disk-floor 3g] [--replication-buffer 64] [--out soak.tsv] [--run-id <id>]
     [--image fennecdb-ycsb] [--tools p6-tools] [--name p6] [--progress <file>]
@@ -397,7 +397,13 @@ impl Opts {
             kill_in_compact_every: 90,
             compact_every: 20,
             backup_every: 120,
-            backup_at: 50,
+            // Five minutes after the compact of minute 40, so that the
+            // backup's five quiet looks after it in its life come before
+            // the server's own compaction (minutes 55-56 of P6's run at
+            // 80%) with room to spare; at 50 they came to exactly five,
+            // across it, the kill of minute 60 ending the life
+            // (docs/design/benchmarks.md, the soak's memory).
+            backup_at: 45,
             ttl: 60,
             // The server stamps `seen` and judges the expiry by its own
             // clock, so the VM's offset from this host cancels: only a
@@ -1033,6 +1039,42 @@ impl Kit {
             return None;
         }
         Look::parse(&out)
+    }
+
+    /// Whether a compact is writing its side file beside the server's
+    /// database (`<file>.beside`) now, read as the minute's look reads it,
+    /// through `/proc/1/root`: there, written in the last minute, and holding
+    /// a byte or more. `None` where the look could not be made. A compact
+    /// rebuilds each worn graph before it writes anything (`graphs_rebuilt`):
+    /// P6's run of 2026-11-27 at 80% sent its kill of minute 360 a second
+    /// after asking that kill's compact, in the docs graph's rebuild, and
+    /// the open after found no side file.
+    fn beside_written(&self, container: &str, file: &str) -> Option<bool> {
+        let f = format!("/proc/1/root/data/{file}.beside");
+        let script = format!(
+            "[ -s {f} ] && [ \"$({WRITTEN_SINCE} {f})\" = 1 ] && echo beside 1 || echo beside 0"
+        );
+        let (ok, out) = docker_within(
+            Duration::from_secs(60),
+            &[
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                &format!("{container}-beside"),
+                &format!("--pid=container:{container}"),
+                "--cap-add",
+                "SYS_PTRACE",
+                ALPINE,
+                "sh",
+                "-c",
+                &script,
+            ],
+        );
+        // Docker's own words, a warning among them, come after the
+        // script's (`docker_env`).
+        ok.then(|| out.lines().any(|l| l.trim() == "beside 1"))
     }
 
     /// A container's state as Docker has it, with how its process ended
@@ -3429,6 +3471,15 @@ struct Shared {
     /// When the side thread's compact was sent, `u64::MAX` while none is
     /// out: what a kill meant for a compact waits for.
     compact_since: AtomicU64,
+    /// The latest backup's stream (`fennec backup`, before its restore and
+    /// verify), in ns from `t0`: from just before its container was started
+    /// to just after it ended, `to` `u64::MAX` while it runs, both before
+    /// the first. While it streams, the primary holds a pinned image of
+    /// its file (`engine/pinned.rs`) -- the usertable's id index, the
+    /// frames' index, the docs graph and up to 8 MB of the open segment,
+    /// none of it in `fennec_memory_bytes` -- and the minute's look
+    /// says so (`backing_up`, `streamed_at`).
+    backup_span: Mutex<(u64, u64)>,
     /// The side thread's job, for a wait on it that runs out to name.
     doing: Mutex<String>,
     /// Inserted keys: the next to hand out, and those inserted and not yet
@@ -3592,6 +3643,7 @@ impl Shared {
             replica_ok: AtomicBool::new(true),
             replica_target: AtomicU64::new(0),
             compact_since: AtomicU64::new(u64::MAX),
+            backup_span: Mutex::new((u64::MAX, u64::MAX)),
             doing: Mutex::new(String::new()),
             fifo: Mutex::new((o.records, VecDeque::new())),
             sessions: Mutex::new(VecDeque::new()),
@@ -5319,6 +5371,14 @@ fn backup_held(
     )
 }
 
+/// Whether a backup's stream (`Shared::backup_span`: `to` `u64::MAX` while
+/// it runs, both before the first) was open at any moment of a look made
+/// over `look`: the primary held its pinned image then, which its memory
+/// criterion leaves out (`backup_looks`).
+fn streamed_at(span: (u64, u64), look: (u64, u64)) -> bool {
+    span.0 != u64::MAX && span.0 <= look.1 && span.1 >= look.0
+}
+
 /// What the side thread needs of the run.
 struct Side {
     sh: Arc<Shared>,
@@ -5501,22 +5561,45 @@ impl Side {
         // is none, a backup writes a database file of its own, which
         // `fennec restore` takes for a sealed one and refuses without its
         // key -- the short run of 2026-11-22's backup.
-        let script = format!(
+        //
+        // The backup's stream in a container of its own, its restore and
+        // verify in the next, so that the minute's look can tell when the
+        // primary streamed its image (`backup_span`): it holds a pinned
+        // image while it does, which its memory criterion leaves out. P6's
+        // run of 2026-11-27 at 80% failed that criterion on the four lives
+        // a backup was asked in, the most +19.3%: 24-30 MB more beyond
+        // what the server holds in the three minutes the backup streamed,
+        // back the minute it ended, three of a stretch's last five looks.
+        // The archive is removed after a stream that failed, as after a
+        // restore; the two within the half hour the one script had.
+        let stream = format!(
             "rm -rf /data/archive /data/restored.fennec; mkdir /data/archive && \
-             /tools/fennec backup http://{}:8080 /data/archive && echo BACKUP-OK && \
-             /tools/fennec restore /data/archive /data/restored.fennec && echo RESTORE-OK && \
-             /tools/fennec verify /data/restored.fennec && echo VERIFY-OK; \
-             rm -rf /data/archive",
+             /tools/fennec backup http://{}:8080 /data/archive && echo BACKUP-OK \
+             || rm -rf /data/archive",
             kit.server(),
         );
         let t = Instant::now();
-        let (_, out) = kit.fennec_env(
+        let within = Duration::from_secs(1800);
+        *sh.backup_span.lock().unwrap() = (sh.ns(), u64::MAX);
+        let (_, mut out) = kit.fennec_env(
             &format!("{}-backup", kit.name),
             &kit.volume("backup-data"),
-            &script,
-            Duration::from_secs(1800),
+            &stream,
+            within,
             &kit.secrets()[1..],
         );
+        sh.backup_span.lock().unwrap().1 = sh.ns();
+        if out.contains("BACKUP-OK") {
+            let (_, more) = kit.fennec(
+                &format!("{}-backup", kit.name),
+                &kit.volume("backup-data"),
+                "/tools/fennec restore /data/archive /data/restored.fennec && echo RESTORE-OK && \
+                 /tools/fennec verify /data/restored.fennec && echo VERIFY-OK; \
+                 rm -rf /data/archive",
+                within.saturating_sub(t.elapsed()),
+            );
+            out.push_str(&more);
+        }
         let e = sh.ns();
         // Refused by the primary for its token or its name: the run's own
         // setting, which every backup after would meet -- the run stops at
@@ -7058,7 +7141,7 @@ fn next_kill(m: u64, o: &Opts) -> Option<u64> {
     })
 }
 
-/// Why the wait for the compact a kill is to land in ended (`compact_wait`).
+/// Why the wait for the compact a kill is to land in ended (`kill_wait`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompactWait {
     /// Docker's `die` of the primary: the dry run's second death, sent a
@@ -7066,35 +7149,85 @@ enum CompactWait {
     /// the compact's cut counted as the kill's, no compact left under way
     /// to end.
     Died,
-    /// The compact under way a second: the kill lands in it.
-    UnderWay,
-    /// It ended within the second: killed without.
+    /// Its side file seen written while its request was out: the kill
+    /// lands in it.
+    Writing,
+    /// It ended before its side file was seen written: killed without.
     Ended,
-    /// None of its own under way within `WAIT_MAX`: killed without.
+    /// No side file of its seen written within the wait's bound: killed
+    /// without.
     Timeout,
 }
 
 /// Whether the wait for the compact the kill is to land in ends, and why:
-/// `evs` Docker's events read since it began, `since` when the compact
-/// under way was asked (`u64::MAX` while none is), `now`, whether it
-/// ended (`ended`) and how long the wait has been.
+/// `evs` Docker's events read since it began, `writing` whether its side
+/// file was seen written by a look made while its request was out
+/// (`kill_wait`), whether it ended (`ended`), and how long the wait has
+/// been against its bound (`within`). Its request out is not enough: a
+/// compact rebuilds each worn graph before it writes anything, and P6's
+/// run of 2026-11-27 at 80%, which killed once the request had been out a
+/// second, found no side file after its kill of minute 360 -- the kill had
+/// landed in the docs graph's rebuild.
 fn compact_wait(
     evs: &[DockerEv],
-    since: u64,
-    now: u64,
+    writing: bool,
     ended: bool,
     waited: Duration,
+    within: Duration,
 ) -> Option<CompactWait> {
     if evs.iter().any(|e| e.die) {
         return Some(CompactWait::Died);
     }
-    if since != u64::MAX && now.saturating_sub(since) >= 1_000_000_000 {
-        return Some(CompactWait::UnderWay);
+    if writing {
+        return Some(CompactWait::Writing);
     }
     if ended {
         return Some(CompactWait::Ended);
     }
-    (waited >= WAIT_MAX).then_some(CompactWait::Timeout)
+    (waited >= within).then_some(CompactWait::Timeout)
+}
+
+/// The wait for the compact the kill is to land in, asked already: its
+/// side file looked for (`look`, `Kit::beside_written` in the run) while
+/// its request is out (`Shared::compact_since`), until one look finds it
+/// written, Docker's events (`events`, kept in `evs`) say the primary
+/// died, the compact ended (`ended`) or `within` passed (`compact_wait`).
+/// Hands back why, and how long after its request was sent its side file
+/// was seen (`None` where it was not): from the request out at the look
+/// that saw it -- the latest ask, the 2 s before each ask again not in it
+/// -- to that look's end, a look some 0.5 s of it. A look counts only
+/// where the request it is for was out from before the look to after it:
+/// the compact a kill is to land in is asked again 2 s after the server's
+/// own turned it away (`Side::compact`), and a side file seen between two
+/// asks is the server's own, a kill in which cuts no request of the run's
+/// (`compact_killed`). One seen while the request is out, in its graph
+/// phase, is a compact writing all the same: the kill cuts both.
+fn kill_wait(
+    sh: &Shared,
+    ended: &dyn Fn() -> bool,
+    events: &mpsc::Receiver<DockerEv>,
+    evs: &mut Vec<DockerEv>,
+    look: &mut dyn FnMut() -> bool,
+    within: Duration,
+) -> (CompactWait, Option<Duration>) {
+    let t = Instant::now();
+    let seen = evs.len();
+    loop {
+        evs.extend(events.try_iter());
+        let since = sh.compact_since.load(Ordering::SeqCst);
+        let writing =
+            since != u64::MAX && look() && sh.compact_since.load(Ordering::SeqCst) == since;
+        if let Some(w) = compact_wait(&evs[seen..], writing, ended(), t.elapsed(), within) {
+            let seen = Duration::from_nanos(sh.ns().saturating_sub(since));
+            return (w, (w == CompactWait::Writing).then_some(seen));
+        }
+        // A look is a container's start, some 0.5 s: paced, not back to
+        // back, while the request is out; its start watched for closely.
+        std::thread::sleep(Duration::from_millis(match since {
+            u64::MAX => 20,
+            _ => 250,
+        }));
+    }
 }
 
 /// A death of the primary the run did not cause, found now: its time read
@@ -8246,8 +8379,11 @@ fn run(o: &Opts) {
         totals.0 += ops;
         totals.1 += errors;
         totals.2 += mismatches;
-        // The servers, as their processes and their metrics have them.
+        // The servers, as their processes and their metrics have them; and
+        // whether a backup streamed through the primary's look.
+        let looked = sh.ns();
         let look = bench.look(&bench.server(), "soak.fennec");
+        let backing_up = streamed_at(*sh.backup_span.lock().unwrap(), (looked, sh.ns()));
         let rlook = bench.look(&bench.replica(), "replica.fennec");
         let page = super::metrics_page(&addr).unwrap_or_default();
         let rpage = super::metrics_page(&raddr).unwrap_or_default();
@@ -8531,6 +8667,7 @@ fn run(o: &Opts) {
                 ("threads", l.threads.to_string()),
                 ("fds", l.fds.to_string()),
                 ("compacting", (l.compacting as u8).to_string()),
+                ("backing_up", (backing_up as u8).to_string()),
             ]);
         }
         if let Some(l) = rlook {
@@ -8818,9 +8955,14 @@ fn run(o: &Opts) {
                         _ => Sampler::start(&bench),
                     };
                     if in_compact {
-                        // The compact the kill lands in: asked, and under
-                        // way a second -- asked again while the server's
-                        // own holds the file -- the kill after.
+                        // The compact the kill lands in: asked -- again
+                        // while the server's own holds the file -- and its
+                        // side file seen written, the kill after. Its wait
+                        // is the announced span's, as its compact is: a
+                        // death in it is found as one in the kill's
+                        // announced second (`found_dead`), and the kill is
+                        // sent no sooner than a second after the
+                        // announcement and at once once the file is seen.
                         let ended = || {
                             doings.compacts.load(Ordering::SeqCst)
                                 + doings.compact_busy.load(Ordering::SeqCst)
@@ -8833,32 +8975,38 @@ fn run(o: &Opts) {
                             minute: m,
                             for_kill: true,
                         });
-                        let t = Instant::now();
-                        let seen = evs.len();
-                        loop {
-                            evs.extend(events.try_iter());
-                            let wait = compact_wait(
-                                &evs[seen..],
-                                sh.compact_since.load(Ordering::SeqCst),
-                                sh.ns(),
-                                ended() != before,
-                                t.elapsed(),
-                            );
-                            match wait {
-                                None => {
-                                    std::thread::sleep(Duration::from_millis(20));
-                                    continue;
-                                }
-                                Some(CompactWait::Ended) => sh.note(format!(
-                                    "the compact the kill at minute {m} was to land in ended within a second: killed without"
-                                )),
-                                Some(CompactWait::Timeout) => sh.note(format!(
-                                    "the kill at minute {m} found no compact of its own under way within {} s: killed without",
-                                    WAIT_MAX.as_secs()
-                                )),
-                                Some(CompactWait::Died | CompactWait::UnderWay) => {}
-                            }
-                            break;
+                        let (wait, seen) = kill_wait(
+                            &sh,
+                            &|| ended() != before,
+                            &events,
+                            &mut evs,
+                            &mut || {
+                                bench.beside_written(&bench.server(), "soak.fennec") == Some(true)
+                            },
+                            WAIT_MAX,
+                        );
+                        // How long after the compact's request was sent
+                        // its side file was seen written -- the request
+                        // out at the look that saw it, to that look's end
+                        // -- -1 where it was not: the report names a kill
+                        // in a compact that found none writing by it.
+                        doings.figure(
+                            "kill_beside_ms",
+                            seen.map_or("-1".into(), |d| d.as_millis().to_string()),
+                        );
+                        match wait {
+                            CompactWait::Ended => sh.note(format!(
+                                "the compact the kill at minute {m} was to land in ended before its side file was seen written: killed without"
+                            )),
+                            CompactWait::Timeout => sh.note(format!(
+                                "the kill at minute {m} saw no side file of its compact written within {} s: killed without",
+                                WAIT_MAX.as_secs()
+                            )),
+                            CompactWait::Writing => say(format!(
+                                "minute {m}: the compact the kill lands in seen writing its side file {:.1} s after it was asked",
+                                seen.unwrap_or_default().as_secs_f64()
+                            )),
+                            CompactWait::Died => {}
                         }
                     }
                     // The announced second: operations due from `from` on
@@ -9376,7 +9524,7 @@ pub const CRITERIA: [&str; 23] = [
     "8 hours and an end line",
     "ran its planned minutes",
     "every minute has operations from every connection",
-    "last hour's p99, steady and in compacts, <= 1.25x its schedule's",
+    "last hour's p99, steady and in compacts, <= 1.25x an hour like it",
     "file <= 2.2x live every minute",
     "primary's memory beyond what it holds < +5% within each life",
     "replica's memory beyond its engine's < +5% after the first hour",
@@ -9459,11 +9607,170 @@ fn same_hour(n: u64, s: &Settings) -> Option<u64> {
     (1..=last - 60).find(|&a| hour_doings(a, n, s) == want)
 }
 
+/// How much CPU this host's other processes may take, in cores, before a
+/// minute is named as one they kept busy (`others_host`).
+const HOST_BUSY: f64 = 1.0;
+
+/// The schedule's compacts in a run's lines, each as its first line, its
+/// p99 in compacts and the most other processes on this host took in its
+/// lines: a run of lines with compact operations (`compact_ops`), one of
+/// which counted a compact ended (`compact`) -- one the server's own
+/// compaction turned away (`compact_busy`) wrote nothing of the run's,
+/// and the compact a kill lands in has its operations the restart's. A
+/// compact's operations and its backlog fall on the line after the minute
+/// it was asked in -- each of the 23 of P6's run of 2026-11-27 at 80% and
+/// the 21 of its run at 50% did -- and where they spread over two lines,
+/// the higher p99 of the two stands for it: none of their operations' p99
+/// is above it.
+fn compact_p99s(minutes: &[Line]) -> Vec<(u64, f64, f64)> {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied().unwrap_or(0.0);
+    let mut out = Vec::new();
+    // The run of lines being read: its first, its p99, its busiest
+    // minute, whether a compact ended in it, and its last line.
+    let mut open: Option<(u64, f64, f64, bool, u64)> = None;
+    let mut close = |o: &mut Option<(u64, f64, f64, bool, u64)>| {
+        if let Some((first, p99, busy, ended, _)) = o.take() {
+            if ended && p99 > 0.0 {
+                out.push((first, p99, busy));
+            }
+        }
+    };
+    for (k, m) in minutes {
+        if get(m, "compact_ops") <= 0.0 {
+            close(&mut open);
+            continue;
+        }
+        if open.is_some_and(|o| o.4 + 1 != *k) {
+            close(&mut open);
+        }
+        let o = open.get_or_insert((*k, 0.0, 0.0, false, *k));
+        o.1 = o.1.max(get(m, "p99_compact"));
+        o.2 = o.2.max(get(m, "others_host"));
+        o.3 |= get(m, "compact") > 0.0;
+        o.4 = *k;
+    }
+    close(&mut open);
+    out
+}
+
+/// An hour's compact: the median of its compacts' p99s, the mean of the
+/// middle two where they are even, `None` with fewer than two. Some three
+/// compacts an hour are on P6's schedule, and the server's own compaction
+/// turns one away now and then -- two of the 23 of its run of 2026-11-27
+/// at 50%. With two, either one alone would decide the hour: the slower,
+/// a busy host's tail -- what the hours' p99s failed on -- or the quicker,
+/// passing an hour whose other compact is slow. Their mean weighs both:
+/// one slowed half again beside one as quick as the reference hour's puts
+/// the hour at 1.25 times it, and one doubled fails it. One compact is
+/// one tail, and an hour with one is not judged.
+fn hour_compact(p99s: &[f64]) -> Option<f64> {
+    let mut s = p99s.to_vec();
+    s.sort_by(f64::total_cmp);
+    match s.len() {
+        0 | 1 => None,
+        n if n % 2 == 0 => Some((s[n / 2 - 1] + s[n / 2]) / 2.0),
+        n => Some(s[n / 2]),
+    }
+}
+
+/// The compacts' half of the last hour's criterion over `n` lines: the
+/// last hour's compact (`hour_compact` over the p99s of `compact_p99s`'s
+/// compacts whose first line is from `n - 59`) against the compact of the
+/// hour from line `a` -- the steady half's, the earliest holding the last
+/// hour's schedule (`same_hour`), lines 61-120 of an 8-hour run -- at most
+/// 1.25 times it; and what it says. Its purpose is to catch compactions
+/// that degrade over the run. An hour's p99 in compacts is its worst
+/// compact's tail -- some three compacts an hour -- and P6's run of
+/// 2026-11-27 at 80% held the last hour's, 6.34 s, from one compact at
+/// minute 440 while other processes took 1.6 cores of this host, against
+/// minutes 61-120's 1.75 s: 3.62x and failed, its hours' 8.4, 1.75, 2.6,
+/// 4.6, 9.1, 2.3, 4.6 and 6.3 s no trend, its compacts 14.5-23.4 s
+/// throughout. The hours' median compacts move with what most of their
+/// compacts do, never with one: that run's 1.62 s against 1.69 s, 0.96x.
+/// Against the median of every compact from minute 61 to the last hour,
+/// as the half first was, the busy compacts of minutes 241-401 lifted the
+/// reference to 2.30 s, and every last-hour compact made 1.75 times
+/// slower passed at 1.23x; against minutes 61-120's, one made 1.5 times
+/// slower fails at 1.44x, as does a drift of +50% from minute 61 to the
+/// end, at 1.35x. The compacts in minutes other processes kept this host
+/// busy in are named, and judged as they are, in either hour. `scheduled`,
+/// whether the hours' schedule asks a compact: where it asks none, there
+/// is nothing to judge; where an hour has fewer than two, it is NOT
+/// JUDGED, and fails.
+fn compacts_judged(
+    compacts: &[(u64, f64, f64)],
+    n: u64,
+    a: u64,
+    scheduled: bool,
+) -> (bool, String) {
+    let from = n.saturating_sub(59).max(1);
+    let first: Vec<&(u64, f64, f64)> = compacts
+        .iter()
+        .filter(|c| (a..=a + 59).contains(&c.0))
+        .collect();
+    let last: Vec<&(u64, f64, f64)> = compacts.iter().filter(|c| c.0 >= from).collect();
+    let p99s = |xs: &[&(u64, f64, f64)]| xs.iter().map(|c| c.1).collect::<Vec<_>>();
+    let busy: Vec<u64> = first
+        .iter()
+        .chain(&last)
+        .filter(|c| c.2 >= HOST_BUSY)
+        .map(|c| c.0)
+        .collect();
+    let busy_said = match busy.is_empty() {
+        true => String::new(),
+        false => format!(
+            "; other processes took a core or more of this host in the compacts of minutes {}, judged as they are",
+            list(&busy)
+        ),
+    };
+    if !scheduled {
+        return (
+            true,
+            format!(
+                "no compact on the schedule of minutes {a}-{} or the last hour",
+                a + 59
+            ),
+        );
+    }
+    let counts = format!(
+        "{} of the schedule's compacts in the last hour and {} in minutes {a}-{}",
+        last.len(),
+        first.len(),
+        a + 59
+    );
+    match (hour_compact(&p99s(&first)), hour_compact(&p99s(&last))) {
+        (Some(c0), Some(c1)) => (
+            c1 <= 1.25 * c0,
+            format!(
+                "in compacts the last hour's median compact {c1:.0} us against minutes {a}-{}'s {c0:.0} us ({:.2}x; each compact's p99, {counts}{}){busy_said}",
+                a + 59,
+                c1 / c0.max(1.0),
+                match first.len() == 2 || last.len() == 2 {
+                    true => ", two weighed by their mean",
+                    false => "",
+                }
+            ),
+        ),
+        _ => (
+            false,
+            format!(
+                "compacts NOT JUDGED, too few: {counts}, two in each needed -- one compact is its own tail{busy_said}"
+            ),
+        ),
+    }
+}
+
 /// A cell's lines as one append wrote them: run, cell, metrics.
 type Block = (String, String, Vec<(String, f64)>);
 
 /// A minute's line as the report reads it: its minute and its values.
 type Line<'a> = (u64, &'a HashMap<String, f64>);
+
+/// A quiet look of the primary's as its memory criterion reads it: the
+/// stretch between compactions it is in, its anonymous memory, that less
+/// what the server holds (its engine's own and its feed's), its minute,
+/// and its anonymous memory less the feed.
+type Quiet = (usize, f64, f64, u64, f64);
 
 /// What the primary's replication feed holds at each line of a life, in
 /// bytes: the records it appended since it opened, up to the feed's bound
@@ -9815,6 +10122,192 @@ fn quiet_look(m: &HashMap<String, f64>, replica: bool) -> bool {
     }
 }
 
+/// The lines whose look of the primary came while a backup streamed its
+/// image (`backing_up`, `streamed_at`), which the primary's memory
+/// criterion leaves out as `quiet_look` leaves out a compaction's; and
+/// whether they were read from the schedule. A run from before the lines
+/// said so names no stream: a backup's looks are then those from the line
+/// after the minute it was asked in (`n` lines, `s` the run's settings) to
+/// the line that counted it (`backup`, `backup_failed`, `backup_died`)
+/// whose server had more connections than the run's median -- the
+/// stream's own, 99 against 98 in each of P6's runs of 2026-11-27, at
+/// exactly the looks a later line would have named (a line that counted
+/// no connections is taken as the stream's). The line that counted it,
+/// and those of its restore and verify, come after the stream: the
+/// connections back to 98, the memory back to where it stood. A backup
+/// never counted leaves no line out. The memory a backup holds is let go
+/// of as its stream ends: what it leaves behind is at the next look.
+fn backup_looks(minutes: &[Line], n: u64, s: Option<&Settings>) -> (BTreeSet<u64>, bool) {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied().unwrap_or(0.0);
+    if minutes.iter().any(|(_, m)| m.contains_key("backing_up")) {
+        let streamed = minutes
+            .iter()
+            .filter(|(_, m)| get(m, "backing_up") > 0.0)
+            .map(|(k, _)| *k)
+            .collect();
+        return (streamed, false);
+    }
+    let mut out = BTreeSet::new();
+    let Some(s) = s else {
+        return (out, true);
+    };
+    let counted = |m: &HashMap<String, f64>| {
+        ["backup", "backup_failed", "backup_died"]
+            .iter()
+            .any(|k| get(m, k) > 0.0)
+    };
+    let usual = median(
+        &minutes
+            .iter()
+            .filter_map(|(_, m)| m.get("connections").copied())
+            .collect::<Vec<_>>(),
+    );
+    for a in backup_asks(n, s) {
+        if let Some((b, _)) = minutes.iter().find(|(k, m)| *k > a && counted(m)) {
+            out.extend(
+                minutes
+                    .iter()
+                    .filter(|(k, m)| {
+                        (a + 1..=*b).contains(k) && m.get("connections").is_none_or(|c| *c > usual)
+                    })
+                    .map(|(k, _)| *k),
+            );
+        }
+    }
+    (out, true)
+}
+
+/// The minutes of a run of `n` lines a backup was asked after, by its
+/// schedule.
+fn backup_asks(n: u64, s: &Settings) -> Vec<u64> {
+    (1..n)
+        .filter(|&a| {
+            schedule(
+                a,
+                n,
+                s.kill_every,
+                s.kill_in_compact_every,
+                s.compact_every,
+                s.backup_every,
+                s.backup_at,
+            )
+            .contains(&Doing::Backup)
+        })
+        .collect()
+}
+
+/// A backup the run counted (`backup`, `backup_failed`, `backup_died`), as
+/// the primary's memory criterion judges it: the minute it was asked after
+/// (`asked`, where the start line gives the schedule), the line that
+/// counted it, its life, and the looks it is judged between -- before it
+/// those under `span.0`, after it those over `span.1`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CountedBackup {
+    asked: Option<u64>,
+    counted: u64,
+    life: Option<u64>,
+    /// Its stream's first and last looks where a look saw it stream
+    /// (`seen`); where none did, an empty stream at the minute it was
+    /// asked, `(asked + 1, asked)`: a backup that streamed, restored and
+    /// verified between two looks, as the fourth dry run of 2026-11-24's
+    /// did (asked at minute 50, counted on line 51, every look at 98
+    /// connections). None where neither places it.
+    span: Option<(u64, u64)>,
+    seen: bool,
+}
+
+/// Each backup the run counted, in order, paired with the schedule's asks
+/// and the streams its looks saw (`streams`, first and last look each):
+/// the k-th counted is the k-th asked, its stream those seen after its ask
+/// and by the line that counted it. Every counted backup is judged: the
+/// first round of #703 judged only the streams its looks saw, so that a
+/// backup quicker than a minute was never judged -- and a run whose only
+/// one was failed as NOT JUDGED for it -- and one missed among others
+/// dropped out of the count unsaid.
+fn counted_backups(
+    minutes: &[Line],
+    n: u64,
+    s: Option<&Settings>,
+    streams: &[(u64, u64)],
+) -> Vec<CountedBackup> {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied().unwrap_or(0.0);
+    let life = |k: u64| {
+        minutes
+            .iter()
+            .find(|x| x.0 == k)
+            .and_then(|x| x.1.get("life"))
+            .map(|l| *l as u64)
+    };
+    let asks = s.map_or(Vec::new(), |s| backup_asks(n, s));
+    let (mut next_ask, mut next_stream) = (0, 0);
+    let mut out = Vec::new();
+    for (b, m) in minutes {
+        let count = ["backup", "backup_failed", "backup_died"]
+            .iter()
+            .map(|k| get(m, k))
+            .sum::<f64>()
+            .round() as u64;
+        for _ in 0..count {
+            let asked = asks.get(next_ask).copied().filter(|a| a < b);
+            next_ask += asked.is_some() as usize;
+            // A stream seen before the ask is a backup's never counted.
+            while streams
+                .get(next_stream)
+                .is_some_and(|x| x.0 <= asked.unwrap_or(0))
+            {
+                next_stream += 1;
+            }
+            let first = next_stream;
+            while streams.get(next_stream).is_some_and(|x| x.0 <= *b) {
+                next_stream += 1;
+            }
+            let seen = &streams[first..next_stream];
+            let (span, at) = match (seen.first(), seen.last(), asked) {
+                (Some(f), Some(l), _) => (Some((f.0, l.1)), Some(f.0)),
+                (_, _, Some(a)) => (Some((a + 1, a)), Some(a)),
+                _ => (None, None),
+            };
+            out.push(CountedBackup {
+                asked,
+                counted: *b,
+                life: at.and_then(life),
+                span,
+                seen: !seen.is_empty(),
+            });
+        }
+    }
+    out
+}
+
+/// Backups as the memory criterion's line names them: by the minute each
+/// was asked after, or where no start line says it, by the line that
+/// counted it.
+fn backups_named(xs: &[&CountedBackup]) -> String {
+    let asked: Vec<u64> = xs.iter().filter_map(|b| b.asked).collect();
+    let counted: Vec<u64> = xs
+        .iter()
+        .filter(|b| b.asked.is_none())
+        .map(|b| b.counted)
+        .collect();
+    let at = |what: &str, v: &[u64]| match v.len() {
+        1 => format!("{what} at minute {}", v[0]),
+        _ => format!("{what} at minutes {}", list(v)),
+    };
+    let the = match xs.len() {
+        1 => "the backup",
+        _ => "the backups",
+    };
+    match (asked.is_empty(), counted.is_empty()) {
+        (_, true) => format!("{the} {}", at("asked", &asked)),
+        (true, false) => format!("{the} {}", at("counted", &counted)),
+        (false, false) => format!(
+            "{the} {} and {}",
+            at("asked", &asked),
+            at("counted", &counted)
+        ),
+    }
+}
+
 fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String, f64>>) -> Judged {
     let mut minutes: Vec<(u64, &HashMap<String, f64>)> = cells
         .iter()
@@ -9936,29 +10429,25 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     // The last hour against the earliest one holding its schedule: the
-    // restarts' and compacts' operations apart from the steady ones, each
-    // held to the same hour's, so that neither a schedule's backlog nor a
-    // compact's tail decides the verdict.
+    // restarts' and compacts' operations apart from the steady ones, the
+    // steady held to the same hour's, so that neither a schedule's backlog
+    // nor a compact's tail decides the verdict.
     let line = |k: u64| minutes.iter().find(|(m, _)| *m == k).map(|x| x.1);
     let same = settings.and_then(|s| same_hour(n, &s));
     let pair = |k: &str| -> Option<(f64, f64)> {
         let a = same?;
         Some((get(line(a + 59)?, k)?, get(minutes.last()?.1, k)?))
     };
-    // An hour with no compact's operation has no compacts' p99 (written as
-    // 0 before): the compacts are not judged where either hour has none --
-    // read as 0, a last hour with no compact's operation passed the half
-    // against any -- the steady half judged as ever.
-    let compacts = same.and_then(|a| {
-        let p = |m: &HashMap<String, f64>| get(m, "p99_compact_hour").filter(|x| *x > 0.0);
-        Some((p(line(a + 59)?), p(minutes.last()?.1)))
-    });
-    match (same, pair("p99_hour"), compacts) {
+    // The compacts are held apart from the hour's operations, the last
+    // hour's median compact against the same hour's (`compacts_judged`):
+    // an hour's p99 in compacts is its worst compact's tail, and one
+    // compact decided the verdict.
+    match (same, pair("p99_hour")) {
         // An hour with no operation on its schedule has no steady p99 --
         // the loop behind it, every operation a restart's or a compact's
         // backlog -- and is not held to one: the line wrote none (0 before,
         // which a last hour behind its schedule passed against any).
-        (Some(a), None, _) => v.push((
+        (Some(a), None) => v.push((
             CRITERIA[3],
             false,
             format!(
@@ -9966,24 +10455,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 a + 59
             ),
         )),
-        (Some(a), Some((s0, s1)), Some(c)) if s0 > 0.0 && s1 > 0.0 => {
-            let (c_ok, c_said) = match c {
-                (Some(c0), Some(c1)) => (
-                    c1 <= 1.25 * c0,
-                    format!("in compacts {c0:.0} us to {c1:.0} us ({:.2}x)", c1 / c0),
-                ),
-                (c0, c1) => (
-                    true,
-                    format!(
-                        "compacts not judged: no compact's operation {}",
-                        match (c0, c1) {
-                            (None, None) => "in either hour".to_string(),
-                            (None, _) => format!("in minutes {a}-{}", a + 59),
-                            _ => "in the last hour".to_string(),
-                        }
-                    ),
-                ),
-            };
+        (Some(a), Some((s0, s1))) if s0 > 0.0 && s1 > 0.0 => {
+            // Whether the hours' schedule asks a compact at all: the hour
+            // from `a` holds the last's (`same_hour`).
+            let scheduled = settings
+                .is_some_and(|s| hour_doings(a, n, &s).iter().any(|d| d.1 == Doing::Compact));
+            let (c_ok, c_said) = compacts_judged(&compact_p99s(&minutes), n, a, scheduled);
             v.push((
                 CRITERIA[3],
                 s1 <= 1.25 * s0 && c_ok,
@@ -10068,14 +10545,60 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // The steps across compactions, said beside the verdict: the most, in
     // bytes, and its minute.
     let mut step: Option<(f64, u64)> = None;
+    // A look while a backup streamed the primary's image is left out as one
+    // in a compaction is (`backup_looks`): the server holds a pinned image
+    // of its file then -- the usertable's id index, some 12 MB, the frames'
+    // index, the docs graph and up to 8 MB of the open segment -- none of
+    // it in its own account, and lets it go as the stream ends. P6's run of
+    // 2026-11-27 at 80% failed the lives a backup was asked in, 1, 5, 9 and
+    // 13, the most +19.3%: 24-30 MB more in the three minutes each backup
+    // streamed, the stretch ending a look after the stream at the server's
+    // own compaction, so that three of its last five quiet looks were the
+    // backup's. Neither the stretch nor the life is cut at one, and what a
+    // backup leaves behind is judged backup by backup: the median of the
+    // five quiet looks after its stream in its life, across a compaction,
+    // against the five before it, under 5% of its anonymous memory at
+    // them. In each of that run's four, the server's own compaction came
+    // two or three looks after the stream and ended the stretch, so that a
+    // stretch held at most one look after a backup: 60 MB kept from each
+    // stream's end passed it at +0.3%, said only as a step across a
+    // compaction. Judged at the single look after a backup instead, its
+    // life 9 failed at +6.9%: its look of minute 295 came in the first
+    // seconds of the server's own compaction of 35 s, its side file not
+    // yet seen, and one look decided. A compaction steps the memory beyond
+    // what the server holds too -- the heap its engine let go of that the
+    // allocator kept, that run's life 6 some 10 MB at minute 198 -- with
+    // the engine's own falling under it and its anonymous memory not
+    // rising; what a backup leaves raises both. So a backup is held to the
+    // lesser of the two rises: beyond what the server holds, and of its
+    // anonymous memory less the feed. Every backup the run counted is
+    // judged, one no look saw stream from the minute it was asked
+    // (`counted_backups`).
+    let (backups, scheduled) = backup_looks(&minutes, n, settings.as_ref());
+    let mut backed: Vec<u64> = Vec::new();
+    // Each backup's stream: the first and last of its looks, one after
+    // another in one life.
+    let life_of = |k: u64| line(k).and_then(|m| get(m, "life"));
+    let mut streams: Vec<(u64, u64)> = Vec::new();
+    for &k in &backups {
+        match streams.last_mut() {
+            Some(s) if s.1 + 1 == k && life_of(s.1) == life_of(k) => s.1 = k,
+            _ => streams.push((k, k)),
+        }
+    }
+    let counted_all = counted_backups(&minutes, n, settings.as_ref(), &streams);
+    // Each backup judged: its place in `counted_all` and its rise.
+    let mut rises: Vec<(usize, f64)> = Vec::new();
     for (life, xs) in &lives {
         let feed = feed_held(xs, cap, *life == 0);
+        let mut streamed: Vec<u64> = Vec::new();
         // Each settled quiet look: the stretch between compactions it is
-        // in, its anonymous memory, that less what the server holds, and
-        // its minute. A compaction -- the run's or the server's own,
-        // writing at a look or ended in a minute -- starts a stretch.
+        // in, its anonymous memory, that less what the server holds, its
+        // minute, and its anonymous memory less the feed. A compaction --
+        // the run's or the server's own, writing at a look or ended in a
+        // minute -- starts a stretch.
         let mut stretch = 0usize;
-        let quiet: Vec<(usize, f64, f64, u64)> = xs
+        let quiet: Vec<Quiet> = xs
             .iter()
             .zip(&feed)
             .skip(xs.len() - settled(xs).len())
@@ -10086,26 +10609,30 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 if !quiet_look(m, false) {
                     return None;
                 }
+                if backups.contains(k) {
+                    streamed.push(*k);
+                    return None;
+                }
                 let anon = get(m, "rss_anon")?;
                 Some((
                     stretch,
                     anon,
                     anon - get(m, "memory_bytes").unwrap_or(0.0) - f,
                     *k,
+                    anon - f,
                 ))
             })
             .collect();
         // What the memory beyond what is held did across each compaction:
         // the median of a stretch's last three quiet looks to the next's
         // first three.
-        let parts: Vec<&[(usize, f64, f64, u64)]> = quiet.chunk_by(|a, b| a.0 == b.0).collect();
+        let parts: Vec<&[Quiet]> = quiet.chunk_by(|a, b| a.0 == b.0).collect();
         for w in parts.windows(2) {
             let (a, b) = (w[0], w[1]);
             if a.len() < 3 || b.len() < 3 {
                 continue;
             }
-            let beyond =
-                |xs: &[(usize, f64, f64, u64)]| median(&xs.iter().map(|x| x.2).collect::<Vec<_>>());
+            let beyond = |xs: &[Quiet]| median(&xs.iter().map(|x| x.2).collect::<Vec<_>>());
             let d = beyond(&b[..3]) - beyond(&a[a.len() - 3..]);
             if step.is_none_or(|s| d > s.0) {
                 step = Some((d, b[0].3));
@@ -10124,7 +10651,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             quiet.len(),
             settled(xs).len()
         ));
-        let at = |xs: &[(usize, f64, f64, u64)], k: usize| -> f64 {
+        let at = |xs: &[Quiet], k: usize| -> f64 {
             median(
                 &xs.iter()
                     .map(|x| if k == 0 { x.1 } else { x.2 })
@@ -10141,15 +10668,121 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 grew.push(*life);
             }
         }
+        // Each backup counted in this life: the five quiet looks before its
+        // stream and the five after it in the life.
+        for (i, b) in counted_all
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.life == Some(*life))
+        {
+            let Some((s0, s1)) = b.span else {
+                continue;
+            };
+            let before: Vec<Quiet> = quiet
+                .iter()
+                .filter(|x| x.3 < s0)
+                .rev()
+                .take(5)
+                .copied()
+                .collect();
+            let after: Vec<Quiet> = quiet.iter().filter(|x| x.3 > s1).take(5).copied().collect();
+            if before.len() < 5 || after.len() < 5 {
+                continue;
+            }
+            let m =
+                |xs: &[Quiet], f: fn(&Quiet) -> f64| median(&xs.iter().map(f).collect::<Vec<_>>());
+            let beyond = m(&after, |x| x.2) - m(&before, |x| x.2);
+            let anon = m(&after, |x| x.4) - m(&before, |x| x.4);
+            rises.push((i, beyond.min(anon) / m(&before, |x| x.1).max(1.0)));
+        }
+        backed.extend(streamed);
         judged_lives += judged as usize;
     }
+    // The backups: none counted, none judged -- each with fewer than five
+    // quiet looks before or after it in its life, or placed by neither a
+    // look nor the schedule -- or each one's rise.
+    let pick = |f: &dyn Fn(usize, &CountedBackup) -> bool| -> Vec<&CountedBackup> {
+        counted_all
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| f(*i, b))
+            .map(|(_, b)| b)
+            .collect()
+    };
+    let judged_at = |i: usize| rises.iter().any(|r| r.0 == i);
+    let unjudged = pick(&|i, b| b.span.is_some() && !judged_at(i));
+    let unplaced = pick(&|_, b| b.span.is_none());
+    let unseen = pick(&|i, b| !b.seen && judged_at(i));
+    let rose = pick(&|i, _| rises.iter().any(|r| r.0 == i && r.1 >= 0.05));
+    let backups_ok = counted_all.is_empty() || (!rises.is_empty() && rose.is_empty());
+    let unplaced_said = match unplaced.len() {
+        0 => String::new(),
+        k => format!(
+            "; {k} counted that neither the schedule nor a look places, not judged: {}",
+            backups_named(&unplaced)
+        ),
+    };
+    let backups_said = match rises.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+        _ if counted_all.is_empty() => match streams.is_empty() {
+            true => "; no backup in the run".to_string(),
+            false => "; no backup counted".to_string(),
+        },
+        None if unjudged.is_empty() => format!(
+            "; its backups NOT JUDGED: neither the schedule nor a look places any of the {} counted ({})",
+            counted_all.len(),
+            backups_named(&unplaced)
+        ),
+        None => format!(
+            "; its backups NOT JUDGED, too few quiet looks: none of the {} counted ({}) had five before its stream and five after it in its life{unplaced_said}",
+            counted_all.len(),
+            backups_named(&unjudged)
+        ),
+        Some(&(at, top)) => format!(
+            "; {} of {} counted backups judged, each from the median of the five quiet looks before its stream to the five after it in its life, a compaction between them or not, by the lesser rise of what is beyond what the server holds and of its anonymous memory less the feed: the most {:+.1}% ({}){}{}{}{unplaced_said}",
+            rises.len(),
+            counted_all.len(),
+            top * 100.0,
+            backups_named(&[&counted_all[at]]),
+            match rose.is_empty() {
+                true => String::new(),
+                false => format!("; 5% or more: {}", backups_named(&rose)),
+            },
+            match unseen.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "; judged from the minute it was asked alone, no look seeing it stream: {}",
+                    backups_named(&unseen)
+                ),
+            },
+            match unjudged.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "; not judged, fewer than five quiet looks before or after it in its life: {}",
+                    backups_named(&unjudged)
+                ),
+            }
+        ),
+    };
     let limit = end
         .and_then(|m| get(m, "memory_limit"))
         .filter(|x| *x > 0.0);
     let peaks_said = |p: &str| peaks(&minutes, p, limit);
+    // The looks left out for a backup, said on the line however it ends.
+    let backed_said = format!(
+        "; {} looks while a backup streamed left out{}{}",
+        backed.len(),
+        match scheduled {
+            true => ", read from the schedule (no line names a stream): from the line after each backup was asked to the one that counted it, where the server had a connection more than its median, the backup's",
+            false => "",
+        },
+        match backed.is_empty() {
+            true => String::new(),
+            false => format!(" (minutes {})", list(&backed)),
+        }
+    );
     v.push((
         CRITERIA[5],
-        judged_lives > 0 && grew.is_empty(),
+        judged_lives > 0 && grew.is_empty() && backups_ok,
         match judged_lives {
             // Not a leak and not a pass: the run's data left nothing to
             // judge -- under the run's memory the server compacts on its
@@ -10157,7 +10790,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             // ten quiet looks between two. Said so, each life's looks
             // beside it.
             0 => format!(
-                "NOT JUDGED, too few quiet looks: no life of the primary had ten between two compactions from its fifth line, its other looks in a compaction -- quiet of settled: {}{}",
+                "NOT JUDGED, too few quiet looks: no life of the primary had ten between two compactions from its fifth line, its other looks in a compaction -- quiet of settled: {}{backed_said}{backups_said}{}",
                 match looks.is_empty() {
                     true => "no line names its life".to_string(),
                     false => looks.join(", "),
@@ -10165,7 +10798,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 peaks_said("")
             ),
             _ => format!(
-                "{judged_lives} of {} lives of ten quiet looks between two compactions or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of a stretch's first five to its last five's{}{}{}",
+                "{judged_lives} of {} lives of ten quiet looks between two compactions or more, the most {:+.1}% of a life's anonymous memory grown beyond what the server holds (its engine's own and its replication feed's, {:.0} MiB at most), from the median of a stretch's first five to its last five's{}{}{backed_said}{backups_said}{}",
                 lives.len(),
                 most * 100.0,
                 cap / 1048576.0,
@@ -10922,7 +11555,11 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     // (its side file left behind: `kill_compacting`, on the line after the
     // kill's minute). A compact request the restart cut (`compact_killed`)
     // alone does not say so: a compact that ended just before the kill
-    // landed leaves its request cut all the same.
+    // landed leaves its request cut all the same. The kill waits for its
+    // compact's side file to be seen written (`kill_wait`), and where it
+    // was not -- the compact ended first, or nothing was written within
+    // the wait -- it is sent without, its line saying so
+    // (`kill_beside_ms` -1), and fails here as one in no compact.
     if let Some(s) = settings {
         for m in 1..n {
             let due = schedule(
@@ -10938,7 +11575,19 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 && line(m + 1).and_then(|x| get(x, "kill_compacting")) != Some(1.0)
                 && !line(m + 1).is_some_and(|x| get(x, "kill_died").is_some_and(|d| d > 0.0))
             {
-                short.push(format!("the kill at minute {m} found no compact writing"));
+                short.push(format!(
+                    "the kill at minute {m} found no compact writing{}",
+                    match line(m + 1).and_then(|x| get(x, "kill_beside_ms")) {
+                        Some(x) if x < 0.0 => {
+                            ", its side file never seen written before the kill".to_string()
+                        }
+                        Some(x) => format!(
+                            ", though its side file was seen written {:.1} s after the compact was asked",
+                            x / 1e3
+                        ),
+                        None => String::new(),
+                    }
+                ));
             }
         }
     }
@@ -11364,12 +12013,21 @@ fn notes(
         .filter(|(_, m)| get(m, "kill").is_some_and(|x| x > 0.0))
         .map(|(k, m)| {
             format!(
-                "minute {} ({}, {})",
+                "minute {} ({}{}, {})",
                 k - 1,
                 match get(m, "kill_compacting") {
                     Some(1.0) => "a compact writing",
                     Some(_) => "no compact writing",
                     None => "compact unknown",
+                },
+                // A kill in a compact: when its side file was seen written.
+                match get(m, "kill_beside_ms") {
+                    Some(x) if x >= 0.0 => format!(
+                        ", its side file seen written {:.1} s after it was asked",
+                        x / 1e3
+                    ),
+                    Some(_) => ", its side file never seen written".into(),
+                    None => String::new(),
                 },
                 match get(m, "kill_sync_ms") {
                     Some(x) if x > 0.0 => format!("an fsync {x:.0} ms in flight"),
@@ -12015,6 +12673,34 @@ mod tests {
         // 120 minutes.
         assert_eq!(owed(480, &s), (15, 5, 23, 4));
         assert_eq!(owed(120, &s), (3, 1, 5, 1));
+        // The default's backups (`--backup-at 45`): each five minutes after
+        // a compact, and nothing else of the schedule's from four minutes
+        // before it to fourteen after -- it streams, restores and verifies
+        // before the server's own compaction, which came fifteen minutes
+        // after each compact at 80%, and its life holds the five quiet
+        // looks after it with that compaction and the kill fifteen minutes
+        // on to spare.
+        let d = Settings::of(&opts());
+        let asks = backup_asks(480, &d);
+        assert_eq!(asks, vec![45, 165, 285, 405]);
+        let others = |m: u64| {
+            schedule(
+                m,
+                480,
+                d.kill_every,
+                d.kill_in_compact_every,
+                d.compact_every,
+                0,
+                0,
+            )
+        };
+        for a in asks {
+            assert_eq!(others(a - 5), vec![Doing::Compact], "{a}");
+            assert!((a - 4..=a + 14).all(|m| others(m).is_empty()), "{a}");
+            assert!(others(a + 15).contains(&Doing::Compact), "{a}");
+        }
+        // And the hour the last is held to is still lines 61-120.
+        assert_eq!(same_hour(480, &d), Some(61));
         // A backup every minute it is due, even one that is a compact's
         // too: the old schedule took the compact alone.
         let s = schedule(120, 480, 30, 0, 20, 120, 0);
@@ -12076,8 +12762,15 @@ mod tests {
             let done = schedule(m - 1, minutes, 30, 90, 20, 120, 50);
             for d in &done {
                 match d {
-                    Doing::Compact => *x.entry("compact").or_default() += 1.0,
+                    Doing::Compact => {
+                        *x.entry("compact").or_default() += 1.0;
+                        // Its operations and their p99, on the same line.
+                        x.insert("compact_ops", 40_000.0);
+                        x.insert("p99_compact", 5_000.0);
+                    }
                     Doing::Backup => {
+                        // Its stream at this look, and counted by it.
+                        x.insert("backing_up", 1.0);
                         x.insert("backup", 1.0);
                         x.insert("restore", 1.0);
                     }
@@ -12141,6 +12834,7 @@ mod tests {
                 ("clock_step", 0.0),
                 ("r_watch", 1.0),
                 ("r_compact_bound_ms", 1_200_000.0),
+                ("backing_up", 0.0),
             ] {
                 x.entry(k).or_insert(val);
             }
@@ -12381,7 +13075,16 @@ mod tests {
                 x.insert("compacting", 1.0);
             }
         });
-        assert_eq!(failing(&held), Vec::<&str>::new());
+        // Its backups, each with four quiet looks after it in its life,
+        // are not judged, and fail the memory's line as such.
+        assert_eq!(failing(&held), vec![CRITERIA[5]]);
+        assert!(
+            verdict(&held, CRITERIA[5])
+                .1
+                .contains("; its backups NOT JUDGED, too few quiet looks"),
+            "{:?}",
+            verdict(&held, CRITERIA[5])
+        );
         let (ok, said) = fds(&held);
         assert!(
             ok && said.contains("within a life 0 at most, 16 of 16 lives judged"),
@@ -12501,8 +13204,8 @@ mod tests {
             (
                 "the compacts' tail drifting",
                 Box::new(|m, x| {
-                    if m > 420 && m < u64::MAX {
-                        x.insert("p99_compact_hour", 7_000.0);
+                    if m > 420 && m < u64::MAX && x.contains_key("p99_compact") {
+                        x.insert("p99_compact", 7_000.0);
                     }
                 }),
                 vec![CRITERIA[3]],
@@ -15250,45 +15953,294 @@ mod tests {
     }
 
     #[test]
-    fn an_hour_with_no_compacts_operation_leaves_the_compacts_not_judged() {
-        let verdict = |text: &str| -> (bool, String) {
-            let j = judge(text, None);
-            let v = j[0].verdicts.iter().find(|v| v.0 == CRITERIA[3]).unwrap();
-            (v.1, v.2.clone())
-        };
-        // The last hour with no compact's operation: read as 0, it passed
-        // the compacts against any.
+    fn an_hour_of_fewer_than_two_compacts_is_not_judged_and_two_weigh_alike() {
+        let verdict = |text: &str| verdict(text, CRITERIA[3]);
+        // The last hour with no compact's operation: not judged, and
+        // failed.
         let (ok, said) = verdict(&synthetic(480, &|m, x| {
             if (421..=480).contains(&m) {
-                x.remove("p99_compact_hour");
+                x.remove("compact_ops");
+                x.remove("p99_compact");
             }
         }));
         assert!(
-            ok && said.contains("compacts not judged: no compact's operation in the last hour"),
+            !ok && said.contains(
+                "compacts NOT JUDGED, too few: 0 of the schedule's compacts in the last hour and 3 in minutes 61-120, two in each needed -- one compact is its own tail"
+            ),
             "{said}"
         );
         // The steady half judged as ever.
         let (ok, said) = verdict(&synthetic(480, &|m, x| {
             if (421..=480).contains(&m) {
-                x.remove("p99_compact_hour");
+                x.remove("compact_ops");
                 x.insert("p99_hour", 3_000.0);
             }
         }));
-        assert!(!ok && said.contains("compacts not judged"), "{said}");
-        // The reference hour's an older line's 0: none, not judged.
+        assert!(
+            !ok && said.contains("steady 2000 us to 3000 us (1.50x)")
+                && said.contains("compacts NOT JUDGED"),
+            "{said}"
+        );
+        // A compact the server's own turned away wrote nothing of the
+        // run's and is none: two of minutes 61-120's, one left -- one
+        // compact is one tail, not judged.
+        let away = |x: &mut HashMap<&'static str, f64>| {
+            if x.remove("compact").is_some() {
+                x.insert("compact_busy", 1.0);
+                x.insert("p99_compact", 50_000.0);
+            }
+        };
         let (ok, said) = verdict(&synthetic(480, &|m, x| {
-            if (61..=120).contains(&m) {
-                x.insert("p99_compact_hour", 0.0);
+            if m == 61 || m == 101 {
+                away(x);
             }
         }));
         assert!(
-            ok && said.contains("compacts not judged: no compact's operation in minutes 61-120"),
+            !ok && said.contains("3 of the schedule's compacts in the last hour and 1 in minutes 61-120, two in each needed"),
             "{said}"
         );
-        // Both: judged.
-        let (ok, said) = verdict(&synthetic(480, &|_, _| {}));
+        // The first hour's compacts aside: judged.
+        let (ok, said) = verdict(&synthetic(480, &|m, x| {
+            if m == 21 || m == 41 {
+                x.insert("p99_compact", 90_000.0);
+            }
+        }));
         assert!(
-            ok && said.contains("in compacts 5000 us to 5000 us"),
+            ok && said.contains(
+                "in compacts the last hour's median compact 5000 us against minutes 61-120's 5000 us (1.00x; each compact's p99, 3 of the schedule's compacts in the last hour and 3 in minutes 61-120)"
+            ),
+            "{said}"
+        );
+        // Two in the last hour, one turned away: their mean. A quick one
+        // never passes a slow one's hour -- one twice as slow beside it
+        // fails it at 1.50x, where the quicker of the two would pass it --
+        // and one 1.4 times as slow passes at 1.20x, where the slower
+        // alone would fail it.
+        let two = |slow: f64| {
+            synthetic(480, &move |m, x| match m {
+                441 => away(x),
+                461 => {
+                    x.insert("p99_compact", 5_000.0 * slow);
+                }
+                _ => {}
+            })
+        };
+        let (ok, said) = verdict(&two(2.0));
+        assert!(
+            !ok && said.contains(
+                "median compact 7500 us against minutes 61-120's 5000 us (1.50x; each compact's p99, 2 of the schedule's compacts in the last hour and 3 in minutes 61-120, two weighed by their mean)"
+            ),
+            "{said}"
+        );
+        let (ok, said) = verdict(&two(1.4));
+        assert!(ok && said.contains("(1.20x;"), "{said}");
+        assert_eq!(hour_compact(&[3.0, 1.0, 2.0, 9.0]), Some(2.5));
+        assert_eq!(hour_compact(&[4.0]), None);
+        // No compact on the hours' schedule: nothing to judge.
+        assert_eq!(
+            compacts_judged(&[], 480, 61, false),
+            (
+                true,
+                "no compact on the schedule of minutes 61-120 or the last hour".to_string()
+            )
+        );
+        // A compact's operations over two lines: the higher p99 of the two
+        // stands for it, and a run of lines with no compact ended in it is
+        // none.
+        let lines: Vec<HashMap<String, f64>> = [
+            (40_000.0, 5_000.0, 0.0, 0.2),
+            (300.0, 9_000.0, 1.0, 1.3),
+            (0.0, 0.0, 0.0, 0.2),
+            (101.0, 42_000.0, 0.0, 0.2),
+            (0.0, 0.0, 0.0, 0.2),
+        ]
+        .iter()
+        .map(|&(ops, p99, compact, others)| {
+            [
+                ("compact_ops", ops),
+                ("p99_compact", p99),
+                ("compact", compact),
+                ("others_host", others),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+        })
+        .collect();
+        let xs: Vec<Line> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i as u64 + 101, m))
+            .collect();
+        assert_eq!(compact_p99s(&xs), vec![(101, 9_000.0, 1.3)]);
+    }
+
+    /// P6's runs of 2026-11-27: each compact's p99 on its line as it wrote
+    /// it, other processes' cores beside it, and the hours' p99s as their
+    /// lines wrote them. At 80%, minutes 61-120's p99 in compacts, 1.75 s,
+    /// the run's quietest hour, against the last hour's 6.34 s from one
+    /// compact at minute 440 while other processes took 1.59 cores: held
+    /// hour to hour it failed at 3.62x, its hours' p99s without a trend.
+    /// The last hour's median compact against minutes 61-120's passes it at
+    /// 0.96x, and its run at 50% at 0.99x. Against the median of every
+    /// compact from minute 61, as the half was first, the busy compacts of
+    /// minutes 241-401 lifted that run's reference to 2.30 s: the last
+    /// hour's compacts slowed by three quarters passed at 1.23x, and a
+    /// drift of +50% from minute 61 to the end at 1.17x. Both fail now, as
+    /// does a slowdown by half and a doubling over the run.
+    #[test]
+    fn the_last_hours_compacts_are_held_to_the_same_hours() {
+        const P6: [(u64, f64, f64); 23] = [
+            (21, 8422162.0, 0.06),
+            (41, 1937768.0, 0.09),
+            (61, 1853882.0, 0.04),
+            (81, 1635779.0, 0.04),
+            (101, 1686110.0, 0.06),
+            (121, 1052770.0, 0.07),
+            (141, 2634023.0, 0.03),
+            (161, 1468006.0, 0.04),
+            (181, 2164261.0, 0.97),
+            (201, 1920991.0, 0.06),
+            (221, 4664066.0, 0.04),
+            (241, 9328132.0, 0.52),
+            (261, 1568670.0, 0.09),
+            (281, 2432696.0, 0.06),
+            (301, 4328522.0, 0.59),
+            (321, 2231370.0, 0.59),
+            (341, 2298479.0, 0.88),
+            (361, 6408897.0, 0.46),
+            (381, 4529848.0, 1.24),
+            (401, 3841982.0, 1.17),
+            (421, 1052770.0, 0.75),
+            (441, 6408897.0, 1.59),
+            (461, 1619001.0, 0.07),
+        ];
+        // At 50%: the compacts of minutes 180 and 360 the server's own
+        // turned away.
+        const P6_50: [(u64, f64, f64); 21] = [
+            (21, 526385.0, 0.47),
+            (41, 346030.0, 0.09),
+            (61, 792723.0, 1.01),
+            (81, 341836.0, 1.03),
+            (101, 383779.0, 0.13),
+            (121, 1002439.0, 0.74),
+            (141, 337641.0, 0.20),
+            (161, 329253.0, 0.18),
+            (201, 337641.0, 0.12),
+            (221, 450888.0, 0.06),
+            (241, 767558.0, 0.04),
+            (261, 341836.0, 0.07),
+            (281, 329253.0, 1.19),
+            (301, 624951.0, 0.04),
+            (321, 379585.0, 1.10),
+            (341, 341836.0, 0.94),
+            (381, 320864.0, 0.07),
+            (401, 350224.0, 0.05),
+            (421, 480248.0, 0.23),
+            (441, 320864.0, 0.07),
+            (461, 379585.0, 0.03),
+        ];
+        // A run's lines from its table, each compact's p99 times `slow` at
+        // its minute, and the hours' p99s: steady, then in compacts, for
+        // minutes 61-120 and the last hour.
+        let run = |table: &[(u64, f64, f64)], hours: [f64; 4], slow: &dyn Fn(u64) -> f64| {
+            synthetic(480, &|m, x| {
+                match table.iter().find(|c| c.0 == m) {
+                    Some(&(_, p99, others)) => {
+                        assert!(x.contains_key("compact_ops"), "{m}");
+                        x.insert("p99_compact", p99 * slow(m));
+                        x.insert("others_host", others);
+                    }
+                    None => {
+                        if x.remove("compact").is_some() {
+                            x.insert("compact_busy", 1.0);
+                        }
+                    }
+                }
+                match m {
+                    61..=120 => {
+                        x.insert("p99_hour", hours[0]);
+                        x.insert("p99_compact_hour", hours[2]);
+                    }
+                    421..=480 => {
+                        x.insert("p99_hour", hours[1]);
+                        x.insert("p99_compact_hour", hours[3]);
+                    }
+                    _ => {}
+                }
+            })
+        };
+        let at80 = [3_103_785.0, 3_405_775.0, 1_753_219.0, 6_341_788.0];
+        let at50 = [274_727.0, 278_921.0, 708_837.0, 421_528.0];
+        let same = |_: u64| 1.0;
+        let p6 = run(&P6, at80, &same);
+        let (ok, said) = verdict(&p6, CRITERIA[3]);
+        assert!(ok, "{said}");
+        assert_eq!(
+            said,
+            "minutes 61-120 against the last hour: steady 3103785 us to 3405775 us (1.10x), in compacts the last hour's median compact 1619001 us against minutes 61-120's 1686110 us (0.96x; each compact's p99, 3 of the schedule's compacts in the last hour and 3 in minutes 61-120); other processes took a core or more of this host in the compacts of minutes 441, judged as they are"
+        );
+        let (ok, said) = verdict(&run(&P6_50, at50, &same), CRITERIA[3]);
+        assert!(
+            ok && said
+                .contains("median compact 379585 us against minutes 61-120's 383779 us (0.99x;")
+                && said.ends_with("in the compacts of minutes 61, 81, judged as they are"),
+            "{said}"
+        );
+        // The last hour's compacts slowed: by three quarters, by half.
+        for (slow, x) in [(1.75, "(1.68x;"), (1.5, "(1.44x;")] {
+            let text = run(&P6, at80, &move |m| if m > 420 { slow } else { 1.0 });
+            let (ok, said) = verdict(&text, CRITERIA[3]);
+            assert!(!ok && said.contains(x), "{slow}: {said}");
+            assert_eq!(failing(&text), vec![CRITERIA[3]]);
+        }
+        // A drift of +50% from minute 61 to the end.
+        let drift = run(&P6, at80, &|m| {
+            1.0 + 0.5 * m.saturating_sub(61) as f64 / 419.0
+        });
+        let (ok, said) = verdict(&drift, CRITERIA[3]);
+        assert!(!ok && said.contains("(1.35x;"), "{said}");
+        // Doubling steadily over the run.
+        let doubling = synthetic(480, &|m, x| {
+            if x.contains_key("p99_compact") {
+                x.insert("p99_compact", 5_000.0 * (1.0 + (m - 1) as f64 / 479.0));
+            }
+        });
+        let (ok, said) = verdict(&doubling, CRITERIA[3]);
+        assert!(
+            !ok && said.contains("median compact 9593 us against minutes 61-120's 5835 us (1.64x;"),
+            "{said}"
+        );
+        // One compact of the last hour's three slowed three times over by
+        // a busy host: named, and the median compact passes.
+        let (ok, said) = verdict(
+            &synthetic(480, &|m, x| {
+                if m == 441 {
+                    x.insert("p99_compact", 15_000.0);
+                    x.insert("others_host", 1.6);
+                }
+            }),
+            CRITERIA[3],
+        );
+        assert!(
+            ok && said.contains("(1.00x;")
+                && said.ends_with("in the compacts of minutes 441, judged as they are"),
+            "{said}"
+        );
+        // A host busy through the last hour, its compacts half again as
+        // slow: failed, the busy compacts named.
+        let busy = synthetic(480, &|m, x| {
+            if (421..=480).contains(&m) {
+                x.insert("others_host", 1.4);
+                if x.contains_key("p99_compact") {
+                    x.insert("p99_compact", 7_500.0);
+                }
+            }
+        });
+        let (ok, said) = verdict(&busy, CRITERIA[3]);
+        assert!(
+            !ok && said.contains("(1.50x;")
+                && said.ends_with("in the compacts of minutes 421, 441, 461, judged as they are"),
             "{said}"
         );
     }
@@ -15920,6 +16872,369 @@ mod tests {
         // Bounded, and full at once where the records were loaded.
         assert!(feed_held(&xs, 7e6, false)[4] <= 7e6 * index + 1.0);
         assert!((feed_held(&xs, 2e6, true)[0] - 2e6 * index).abs() < 1.0);
+    }
+
+    /// P6's run of 2026-11-27 at 80%: each backup streamed through the
+    /// looks of the three minutes after the one it was asked in, the
+    /// primary 24-30 MB more beyond what it holds at them, back at the look
+    /// after; the server's own compaction a minute later -- writing at that
+    /// look, ended at the next -- ended the stretch, so that three of its
+    /// last five quiet looks were the backup's: +19.3%, lives 1, 5, 9 and
+    /// 13, and failed. Left out, the lives pass. What a backup leaves
+    /// behind is judged backup by backup, at the five quiet looks after its
+    /// stream in its life against the five before it: a review kept 60 MB
+    /// from each stream's end to its life's end, and the stretches passed
+    /// it at +0.3%, the compaction ending each a look after the stream.
+    #[test]
+    fn a_backups_looks_are_left_out_of_the_primarys_memory_and_each_backup_is_judged() {
+        // `kept`: the bytes a backup leaves held from its stream's end to
+        // its life's end; `compaction`: the server's own, writing at the
+        // looks from that many minutes after it was asked, ended at the
+        // look after them; `named`: the lines say when it streamed, else
+        // only the backup's connection does; `fell`: what the engine's own
+        // falls by from that compaction on, the anonymous memory as it was
+        // -- the heap it let go of, kept by the allocator.
+        let run = |kept: f64, compaction: Option<(u64, u64)>, named: bool, fell: f64| {
+            synthetic(480, &move |m, x| {
+                if m == 0 || m == u64::MAX {
+                    return;
+                }
+                if !named {
+                    x.remove("backing_up");
+                }
+                x.insert("memory_bytes", 30e6);
+                // Each backup asked at 50, 170, 290 and 410, its stream at
+                // the next three looks, counted when its restore ends.
+                for a in [50, 170, 290, 410] {
+                    let streams = (a + 1..=a + 3).contains(&m);
+                    if streams {
+                        x.insert("rss_anon", 128e6);
+                        match named {
+                            true => x.insert("backing_up", 1.0),
+                            false => x.insert("connections", 101.0),
+                        };
+                    }
+                    if m == a + 1 {
+                        x.remove("backup");
+                        x.remove("restore");
+                    }
+                    if m == a + 4 {
+                        x.insert("backup", 1.0);
+                        x.insert("restore", 1.0);
+                    }
+                    // Lines a + 4 to a + 10 are the rest of its life
+                    // (`synthetic`).
+                    if (a + 4..=a + 10).contains(&m) {
+                        x.insert("rss_anon", 100e6 + kept);
+                    }
+                    if let Some((from, to)) = compaction {
+                        if (a + from..a + to).contains(&m) {
+                            x.insert("compacting", 1.0);
+                        }
+                        if m == a + to {
+                            x.insert("auto_compacts", 1.0);
+                        }
+                        if (a + from..=a + 10).contains(&m) {
+                            x.insert("memory_bytes", 30e6 - fell);
+                        }
+                    }
+                }
+            })
+        };
+        let memory = |text: &str| verdict(text, CRITERIA[5]);
+        let p6_compaction = Some((5, 6));
+        // P6's: passes, the backups' twelve looks left out and said, each
+        // backup judged across the compaction after it.
+        let p6 = run(0.0, p6_compaction, true, 0.0);
+        let (ok, said) = memory(&p6);
+        assert!(ok, "{said}");
+        assert!(
+            said.starts_with("16 of 16 lives")
+                && said.contains(
+                    "; 12 looks while a backup streamed left out (minutes 51, 52, 53, 171, 172, 173, 291, 292, 293, 411, 412, 413); 4 of 4 counted backups judged, each from the median of the five quiet looks before its stream to the five after it in its life"
+                )
+                && said.contains("the most +0.0% (the backup asked at minute ")
+                && !said.contains("judged from the minute it was asked alone"),
+            "{said}"
+        );
+        assert_eq!(failing(&p6), Vec::<&str>::new());
+        // Judged with them, as before: the four lives fail; and no look
+        // saw the backups it counted stream, so each is judged from the
+        // minute it was asked, its stream's looks among the five after it.
+        let (ok, said) = memory(&p6.replace("\tbacking_up\t1", "\tbacking_up\t0"));
+        assert!(
+            !ok && said.contains("; lives 1, 5, 9, 13;")
+                && said.contains("; 4 of 4 counted backups judged")
+                && said.contains("the most +28.0% (the backup asked at minute ")
+                && said.contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410;")
+                && said.contains(
+                    "; judged from the minute it was asked alone, no look seeing it stream: the backups asked at minutes 50, 170, 290, 410"
+                ),
+            "{said}"
+        );
+        // The review's leak: 60 MB kept from each stream's end, the
+        // compaction a look after it. The stretches pass it -- the one
+        // before the compaction ends a look after the stream -- and said
+        // only the step across the compaction; the backups fail.
+        let leak = run(60e6, p6_compaction, true, 0.0);
+        let (ok, said) = memory(&leak);
+        assert!(
+            !ok && said.contains("the most +0.0% of a life's anonymous memory grown")
+                && said.contains("across a compaction it stepped +57.2 MB at most (minute 57)")
+                && said.contains("the most +60.0% (the backup asked at minute ")
+                && said.contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410"),
+            "{said}"
+        );
+        assert_eq!(failing(&leak), vec![CRITERIA[5]]);
+        // Kept with the stretch going on, or ended by a compaction four
+        // looks on: the stretches fail it too.
+        for compaction in [None, Some((8, 9))] {
+            let (ok, said) = memory(&run(28e6, compaction, true, 0.0));
+            assert!(
+                !ok && said.contains("the most +28.0% of a life's anonymous memory grown")
+                    && said.contains("; lives 1, 5, 9, 13;")
+                    && said
+                        .contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410"),
+                "{compaction:?}: {said}"
+            );
+        }
+        // The compaction after it lets go of 14 MB of the engine's own and
+        // the allocator keeps the heap: 14 MB more beyond what the server
+        // holds, its anonymous memory as it was -- the compaction's step,
+        // passed. A leak on top raises both, and fails.
+        let (ok, said) = memory(&run(0.0, p6_compaction, true, 14e6));
+        assert!(
+            ok && said.contains("across a compaction it stepped +13.4 MB at most (minute 57)")
+                && said.contains("the most +0.0% (the backup asked at minute "),
+            "{said}"
+        );
+        let (ok, said) = memory(&run(28e6, p6_compaction, true, 14e6));
+        assert!(
+            !ok && said.contains("the most +28.0% (the backup asked at minute "),
+            "{said}"
+        );
+        // An older run's lines name no stream: the backup's looks read from
+        // the schedule, from the line after it was asked to the one that
+        // counted it, where the server had the backup's connection more.
+        // The line that counted it is past the stream, and judged.
+        let (ok, said) = memory(&run(0.0, p6_compaction, false, 0.0));
+        assert!(ok, "{said}");
+        assert!(
+            said.contains(
+                "; 12 looks while a backup streamed left out, read from the schedule (no line names a stream): from the line after each backup was asked to the one that counted it, where the server had a connection more than its median, the backup's (minutes 51, 52, 53, 171,"
+            ) && said.contains("; 4 of 4 counted backups judged"),
+            "{said}"
+        );
+        // A backup with fewer than five quiet looks after it in its life:
+        // said, and not judged; the run fails where none could be.
+        let short = |lives: &'static [u64]| {
+            synthetic(480, &move |m, x| {
+                for a in [50, 170, 290, 410] {
+                    if lives.contains(&a) && (a + 6..=a + 9).contains(&m) {
+                        x.insert("compacting", 1.0);
+                    }
+                    if lives.contains(&a) && m == a + 10 {
+                        x.insert("auto_compacts", 1.0);
+                    }
+                }
+            })
+        };
+        let (ok, said) = memory(&short(&[50]));
+        assert!(
+            ok && said.contains("; 3 of 4 counted backups judged")
+                && said.ends_with(
+                    "; not judged, fewer than five quiet looks before or after it in its life: the backup asked at minute 50"
+                ),
+            "{said}"
+        );
+        let (ok, said) = memory(&short(&[50, 170, 290, 410]));
+        assert!(
+            !ok && said.ends_with(
+                "; its backups NOT JUDGED, too few quiet looks: none of the 4 counted (the backups asked at minutes 50, 170, 290, 410) had five before its stream and five after it in its life"
+            ),
+            "{said}"
+        );
+        // A look is the backup's where its stream was open at any moment
+        // of it.
+        let s = 1_000_000_000u64;
+        assert!(!streamed_at((u64::MAX, u64::MAX), (5 * s, 6 * s)));
+        assert!(streamed_at((4 * s, u64::MAX), (5 * s, 6 * s)));
+        assert!(streamed_at((4 * s, 5 * s), (5 * s, 6 * s)));
+        assert!(streamed_at((6 * s, 9 * s), (5 * s, 6 * s)));
+        assert!(!streamed_at((2 * s, 4 * s), (5 * s, 6 * s)));
+        assert!(!streamed_at((7 * s, u64::MAX), (5 * s, 6 * s)));
+    }
+
+    /// A backup quicker than the minute between two looks streams at none
+    /// of them: the fourth dry run of 2026-11-24 asked its one at minute
+    /// 50 and counted it on line 51, every look at 98 connections, and the
+    /// first round of #703 failed its memory as NOT JUDGED for it; a
+    /// review hid one of the 80% run's four streams, and the line said "3
+    /// of 3 backups judged". Every counted backup is judged, one no look
+    /// saw stream from the minute it was asked.
+    #[test]
+    fn every_counted_backup_is_judged_one_no_look_saw_stream_from_the_minute_it_was_asked() {
+        // `unseen`: the backups, by the minute each was asked, whose stream
+        // no look saw -- streamed, restored and verified within the minute,
+        // counted on the line after it; `kept`: the bytes each leaves held
+        // from that line to its life's end.
+        let run = |minutes: u64, unseen: &'static [u64], kept: f64| {
+            synthetic(minutes, &move |m, x| {
+                if m == 0 || m == u64::MAX {
+                    return;
+                }
+                for a in [50, 170, 290, 410] {
+                    if unseen.contains(&a) && m == a + 1 {
+                        x.insert("backing_up", 0.0);
+                    }
+                    if (a + 1..=a + 10).contains(&m) {
+                        x.insert("rss_anon", 100e6 + kept);
+                    }
+                }
+            })
+        };
+        let memory = |text: &str| verdict(text, CRITERIA[5]);
+        let all: &[u64] = &[50, 170, 290, 410];
+        let (ok, said) = memory(&run(480, all, 0.0));
+        assert!(
+            ok && said.contains("; 0 looks while a backup streamed left out; 4 of 4 counted backups judged")
+                && said.ends_with(
+                    "; judged from the minute it was asked alone, no look seeing it stream: the backups asked at minutes 50, 170, 290, 410"
+                ),
+            "{said}"
+        );
+        // What one leaves behind fails it, as a seen one's does.
+        let (ok, said) = memory(&run(480, all, 28e6));
+        assert!(
+            !ok && said.contains("the most +28.0% (the backup asked at minute ")
+                && said.contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410;"),
+            "{said}"
+        );
+        // One missed among the others is judged and named, never dropped
+        // from the count.
+        let (ok, said) = memory(&run(480, &[290], 0.0));
+        assert!(
+            ok && said.contains("; 3 looks while a backup streamed left out (minutes 51, 171, 411); 4 of 4 counted backups judged")
+                && said.ends_with(
+                    "; judged from the minute it was asked alone, no look seeing it stream: the backup asked at minute 290"
+                ),
+            "{said}"
+        );
+        let (ok, said) = memory(&run(480, &[290], 28e6));
+        assert!(
+            !ok && said.contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410;"),
+            "{said}"
+        );
+        // The dry run's shape: two hours, its one backup unseen, fails only
+        // what two hours fail.
+        let dry = run(120, all, 0.0);
+        let (ok, said) = memory(&dry);
+        assert!(
+            ok && said.contains("; 1 of 1 counted backups judged"),
+            "{said}"
+        );
+        assert_eq!(failing(&dry), vec![CRITERIA[0], CRITERIA[3]]);
+        // An older run's lines name no stream, and no look had the
+        // backup's connection more: the same.
+        let (ok, said) = memory(
+            &run(480, &[], 0.0)
+                .lines()
+                .filter(|l| !l.contains("\tbacking_up\t"))
+                .map(|l| format!("{l}\n"))
+                .collect::<String>(),
+        );
+        assert!(
+            ok && said.contains("read from the schedule")
+                && said.contains("; 4 of 4 counted backups judged")
+                && said.ends_with(
+                    "no look seeing it stream: the backups asked at minutes 50, 170, 290, 410"
+                ),
+            "{said}"
+        );
+        // With no start line no schedule says when a backup no look saw
+        // was asked: not judged, and said by the line that counted it.
+        let (ok, said) = memory(
+            &run(480, all, 0.0)
+                .lines()
+                .filter(|l| !l.contains(":start\t"))
+                .map(|l| format!("{l}\n"))
+                .collect::<String>(),
+        );
+        assert!(
+            !ok && said.ends_with(
+                "; its backups NOT JUDGED: neither the schedule nor a look places any of the 4 counted (the backups counted at minutes 51, 171, 291, 411)"
+            ),
+            "{said}"
+        );
+    }
+
+    /// A backup is held to the lesser of two rises: of what is beyond what
+    /// the server holds, and of its anonymous memory less the feed. A
+    /// compaction steps the first up -- the engine's own falls, and the
+    /// allocator keeps the heap it let go of -- without the second; the
+    /// engine's own growing raises the second without the first; what a
+    /// backup leaves behind raises both. Held to the anonymous memory
+    /// alone, P6's run at 50% failed at +8.7%; to what is beyond alone, a
+    /// compaction after a backup fails it.
+    #[test]
+    fn a_backup_is_held_to_the_lesser_rise_of_what_is_beyond_and_of_its_anonymous_memory() {
+        // From the look after each backup's stream to its life's end:
+        // `engine`, what the engine's own moves by, `anon` what its
+        // anonymous memory does; `compaction`, the server's own writing at
+        // that look and ended at the next, `engine` moving from it.
+        let run = |engine: f64, anon: f64, compaction: bool| {
+            synthetic(480, &move |m, x| {
+                if m == 0 || m == u64::MAX {
+                    return;
+                }
+                x.insert("memory_bytes", 30e6);
+                for a in [50, 170, 290, 410] {
+                    if compaction && m == a + 2 {
+                        x.insert("compacting", 1.0);
+                    }
+                    if compaction && m == a + 3 {
+                        x.insert("auto_compacts", 1.0);
+                    }
+                    if (a + 2..=a + 10).contains(&m) {
+                        x.insert("memory_bytes", 30e6 + engine);
+                        x.insert("rss_anon", 100e6 + anon);
+                    }
+                }
+            })
+        };
+        let memory = |text: &str| verdict(text, CRITERIA[5]);
+        // The engine's own grows 8 MB across each backup, its anonymous
+        // memory with it: nothing beyond what it holds, passed -- held to
+        // its anonymous memory alone, +8.0%.
+        let (ok, said) = memory(&run(8e6, 8e6, false));
+        assert!(
+            ok && said.starts_with("16 of 16 lives")
+                && said.contains("; 4 of 4 counted backups judged")
+                && said.contains("the most +0.0% (the backup asked at minute "),
+            "{said}"
+        );
+        // A compaction after each lets go of 8 MB of the engine's own, the
+        // allocator keeping the heap: 8 MB more beyond what it holds, its
+        // anonymous memory as it was -- the compaction's step, passed;
+        // held to what is beyond alone, +8.0%.
+        let (ok, said) = memory(&run(-8e6, 0.0, true));
+        assert!(
+            ok && said.contains("across a compaction it stepped +7.6 MB at most (minute 54)")
+                && said.contains("; 4 of 4 counted backups judged")
+                && said.contains("the most +0.0% (the backup asked at minute "),
+            "{said}"
+        );
+        // What a backup leaves raises both, and fails, a compaction after
+        // it or not.
+        for compaction in [false, true] {
+            let (ok, said) = memory(&run(0.0, 8e6, compaction));
+            assert!(
+                !ok && said.contains("the most +8.0% (the backup asked at minute ")
+                    && said
+                        .contains("; 5% or more: the backups asked at minutes 50, 170, 290, 410"),
+                "{compaction}: {said}"
+            );
+        }
     }
 
     #[test]
@@ -17115,7 +18430,6 @@ mod tests {
 
     #[test]
     fn the_wait_for_a_kill_s_compact_ends_on_a_die() {
-        let s = 1_000_000_000u64;
         let die = DockerEv {
             at: 1,
             vm: 1,
@@ -17127,34 +18441,195 @@ mod tests {
             exit: None,
             ..die
         };
-        let zero = Duration::ZERO;
-        assert_eq!(compact_wait(&[], u64::MAX, 5 * s, false, zero), None);
+        let (zero, max) = (Duration::ZERO, WAIT_MAX);
+        assert_eq!(compact_wait(&[], false, false, zero, max), None);
         // An oom alone: its die is what ends the process.
-        assert_eq!(compact_wait(&[oom], u64::MAX, 5 * s, false, zero), None);
+        assert_eq!(compact_wait(&[oom], false, false, zero, max), None);
         // The die: at once, whatever else -- the dry run's second death
         // held the run here for `WAIT_MAX`.
         assert_eq!(
-            compact_wait(&[oom, die], u64::MAX, 5 * s, false, zero),
+            compact_wait(&[oom, die], false, false, zero, max),
             Some(CompactWait::Died)
         );
         assert_eq!(
-            compact_wait(&[die], 4 * s, 5 * s, true, WAIT_MAX),
+            compact_wait(&[die], true, true, WAIT_MAX, max),
             Some(CompactWait::Died)
         );
-        // Under way a second: the kill lands in it.
+        // Its side file seen written: the kill lands in it.
         assert_eq!(
-            compact_wait(&[], 4 * s, 5 * s, false, zero),
-            Some(CompactWait::UnderWay)
+            compact_wait(&[], true, false, zero, max),
+            Some(CompactWait::Writing)
         );
-        assert_eq!(compact_wait(&[], 4 * s + 1, 5 * s, false, zero), None);
         assert_eq!(
-            compact_wait(&[], u64::MAX, 5 * s, true, zero),
+            compact_wait(&[], false, true, zero, max),
             Some(CompactWait::Ended)
         );
         assert_eq!(
-            compact_wait(&[], u64::MAX, 5 * s, false, WAIT_MAX),
+            compact_wait(&[], false, false, WAIT_MAX, max),
             Some(CompactWait::Timeout)
         );
+    }
+
+    /// The kill of minute 360 of P6's run of 2026-11-27 at 80%: its
+    /// compact asked as the schedule's of that minute ended, the docs graph
+    /// past its rebuild's threshold, and the kill sent once the request had
+    /// been out a second -- in the graph phase, which writes nothing, so
+    /// the open after found no side file. The wait, held to the harness's
+    /// own side thread asking a fake server's compact, ends once the side
+    /// file is seen written while the request is out, and never on the
+    /// request's time alone.
+    #[test]
+    fn the_kill_in_a_compact_waits_for_its_side_file_written() {
+        // The fake's compact answers once `release` says so.
+        let release = Arc::new(AtomicBool::new(false));
+        let r = Arc::clone(&release);
+        let addr = fake(move |_, body| {
+            if body.contains("compact usertable") {
+                while !r.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            (200, "{}".into())
+        });
+        let sh = Arc::new(Shared::new(&opts(), addr.clone(), addr, &[]));
+        let doings = Arc::new(Doings::default());
+        let (jobs, rx) = mpsc::channel::<Job>();
+        let side = Side {
+            sh: Arc::clone(&sh),
+            doings: Arc::clone(&doings),
+            kit: kit(1),
+        };
+        let side = std::thread::spawn(move || side.run(rx));
+        let ask = |minute: u64| {
+            jobs.send(Job::Compact {
+                minute,
+                for_kill: true,
+            })
+            .unwrap()
+        };
+        let out = || sh.compact_since.load(Ordering::SeqCst) != u64::MAX;
+        let compacts = |n: u64| {
+            let d = Arc::clone(&doings);
+            move || d.compacts.load(Ordering::SeqCst) >= n
+        };
+        let (_tx, events) = mpsc::channel::<DockerEv>();
+        let mut evs = Vec::new();
+
+        // Minute 360's: the request out, in its graph phase, past the
+        // second the wait gave it before and looked at since -- no kill;
+        // then its side file written -- the kill lands in it.
+        let beside = Arc::new(AtomicBool::new(false));
+        let looks = Arc::new(AtomicU64::new(0));
+        let waiter = {
+            let (sh, beside, looks) = (Arc::clone(&sh), Arc::clone(&beside), Arc::clone(&looks));
+            let ended = compacts(1);
+            std::thread::spawn(move || {
+                let mut evs = Vec::new();
+                let (_tx, events) = mpsc::channel::<DockerEv>();
+                kill_wait(
+                    &sh,
+                    &ended,
+                    &events,
+                    &mut evs,
+                    &mut || {
+                        looks.fetch_add(1, Ordering::SeqCst);
+                        beside.load(Ordering::SeqCst)
+                    },
+                    WAIT_MAX,
+                )
+            })
+        };
+        // The wait begun a second before the compact is asked: the time its
+        // side file was seen at is the request's, not the wait's.
+        std::thread::sleep(Duration::from_secs(1));
+        let sent = Instant::now();
+        ask(360);
+        while !out() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let asked = Instant::now();
+        while (asked.elapsed() < Duration::from_millis(1_500) || looks.load(Ordering::SeqCst) < 2)
+            && !waiter.is_finished()
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !waiter.is_finished(),
+            "the wait ended with the request out {:?} and no side file seen",
+            asked.elapsed()
+        );
+        beside.store(true, Ordering::SeqCst);
+        let (why, seen) = waiter.join().unwrap();
+        let since_sent = sent.elapsed();
+        assert_eq!(why, CompactWait::Writing);
+        assert!(
+            seen.is_some_and(|d| d >= Duration::from_millis(1_500) && d <= since_sent),
+            "{seen:?}, the request sent {since_sent:?} before the wait ended"
+        );
+        // The kill is sent with the request still out: it cuts it.
+        assert!(out());
+        release.store(true, Ordering::SeqCst);
+        while !compacts(1)() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // A side file seen by a look the request ended during -- the
+        // server's own, the run's turned away -- is not the kill's: its
+        // compact ended, and the kill goes without.
+        release.store(false, Ordering::SeqCst);
+        ask(450);
+        let (why, seen) = kill_wait(
+            &sh,
+            &compacts(2),
+            &events,
+            &mut evs,
+            &mut || {
+                release.store(true, Ordering::SeqCst);
+                while out() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                true
+            },
+            WAIT_MAX,
+        );
+        assert_eq!((why, seen), (CompactWait::Ended, None));
+        while !compacts(2)() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // No request out, a side file there -- the server's own between
+        // two asks: never looked at as the kill's, and the bound ends it.
+        let mut looked = 0;
+        let (why, seen) = kill_wait(
+            &sh,
+            &|| false,
+            &events,
+            &mut evs,
+            &mut || {
+                looked += 1;
+                true
+            },
+            Duration::from_millis(300),
+        );
+        assert_eq!((why, seen, looked), (CompactWait::Timeout, None, 0));
+
+        // The request out and nothing written within the bound: killed
+        // without.
+        release.store(false, Ordering::SeqCst);
+        ask(540);
+        let (why, seen) = kill_wait(
+            &sh,
+            &compacts(3),
+            &events,
+            &mut evs,
+            &mut || false,
+            Duration::from_millis(300),
+        );
+        assert_eq!((why, seen), (CompactWait::Timeout, None));
+        release.store(true, Ordering::SeqCst);
+        drop(jobs);
+        side.join().unwrap();
+        assert_eq!(doings.compacts.load(Ordering::SeqCst), 3);
     }
 
     #[test]
