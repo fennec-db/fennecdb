@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
+fennec-core's prepared blocks and pinned reads (`Database::prepare` in `prepared.rs`, `Database::pin` in `pinned.rs`), the handover, maintenance beside the database and compaction (`handover.rs`, `maintenance.rs`, `garbage.rs`) and the id index's floor (`IdIndex` in `store.rs`) -- for code in `crates/fennec-core/src/engine/`; the rest of fennec-core's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
 
 ## Invariants
 
@@ -91,6 +91,37 @@ refusing one made by other places. From the first store it changes until
 each points at the new file, a panic, a store refusing or a file the sink
 cannot map fails the database (`compact_unwound`, `repoint`); a refusal the
 server's compaction meets again is logged once and counted.
+
+A collection's id index sheds its dead ids alike, in memory: its array
+is a suffix of main's -- the array from id 1 that 0.2.0 kept -- ending
+where it ends, from a [floor](../../../../docs/design/storage.md#the-id-floor)
+a cut raises once its first half holds no id (`IdIndex::cut_due`, a count
+taken on to the first held slot when asked, never a walk), never past the
+next new id, and its sparse map main's, floor and all. The cut runs at a
+block's first write to the collection (`Block::remember`) or a replica's
+first frame for it since its records landed (`remember_frame`), never
+inside a block: a put-back would point an id below it. No write lowers it
+a step: an id written below it waits in `under` until a rebuild, or until
+that map's buckets and its walks' sorted list (`Under::sorted`, counted at
+its most) pass the floor's slots in bytes, asked at every write below it,
+and it drops to 1 in main's room (`IdIndex::over_floor`,
+`IdIndex::dropped`), a copy paid for by the writes since the cut before
+it, one at most a cut. An open, a checkpoint and a compact lay the index
+out as main's would and cut it by the same rule (`Store::rebuild_ids`),
+never as a layout of their own: one past main's reach moved every id into
+the map under the write lock, 1.2 s at 10 million rows. The array's
+allocation stays within main's room past the floor (`IdIndex::room`,
+`grow`, `cut`), so the index's bytes are at or under main's for every
+order of writes. A lookup stays a subtraction and a compare, and a walk
+costs the array and the ids below the floor, read from a list sorted
+once after each add, which a pin's copy takes as it stands
+(`Clone for Under`, charged sorted or not by `Store::pinned_bytes`):
+adds and walks taking turns sort them all at every walk, where main sorts
+nothing, the drop bounding them at F/8 to F/4 ids below a floor F, 4.6 ms
+a walk at 114 688, the most below 600 001.
+`store::id_floor_tests` drives main's own index beside it and holds every
+id read back, the layout main's and the bytes, as a counting allocator
+reads them, at or under main's after every write.
 
 **[A file is compacted before it outgrows the page cache](../../../../docs/design/storage.md#compaction-and-the-page-cache)**
 (`CompactPolicy::memory`) so its live records fit the cache's room
