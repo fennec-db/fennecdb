@@ -1128,7 +1128,9 @@ it lands, before its fsync and its answer.
 minute 50 a backup over the replication stream (`fennec backup` into an
 archive, its directory made first: into a path that is none it writes a
 database file of its own, which `fennec restore` takes for a sealed backup
-and refuses without a key), restored (`fennec restore`), the restored file verified and then
+and refuses without a key) -- in a container of its own, the span its
+stream was open in kept, so that the minute's look says whether the
+primary streamed its image through it (`backing_up`) -- restored (`fennec restore`), the restored file verified and then
 served read-only beside the run, its change number held to the primary's
 at the backup's start and 1 000 of the records written so far read from it
 and held to the registers as reads over the backup's span (an empty or
@@ -1137,8 +1139,26 @@ all of it holds (`backup_stale`, `backup_differs` where it does not); every
 30 the server killed (`docker kill --signal KILL`), its file held to its
 checksums (`fennec verify`) before it starts again. They queue one behind
 another, so a backup due with a compact runs after it; a kill waits for the
-queue but every 90 minutes, when it lands in a compact of its own: asked,
-and under way for a second when the kill is sent. fennec-server compacts
+queue but every 90 minutes, when it lands in a compact of its own:
+announced, then the compact asked, and its side file seen written when
+the kill is sent -- `<file>.beside` read through `/proc/1/root` as the
+minute's look reads it, a byte or more and written in the last minute,
+by a look made while the compact's request was out from its start to its
+end (`kill_wait`, `Kit::beside_written`), a second after the announcement
+at the soonest. Its request out was not enough: a compact rebuilds each
+worn graph before it writes anything (`graphs_rebuilt`), and P6's run of
+2026-11-27 at 80% sent its kill of minute 360 once the request had been
+out a second -- minute 360 is the schedule's compact's too, and the
+kill's compact was asked as that one ended, the docs graph just past its
+rebuild's threshold (its 20 646 tombstones dropped in 3.7 s after the
+restart) -- and the open after found no side file. The wait is the
+announced span's, as the second after the announcement always was: a
+death in it is found as one in the kill's announced second, its
+operations the restart's. Bounded by `WAIT_MAX`; where no side file is
+seen -- the compact ended first, or none was written within the bound --
+the kill is sent without and its line says so (`kill_beside_ms` -1, how
+long after the compact was asked its side file was seen otherwise).
+fennec-server compacts
 on its own besides (`--auto-compact`) -- at half the file dead: its live
 records, 1.0-1.1 GB, never fit the room the cgroup leaves the page cache
 (512 MiB less the server's own anonymous memory, 120-200 MB), so the
@@ -1173,7 +1193,7 @@ passed over -- and at the end every key, every counter and every session.
 
 Every wait the run can block on is bounded and named: a docker call (two
 minutes unless its own is longer), a kill's wait for the side job before
-it and for its compact to be under way, a server's answer after its start
+it and for its compact's side file to be seen written, a server's answer after its start
 (`WAIT_MAX`, 540 s), and the end's wait for the side jobs still queued,
 the same fence a kill's is -- with a line before each wait that could
 outlast the guard with another, the end's two verifies among them -- under
@@ -1211,7 +1231,8 @@ operation's time from its send to its answer, and `replica_p50` and
 `replica_p99`, the reads through the replica's alone: what the servers
 answered in, the schedule's wait left out; apart from them `restart_ops`
 and
-`p99_restart`, the operations due from a second before a kill until the
+`p99_restart`, the operations due from a kill's announcement -- a second
+before it, or before a kill in a compact asks its compact -- until the
 server answered again and, after it, until their connection was back on
 its schedule -- at 80% the open loop's backlog drains for minutes, its waits
 the restart's -- of a kill the loop met on its schedule, the reads through
@@ -1221,7 +1242,9 @@ the replica among them apart (`restart_replica_ops`,
 than a second behind (`kill_behind_s`, its lag as the kill was announced,
 after the queue the kill waited for), which wait out the backlog first;
 and `compact_ops`, `p99_compact` and `p99_compact_hour`,
-those due while a compact ran and until back on schedule after it; and
+those due while a compact ran and until back on schedule after it (the
+report judges each compact by its line's `p99_compact`, the hour's said
+no more); and
 apart from all of them the reads through the replica waiting in a
 compaction of its own and their workers' backlog (`r_compact_ops`,
 `p99_r_compact`, `p99_r_compact_hour`, those due in a restart
@@ -1251,6 +1274,7 @@ on a stale base or on no read (`r_compacts_reset`, `r_compacts_stale`,
 length alone, read through `/proc/1/root` (never the image a compact
 writes beside it), and `live`, `fennec_data_bytes`; `compactions` so far,
 `auto_compacts`, `r_auto_compacts`, `compacting`, `r_compacting`;
+`backing_up`, a backup's stream open at any moment of the primary's look;
 `rss_anon`, `memory_bytes`, `seq` (`fennec_change_sequence`), `cg_anon`, `cg_file`, `cg_current`, `majflt`,
 `threads`, `fds` and `connections` (`fennec_connections`) of the primary,
 `r_rss_anon`, `r_memory_bytes`, `r_threads`, `r_fds`, `r_connections`,
@@ -1268,7 +1292,8 @@ run's doings in the minute (`kill`, `kill_died`, `verify`,
 `sweep_failed`) and a kill's parts, each timed apart -- docker's kill and
 wait (`kill_ms`), the verify (`verify_ms`) and the server's own part,
 `docker start` to answering (`start_ms`) -- with `kill_compacting`,
-`kill_sync_ms` and `replica_back_ms`; a restart's catch-up ("A restart's
+`kill_beside_ms` (a kill in a compact's, above), `kill_sync_ms` and
+`replica_back_ms`; a restart's catch-up ("A restart's
 catch-up" above) -- `catchup_on_ms` from the server answering again to
 the loop on its schedule, `catchup_replica_ms` from there to the replica
 holding the change answered then (-1 past `--replica-back-max` from there
@@ -1312,17 +1337,52 @@ item's exit criterion and what holds it, a line each with the minutes that
 broke it: 8 hours and an end line; the planned minutes run; every minute
 with operations from every connection (the dead-man: a minute nothing was
 answered in, a worker stuck, or a soak the guard stopped as hung); the last
-hour's steady p99, and its p99 in compacts, at most 1.25 times those of
+hour's steady p99 at most 1.25 times that of
 the earliest hour before it that holds the same schedule -- the same kills,
 one in a compact, the same compacts and backups at the same minutes of the
 hour: lines 61-120 of an 8-hour run, against 421-480 (`same_hour`), so
 that neither a restart's backlog nor a compact's tail weighs more in one
-than in the other -- the replica's own compactions, on no schedule, out
-of both figures; a two-hour run has no such hour and is not judged on
-it, and neither is an hour with no operation on its schedule, which has
-no steady p99 (written as 0, a last hour behind its schedule passed
-against any), nor the compacts' half where either hour had no compact's
-operation; the file at most 2.2 times the live bytes every minute; the primary's
+than in the other -- and its compacts' p99, the median of the last hour's
+compacts', at most 1.25 times the median of every compact's before it
+from the second hour on (`compacts_judged`), the replica's own
+compactions, on no schedule, out of both figures; a two-hour run has no
+such hour and is not judged on it, and neither is an hour with no
+operation on its schedule, which has no steady p99 (written as 0, a last
+hour behind its schedule passed against any), nor the compacts' half
+where the last hour had no compact or fewer than three came before it.
+A compact is a run of lines with compact operations, one of which counted
+a compact ended (`compact_p99s`: one the server's own turned away wrote
+nothing of the run's, and the compact a kill lands in has its operations
+the restart's), its p99 its line's `p99_compact` -- its operations and
+their backlog fall on the line after the minute it was asked in, each of
+the 23 of P6's run of 2026-11-27 at 80% and the 21 of its run at 50% on
+one line -- or the higher of two lines' where they spread, above which
+none of their operations' p99 is. The half held the hour's p99 in
+compacts to the same hour's until that run at 80% failed it at 3.62x,
+1.75 s in minutes 61-120 against 6.34 s in the last hour, with no
+compaction grown costlier: its compacts took 14.5-23.4 s throughout, its
+live size flat, no graph phase run, and its hours' p99 in compacts were
+8.4, 1.75, 2.6, 4.6, 9.1, 2.3, 4.6 and 6.3 s, no trend -- an hour's p99
+over its three compacts or so is its worst compact's tail, the reference
+hour was the run's quietest, and the last hour's came from one compact at
+minute 440 while other processes took 1.6 cores of this host. Of the two
+ways to judge it less noisily -- the last hour's p99 against the median
+of the earlier hours', or each compact against the run's median compact
+-- the second is taken, as the median of the last hour's compacts against
+the median of the earlier ones: the first still holds the last hour by
+its worst compact, and that run fails it at 1.38x at the least (6.34 s
+against 4.6 s, the higher of its six hours' middle two), where the second
+moves with what most compacts do and never with one -- 1.62 s against
+2.30 s, 0.70x; its run at 50%, 0.38 s against 0.35 s, 1.08x, where the
+hours had it at 0.59x. Its purpose kept, a p99 doubling steadily
+over the run puts the last hour's median compact 1.28 times over the
+earlier ones' and fails (`each_compact_is_held_to_the_runs_median_compact`);
+the margin is thin for so slow a drift, and anything faster is wide of
+it. The compacts in minutes another process took a core or more of this
+host in are named on the line and judged as they are: one of them decides
+nothing against the median, and left out, a host busy through the last
+hour would leave nothing to judge -- a busy host can fail a run, never
+pass it. The file at most 2.2 times the live bytes every minute; the primary's
 `rss_anon` beyond what the server holds by its own account grown less
 than 5% of its `rss_anon` within each life (it is killed every 30
 minutes) and between two compactions, from the median of a stretch's
@@ -1347,7 +1407,37 @@ being none in a minute a compact ran or was writing at the look
 (`begin_beside` clones each store), so that one look in a compaction never
 decides, and a settled one none of the five after one of the replica's
 compactions (`REPLICA_SETTLE`): the allocator keeps the heap the
-compaction let go of while the engine grows back into it. The third dry
+compaction let go of while the engine grows back into it. Nor is a look of
+the primary's while a backup streamed its image (`backing_up`) one, as a
+compaction's is not: the server holds a pinned image of its file for the
+stream (`PinnedImage`, `engine/pinned.rs`) -- the usertable's id index,
+some 12 MB, the frames' index, the docs graph and up to 8 MB of the open
+segment, none of it in `memory_bytes` -- and lets it go as the stream
+ends. P6's run of 2026-11-27 at 80% failed this criterion on lives 1, 5,
+9 and 13, the most +19.3%, exactly those a backup was asked in (minutes
+50, 170, 290 and 410): beyond what the server holds its memory stood 24-30
+MB higher in the three minutes each backup streamed (its connections 98 to
+99), back the minute it ended, and the server's own compaction a look
+after the stream ended the stretch, so that three of its last five
+quiet looks were the backup's -- its run at 50% had the backup's one look
+in a stretch's middle, +4.2%. Lines from before the stream was said
+(`backing_up`) take a backup's looks from the schedule: from the line
+after the minute it was asked in to the line that counted it, its restore
+and verify among them. So judged again, that run's lives pass, the most
++0.3%, 14 of its 16 judged (two lost their tenth quiet look with the
+line that counted the backup); its run at 50% passes as it did, +4.2%.
+Neither the stretch nor the life is cut at a backup: what one leaves
+behind is at the quiet looks after it, and fails where they are a
+stretch's last five
+(`a_backups_looks_are_left_out_of_the_primarys_memory_and_what_it_leaves_behind_is_not`).
+Where a compaction ends the stretch a look after the backup, as at 80%,
+it is the step across that compaction, said beside the verdict as any
+is. Judged at the single look after a backup instead, against the three
+before it, the 80% run's life 9 failed at +6.9%: its look of minute 295
+came in the first seconds of the server's own compaction of 35 s, before
+its side file was seen, and one look decided -- what the medians of five
+are there to prevent. The line says how many looks it left out, and
+which. The replica's are not left out: the backup reads the primary. The third dry
 run of 2026-11-24's replica stood 65-72 MB beyond its engine's through
 the second hour and 73-75 MB in the two to four looks after each of its
 three compactions, its engine's own down from 50-60 MB to 26-31 at each;
@@ -1455,7 +1545,9 @@ minutes for the schedule's compact, and the loop, 114 s behind at that
 look, was 166 s behind at the kill; the kills and verifies
 the schedule owes for the run's length (`(minutes - 1) / 30`), its
 compacts (one the server's own turned away counting), the kills that cut
-a compact, backups whose restored records held and restores -- a kill
+a compact and found it writing (`kill_compacting`; one whose side file
+was never seen before it, `kill_beside_ms` -1, said so), backups whose
+restored records held and restores -- a kill
 that found its server dead, a compact or a backup a death cut, counted
 with the death, and each death's restart verified beside the kills'; every verify,
 backup and restore clean; match and near as a scan; every key read back,
